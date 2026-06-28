@@ -190,7 +190,7 @@ the first-pixel path uses a fast half/quarter-res full decode instead.
 
 ## 7. Reference
 
-- Original proposal: the project proposal handed to the planning process (goals G1–G5,
-  non-goals NG1–NG6, accepted tradeoffs, settled tech stack). Treat its "Settled
-  decisions" as fixed and its "Open questions" as resolved per §2/§4 above.
+- Original proposal: `2026-06-28-ferrolite-proposal.md` (archived in this directory).
+  Goals G1–G5, non-goals NG1–NG6, accepted tradeoffs, settled tech stack. Treat its
+  "Settled decisions" as fixed and its "Open questions" as resolved per §2/§4 above.
 - RapidRAW (AGPL-3.0): read for ideas only; no code copied into this GPL-3.0 project.

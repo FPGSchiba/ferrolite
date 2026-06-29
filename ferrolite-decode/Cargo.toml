@@ -9,3 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+ferrolite-image = { workspace = true }
+rawler = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }

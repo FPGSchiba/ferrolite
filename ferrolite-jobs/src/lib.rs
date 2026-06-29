@@ -3,5 +3,7 @@
 
 mod priority;
 mod queue;
+mod system;
 
 pub use priority::{CancelToken, JobId, Priority};
+pub use system::{JobHandle, JobSystem};

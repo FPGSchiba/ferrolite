@@ -45,6 +45,7 @@ impl Queue {
 
     /// Drop a still-pending job (its bucket entry becomes stale). Jobs already
     /// dequeued/running are unaffected — cancel those via their `CancelToken`.
+    #[allow(dead_code)]
     pub fn cancel(&mut self, id: JobId) {
         self.jobs.remove(&id);
     }

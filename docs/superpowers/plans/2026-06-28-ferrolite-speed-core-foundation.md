@@ -38,22 +38,21 @@ Each plan produces a working, testable deliverable. Later plans are written when
 Cargo.toml                                  # virtual workspace manifest
 rust-toolchain.toml                         # pinned toolchain
 .github/workflows/ci.yml                    # fmt + clippy + build + test on 3 OSes
-crates/
-  ferrolite-app/
-    Cargo.toml
-    assets/fonts/                           # IBMPlexSans-Regular/Medium/SemiBold.ttf, IBMPlexMono-Regular/Medium.ttf
-    src/
-      main.rs                               # eframe::run_native entrypoint (wgpu backend)
-      app.rs                                # FerroliteApp + eframe::App impl (shell layout, module switch)
-      theme.rs                              # color tokens + Visuals override + font install
-      module.rs                             # Module enum + pure switch logic (testable)
-      widgets/
-        mod.rs
-        slider.rs                           # EguiSlider widget + pure value-math module (testable)
-      canvas/
-        mod.rs
-        callback.rs                         # wgpu CallbackTrait impl (pipeline + paint)
-        shader.wgsl                          # fullscreen gradient (Gate 0 proof)
+ferrolite-app/                              # crate lives at the repo root (flat layout, no crates/ dir)
+  Cargo.toml
+  assets/fonts/                             # IBMPlexSans-Regular/Medium/SemiBold.ttf, IBMPlexMono-Regular/Medium.ttf
+  src/
+    main.rs                                 # eframe::run_native entrypoint (wgpu backend)
+    app.rs                                  # FerroliteApp + eframe::App impl (shell layout, module switch)
+    theme.rs                                # color tokens + Visuals override + font install
+    module.rs                               # Module enum + pure switch logic (testable)
+    widgets/
+      mod.rs
+      slider.rs                             # EguiSlider widget + pure value-math module (testable)
+    canvas/
+      mod.rs
+      callback.rs                           # wgpu CallbackTrait impl (pipeline + paint)
+      shader.wgsl                           # fullscreen gradient (Gate 0 proof)
 ```
 
 ---
@@ -62,7 +61,7 @@ crates/
 
 **Files:**
 - Create: `Cargo.toml`, `rust-toolchain.toml`, `.gitignore` (append), `.github/workflows/ci.yml`
-- Create: `crates/ferrolite-app/Cargo.toml`, `crates/ferrolite-app/src/main.rs`
+- Create: `ferrolite-app/Cargo.toml`, `ferrolite-app/src/main.rs`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -74,7 +73,7 @@ crates/
 ```toml
 [workspace]
 resolver = "2"
-members = ["crates/ferrolite-app"]
+members = ["ferrolite-app"]
 
 [workspace.package]
 edition = "2021"
@@ -96,7 +95,7 @@ components = ["rustfmt", "clippy"]
 
 - [ ] **Step 3: Create the app crate manifest**
 
-`crates/ferrolite-app/Cargo.toml`:
+`ferrolite-app/Cargo.toml`:
 ```toml
 [package]
 name = "ferrolite-app"
@@ -119,7 +118,7 @@ Note: confirm the newest matching versions with `cargo add` during execution; ke
 
 - [ ] **Step 4: Minimal main so the workspace builds**
 
-`crates/ferrolite-app/src/main.rs`:
+`ferrolite-app/src/main.rs`:
 ```rust
 fn main() {
     println!("ferrolite-app skeleton");
@@ -174,7 +173,7 @@ Expected: all succeed, `ferrolite-app` builds.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add Cargo.toml rust-toolchain.toml .gitignore .github crates
+git add Cargo.toml rust-toolchain.toml .gitignore .github ferrolite-app
 git commit -m "chore: scaffold cargo workspace, ferrolite-app crate, and CI"
 ```
 
@@ -183,8 +182,8 @@ git commit -m "chore: scaffold cargo workspace, ferrolite-app crate, and CI"
 ### Task 2: Module state with pure, testable switch logic
 
 **Files:**
-- Create: `crates/ferrolite-app/src/module.rs`
-- Modify: `crates/ferrolite-app/src/main.rs` (add `mod module;`)
+- Create: `ferrolite-app/src/module.rs`
+- Modify: `ferrolite-app/src/main.rs` (add `mod module;`)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -192,7 +191,7 @@ git commit -m "chore: scaffold cargo workspace, ferrolite-app crate, and CI"
 
 - [ ] **Step 1: Write the failing test**
 
-`crates/ferrolite-app/src/module.rs`:
+`ferrolite-app/src/module.rs`:
 ```rust
 //! Top-level UI module selection (Library vs Develop).
 
@@ -228,7 +227,7 @@ mod tests {
 
 - [ ] **Step 2: Wire the module into the crate**
 
-In `crates/ferrolite-app/src/main.rs`, add at the top:
+In `ferrolite-app/src/main.rs`, add at the top:
 ```rust
 mod module;
 ```
@@ -241,7 +240,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/ferrolite-app/src/module.rs crates/ferrolite-app/src/main.rs
+git add ferrolite-app/src/module.rs ferrolite-app/src/main.rs
 git commit -m "feat(app): add Module enum with switch logic"
 ```
 
@@ -250,8 +249,8 @@ git commit -m "feat(app): add Module enum with switch logic"
 ### Task 3: EguiSlider value math (pure functions, TDD)
 
 **Files:**
-- Create: `crates/ferrolite-app/src/widgets/mod.rs`, `crates/ferrolite-app/src/widgets/slider.rs`
-- Modify: `crates/ferrolite-app/src/main.rs` (add `mod widgets;`)
+- Create: `ferrolite-app/src/widgets/mod.rs`, `ferrolite-app/src/widgets/slider.rs`
+- Modify: `ferrolite-app/src/main.rs` (add `mod widgets;`)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -266,7 +265,7 @@ These mirror the imported `EguiSlider.dc.html` behavior (design system §5).
 
 - [ ] **Step 1: Write the failing tests**
 
-`crates/ferrolite-app/src/widgets/slider.rs`:
+`ferrolite-app/src/widgets/slider.rs`:
 ```rust
 //! Lightroom-style horizontal slider. See docs/design/ferrolite-design-system.md §5.
 
@@ -357,7 +356,7 @@ mod tests {
 }
 ```
 
-`crates/ferrolite-app/src/widgets/mod.rs`:
+`ferrolite-app/src/widgets/mod.rs`:
 ```rust
 pub mod slider;
 pub use slider::EguiSlider;
@@ -365,7 +364,7 @@ pub use slider::EguiSlider;
 
 - [ ] **Step 2: Add a placeholder widget type so `mod.rs` compiles**
 
-Append to `crates/ferrolite-app/src/widgets/slider.rs`:
+Append to `ferrolite-app/src/widgets/slider.rs`:
 ```rust
 /// The widget handle (egui rendering added in Task 4).
 pub struct EguiSlider<'a> {
@@ -384,7 +383,7 @@ pub struct EguiSlider<'a> {
 
 - [ ] **Step 3: Wire widgets into the crate**
 
-In `crates/ferrolite-app/src/main.rs` add:
+In `ferrolite-app/src/main.rs` add:
 ```rust
 mod widgets;
 ```
@@ -397,7 +396,7 @@ Expected: PASS (6 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ferrolite-app/src/widgets crates/ferrolite-app/src/main.rs
+git add ferrolite-app/src/widgets ferrolite-app/src/main.rs
 git commit -m "feat(app): EguiSlider pure value math with tests"
 ```
 
@@ -406,7 +405,7 @@ git commit -m "feat(app): EguiSlider pure value math with tests"
 ### Task 4: EguiSlider egui rendering
 
 **Files:**
-- Modify: `crates/ferrolite-app/src/widgets/slider.rs` (add `impl egui::Widget`)
+- Modify: `ferrolite-app/src/widgets/slider.rs` (add `impl egui::Widget`)
 
 **Interfaces:**
 - Consumes: `slider::math::*`; `egui` (`Ui`, `Response`, `Sense`, `Color32`, `Stroke`, `pos2`, `vec2`).
@@ -414,7 +413,7 @@ git commit -m "feat(app): EguiSlider pure value math with tests"
 
 - [ ] **Step 1: Implement the Widget**
 
-Append to `crates/ferrolite-app/src/widgets/slider.rs`:
+Append to `ferrolite-app/src/widgets/slider.rs`:
 ```rust
 use egui::{pos2, vec2, Color32, Response, Sense, Stroke, Ui, Widget};
 
@@ -514,7 +513,7 @@ Expected: no warnings.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/ferrolite-app/src/widgets/slider.rs
+git add ferrolite-app/src/widgets/slider.rs
 git commit -m "feat(app): render EguiSlider in egui with drag + reset"
 ```
 
@@ -523,9 +522,9 @@ git commit -m "feat(app): render EguiSlider in egui with drag + reset"
 ### Task 5: Theme — tokens, Visuals override, bundled fonts
 
 **Files:**
-- Create: `crates/ferrolite-app/src/theme.rs`
-- Add font assets: `crates/ferrolite-app/assets/fonts/*.ttf`
-- Modify: `crates/ferrolite-app/src/main.rs` (add `mod theme;`)
+- Create: `ferrolite-app/src/theme.rs`
+- Add font assets: `ferrolite-app/assets/fonts/*.ttf`
+- Modify: `ferrolite-app/src/main.rs` (add `mod theme;`)
 
 **Interfaces:**
 - Consumes: `egui::Context`.
@@ -533,10 +532,10 @@ git commit -m "feat(app): render EguiSlider in egui with drag + reset"
 
 - [ ] **Step 1: Download the fonts**
 
-Download IBM Plex (SIL OFL 1.1 — compatible with a GPL binary) into `crates/ferrolite-app/assets/fonts/`:
+Download IBM Plex (SIL OFL 1.1 — compatible with a GPL binary) into `ferrolite-app/assets/fonts/`:
 ```bash
-mkdir -p crates/ferrolite-app/assets/fonts
-cd crates/ferrolite-app/assets/fonts
+mkdir -p ferrolite-app/assets/fonts
+cd ferrolite-app/assets/fonts
 base=https://raw.githubusercontent.com/IBM/plex/master
 curl -L -o IBMPlexSans-Regular.ttf   $base/IBM-Plex-Sans/fonts/complete/ttf/IBMPlexSans-Regular.ttf
 curl -L -o IBMPlexSans-Medium.ttf    $base/IBM-Plex-Sans/fonts/complete/ttf/IBMPlexSans-Medium.ttf
@@ -549,7 +548,7 @@ Verify all five files exist and are > 50 KB. Add a `LICENSE-fonts.txt` next to t
 
 - [ ] **Step 2: Write the theme module with a token test**
 
-`crates/ferrolite-app/src/theme.rs`:
+`ferrolite-app/src/theme.rs`:
 ```rust
 //! Dark theme + bundled fonts. Tokens from docs/design/ferrolite-design-system.md §2/§3.
 
@@ -623,7 +622,7 @@ Note: `FontData::from_static(...).into()` targets egui 0.29's `Arc<FontData>` ma
 
 - [ ] **Step 3: Wire theme into the crate**
 
-In `crates/ferrolite-app/src/main.rs` add:
+In `ferrolite-app/src/main.rs` add:
 ```rust
 mod theme;
 ```
@@ -636,7 +635,7 @@ Expected: PASS (2 tests).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ferrolite-app/src/theme.rs crates/ferrolite-app/src/main.rs crates/ferrolite-app/assets
+git add ferrolite-app/src/theme.rs ferrolite-app/src/main.rs ferrolite-app/assets
 git commit -m "feat(app): dark theme tokens, Visuals override, bundled IBM Plex fonts"
 ```
 
@@ -645,8 +644,8 @@ git commit -m "feat(app): dark theme tokens, Visuals override, bundled IBM Plex 
 ### Task 6: wgpu canvas callback (Gate 0 proof)
 
 **Files:**
-- Create: `crates/ferrolite-app/src/canvas/mod.rs`, `crates/ferrolite-app/src/canvas/callback.rs`, `crates/ferrolite-app/src/canvas/shader.wgsl`
-- Modify: `crates/ferrolite-app/src/main.rs` (add `mod canvas;`)
+- Create: `ferrolite-app/src/canvas/mod.rs`, `ferrolite-app/src/canvas/callback.rs`, `ferrolite-app/src/canvas/shader.wgsl`
+- Modify: `ferrolite-app/src/main.rs` (add `mod canvas;`)
 
 **Interfaces:**
 - Consumes: `egui_wgpu::{CallbackTrait, RenderState, ScreenDescriptor}`, `wgpu`.
@@ -656,7 +655,7 @@ git commit -m "feat(app): dark theme tokens, Visuals override, bundled IBM Plex 
 
 - [ ] **Step 1: Write the WGSL shader**
 
-`crates/ferrolite-app/src/canvas/shader.wgsl`:
+`ferrolite-app/src/canvas/shader.wgsl`:
 ```wgsl
 // Fullscreen gradient — proves egui hosts a live wgpu render pass (Gate 0).
 @vertex
@@ -677,7 +676,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 
 - [ ] **Step 2: Implement the callback**
 
-`crates/ferrolite-app/src/canvas/callback.rs`:
+`ferrolite-app/src/canvas/callback.rs`:
 ```rust
 use egui_wgpu::{CallbackTrait, RenderState};
 use wgpu::util::DeviceExt as _;
@@ -745,7 +744,7 @@ impl CallbackTrait for CanvasCallback {
 
 Note: the two `let _ =` lines exist only to keep the `DeviceExt` import warning-free until Plan 4 adds vertex buffers — delete them and the `use ... DeviceExt` line if clippy prefers, this is a placeholder-free convenience, not a behavior.
 
-`crates/ferrolite-app/src/canvas/mod.rs`:
+`ferrolite-app/src/canvas/mod.rs`:
 ```rust
 mod callback;
 pub use callback::CanvasResources;
@@ -763,7 +762,7 @@ pub fn paint(ui: &mut egui::Ui, rect: egui::Rect) {
 
 - [ ] **Step 3: Wire canvas into the crate**
 
-In `crates/ferrolite-app/src/main.rs` add:
+In `ferrolite-app/src/main.rs` add:
 ```rust
 mod canvas;
 ```
@@ -776,7 +775,7 @@ Expected: no warnings. (If the `DeviceExt` placeholder lines trip clippy, remove
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ferrolite-app/src/canvas crates/ferrolite-app/src/main.rs
+git add ferrolite-app/src/canvas ferrolite-app/src/main.rs
 git commit -m "feat(app): wgpu canvas render pipeline + paint callback"
 ```
 
@@ -785,8 +784,8 @@ git commit -m "feat(app): wgpu canvas render pipeline + paint callback"
 ### Task 7: Assemble the shell, boot the app, clear Gate 0
 
 **Files:**
-- Create: `crates/ferrolite-app/src/app.rs`
-- Rewrite: `crates/ferrolite-app/src/main.rs` (real eframe entrypoint)
+- Create: `ferrolite-app/src/app.rs`
+- Rewrite: `ferrolite-app/src/main.rs` (real eframe entrypoint)
 
 **Interfaces:**
 - Consumes: `module::Module`, `theme`, `canvas`, `widgets::EguiSlider`, `eframe`.
@@ -794,7 +793,7 @@ git commit -m "feat(app): wgpu canvas render pipeline + paint callback"
 
 - [ ] **Step 1: Write the app shell**
 
-`crates/ferrolite-app/src/app.rs`:
+`ferrolite-app/src/app.rs`:
 ```rust
 use crate::canvas::{self, CanvasResources};
 use crate::module::Module;
@@ -901,7 +900,7 @@ impl eframe::App for FerroliteApp {
 
 - [ ] **Step 2: Real entrypoint**
 
-Rewrite `crates/ferrolite-app/src/main.rs` (keep the `mod` lines from earlier tasks):
+Rewrite `ferrolite-app/src/main.rs` (keep the `mod` lines from earlier tasks):
 ```rust
 mod app;
 mod canvas;
@@ -943,7 +942,7 @@ Repeat on macOS and Windows (or rely on CI building + a teammate's visual check)
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/ferrolite-app/src/app.rs crates/ferrolite-app/src/main.rs
+git add ferrolite-app/src/app.rs ferrolite-app/src/main.rs
 git commit -m "feat(app): assemble themed shell with wgpu canvas — clears Gate 0"
 ```
 

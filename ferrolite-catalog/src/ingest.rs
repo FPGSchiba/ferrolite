@@ -78,8 +78,7 @@ impl Catalog {
             }
         }
 
-        for (dir, id) in &dir_ids {
-            let _ = dir;
+        for id in dir_ids.values() {
             self.conn().execute(
                 "UPDATE folders SET last_scanned = ?1 WHERE id = ?2",
                 rusqlite::params![now_secs(), id],

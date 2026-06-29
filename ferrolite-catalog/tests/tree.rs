@@ -9,8 +9,8 @@ fn make_png(path: &std::path::Path) {
     img.save(path).unwrap();
 }
 
-fn nested_fixture() -> PathBuf {
-    let root = std::env::temp_dir().join(format!("ferro-tree-{}", std::process::id()));
+fn nested_fixture(tag: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("ferro-tree-{}-{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("2024")).unwrap();
     std::fs::create_dir_all(root.join("2025")).unwrap();
@@ -23,8 +23,8 @@ fn nested_fixture() -> PathBuf {
 
 #[test]
 fn recursive_ingest_wires_tree_and_keys_per_directory() {
-    let root = nested_fixture();
-    let db = std::env::temp_dir().join(format!("ferro-tree-{}.db", std::process::id()));
+    let root = nested_fixture("ingest");
+    let db = std::env::temp_dir().join(format!("ferro-tree-ingest-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&db);
     let cat = Catalog::open(&db).unwrap();
 
@@ -58,8 +58,8 @@ fn recursive_ingest_wires_tree_and_keys_per_directory() {
 
 #[test]
 fn remove_folder_deletes_subtree_only() {
-    let root = nested_fixture();
-    let db = std::env::temp_dir().join(format!("ferro-rm-{}.db", std::process::id()));
+    let root = nested_fixture("rm");
+    let db = std::env::temp_dir().join(format!("ferro-tree-rm-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&db);
     let cat = Catalog::open(&db).unwrap();
     cat.ingest_folder(&root).unwrap();

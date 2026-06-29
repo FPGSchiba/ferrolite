@@ -39,15 +39,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             ui.add_space(node.depth as f32 * 14.0);
 
             // Disclosure triangle — painted (egui's native rotating icon), never a
-            // font glyph. The click cell stays 14px (matching the leaf-row
-            // `add_space` below, so labels stay column-aligned), but the triangle
-            // is painted into a 9px sub-rect (~2/3) so it looks proportional.
+            // font glyph. The click cell is sized to the icon (9px, matching the
+            // leaf-row `add_space` below so labels stay column-aligned) so the
+            // triangle hugs the name instead of floating in an oversized box.
             if node.has_children {
                 let open = state.expanded_folders.contains(&node.id);
-                let resp = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                let resp = ui.allocate_response(egui::vec2(9.0, 9.0), egui::Sense::click());
                 let openness = if open { 1.0 } else { 0.0 };
-                let mut icon_resp = resp.clone();
-                icon_resp.rect = resp.rect.shrink(2.5);
                 // Hover changes the triangle's colour (via fg_stroke) but must not
                 // change its size: paint with the widget expansion zeroed so it
                 // doesn't grow on hover.
@@ -57,7 +55,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                     w.hovered.expansion = 0.0;
                     w.active.expansion = 0.0;
                     w.open.expansion = 0.0;
-                    egui::collapsing_header::paint_default_icon(ui, openness, &icon_resp);
+                    egui::collapsing_header::paint_default_icon(ui, openness, &resp);
                 });
                 if resp.clicked() {
                     if open {
@@ -67,7 +65,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                     }
                 }
             } else {
-                ui.add_space(14.0);
+                ui.add_space(9.0);
             }
 
             let selected = state.current_folder == Some(node.id);

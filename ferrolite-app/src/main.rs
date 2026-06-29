@@ -1,4 +1,5 @@
 mod module;
+mod theme;
 mod widgets;
 
 fn main() {

@@ -126,6 +126,7 @@ fn decode_one(
     mtime: i64,
     size: i64,
 ) -> Result<(NewImage, Thumbnail), String> {
+    // Opens the RAW more than once (metadata + preview); a single-open decode_all is deferred to Plan 4 (two-tier load).
     let meta = ferrolite_decode::read_metadata(path).map_err(|e| e.to_string())?;
     let preview = ferrolite_decode::decode_preview(path).map_err(|e| e.to_string())?;
     let thumb = generate_thumbnail(&preview).map_err(|e| e.to_string())?;

@@ -47,6 +47,10 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         version = 1;
     }
 
+    debug_assert_eq!(
+        version, SCHEMA_VERSION,
+        "every migration block must advance `version` to SCHEMA_VERSION"
+    );
     conn.pragma_update(None, "user_version", version)?;
     Ok(())
 }

@@ -28,6 +28,7 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
     // Float — quantize to u16 for this plan's display-only consumer.
     let pixels = match img.data {
         RawImageData::Integer(v) => v,
+        // NaN/Inf saturate to 0 / 65535 via Rust's defined float-to-int cast; acceptable for this display-only consumer.
         RawImageData::Float(v) => v
             .iter()
             .map(|f| f.round().clamp(0.0, 65535.0) as u16)

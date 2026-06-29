@@ -33,18 +33,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             .unwrap_or_default();
 
         ui.horizontal(|ui| {
-            // Tighter gap between the disclosure cell and the name (~2/3 of the
-            // 8px default), to match the shrunk icon.
-            ui.spacing_mut().item_spacing.x = 5.0;
+            // Tighter gap between the disclosure cell and the name (the item
+            // spacing is the dominant remaining gap once the cell hugs the icon).
+            ui.spacing_mut().item_spacing.x = 3.0;
             ui.add_space(node.depth as f32 * 14.0);
 
             // Disclosure triangle — painted (egui's native rotating icon), never a
-            // font glyph. The click cell is sized to the icon (9px, matching the
+            // font glyph. The click cell is sized to the icon (8px, matching the
             // leaf-row `add_space` below so labels stay column-aligned) so the
             // triangle hugs the name instead of floating in an oversized box.
             if node.has_children {
                 let open = state.expanded_folders.contains(&node.id);
-                let resp = ui.allocate_response(egui::vec2(9.0, 9.0), egui::Sense::click());
+                let resp = ui.allocate_response(egui::vec2(8.0, 8.0), egui::Sense::click());
                 let openness = if open { 1.0 } else { 0.0 };
                 // Hover changes the triangle's colour (via fg_stroke) but must not
                 // change its size: paint with the widget expansion zeroed so it
@@ -65,7 +65,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                     }
                 }
             } else {
-                ui.add_space(9.0);
+                ui.add_space(8.0);
             }
 
             let selected = state.current_folder == Some(node.id);

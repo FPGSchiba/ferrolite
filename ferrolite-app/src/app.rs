@@ -22,47 +22,73 @@ impl FerroliteApp {
     }
 }
 
-/// Invisible 6px resize grips along the South, West, and East window edges.
-/// North is intentionally omitted: the 30px custom title bar owns the top edge
-/// (drag-to-move + double-click-to-maximize), and a North grip at
-/// `Order::Foreground` would hijack pointer events in that strip.
-/// Uses three transparent `egui::Area`s with `Sense::drag()` (the Area path),
-/// because `ctx.interact(LayerId, Id, Rect, Sense)` does not exist in egui 0.29.
+/// Title-bar height; resize grips start below it so they never fight the bar.
+const TITLE_BAR_H: f32 = 30.0;
+
+/// Invisible resize grips: West/East side edges (below the title bar), the South
+/// bottom edge, and the two bottom corners (diagonal). The top edge/corners are
+/// intentionally omitted — the 30px custom title bar owns the top (drag-to-move +
+/// double-click-to-maximize), and any `Order::Foreground` grip there would hijack
+/// the bar's pointer events (incl. the close button). Edges are listed before
+/// corners so the corners (shown last, hence on top) win at the overlaps and give
+/// a diagonal resize. Uses transparent `egui::Area`s with `Sense::drag()` because
+/// `ctx.interact(LayerId, Id, Rect, Sense)` does not exist in egui 0.29.
 fn window_resize_grips(ctx: &egui::Context) {
     use egui::{Area, CursorIcon, Id, Order, Rect, ResizeDirection, Sense, ViewportCommand};
     let r = ctx.screen_rect();
-    let m = 6.0_f32; // grip thickness
-    let edges: [(Rect, ResizeDirection, CursorIcon); 3] = [
+    let t = 8.0_f32; // edge thickness
+    let c = 14.0_f32; // corner size
+    let top = r.top() + TITLE_BAR_H; // side grips begin below the title bar
+    let grips: [(Rect, ResizeDirection, CursorIcon); 5] = [
+        // West edge
         (
-            Rect::from_min_max(egui::pos2(r.left(), r.bottom() - m), r.right_bottom()),
-            ResizeDirection::South,
-            CursorIcon::ResizeVertical,
-        ),
-        (
-            Rect::from_min_max(r.left_top(), egui::pos2(r.left() + m, r.bottom())),
+            Rect::from_min_max(
+                egui::pos2(r.left(), top),
+                egui::pos2(r.left() + t, r.bottom()),
+            ),
             ResizeDirection::West,
             CursorIcon::ResizeHorizontal,
         ),
+        // East edge
         (
-            Rect::from_min_max(egui::pos2(r.right() - m, r.top()), r.right_bottom()),
+            Rect::from_min_max(egui::pos2(r.right() - t, top), r.right_bottom()),
             ResizeDirection::East,
             CursorIcon::ResizeHorizontal,
         ),
+        // South edge
+        (
+            Rect::from_min_max(egui::pos2(r.left(), r.bottom() - t), r.right_bottom()),
+            ResizeDirection::South,
+            CursorIcon::ResizeVertical,
+        ),
+        // South-west corner (diagonal)
+        (
+            Rect::from_min_max(
+                egui::pos2(r.left(), r.bottom() - c),
+                egui::pos2(r.left() + c, r.bottom()),
+            ),
+            ResizeDirection::SouthWest,
+            CursorIcon::ResizeNeSw,
+        ),
+        // South-east corner (diagonal)
+        (
+            Rect::from_min_max(egui::pos2(r.right() - c, r.bottom() - c), r.right_bottom()),
+            ResizeDirection::SouthEast,
+            CursorIcon::ResizeNwSe,
+        ),
     ];
-    for (i, (rect, dir, cursor)) in edges.into_iter().enumerate() {
+    for (i, (rect, dir, cursor)) in grips.into_iter().enumerate() {
         let resp = Area::new(Id::new(("resize_grip", i)))
             .order(Order::Foreground)
             .fixed_pos(rect.min)
             .interactable(true)
             .sense(Sense::drag())
-            .show(ctx, |ui| {
-                // allocate the full grip rect so the Area covers the edge
-                ui.allocate_rect(rect, Sense::drag())
-            });
-        if resp.inner.hovered() {
+            .show(ctx, |ui| ui.allocate_rect(rect, Sense::drag()))
+            .inner;
+        if resp.hovered() {
             ctx.set_cursor_icon(cursor);
         }
-        if resp.inner.drag_started() {
+        if resp.drag_started() {
             ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
         }
     }

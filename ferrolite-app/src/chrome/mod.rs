@@ -4,29 +4,59 @@ pub mod window_controls;
 
 use crate::module::Module;
 use crate::theme;
-use egui::{vec2, Align, Context, Layout, Sense, UiBuilder};
+use egui::{pos2, vec2, Align, Context, Layout, PointerButton, Rect, Sense, UiBuilder};
 
 /// Render the borderless title bar contents. `ui` is the 30px top panel's ui.
 /// Left: icon + wordmark + menu labels. Center: Library/Develop tabs.
 /// Right: version + window controls. Empty space drags the window.
+///
+/// The three clusters live in their own bounded, non-overlapping rects so the
+/// centered tabs don't left-align and the right side stays draggable; the
+/// drag region is registered first (lowest input priority) so the controls and
+/// tabs added afterwards win their own clicks.
 pub fn title_bar(ctx: &Context, ui: &mut egui::Ui, module: &mut Module, version: &str) {
     let bar = ui.max_rect();
 
-    // 1) Drag region over the whole bar (added first => lowest input priority;
-    //    widgets drawn after take their clicks, empty space starts a window drag).
+    // Window drag + double-click-to-maximize over the whole bar. Registered first
+    // so it has the lowest input priority; interactive widgets added afterwards win
+    // their own clicks, and only empty bar space starts a window drag.
     let drag = ui.interact(bar, ui.id().with("titlebar_drag"), Sense::click_and_drag());
-    if drag.drag_started() {
+    if drag.drag_started_by(PointerButton::Primary) {
         ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
-    if drag.double_clicked() {
+    if drag.double_clicked_by(PointerButton::Primary) {
         let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
     }
 
-    // 2) Left cluster: icon mark + wordmark + menu labels.
+    // Right cluster: window controls (close rightmost) + version, in a bounded
+    // right-anchored rect. Drawn after the drag region so the buttons receive clicks.
+    let right_w = 3.0 * window_controls::BTN_W + 72.0;
+    let right_rect = Rect::from_min_max(pos2(bar.right() - right_w, bar.top()), bar.right_bottom());
+    let control_clicked = ui
+        .allocate_new_ui(
+            UiBuilder::new()
+                .max_rect(right_rect)
+                .layout(Layout::right_to_left(Align::Center)),
+            |ui| {
+                let clicked = window_controls::controls_ui(ui);
+                ui.add_space(8.0);
+                ui.monospace(version);
+                clicked
+            },
+        )
+        .inner;
+    if let Some(action) = control_clicked {
+        let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        ctx.send_viewport_cmd(window_controls::command(action, max));
+    }
+
+    // Left cluster: icon mark + wordmark + menu labels, bounded so it can't reach
+    // the controls region.
+    let left_rect = Rect::from_min_max(bar.left_top(), pos2(bar.right() - right_w, bar.bottom()));
     ui.allocate_new_ui(
         UiBuilder::new()
-            .max_rect(bar)
+            .max_rect(left_rect)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             ui.add_space(8.0);
@@ -41,45 +71,37 @@ pub fn title_bar(ctx: &Context, ui: &mut egui::Ui, module: &mut Module, version:
         },
     );
 
-    // 3) Center cluster: module tabs, horizontally centered in the bar.
+    // Center cluster: Library/Develop tabs, centered in the whole bar using a
+    // content-sized rect placed at the bar centre. Drawn last so the tabs sit on top.
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text_w = |t: &str| {
+        ui.fonts(|f| {
+            f.layout_no_wrap(t.to_owned(), font.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        })
+    };
+    let btn_pad = ui.spacing().button_padding.x * 2.0;
+    let tabs_w =
+        text_w("Library") + text_w("Develop") + btn_pad * 2.0 + ui.spacing().item_spacing.x;
+    let center_rect = Rect::from_center_size(bar.center(), vec2(tabs_w, bar.height()));
     ui.allocate_new_ui(
         UiBuilder::new()
-            .max_rect(bar)
-            .layout(Layout::top_down(Align::Center)),
+            .max_rect(center_rect)
+            .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            // top_down starts the cursor at bar.min.y; nudge down so the row is vertically centered.
-            let row_h =
-                ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().button_padding.y * 2.0;
-            ui.add_space(((bar.height() - row_h) * 0.5).max(0.0));
-            ui.horizontal(|ui| {
-                if ui
-                    .selectable_label(module.is_library(), "Library")
-                    .clicked()
-                {
-                    *module = Module::Library;
-                }
-                if ui
-                    .selectable_label(!module.is_library(), "Develop")
-                    .clicked()
-                {
-                    *module = Module::Develop;
-                }
-            });
-        },
-    );
-
-    // 4) Right cluster: window controls (rightmost) then version.
-    ui.allocate_new_ui(
-        UiBuilder::new()
-            .max_rect(bar)
-            .layout(Layout::right_to_left(Align::Center)),
-        |ui| {
-            if let Some(action) = window_controls::controls_ui(ui) {
-                let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-                ctx.send_viewport_cmd(window_controls::command(action, max));
+            if ui
+                .selectable_label(module.is_library(), "Library")
+                .clicked()
+            {
+                *module = Module::Library;
             }
-            ui.add_space(8.0);
-            ui.monospace(version);
+            if ui
+                .selectable_label(!module.is_library(), "Develop")
+                .clicked()
+            {
+                *module = Module::Develop;
+            }
         },
     );
 }

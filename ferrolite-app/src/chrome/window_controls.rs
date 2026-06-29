@@ -20,7 +20,7 @@ pub fn command(action: WindowAction, is_maximized: bool) -> ViewportCommand {
     }
 }
 
-const BTN_W: f32 = 44.0;
+pub const BTN_W: f32 = 44.0;
 
 /// Render the three window-control buttons right-to-left (close is rightmost).
 /// Returns the action whose button was clicked this frame, if any.

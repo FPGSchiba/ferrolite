@@ -56,6 +56,20 @@ pub(crate) fn image_by_name(
     })
 }
 
+pub(crate) fn folder_path(
+    conn: &Connection,
+    folder_id: i64,
+) -> Result<Option<String>, CatalogError> {
+    let p = conn
+        .query_row(
+            "SELECT path FROM folders WHERE id = ?1",
+            rusqlite::params![folder_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(p)
+}
+
 pub(crate) fn image_count(conn: &Connection) -> Result<u64, CatalogError> {
     let n: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0))?;
     Ok(n as u64)

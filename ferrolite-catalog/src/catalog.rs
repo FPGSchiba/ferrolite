@@ -2,6 +2,7 @@ use crate::error::CatalogError;
 use crate::model::{DecodeStatus, ImageRecord, NewImage};
 use crate::schema;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// SQLite-backed catalog. The catalog is a *cache*: source of truth is the files
@@ -106,6 +107,58 @@ impl Catalog {
         crate::queries::list_images_recursive(self.conn(), folder_id)
     }
 
+    /// Prune a folder subtree to mirror disk after a full rescan: delete images
+    /// (and their thumbnails) whose id is not in `kept_image_ids`, and folders
+    /// (vanished subdirectories) whose id is not in `kept_folder_ids`. The root
+    /// is expected to be in `kept_folder_ids` and is never pruned. Cache only —
+    /// never touches files on disk. Runs in one transaction.
+    pub fn prune_subtree(
+        &self,
+        root_folder_id: i64,
+        kept_folder_ids: &HashSet<i64>,
+        kept_image_ids: &HashSet<i64>,
+    ) -> Result<(), CatalogError> {
+        const SUBTREE_CTE: &str = "WITH RECURSIVE subtree(id) AS (
+                 SELECT id FROM folders WHERE id = ?1
+                 UNION ALL
+                 SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+             )";
+        let tx = self.conn().unchecked_transaction()?;
+
+        let subtree_image_ids: Vec<i64> = {
+            let sql = format!(
+                "{SUBTREE_CTE} SELECT id FROM images WHERE folder_id IN (SELECT id FROM subtree)"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![root_folder_id], |r| r.get::<_, i64>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for img in subtree_image_ids {
+            if !kept_image_ids.contains(&img) {
+                tx.execute(
+                    "DELETE FROM thumbnails WHERE image_id = ?1",
+                    rusqlite::params![img],
+                )?;
+                tx.execute("DELETE FROM images WHERE id = ?1", rusqlite::params![img])?;
+            }
+        }
+
+        let subtree_folder_ids: Vec<i64> = {
+            let sql = format!("{SUBTREE_CTE} SELECT id FROM subtree");
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![root_folder_id], |r| r.get::<_, i64>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for fid in subtree_folder_ids {
+            if !kept_folder_ids.contains(&fid) {
+                tx.execute("DELETE FROM folders WHERE id = ?1", rusqlite::params![fid])?;
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Delete a folder subtree from the catalog (thumbnails → images → folders),
     /// in one transaction. Cache only — never touches files on disk.
     pub fn remove_folder(&self, folder_id: i64) -> Result<(), CatalogError> {
@@ -142,6 +195,10 @@ impl Catalog {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn folder_path(&self, folder_id: i64) -> Result<Option<String>, CatalogError> {
+        crate::queries::folder_path(self.conn(), folder_id)
     }
 
     pub fn image_count(&self) -> Result<u64, CatalogError> {

@@ -9,10 +9,20 @@ use ferrolite_catalog::{
 };
 use ferrolite_jobs::{CancelToken, JobSystem, Priority};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+
+/// How a (re)ingest treats already-indexed files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReindexMode {
+    /// Skip files whose (mtime, size) are unchanged (default / soft).
+    Incremental,
+    /// Force re-decode + re-thumbnail every file, and prune catalog rows for
+    /// files/folders no longer on disk (hard / full rebuild).
+    Full,
+}
 
 pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) {
     state.reset_for_new_folder();
@@ -34,7 +44,16 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
 
     let jobs_for_closure = Arc::clone(&jobs);
     let handle = jobs.submit(Priority::Interactive, move |cancel| {
-        ingest_job(folder, writer, reads, jobs_for_closure, tx, ctx, cancel);
+        ingest_job(
+            folder,
+            ReindexMode::Incremental,
+            writer,
+            reads,
+            jobs_for_closure,
+            tx,
+            ctx,
+            cancel,
+        );
     });
     state.ingest_handle = Some(handle);
 }
@@ -42,6 +61,7 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
 #[allow(clippy::too_many_arguments)]
 fn ingest_job(
     folder: PathBuf,
+    mode: ReindexMode,
     writer: Arc<Mutex<Catalog>>,
     reads: Arc<ReadPool>,
     jobs: Arc<JobSystem>,
@@ -50,6 +70,7 @@ fn ingest_job(
     cancel: &CancelToken,
 ) {
     let files = scan_tree(&folder);
+    let force = matches!(mode, ReindexMode::Full);
 
     // Create folder rows top-down, wiring parent_id.
     let mut dir_ids: HashMap<PathBuf, i64> = HashMap::new();
@@ -69,16 +90,19 @@ fn ingest_job(
             Err(e) => eprintln!("ferrolite: upsert_folder failed: {e}"),
         }
     }
+    let root_folder_id = dir_ids.get(&folder).copied();
 
-    // Parallel metadata decode for files needing (re)ingest. No DB writes here.
+    // Parallel metadata decode. Incremental skips unchanged files; Full forces all.
     let rows: Vec<(NewImage, PathBuf, FileKind)> = files
         .par_iter()
         .filter(|_| !cancel.is_cancelled())
         .filter_map(|f| {
             let folder_id = *f.path.parent().and_then(|p| dir_ids.get(p))?;
-            match reads.needs_reingest(folder_id, &f.filename, f.mtime, f.size) {
-                Ok(true) => {}
-                _ => return None,
+            if !force {
+                match reads.needs_reingest(folder_id, &f.filename, f.mtime, f.size) {
+                    Ok(true) => {}
+                    _ => return None,
+                }
             }
             let new_image = match ferrolite_decode::read_metadata(&f.path, f.kind) {
                 Ok(meta) => NewImage::from_metadata(
@@ -95,6 +119,9 @@ fn ingest_job(
         })
         .collect();
 
+    // Serial row upserts under the writer lock; enqueue a thumbnail job per row.
+    // For Full, collect every present file's id so prune can delete the rest.
+    let mut kept_image_ids: HashSet<i64> = HashSet::new();
     for (new_image, path, kind) in rows {
         if cancel.is_cancelled() {
             break;
@@ -106,6 +133,9 @@ fn ingest_job(
                 continue;
             }
         };
+        if force {
+            kept_image_ids.insert(id);
+        }
         let _ = tx.send(AppEvent::Indexed { added: 1 });
         if new_image.decode_status != DecodeStatus::Failed {
             let job_id = spawn_thumbnail(&jobs, &writer, &tx, &ctx, id, path, kind);
@@ -116,6 +146,22 @@ fn ingest_job(
         }
         ctx.request_repaint();
     }
+
+    // Full: prune catalog rows for files/folders no longer on disk. Skip if
+    // cancelled (kept set would be incomplete).
+    if force && !cancel.is_cancelled() {
+        if let Some(root) = root_folder_id {
+            let kept_folder_ids: HashSet<i64> = dir_ids.values().copied().collect();
+            if let Err(e) = writer.lock().expect("writer").prune_subtree(
+                root,
+                &kept_folder_ids,
+                &kept_image_ids,
+            ) {
+                eprintln!("ferrolite: prune_subtree failed: {e}");
+            }
+        }
+    }
+
     let _ = tx.send(AppEvent::IngestDone);
     ctx.request_repaint();
 }

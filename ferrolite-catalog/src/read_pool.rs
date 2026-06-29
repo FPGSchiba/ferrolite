@@ -77,4 +77,7 @@ impl ReadPool {
     pub fn list_folders(&self) -> Result<Vec<crate::FolderRecord>, CatalogError> {
         self.with_conn(crate::queries::list_folders)
     }
+    pub fn folder_path(&self, folder_id: i64) -> Result<Option<String>, CatalogError> {
+        self.with_conn(|c| crate::queries::folder_path(c, folder_id))
+    }
 }

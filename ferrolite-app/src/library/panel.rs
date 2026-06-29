@@ -29,11 +29,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             ui.add_space(node.depth as f32 * 14.0);
 
-            // Expand/collapse triangle (only when the node has children).
+            // Disclosure triangle — painted (egui's native rotating icon), never a
+            // font glyph. Non-expandable rows reserve the same 14px width.
             if node.has_children {
                 let open = state.expanded_folders.contains(&node.id);
-                let arrow = if open { "▾" } else { "▸" };
-                if ui.add(egui::Button::new(arrow).frame(false)).clicked() {
+                let resp = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                let openness = if open { 1.0 } else { 0.0 };
+                egui::collapsing_header::paint_default_icon(ui, openness, &resp);
+                if resp.clicked() {
                     if open {
                         state.expanded_folders.remove(&node.id);
                     } else {
@@ -50,15 +53,29 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             if resp.clicked() {
                 state.select_folder(node.id);
             }
-            // Right-click context menu → Remove.
             resp.context_menu(|ui| {
                 if ui.button("Remove from catalog").clicked() {
                     request_remove(state, &folders, node.id, &node.name);
                     ui.close_menu();
                 }
             });
-            // Hover ✕.
-            if resp.hovered() && ui.small_button("✕").clicked() {
+
+            // Remove ✕ — always reserve a 14px slot (no hover relayout); paint an
+            // X (two line segments) only when the row or slot is hovered.
+            let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+            if resp.hovered() || x_slot.hovered() {
+                let r = x_slot.rect.shrink(4.0);
+                let color = if x_slot.hovered() {
+                    theme::TEXT_PRIMARY
+                } else {
+                    theme::TEXT_DIM
+                };
+                let stroke = egui::Stroke::new(1.2, color);
+                let p = ui.painter();
+                p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                p.line_segment([r.left_bottom(), r.right_top()], stroke);
+            }
+            if x_slot.clicked() {
                 request_remove(state, &folders, node.id, &node.name);
             }
         });

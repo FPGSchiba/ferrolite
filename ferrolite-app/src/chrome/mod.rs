@@ -70,7 +70,7 @@ pub fn title_bar(ctx: &Context, ui: &mut egui::Ui, module: &mut Module, version:
                 .max_rect(bar)
                 .layout(Layout::right_to_left(Align::Center)),
             |ui| {
-                ui.add_space(8.0);
+                ui.spacing_mut().item_spacing.x = 0.0;
                 let clicked = window_controls::controls_ui(ui, is_maximized);
                 ui.add_space(8.0);
                 ui.monospace(version);

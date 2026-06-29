@@ -108,7 +108,7 @@ pub fn paint_mark(painter: &Painter, rect: Rect) {
     // The F occupies design-space x 20..46, y 16..49 (26 x 33). Fit it into rect.
     let s = (rect.width() / 26.0).min(rect.height() / 33.0);
     // origin so that design point (20,16) maps near rect.min, vertically centered.
-    let origin = egui::pos2(rect.left() - 20.0 * s, rect.center().y - 32.5 * s);
+    let origin = egui::pos2(rect.left() - 20.0 * s, rect.center().y - 32.5 * s); // 32.5 = 16 (F top) + 33/2 (half the F's design-space height) — centers the F's midpoint on rect.center().y
     for r in [&STEM, &TOP_ARM, &MID_ARM] {
         painter.rect_filled(scaled(r, origin, s), Rounding::ZERO, theme::ACCENT);
     }

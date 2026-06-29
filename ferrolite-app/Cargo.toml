@@ -28,3 +28,6 @@ ferrolite-image = { workspace = true }
 image = { workspace = true }
 rayon = { workspace = true }
 rfd = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true, features = ["png", "jpeg"] }

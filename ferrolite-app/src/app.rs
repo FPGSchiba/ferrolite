@@ -1,7 +1,6 @@
 use crate::canvas::{self, CanvasResources};
 use crate::module::Module;
 use crate::theme;
-use crate::widgets::EguiSlider;
 
 pub struct FerroliteApp {
     module: Module,
@@ -82,32 +81,13 @@ impl eframe::App for FerroliteApp {
                 crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1");
             });
 
-        egui::SidePanel::left("left")
-            .exact_width(236.0)
-            .frame(egui::Frame::none().fill(theme::BG_PANEL))
+        egui::TopBottomPanel::top("toolbar")
+            .exact_height(40.0)
+            .frame(egui::Frame::none().fill(theme::BG_TOOLBAR))
             .show(ctx, |ui| {
-                ui.add_space(8.0);
-                ui.colored_label(theme::TEXT_FAINT, "CATALOG");
-                ui.label("All Photographs");
-                if ui.button("Open folder…").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                        crate::ingest::spawn_ingest(&mut self.state, ctx, folder);
-                    }
+                if self.module.is_library() {
+                    crate::library::toolbar::show(ui, &mut self.thumb_size);
                 }
-                ui.add_space(12.0);
-                ui.colored_label(theme::TEXT_FAINT, "THUMBNAIL SIZE");
-                ui.add(EguiSlider {
-                    label: "Size",
-                    value: &mut self.thumb_size,
-                    min: 0.0,
-                    max: 100.0,
-                    default: 46.0,
-                    step: 1.0,
-                    decimals: 0,
-                    unit: "",
-                    bipolar: false,
-                    signed: false,
-                });
             });
 
         egui::TopBottomPanel::bottom("status")
@@ -115,6 +95,13 @@ impl eframe::App for FerroliteApp {
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
             .show(ctx, |ui| {
                 crate::status_bar::show(ui, &self.state);
+            });
+
+        egui::SidePanel::left("left")
+            .exact_width(236.0)
+            .frame(egui::Frame::none().fill(theme::BG_PANEL))
+            .show(ctx, |ui| {
+                crate::library::panel::show(ui, &mut self.state, ctx);
             });
 
         egui::CentralPanel::default()

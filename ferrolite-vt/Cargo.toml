@@ -7,3 +7,16 @@ rust-version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+ferrolite-image = { workspace = true }
+ferrolite-gpu = { workspace = true }
+ferrolite-jobs = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+fast_image_resize = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
+image = { workspace = true, features = ["png"] }

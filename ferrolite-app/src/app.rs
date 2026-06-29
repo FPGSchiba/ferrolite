@@ -22,73 +22,45 @@ impl FerroliteApp {
     }
 }
 
-/// Title-bar height; resize grips start below it so they never fight the bar.
+/// Title-bar height; resize edges start below it so they never fight the bar.
 const TITLE_BAR_H: f32 = 30.0;
 
-/// Invisible resize grips: West/East side edges (below the title bar), the South
-/// bottom edge, and the two bottom corners (diagonal). The top edge/corners are
-/// intentionally omitted — the 30px custom title bar owns the top (drag-to-move +
-/// double-click-to-maximize), and any `Order::Foreground` grip there would hijack
-/// the bar's pointer events (incl. the close button). Edges are listed before
-/// corners so the corners (shown last, hence on top) win at the overlaps and give
-/// a diagonal resize. Uses transparent `egui::Area`s with `Sense::drag()` because
-/// `ctx.interact(LayerId, Id, Rect, Sense)` does not exist in egui 0.29.
-fn window_resize_grips(ctx: &egui::Context) {
-    use egui::{Area, CursorIcon, Id, Order, Rect, ResizeDirection, Sense, ViewportCommand};
+/// Borderless-window edge/corner resize, driven purely by the pointer position —
+/// deliberately NOT via overlay `egui::Area`s: an interactable `Order::Foreground`
+/// Area over the edges steals the custom title bar's pointer input after a
+/// maximize/restore transition (buttons + drag on the right half go dead). Instead
+/// we read the latest pointer position; when it is over a window edge *below* the
+/// title bar we show the resize cursor and start an OS resize on primary press.
+/// The top edge/corners are omitted — the title bar owns the top (drag + maximize).
+fn window_resize(ctx: &egui::Context) {
+    use egui::{CursorIcon, ResizeDirection, ViewportCommand};
+    let Some(pos) = ctx.pointer_latest_pos() else {
+        return;
+    };
     let r = ctx.screen_rect();
-    let t = 8.0_f32; // edge thickness
-    let c = 14.0_f32; // corner size
-    let top = r.top() + TITLE_BAR_H; // side grips begin below the title bar
-    let grips: [(Rect, ResizeDirection, CursorIcon); 5] = [
-        // West edge
-        (
-            Rect::from_min_max(
-                egui::pos2(r.left(), top),
-                egui::pos2(r.left() + t, r.bottom()),
-            ),
-            ResizeDirection::West,
-            CursorIcon::ResizeHorizontal,
-        ),
-        // East edge
-        (
-            Rect::from_min_max(egui::pos2(r.right() - t, top), r.right_bottom()),
-            ResizeDirection::East,
-            CursorIcon::ResizeHorizontal,
-        ),
-        // South edge
-        (
-            Rect::from_min_max(egui::pos2(r.left(), r.bottom() - t), r.right_bottom()),
-            ResizeDirection::South,
-            CursorIcon::ResizeVertical,
-        ),
-        // South-west corner (diagonal)
-        (
-            Rect::from_min_max(
-                egui::pos2(r.left(), r.bottom() - c),
-                egui::pos2(r.left() + c, r.bottom()),
-            ),
-            ResizeDirection::SouthWest,
-            CursorIcon::ResizeNeSw,
-        ),
-        // South-east corner (diagonal)
-        (
-            Rect::from_min_max(egui::pos2(r.right() - c, r.bottom() - c), r.right_bottom()),
-            ResizeDirection::SouthEast,
-            CursorIcon::ResizeNwSe,
-        ),
-    ];
-    for (i, (rect, dir, cursor)) in grips.into_iter().enumerate() {
-        let resp = Area::new(Id::new(("resize_grip", i)))
-            .order(Order::Foreground)
-            .fixed_pos(rect.min)
-            .interactable(true)
-            .sense(Sense::drag())
-            .show(ctx, |ui| ui.allocate_rect(rect, Sense::drag()))
-            .inner;
-        if resp.hovered() {
-            ctx.set_cursor_icon(cursor);
-        }
-        if resp.drag_started() {
+    let m = 8.0_f32; // edge band thickness
+    if pos.y < r.top() + TITLE_BAR_H {
+        return; // never resize from within the title bar
+    }
+    let left = pos.x <= r.left() + m;
+    let right = pos.x >= r.right() - m;
+    let bottom = pos.y >= r.bottom() - m;
+    let dir = if bottom && right {
+        Some((ResizeDirection::SouthEast, CursorIcon::ResizeNwSe))
+    } else if bottom && left {
+        Some((ResizeDirection::SouthWest, CursorIcon::ResizeNeSw))
+    } else if right {
+        Some((ResizeDirection::East, CursorIcon::ResizeHorizontal))
+    } else if left {
+        Some((ResizeDirection::West, CursorIcon::ResizeHorizontal))
+    } else if bottom {
+        Some((ResizeDirection::South, CursorIcon::ResizeVertical))
+    } else {
+        None
+    };
+    if let Some((dir, cursor)) = dir {
+        ctx.set_cursor_icon(cursor);
+        if ctx.input(|i| i.pointer.primary_pressed()) {
             ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
         }
     }
@@ -160,6 +132,6 @@ impl eframe::App for FerroliteApp {
             egui::Stroke::new(1.0, theme::BORDER_STRONG),
         );
 
-        window_resize_grips(ctx);
+        window_resize(ctx);
     }
 }

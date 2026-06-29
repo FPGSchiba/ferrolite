@@ -46,7 +46,10 @@ impl AppState {
                 self.thumb_jobs.insert(image_id, job_id);
                 None
             }
-            AppEvent::IngestDone => None,
+            AppEvent::IngestDone => {
+                self.active_ingests = self.active_ingests.saturating_sub(1);
+                None
+            }
         }
     }
 }

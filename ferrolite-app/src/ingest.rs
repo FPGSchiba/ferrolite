@@ -7,7 +7,7 @@ use crate::state::AppState;
 use ferrolite_catalog::{
     collect_dirs, scan_tree, Catalog, DecodeStatus, FileKind, NewImage, ReadPool, Thumbnail,
 };
-use ferrolite_jobs::{CancelToken, JobSystem, Priority};
+use ferrolite_jobs::{CancelToken, JobHandle, JobSystem, Priority};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -24,16 +24,46 @@ pub enum ReindexMode {
     Full,
 }
 
-pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) {
-    state.reset_for_new_folder();
-
+/// Submit one ingest job for `folder` at `priority` with `mode`, incrementing
+/// the in-flight counter. Returns the handle so the caller can store it for
+/// cancellation. Does NOT reset the view — callers decide that.
+pub(crate) fn submit_ingest(
+    state: &mut AppState,
+    ctx: &egui::Context,
+    folder: PathBuf,
+    mode: ReindexMode,
+    priority: Priority,
+) -> JobHandle {
+    state.active_ingests += 1;
     let writer = Arc::clone(&state.writer);
     let reads = Arc::clone(&state.reads);
     let jobs = Arc::clone(&state.jobs);
+    let jobs_for_closure = Arc::clone(&jobs);
     let tx = state.tx.clone();
     let ctx = ctx.clone();
+    jobs.submit(priority, move |cancel| {
+        ingest_job(
+            folder,
+            mode,
+            writer,
+            reads,
+            jobs_for_closure,
+            tx,
+            ctx,
+            cancel,
+        );
+    })
+}
 
-    let folder_id = match writer.lock().expect("writer").upsert_folder(&folder, None) {
+pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) {
+    state.reset_for_new_folder();
+
+    let folder_id = match state
+        .writer
+        .lock()
+        .expect("writer")
+        .upsert_folder(&folder, None)
+    {
         Ok(id) => id,
         Err(e) => {
             eprintln!("ferrolite: upsert_folder failed: {e}");
@@ -42,19 +72,31 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
     };
     state.current_folder = Some(folder_id);
 
-    let jobs_for_closure = Arc::clone(&jobs);
-    let handle = jobs.submit(Priority::Interactive, move |cancel| {
-        ingest_job(
-            folder,
-            ReindexMode::Incremental,
-            writer,
-            reads,
-            jobs_for_closure,
-            tx,
-            ctx,
-            cancel,
-        );
-    });
+    let handle = submit_ingest(
+        state,
+        ctx,
+        folder,
+        ReindexMode::Incremental,
+        Priority::Interactive,
+    );
+    state.ingest_handle = Some(handle);
+}
+
+/// Reindex a folder's subtree in place (does not clear the grid like Open Folder).
+/// `Full` zeroes the thumbnail-progress counters for a clean status-bar readout.
+pub fn spawn_reindex(
+    state: &mut AppState,
+    ctx: &egui::Context,
+    folder_path: PathBuf,
+    mode: ReindexMode,
+) {
+    state.cancel_pending_jobs();
+    if matches!(mode, ReindexMode::Full) {
+        state.thumb_total = 0;
+        state.thumb_done = 0;
+    }
+    state.dirty = true;
+    let handle = submit_ingest(state, ctx, folder_path, mode, Priority::Interactive);
     state.ingest_handle = Some(handle);
 }
 

@@ -26,6 +26,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
     let nodes = flatten(&folders, &state.expanded_folders);
 
     for node in nodes {
+        let node_path = folders
+            .iter()
+            .find(|f| f.id == node.id)
+            .map(|f| f.path.clone())
+            .unwrap_or_default();
+
         ui.horizontal(|ui| {
             ui.add_space(node.depth as f32 * 14.0);
 
@@ -54,6 +60,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                 state.select_folder(node.id);
             }
             resp.context_menu(|ui| {
+                if ui.button("Reindex — new files").clicked() {
+                    crate::ingest::spawn_reindex(
+                        state,
+                        ctx,
+                        std::path::PathBuf::from(&node_path),
+                        crate::ingest::ReindexMode::Incremental,
+                    );
+                    ui.close_menu();
+                }
+                if ui.button("Reindex — full rebuild").clicked() {
+                    crate::ingest::spawn_reindex(
+                        state,
+                        ctx,
+                        std::path::PathBuf::from(&node_path),
+                        crate::ingest::ReindexMode::Full,
+                    );
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button("Remove from catalog").clicked() {
                     request_remove(state, &folders, node.id, &node.name);
                     ui.close_menu();

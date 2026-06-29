@@ -16,6 +16,7 @@ pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xdc, 0xdc, 0xdc);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
 pub const ACCENT: Color32 = Color32::from_rgb(0x6d, 0x97, 0xb5);
+pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xa9, 0xc7, 0xdd);
 pub const ACCENT_BG_SEL: Color32 = Color32::from_rgb(0x21, 0x2a, 0x30);
 
 pub fn install(ctx: &Context) {
@@ -65,5 +66,10 @@ mod tests {
     #[test]
     fn app_background_token_is_dark() {
         assert_eq!(BG_APP, Color32::from_rgb(26, 26, 26)); // #1a1a1a
+    }
+
+    #[test]
+    fn accent_bright_token_matches_design_system() {
+        assert_eq!(ACCENT_BRIGHT, Color32::from_rgb(169, 199, 221)); // #a9c7dd
     }
 }

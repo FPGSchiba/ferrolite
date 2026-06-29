@@ -63,7 +63,6 @@ const TRACK: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 const FILL_IDLE: Color32 = Color32::from_rgb(0x58, 0x58, 0x58);
 const HANDLE_IDLE: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
 const HANDLE_BORDER: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xa9, 0xc7, 0xdd);
 const LABEL: Color32 = Color32::from_rgb(0x8c, 0x8c, 0x8c);
 const VALUE_IDLE: Color32 = Color32::from_rgb(0xbd, 0xbd, 0xbd);
 
@@ -128,7 +127,7 @@ impl<'a> Widget for EguiSlider<'a> {
         );
         // handle
         let hx = track_left + frac * track_w;
-        let handle_color = if active { ACCENT_BRIGHT } else { HANDLE_IDLE };
+        let handle_color = if active { theme::ACCENT_BRIGHT } else { HANDLE_IDLE };
         painter.circle(
             pos2(hx, mid_y),
             5.5,

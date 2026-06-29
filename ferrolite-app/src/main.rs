@@ -1,5 +1,6 @@
 mod app;
 mod canvas;
+mod chrome;
 mod module;
 mod theme;
 mod widgets;

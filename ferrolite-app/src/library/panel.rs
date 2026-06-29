@@ -36,12 +36,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             ui.add_space(node.depth as f32 * 14.0);
 
             // Disclosure triangle — painted (egui's native rotating icon), never a
-            // font glyph. Non-expandable rows reserve the same 14px width.
+            // font glyph. The click cell stays 14px (matching the leaf-row
+            // `add_space` below, so labels stay column-aligned), but the triangle
+            // is painted into a 9px sub-rect (~2/3) so it looks proportional.
             if node.has_children {
                 let open = state.expanded_folders.contains(&node.id);
                 let resp = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
                 let openness = if open { 1.0 } else { 0.0 };
-                egui::collapsing_header::paint_default_icon(ui, openness, &resp);
+                let mut icon_resp = resp.clone();
+                icon_resp.rect = resp.rect.shrink(2.5);
+                egui::collapsing_header::paint_default_icon(ui, openness, &icon_resp);
                 if resp.clicked() {
                     if open {
                         state.expanded_folders.remove(&node.id);

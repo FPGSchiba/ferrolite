@@ -2,51 +2,66 @@ use crate::catalog::Catalog;
 use crate::error::CatalogError;
 use crate::model::{IngestSummary, NewImage};
 use crate::thumbnail::{generate_thumbnail, Thumbnail, ThumbnailStore};
+use crate::ScannedFile;
+use ferrolite_image::FileKind;
 use rayon::prelude::*;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
-/// One file's CPU-heavy decode result, produced off the DB thread.
 struct Decoded {
+    folder_id: i64,
     filename: String,
     mtime: i64,
     size: i64,
+    kind: FileKind,
     outcome: Result<(NewImage, Thumbnail), String>,
 }
 
 impl Catalog {
-    /// Ingest a folder of RAWs (non-recursive into subfolders for this plan).
-    /// New/changed files (by mtime+size) are decoded + thumbnailed in parallel;
-    /// rows and thumbnail blobs are written serially (rusqlite Connection is
-    /// single-threaded). Structured so Plan 3 can submit each file as a job.
+    /// Ingest a folder and **all its subfolders** (Model B). Every directory in
+    /// the subtree becomes a `folders` row with `parent_id` wired; each image is
+    /// keyed to its actual directory.
     pub fn ingest_folder(&self, path: &Path) -> Result<IngestSummary, CatalogError> {
-        let folder_id = self.upsert_folder(path)?;
         let mut summary = IngestSummary::default();
+        let files = crate::scan_tree(path);
 
-        let mut to_process: Vec<crate::ScannedFile> = Vec::new();
-        for f in crate::scan_raw_files(path) {
+        // 1) Create folder rows top-down, wiring parent_id.
+        let mut dir_ids: HashMap<PathBuf, i64> = HashMap::new();
+        for dir in crate::collect_dirs(&files, path) {
+            let parent_id = dir.parent().and_then(|p| dir_ids.get(p).copied());
+            let id = self.upsert_folder(&dir, parent_id)?;
+            dir_ids.insert(dir, id);
+        }
+
+        // 2) Decide which files need (re)ingest.
+        let mut to_process: Vec<(&ScannedFile, i64)> = Vec::new();
+        for f in &files {
             summary.scanned += 1;
+            let folder_id = match f.path.parent().and_then(|p| dir_ids.get(p)) {
+                Some(id) => *id,
+                None => continue,
+            };
             if self.needs_reingest(folder_id, &f.filename, f.mtime, f.size)? {
-                to_process.push(f);
+                to_process.push((f, folder_id));
             } else {
                 summary.skipped += 1;
             }
         }
 
-        // 2) Decode + thumbnail in parallel (no DB access here).
-        // folder_id is resolved up-front (upsert_folder above) and copied into each
-        // parallel task; the NewImage is fully built off-thread, so no Catalog/DB
-        // handle crosses a thread boundary.
+        // 3) Decode + thumbnail in parallel (no DB access).
         let decoded: Vec<Decoded> = to_process
             .into_par_iter()
-            .map(|f| Decoded {
+            .map(|(f, folder_id)| Decoded {
+                folder_id,
                 filename: f.filename.clone(),
                 mtime: f.mtime,
                 size: f.size,
-                outcome: decode_one(&f.path, folder_id, &f.filename, f.mtime, f.size),
+                kind: f.kind,
+                outcome: decode_one(&f.path, folder_id, &f.filename, f.mtime, f.size, f.kind),
             })
             .collect();
 
-        // 3) Write rows + thumbnails serially.
+        // 4) Write rows + thumbnails serially.
         for d in decoded {
             match d.outcome {
                 Ok((new_image, thumb)) => {
@@ -56,37 +71,37 @@ impl Catalog {
                 }
                 Err(msg) => {
                     eprintln!("ferrolite-catalog: decode failed for {}: {msg}", d.filename);
-                    // Record a failed row so the grid shows a placeholder and we
-                    // don't retry forever. One bad file never downs the pass.
-                    let failed = NewImage::failed(folder_id, d.filename, d.mtime, d.size);
+                    let failed = NewImage::failed(d.folder_id, d.filename, d.mtime, d.size, d.kind);
                     self.upsert_image(&failed)?;
                     summary.failed += 1;
                 }
             }
         }
 
-        self.conn().execute(
-            "UPDATE folders SET last_scanned = ?1 WHERE id = ?2",
-            rusqlite::params![now_secs(), folder_id],
-        )?;
+        for (dir, id) in &dir_ids {
+            let _ = dir;
+            self.conn().execute(
+                "UPDATE folders SET last_scanned = ?1 WHERE id = ?2",
+                rusqlite::params![now_secs(), id],
+            )?;
+        }
         Ok(summary)
     }
 }
 
-/// Decode one file into a (row, thumbnail) pair. Returns Err(message) on any
-/// decode/thumbnail failure so the caller can mark the row Failed.
 fn decode_one(
     path: &std::path::Path,
     folder_id: i64,
     filename: &str,
     mtime: i64,
     size: i64,
+    kind: FileKind,
 ) -> Result<(NewImage, Thumbnail), String> {
-    // Opens the RAW more than once (metadata + preview); a single-open decode_all is deferred to Plan 4 (two-tier load).
-    let meta = ferrolite_decode::read_metadata(path).map_err(|e| e.to_string())?;
-    let preview = ferrolite_decode::decode_preview(path).map_err(|e| e.to_string())?;
+    let meta = ferrolite_decode::read_metadata(path, kind).map_err(|e| e.to_string())?;
+    let preview = ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?;
     let thumb = generate_thumbnail(&preview).map_err(|e| e.to_string())?;
-    let new_image = NewImage::from_metadata(folder_id, filename.to_string(), mtime, size, &meta);
+    let new_image =
+        NewImage::from_metadata(folder_id, filename.to_string(), mtime, size, &meta, kind);
     Ok((new_image, thumb))
 }
 

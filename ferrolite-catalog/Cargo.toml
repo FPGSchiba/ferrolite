@@ -17,3 +17,6 @@ fast_image_resize = { workspace = true }
 rayon = { workspace = true }
 walkdir = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true, features = ["png"] }

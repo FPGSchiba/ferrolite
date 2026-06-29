@@ -56,6 +56,9 @@ impl ReadPool {
     pub fn list_images(&self, folder_id: i64) -> Result<Vec<ImageRecord>, CatalogError> {
         self.with_conn(|c| crate::queries::list_images(c, folder_id))
     }
+    pub fn list_images_recursive(&self, folder_id: i64) -> Result<Vec<ImageRecord>, CatalogError> {
+        self.with_conn(|c| crate::queries::list_images_recursive(c, folder_id))
+    }
     pub fn image_count(&self) -> Result<u64, CatalogError> {
         self.with_conn(crate::queries::image_count)
     }

@@ -1,4 +1,4 @@
-use ferrolite_catalog::{Catalog, DecodeStatus, NewImage};
+use ferrolite_catalog::{Catalog, DecodeStatus, FileKind, NewImage};
 use ferrolite_image::Orientation;
 
 #[test]
@@ -39,6 +39,7 @@ fn sample_image(folder_id: i64, filename: &str) -> NewImage {
         capture_time: Some("2026:06:29 12:00:00".into()),
         iso: Some(100),
         decode_status: DecodeStatus::Done,
+        kind: FileKind::Raw,
     }
 }
 
@@ -46,7 +47,7 @@ fn sample_image(folder_id: i64, filename: &str) -> NewImage {
 fn upsert_and_query_round_trip() {
     let cat = Catalog::open_in_memory().unwrap();
     let folder = cat
-        .upsert_folder(std::path::Path::new("/photos/a"))
+        .upsert_folder(std::path::Path::new("/photos/a"), None)
         .unwrap();
     let id = cat
         .upsert_image(&sample_image(folder, "DSC_0001.NEF"))
@@ -69,11 +70,11 @@ fn upsert_and_query_round_trip() {
 fn upsert_is_idempotent_on_folder_and_filename() {
     let cat = Catalog::open_in_memory().unwrap();
     let folder = cat
-        .upsert_folder(std::path::Path::new("/photos/a"))
+        .upsert_folder(std::path::Path::new("/photos/a"), None)
         .unwrap();
     assert_eq!(
         folder,
-        cat.upsert_folder(std::path::Path::new("/photos/a"))
+        cat.upsert_folder(std::path::Path::new("/photos/a"), None)
             .unwrap()
     );
 
@@ -94,7 +95,7 @@ fn upsert_is_idempotent_on_folder_and_filename() {
 fn needs_reingest_detects_changes() {
     let cat = Catalog::open_in_memory().unwrap();
     let folder = cat
-        .upsert_folder(std::path::Path::new("/photos/a"))
+        .upsert_folder(std::path::Path::new("/photos/a"), None)
         .unwrap();
     cat.upsert_image(&sample_image(folder, "DSC_0001.NEF"))
         .unwrap();
@@ -147,7 +148,7 @@ fn generate_thumbnail_fits_within_max_edge_and_is_decodable_jpeg() {
 fn thumbnail_store_blob_round_trip() {
     let cat = Catalog::open_in_memory().unwrap();
     let folder = cat
-        .upsert_folder(std::path::Path::new("/photos/a"))
+        .upsert_folder(std::path::Path::new("/photos/a"), None)
         .unwrap();
     let id = cat
         .upsert_image(&sample_image(folder, "DSC_0001.NEF"))
@@ -184,7 +185,7 @@ fn ingest_folder_indexes_images_and_thumbnails() {
     assert!(cat.image_count().unwrap() >= 1);
 
     // Every indexed image has a decodable thumbnail within the size cap.
-    let folder = cat.upsert_folder(&fixture_dir()).unwrap();
+    let folder = cat.upsert_folder(&fixture_dir(), None).unwrap();
     let images = cat.list_images(folder).unwrap();
     assert!(!images.is_empty());
     for rec in images {
@@ -211,6 +212,25 @@ fn second_ingest_skips_unchanged_files() {
         second.skipped, first.added,
         "all previously-added files skipped"
     );
+}
+
+#[test]
+fn kind_round_trips_and_schema_is_v2() {
+    use ferrolite_catalog::FileKind;
+    let cat = ferrolite_catalog::Catalog::open_in_memory().unwrap();
+    assert_eq!(cat.schema_version().unwrap(), 2);
+    let folder = cat
+        .upsert_folder(std::path::Path::new("/photos/a"), None)
+        .unwrap();
+    let raw = ferrolite_catalog::NewImage::failed(folder, "r.nef".into(), 1, 1, FileKind::Raw);
+    let std_ =
+        ferrolite_catalog::NewImage::failed(folder, "s.jpg".into(), 1, 1, FileKind::Standard);
+    cat.upsert_image(&raw).unwrap();
+    cat.upsert_image(&std_).unwrap();
+    let mut rows = cat.list_images(folder).unwrap();
+    rows.sort_by(|a, b| a.filename.cmp(&b.filename));
+    assert_eq!(rows[0].kind, FileKind::Raw); // r.nef
+    assert_eq!(rows[1].kind, FileKind::Standard); // s.jpg
 }
 
 /// Minimal temp dir without an extra dependency: unique path under the OS temp

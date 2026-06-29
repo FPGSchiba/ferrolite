@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 /// Bump this and add a `if version < N { ... }` block when the schema changes.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Apply migrations using the SQLite `user_version` pragma. Idempotent.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -45,6 +45,11 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
              );",
         )?;
         version = 1;
+    }
+
+    if version < 2 {
+        conn.execute_batch("ALTER TABLE images ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;")?;
+        version = 2;
     }
 
     debug_assert_eq!(

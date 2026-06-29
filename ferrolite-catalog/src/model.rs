@@ -1,4 +1,4 @@
-use ferrolite_image::Orientation;
+use ferrolite_image::{FileKind, Orientation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeStatus {
@@ -40,6 +40,7 @@ pub struct NewImage {
     pub capture_time: Option<String>,
     pub iso: Option<u32>,
     pub decode_status: DecodeStatus,
+    pub kind: FileKind,
 }
 
 /// Row read back from the catalog for the grid/status bar.
@@ -54,6 +55,7 @@ pub struct ImageRecord {
     pub capture_time: Option<String>,
     pub iso: Option<u32>,
     pub decode_status: DecodeStatus,
+    pub kind: FileKind,
 }
 
 /// Result of an ingest pass.
@@ -73,6 +75,7 @@ impl NewImage {
         mtime: i64,
         size: i64,
         meta: &ferrolite_decode::Metadata,
+        kind: FileKind,
     ) -> Self {
         Self {
             folder_id,
@@ -87,11 +90,12 @@ impl NewImage {
             capture_time: meta.capture_time.clone(),
             iso: meta.iso,
             decode_status: DecodeStatus::Done,
+            kind,
         }
     }
 
     /// Build a `Failed` placeholder row (decode failed; grid shows a broken cell).
-    pub fn failed(folder_id: i64, filename: String, mtime: i64, size: i64) -> Self {
+    pub fn failed(folder_id: i64, filename: String, mtime: i64, size: i64, kind: FileKind) -> Self {
         Self {
             folder_id,
             filename,
@@ -105,6 +109,7 @@ impl NewImage {
             capture_time: None,
             iso: None,
             decode_status: DecodeStatus::Failed,
+            kind,
         }
     }
 }

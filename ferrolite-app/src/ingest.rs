@@ -29,7 +29,7 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
     let ctx = ctx.clone();
 
     // Resolve folder_id up front (quick write) so the job can key rows.
-    let folder_id = match writer.lock().expect("writer").upsert_folder(&folder) {
+    let folder_id = match writer.lock().expect("writer").upsert_folder(&folder, None) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("ferrolite: upsert_folder failed: {e}");
@@ -77,13 +77,21 @@ fn ingest_job(
                 Ok(false) => return None,
                 Err(_) => return None,
             }
-            match ferrolite_decode::read_metadata(&f.path) {
+            let kind = f.kind;
+            match ferrolite_decode::read_metadata(&f.path, kind) {
                 Ok(meta) => Some((
-                    NewImage::from_metadata(folder_id, f.filename.clone(), f.mtime, f.size, &meta),
+                    NewImage::from_metadata(
+                        folder_id,
+                        f.filename.clone(),
+                        f.mtime,
+                        f.size,
+                        &meta,
+                        kind,
+                    ),
                     f.path.clone(),
                 )),
                 Err(_) => Some((
-                    NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size),
+                    NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, kind),
                     f.path.clone(),
                 )),
             }
@@ -126,7 +134,10 @@ pub fn thumbnail_blocking(
     image_id: i64,
     path: &Path,
 ) -> Result<Thumbnail, String> {
-    let preview = ferrolite_decode::decode_preview(path).map_err(|e| e.to_string())?;
+    // thumbnail_blocking doesn't know the kind at this call site; default to Raw
+    // (the bench and job paths that use this function work on RAW-only folders).
+    let preview = ferrolite_decode::decode_preview(path, ferrolite_image::FileKind::Raw)
+        .map_err(|e| e.to_string())?;
     let thumb = ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())?;
     {
         use ferrolite_catalog::ThumbnailStore;

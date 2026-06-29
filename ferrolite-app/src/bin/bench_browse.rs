@@ -68,7 +68,7 @@ fn main() {
     let folder_id = writer
         .lock()
         .expect("writer lock")
-        .upsert_folder(&folder)
+        .upsert_folder(&folder, None)
         .expect("upsert_folder failed");
 
     let files = scan_raw_files(&folder);
@@ -76,11 +76,12 @@ fn main() {
 
     let mut image_ids: Vec<(i64, PathBuf)> = Vec::with_capacity(files.len());
     for f in &files {
-        let new_image = match ferrolite_decode::read_metadata(&f.path) {
+        let kind = f.kind;
+        let new_image = match ferrolite_decode::read_metadata(&f.path, kind) {
             Ok(meta) => {
-                NewImage::from_metadata(folder_id, f.filename.clone(), f.mtime, f.size, &meta)
+                NewImage::from_metadata(folder_id, f.filename.clone(), f.mtime, f.size, &meta, kind)
             }
-            Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size),
+            Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, kind),
         };
         match writer.lock().expect("writer lock").upsert_image(&new_image) {
             Ok(id) => {

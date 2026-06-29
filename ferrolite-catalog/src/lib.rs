@@ -24,5 +24,6 @@ pub use thumbnail::{generate_thumbnail, Thumbnail, ThumbnailStore, THUMB_MAX_EDG
 pub struct FolderRecord {
     pub id: i64,
     pub path: String,
+    pub parent_id: Option<i64>,
     pub image_count: u64,
 }

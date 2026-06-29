@@ -78,7 +78,7 @@ members = ["ferrolite-app"]
 [workspace.package]
 edition = "2021"
 license = "GPL-3.0-only"
-rust-version = "1.82"
+rust-version = "1.85"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -89,7 +89,7 @@ all = { level = "warn", priority = -1 }
 `rust-toolchain.toml`:
 ```toml
 [toolchain]
-channel = "1.82.0"
+channel = "stable"
 components = ["rustfmt", "clippy"]
 ```
 
@@ -155,7 +155,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libxcb1-dev \
             libxkbcommon-x11-dev pkg-config
-      - uses: dtolnay/rust-toolchain@1.82.0
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2

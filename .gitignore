@@ -20,3 +20,6 @@ debug
 #.idea/
 
 /target
+
+# Superpowers scratch (brainstorm screens, SDD ledgers/briefs)
+.superpowers/

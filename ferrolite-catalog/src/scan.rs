@@ -101,6 +101,10 @@ pub fn scan_tree(root: &Path) -> Vec<ScannedFile> {
 /// All directories that must become `folders` rows: every file's parent plus
 /// its ancestors up to (and including) `root`, deduplicated and ordered
 /// parent-first (so a parent row exists before its child upserts).
+///
+/// **Invariant**: every file in `files` must be located under `root` (as
+/// `scan_tree` guarantees); the ancestor walk relies on `root` appearing in
+/// each file's ancestry to terminate correctly.
 pub fn collect_dirs(files: &[ScannedFile], root: &Path) -> Vec<PathBuf> {
     let mut set: BTreeSet<PathBuf> = BTreeSet::new();
     set.insert(root.to_path_buf());

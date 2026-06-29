@@ -162,7 +162,7 @@ impl AppState {
             eprintln!("ferrolite: remove_folder failed: {e}");
             return;
         }
-        self.expanded_folders.remove(&folder_id);
+        self.expanded_folders.retain(|id| !removed_set.contains(id));
         self.dirty = true;
     }
 
@@ -311,6 +311,52 @@ mod tests {
         s.include_subfolders = true;
         s.refresh_images();
         assert_eq!(s.images.len(), 2, "recursive view: root + child images");
+    }
+
+    #[test]
+    fn remove_folder_cascade_preserves_current_when_outside_subtree() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+        let (root, sibling, other) = {
+            let w = s.writer.lock().unwrap();
+            let root = w.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            let sibling = w
+                .upsert_folder(std::path::Path::new("/p/a"), Some(root))
+                .unwrap();
+            let other = w
+                .upsert_folder(std::path::Path::new("/p/b"), Some(root))
+                .unwrap();
+            w.upsert_image(&NewImage::failed(
+                sibling,
+                "a.jpg".into(),
+                1,
+                1,
+                FileKind::Standard,
+            ))
+            .unwrap();
+            (root, sibling, other)
+        };
+        let _ = root;
+        // current_folder is `other` (not under `sibling`)
+        s.current_folder = Some(other);
+        s.remove_folder_cascade(sibling); // remove a different branch
+        assert_eq!(
+            s.current_folder,
+            Some(other),
+            "current_folder must be unchanged when outside removed subtree"
+        );
+        // `sibling` should no longer appear in the folder list
+        let remaining: Vec<i64> = s
+            .reads
+            .list_folders()
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            !remaining.contains(&sibling),
+            "removed folder must be absent from list"
+        );
     }
 
     #[test]

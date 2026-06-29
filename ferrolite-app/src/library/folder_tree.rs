@@ -132,6 +132,18 @@ mod tests {
     }
 
     #[test]
+    fn flatten_treats_orphan_parent_as_root() {
+        // A folder whose parent_id points to an id not in the slice must appear
+        // at depth 0 — flatten treats it as a root.
+        let folders = vec![rec(5, "/p/orphan", Some(999), 1)];
+        let expanded = HashSet::new();
+        let nodes = flatten(&folders, &expanded);
+        assert_eq!(nodes.len(), 1, "orphan should appear as the sole root");
+        assert_eq!(nodes[0].id, 5);
+        assert_eq!(nodes[0].depth, 0, "orphan must be at depth 0");
+    }
+
+    #[test]
     fn flatten_expanded_shows_children_in_order() {
         let f = fixture();
         let expanded: HashSet<i64> = [1, 2].into_iter().collect();

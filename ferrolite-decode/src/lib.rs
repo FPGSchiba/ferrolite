@@ -1,5 +1,6 @@
-//! RAW decode: the three independently-consumable products (preview, full,
-//! metadata) the two-tier load path relies on. Wraps `rawler` 0.7.x.
+//! Unified decode entry point: routes preview and metadata requests by
+//! `FileKind` — RAW files via `rawler` 0.7.x, standard rasters via `image` +
+//! `kamadak-exif` — returning the same three separable products in both cases.
 
 mod error;
 mod metadata;

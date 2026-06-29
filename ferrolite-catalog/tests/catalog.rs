@@ -1,4 +1,5 @@
-use ferrolite_catalog::Catalog;
+use ferrolite_catalog::{Catalog, DecodeStatus, NewImage};
+use ferrolite_image::Orientation;
 
 #[test]
 fn fresh_db_is_migrated_to_current_version() {
@@ -21,6 +22,101 @@ fn migrate_is_idempotent_on_reopen() {
     assert_eq!(
         cat.schema_version().expect("version"),
         ferrolite_catalog::SCHEMA_VERSION
+    );
+}
+
+fn sample_image(folder_id: i64, filename: &str) -> NewImage {
+    NewImage {
+        folder_id,
+        filename: filename.to_string(),
+        mtime: 1000,
+        size: 2000,
+        make: Some("Nikon".into()),
+        model: Some("Z f".into()),
+        width: Some(6048),
+        height: Some(4032),
+        orientation: Orientation::Rotate90,
+        capture_time: Some("2026:06:29 12:00:00".into()),
+        iso: Some(100),
+        decode_status: DecodeStatus::Done,
+    }
+}
+
+#[test]
+fn upsert_and_query_round_trip() {
+    let cat = Catalog::open_in_memory().unwrap();
+    let folder = cat
+        .upsert_folder(std::path::Path::new("/photos/a"))
+        .unwrap();
+    let id = cat
+        .upsert_image(&sample_image(folder, "DSC_0001.NEF"))
+        .unwrap();
+
+    let rec = cat
+        .image_by_name(folder, "DSC_0001.NEF")
+        .unwrap()
+        .expect("row");
+    assert_eq!(rec.id, id);
+    assert_eq!(rec.width, Some(6048));
+    assert_eq!(rec.orientation, Orientation::Rotate90);
+    assert_eq!(rec.decode_status, DecodeStatus::Done);
+
+    assert_eq!(cat.list_images(folder).unwrap().len(), 1);
+    assert_eq!(cat.image_count().unwrap(), 1);
+}
+
+#[test]
+fn upsert_is_idempotent_on_folder_and_filename() {
+    let cat = Catalog::open_in_memory().unwrap();
+    let folder = cat
+        .upsert_folder(std::path::Path::new("/photos/a"))
+        .unwrap();
+    assert_eq!(
+        folder,
+        cat.upsert_folder(std::path::Path::new("/photos/a"))
+            .unwrap()
+    );
+
+    let first = cat
+        .upsert_image(&sample_image(folder, "DSC_0001.NEF"))
+        .unwrap();
+    let second = cat
+        .upsert_image(&sample_image(folder, "DSC_0001.NEF"))
+        .unwrap();
+    assert_eq!(
+        first, second,
+        "same (folder, filename) updates the same row"
+    );
+    assert_eq!(cat.image_count().unwrap(), 1);
+}
+
+#[test]
+fn needs_reingest_detects_changes() {
+    let cat = Catalog::open_in_memory().unwrap();
+    let folder = cat
+        .upsert_folder(std::path::Path::new("/photos/a"))
+        .unwrap();
+    cat.upsert_image(&sample_image(folder, "DSC_0001.NEF"))
+        .unwrap();
+
+    assert!(
+        !cat.needs_reingest(folder, "DSC_0001.NEF", 1000, 2000)
+            .unwrap(),
+        "unchanged"
+    );
+    assert!(
+        cat.needs_reingest(folder, "DSC_0001.NEF", 1001, 2000)
+            .unwrap(),
+        "mtime changed"
+    );
+    assert!(
+        cat.needs_reingest(folder, "DSC_0001.NEF", 1000, 9999)
+            .unwrap(),
+        "size changed"
+    );
+    assert!(
+        cat.needs_reingest(folder, "NEW.NEF", 1, 1).unwrap(),
+        "new file"
     );
 }
 

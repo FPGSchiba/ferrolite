@@ -30,9 +30,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             .selectable_label(selected, format!("{name}  ({})", f.image_count))
             .clicked()
         {
-            state.current_folder = Some(f.id);
-            state.selected = None;
-            state.refresh_images();
+            state.select_folder(f.id);
         }
     }
 }

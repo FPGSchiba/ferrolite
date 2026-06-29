@@ -75,8 +75,12 @@ impl eframe::App for FerroliteApp {
             if let Some((id, jpeg)) = self.state.apply(event) {
                 self.state.upload_thumbnail(ctx, id, jpeg);
             }
+            self.state.dirty = true;
         }
-        self.state.refresh_images();
+        if self.state.dirty {
+            self.state.refresh_images();
+            self.state.dirty = false;
+        }
 
         egui::TopBottomPanel::top("titlebar")
             .exact_height(30.0)

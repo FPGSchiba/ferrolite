@@ -14,17 +14,13 @@ use std::sync::{Arc, Mutex};
 /// Start ingesting `folder`: cancels any in-flight ingest + pending thumbnails,
 /// resets counters, then submits the Interactive walk/upsert job.
 pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) {
-    // Cancel superseded work (contract §5.1).
-    if let Some(h) = state.ingest_handle.take() {
-        h.cancel();
-    }
-    for (_image_id, job_id) in state.thumb_jobs.drain() {
-        state.jobs.cancel(job_id);
-    }
-    state.indexed = 0;
-    state.thumb_total = 0;
-    state.thumb_done = 0;
-    state.images.clear();
+    // Cancel superseded work and zero all per-folder counters (contract §5.1).
+    state.reset_for_new_folder();
+    // Note: a late `ThumbRegistered` or `ThumbReady` from the just-cancelled
+    // prior ingest may transiently re-touch `thumb_jobs`/counters before the
+    // cancel propagates. This is benign: textures are keyed by globally-unique
+    // `image_id`, so a stale thumbnail is cached-but-never-painted and only
+    // causes a transient status-bar count drift until the next reset.
 
     let writer = Arc::clone(&state.writer);
     let reads = Arc::clone(&state.reads);

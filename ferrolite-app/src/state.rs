@@ -33,6 +33,11 @@ pub struct AppState {
     pub textures: crate::library::texture_cache::TextureCache,
     /// IDs visible in the grid on the last frame (for delta reprioritization).
     pub last_visible: HashSet<i64>,
+
+    /// Set to `true` whenever catalog-visible state changes (ingest events,
+    /// folder switch). `app.rs` checks this flag before calling
+    /// `refresh_images()` so idle frames issue zero SQL queries.
+    pub dirty: bool,
 }
 
 impl AppState {
@@ -64,6 +69,7 @@ impl AppState {
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
+            dirty: true,
         })
     }
 
@@ -93,6 +99,30 @@ impl AppState {
         }
     }
 
+    /// Reset per-folder job + counter state when switching folders: cancel any
+    /// pending thumbnail jobs, drop their handles, zero the progress counters,
+    /// and mark the view dirty so the grid reloads.
+    pub fn reset_for_new_folder(&mut self) {
+        if let Some(h) = self.ingest_handle.take() {
+            h.cancel();
+        }
+        for (_image_id, job_id) in self.thumb_jobs.drain() {
+            self.jobs.cancel(job_id);
+        }
+        self.indexed = 0;
+        self.thumb_total = 0;
+        self.thumb_done = 0;
+        self.images.clear();
+        self.selected = None;
+        self.dirty = true;
+    }
+
+    /// Switch the browsed folder (from the folder list) and reset state.
+    pub fn select_folder(&mut self, folder_id: i64) {
+        self.reset_for_new_folder();
+        self.current_folder = Some(folder_id);
+    }
+
     #[cfg(test)]
     pub fn for_test() -> Self {
         // Use a unique ID per test (thread + process) to avoid concurrent collision.
@@ -119,6 +149,7 @@ impl AppState {
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
+            dirty: true,
         }
     }
 }
@@ -132,4 +163,54 @@ fn default_db_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("ferrolite").join("catalog.db")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `reset_for_new_folder` must zero all per-folder counters, drain `thumb_jobs`,
+    /// clear `images`, clear `selected`, and set the dirty flag.
+    #[test]
+    fn reset_for_new_folder_zeroes_counters_and_clears_jobs() {
+        let mut s = AppState::for_test();
+        // Seed some prior state.
+        s.indexed = 42;
+        s.thumb_total = 10;
+        s.thumb_done = 7;
+        s.thumb_jobs.insert(1, ferrolite_jobs::JobId(100));
+        s.thumb_jobs.insert(2, ferrolite_jobs::JobId(101));
+        s.selected = Some(1);
+        s.dirty = false; // simulate an idle frame that already cleared the flag
+
+        s.reset_for_new_folder();
+
+        assert_eq!(s.thumb_total, 0, "thumb_total must be zeroed");
+        assert_eq!(s.thumb_done, 0, "thumb_done must be zeroed");
+        assert_eq!(s.indexed, 0, "indexed must be zeroed");
+        assert!(s.thumb_jobs.is_empty(), "thumb_jobs must be drained");
+        assert!(s.images.is_empty(), "images must be cleared");
+        assert_eq!(s.selected, None, "selected must be cleared");
+        assert!(s.dirty, "dirty flag must be set after reset");
+    }
+
+    /// `select_folder` must delegate to `reset_for_new_folder` and then set the
+    /// new `current_folder`.
+    #[test]
+    fn select_folder_resets_and_sets_folder() {
+        let mut s = AppState::for_test();
+        s.current_folder = Some(99);
+        s.thumb_total = 5;
+        s.thumb_done = 3;
+        s.thumb_jobs.insert(7, ferrolite_jobs::JobId(200));
+        s.dirty = false;
+
+        s.select_folder(42);
+
+        assert_eq!(s.current_folder, Some(42));
+        assert_eq!(s.thumb_total, 0);
+        assert_eq!(s.thumb_done, 0);
+        assert!(s.thumb_jobs.is_empty());
+        assert!(s.dirty);
+    }
 }

@@ -87,7 +87,11 @@ impl TilePool {
             wgpu::ImageCopyTexture {
                 texture: &self.texture,
                 mip_level: 0,
-                origin: wgpu::Origin3d { x: 0, y: 0, z: slot },
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: slot,
+                },
                 aspect: wgpu::TextureAspect::All,
             },
             bytemuck::cast_slice(&texels),

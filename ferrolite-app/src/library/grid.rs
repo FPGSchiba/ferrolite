@@ -109,6 +109,12 @@ fn paint_cell(
     if resp.double_clicked() {
         if let Ok(Some(folder_path)) = state.reads.folder_path(rec.folder_id) {
             let path = std::path::PathBuf::from(folder_path).join(&rec.filename);
+            // Cancel the previously-open viewer's in-flight decode jobs before
+            // replacing it; its streaming VT tile jobs are cancelled in `app.rs`
+            // once the holder is superseded (it needs the GPU render state).
+            if let Some(old) = state.viewer.as_ref() {
+                old.cancel_loads();
+            }
             state.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
         }
     }

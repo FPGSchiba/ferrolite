@@ -106,6 +106,11 @@ struct StreamingResources {
     sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     image_dims: (u32, u32),
+    /// Per-frame transform uniform, rewritten by `prepare_streaming` (so the
+    /// egui-callback paint split has no allocation in the render pass).
+    uniform_buf: wgpu::Buffer,
+    /// Bind group built in `prepare_streaming`, consumed by `draw_streaming`.
+    bind_group: Option<wgpu::BindGroup>,
 }
 
 /// Rung-4 sparse resources: everything in `StreamingResources`, but the NEEDED
@@ -809,6 +814,14 @@ impl VirtualTexture {
         let (bind_group_layout, sampler, pipeline) =
             build_tiled_pipeline(device, target_format, "vt-stream");
 
+        // Persistent transform uniform, rewritten each frame by `prepare_streaming`.
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-stream-xf"),
+            size: std::mem::size_of::<TransformUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let (tx, rx) = std::sync::mpsc::channel();
 
         let streaming = StreamingResources {
@@ -829,6 +842,8 @@ impl VirtualTexture {
             sampler,
             pipeline,
             image_dims: (img_w, img_h),
+            uniform_buf,
+            bind_group: None,
         };
 
         Self {
@@ -912,8 +927,10 @@ impl VirtualTexture {
         };
         let mut made_resident = 0;
         // Collect first so we don't hold the receiver borrow across mutation.
-        let ready: Vec<(TileCoord, LinearRgbaF32)> =
-            s.rx.get_mut().expect("vt rx mutex").try_iter().collect();
+        // Poison-tolerant: a panicked tile job poisons the mutex, but the
+        // receiver itself is still valid, so recover the inner value.
+        let rx = s.rx.get_mut().unwrap_or_else(|e| e.into_inner());
+        let ready: Vec<(TileCoord, LinearRgbaF32)> = rx.try_iter().collect();
         for (coord, tile) in ready {
             s.in_flight.remove(&coord);
             // If a budget-driven eviction freed a slot, evict an LRU resident to
@@ -947,6 +964,95 @@ impl VirtualTexture {
                 .write_buffer(&s.slots_buf, 0, bytemuck::cast_slice(&s.slots));
         }
         made_resident
+    }
+
+    /// Rung 3: number of tiles still in flight (jobs submitted, not yet drained).
+    /// `None` if this is not a streaming VT. Used by the viewer to decide whether
+    /// to keep requesting repaints and whether the full image is "settled" enough
+    /// to finish the crossfade. Note: 0 in-flight means everything *requested*
+    /// has arrived; the next `request_view` may submit more if the view changed.
+    pub fn streaming_pending(&self) -> Option<usize> {
+        self.streaming.as_ref().map(|s| s.in_flight.len())
+    }
+
+    /// Rung 3: cancel every in-flight tile-load job. Called on navigation so a
+    /// superseded image's tile jobs stop competing with the newly-opened one.
+    /// Idempotent; a no-op on a non-streaming VT.
+    pub fn cancel_streaming(&mut self) {
+        if let Some(s) = self.streaming.as_mut() {
+            for (_coord, handle) in s.in_flight.drain() {
+                handle.cancel();
+            }
+        }
+    }
+
+    /// Prepare-half of the rung-3 paint (egui_wgpu `CallbackTrait::prepare`):
+    /// rewrite the per-frame transform uniform and build the bind group, stashing
+    /// it for `draw_streaming`. The slot table is uploaded separately by
+    /// `request_view`/`drain_loaded`. Call once per frame before `draw_streaming`.
+    pub fn prepare_streaming(
+        &mut self,
+        ctx: &GpuContext,
+        view: &ViewTransform,
+        viewport: (f32, f32),
+    ) {
+        let s = self
+            .streaming
+            .as_mut()
+            .expect("prepare_streaming called on a non-streaming VirtualTexture");
+        let uniform = TransformUniform {
+            zoom: view.zoom,
+            _pad0: 0.0,
+            pan: [view.pan.0, view.pan.1],
+            viewport: [viewport.0, viewport.1],
+            image: [s.image_dims.0 as f32, s.image_dims.1 as f32],
+        };
+        ctx.queue
+            .write_buffer(&s.uniform_buf, 0, bytemuck::bytes_of(&uniform));
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vt-stream-bind"),
+            layout: &s.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&s.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: s.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&s.array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: s.slots_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: s.meta_buf.as_entire_binding(),
+                },
+            ],
+        });
+        s.bind_group = Some(bind);
+    }
+
+    /// Paint-half of the rung-3 paint (egui_wgpu `CallbackTrait::paint`): bind the
+    /// pipeline + the bind group built by `prepare_streaming` and draw the
+    /// full-screen triangle. No device/queue needed; a no-op if `prepare_streaming`
+    /// has not run.
+    pub fn draw_streaming(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let s = self
+            .streaming
+            .as_ref()
+            .expect("draw_streaming called on a non-streaming VirtualTexture");
+        let Some(bind) = s.bind_group.as_ref() else {
+            return;
+        };
+        pass.set_pipeline(&s.pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Rung 3: bind the streaming resources and draw the full-screen triangle.
@@ -1171,8 +1277,10 @@ impl VirtualTexture {
             None => return 0,
         };
         let mut made_resident = 0;
-        let ready: Vec<(TileCoord, LinearRgbaF32)> =
-            s.rx.get_mut().expect("vt rx mutex").try_iter().collect();
+        // Poison-tolerant: recover the receiver even if a panicked tile job
+        // poisoned the mutex (the channel itself remains valid).
+        let rx = s.rx.get_mut().unwrap_or_else(|e| e.into_inner());
+        let ready: Vec<(TileCoord, LinearRgbaF32)> = rx.try_iter().collect();
         for (coord, tile) in ready {
             s.in_flight.remove(&coord);
             let slot = match s.allocator.alloc(coord) {

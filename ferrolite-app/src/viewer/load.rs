@@ -3,8 +3,9 @@
 
 use std::path::PathBuf;
 
+use ferrolite_decode::{DemosaicToRgb16f, QuadBin};
 use ferrolite_image::{FileKind, ImageBuffer, LinearRgbaF32, PixelFormat};
-use ferrolite_jobs::{JobSystem, Priority};
+use ferrolite_jobs::{JobHandle, JobSystem, Priority};
 
 use crate::events::AppEvent;
 
@@ -46,7 +47,7 @@ pub fn spawn_preview(
     image_id: i64,
     path: PathBuf,
     kind: FileKind,
-) {
+) -> JobHandle {
     let tx = tx.clone();
     let ctx = ctx.clone();
     jobs.submit(Priority::Interactive, move |cancel| {
@@ -62,7 +63,46 @@ pub fn spawn_preview(
             }
         }
         ctx.request_repaint();
-    });
+    })
+}
+
+/// Submit an `Interactive` tier-2 full-decode job: full RAW decode →
+/// `QuadBin.to_linear_rgba_f32` (display-linear half-res), then send
+/// `AppEvent::FullDecoded { image_id, image }`. On decode error sends
+/// `AppEvent::FullFailed { image_id }` and logs.
+///
+/// RAW-only: `decode_full` decodes via rawler, which has no full path for
+/// Standard/JPEG images. For a Standard image the tier-1 preview already IS the
+/// full-resolution image, so tier-2 is skipped entirely (the caller guards on
+/// `kind == FileKind::Raw`).
+pub fn spawn_full(
+    jobs: &std::sync::Arc<JobSystem>,
+    tx: &std::sync::mpsc::Sender<AppEvent>,
+    ctx: &egui::Context,
+    image_id: i64,
+    path: PathBuf,
+) -> JobHandle {
+    let tx = tx.clone();
+    let ctx = ctx.clone();
+    jobs.submit(Priority::Interactive, move |cancel| {
+        if cancel.is_cancelled() {
+            return;
+        }
+        match ferrolite_decode::decode_full(&path) {
+            Ok(raw) => {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let image = QuadBin.to_linear_rgba_f32(&raw);
+                let _ = tx.send(AppEvent::FullDecoded { image_id, image });
+            }
+            Err(e) => {
+                eprintln!("ferrolite: full decode failed for #{image_id}: {e}");
+                let _ = tx.send(AppEvent::FullFailed { image_id });
+            }
+        }
+        ctx.request_repaint();
+    })
 }
 
 #[cfg(test)]

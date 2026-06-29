@@ -1,34 +1,40 @@
-//! egui↔wgpu paint callback for the viewer's rung-1 `VirtualTexture`.
+//! egui↔wgpu paint callback for the viewer's `VirtualTexture`s.
 //!
-//! The heavy GPU resources (the `VirtualTexture` + a borrowed `GpuContext`) live
-//! in eframe's `callback_resources` type-map as a single [`ViewerGpu`] holder —
-//! only one viewer is open at a time. The egui `Callback` carries only the small
-//! `Copy` per-frame data (`view` + `viewport`); the `prepare`/`paint` split lets
-//! us build the per-frame uniform + bind group where the device/queue is
-//! available (`prepare`) and merely bind+draw where it is not (`paint`).
+//! The heavy GPU resources (the preview rung-1 VT, the optional tier-2 streaming
+//! VT, and a borrowed `GpuContext`) live in eframe's `callback_resources` type-map
+//! as a single [`ViewerGpu`] holder — only one viewer is open at a time. The egui
+//! `Callback` carries only the small `Copy` per-frame data (`view` + `viewport` +
+//! the `show_full` selector); the `prepare`/`paint` split lets us build the
+//! per-frame uniform + bind group where the device/queue is available (`prepare`)
+//! and merely bind+draw where it is not (`paint`).
 
 use egui_wgpu::CallbackTrait;
 use ferrolite_gpu::GpuContext;
 use ferrolite_vt::{ViewTransform, VirtualTexture};
 
-/// Holder stashed in `callback_resources`: the viewer's rung-1 texture plus the
-/// GPU context needed to rebuild its per-frame uniform/bind group each frame.
+/// Holder stashed in `callback_resources`: the viewer's GPU context plus the
+/// rung-1 preview texture and (once tier-2 finishes) the streaming full-res VT.
 pub struct ViewerGpu {
     pub ctx: GpuContext,
-    pub vt: VirtualTexture,
-    /// Image id whose preview this VT holds — guards against painting a texture
-    /// that belongs to a viewer that has since been closed/replaced.
+    /// Rung-1 single-texture preview. Painted until the full VT is shown.
+    pub preview: VirtualTexture,
+    /// Rung-3 streaming full-res VT (tier-2). `None` until `FullDecoded` arrives.
+    pub full: Option<VirtualTexture>,
+    /// Image id whose textures these are — guards against painting a holder that
+    /// belongs to a viewer that has since been closed/replaced.
     pub image_id: i64,
 }
 
-/// Per-frame paint command: small `Copy` data only. The VT is fetched from
+/// Per-frame paint command: small `Copy` data only. The textures are fetched from
 /// `callback_resources` in both phases. `image_id` guards against painting a
 /// holder that belongs to a different (newer) viewer than this callback was
-/// enqueued for.
+/// enqueued for. `show_full` selects the streaming VT once the crossfade decides
+/// it is the sharp image to show (swap-on-ready, see `viewer::paint`).
 pub struct ViewerCallback {
     pub image_id: i64,
     pub view: ViewTransform,
     pub viewport: (f32, f32),
+    pub show_full: bool,
 }
 
 impl CallbackTrait for ViewerCallback {
@@ -42,7 +48,15 @@ impl CallbackTrait for ViewerCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(g) = resources.get_mut::<ViewerGpu>() {
             if g.image_id == self.image_id {
-                g.vt.prepare_single(&g.ctx, &self.view, self.viewport);
+                if self.show_full {
+                    if let Some(full) = g.full.as_mut() {
+                        full.prepare_streaming(&g.ctx, &self.view, self.viewport);
+                    } else {
+                        g.preview.prepare_single(&g.ctx, &self.view, self.viewport);
+                    }
+                } else {
+                    g.preview.prepare_single(&g.ctx, &self.view, self.viewport);
+                }
             }
         }
         Vec::new()
@@ -56,7 +70,15 @@ impl CallbackTrait for ViewerCallback {
     ) {
         if let Some(g) = resources.get::<ViewerGpu>() {
             if g.image_id == self.image_id {
-                g.vt.draw_single(pass);
+                if self.show_full {
+                    if let Some(full) = g.full.as_ref() {
+                        full.draw_streaming(pass);
+                    } else {
+                        g.preview.draw_single(pass);
+                    }
+                } else {
+                    g.preview.draw_single(pass);
+                }
             }
         }
     }

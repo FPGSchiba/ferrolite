@@ -60,15 +60,187 @@ impl FerroliteApp {
         };
         v.view = ferrolite_vt::ViewTransform::fit(dims, viewport);
         v.loaded = true;
+        // A Standard image's preview IS the full-resolution image, so there is no
+        // tier-2 to wait for — go idle once the preview is up so the repaint loop
+        // does not spin.
+        if v.kind != ferrolite_image::FileKind::Raw {
+            v.idle = true;
+        }
 
         rs.renderer
             .write()
             .callback_resources
             .insert(viewer::ViewerGpu {
                 ctx: gpu,
-                vt,
+                preview: vt,
+                full: None,
                 image_id,
             });
+    }
+
+    /// Handle a tier-2 full decode: build a `PyramidTileSource` from the
+    /// display-linear image, wrap it as a streaming (rung-3) `VirtualTexture`,
+    /// store it alongside the preview in `ViewerGpu`, and begin the preview→full
+    /// crossfade. Stale events (no open viewer / different image_id) are dropped.
+    fn apply_full_decoded(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        image: &ferrolite_image::LinearRgbaF32,
+    ) {
+        let Some(v) = self.state.viewer.as_mut() else {
+            return; // viewer closed while decoding
+        };
+        if v.image_id != image_id {
+            return; // stale: a different image is now open
+        }
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+
+        // `v` only guarded staleness above; release the borrow before taking the
+        // renderer lock so we can re-borrow afterwards. (Both live on `self` but
+        // do not alias.)
+        let _ = v;
+
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
+            std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
+        let full = ferrolite_vt::VirtualTexture::streaming(
+            &gpu,
+            source,
+            std::sync::Arc::clone(&self.state.jobs),
+            VIEWER_TILE_BUDGET,
+            rs.target_format,
+        );
+
+        // Store the full VT into the existing holder (keep the preview around so
+        // the crossfade can keep showing it until the full tiles are resident).
+        // Only flip `full_ready` / start the crossfade if the holder was actually
+        // updated for THIS image — otherwise (stale holder) the viewer would
+        // permanently idle on the preview with no full VT to swap to.
+        let mut full_installed = false;
+        {
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == image_id {
+                    g.full = Some(full);
+                    full_installed = true;
+                }
+            }
+        }
+
+        if full_installed {
+            if let Some(v) = self.state.viewer.as_mut() {
+                if v.image_id == image_id {
+                    v.full_ready = true;
+                    v.begin_crossfade();
+                }
+            }
+        }
+    }
+}
+
+/// Physical tile-pool budget for the viewer's streaming VT. 256 tiles × 256² ×
+/// RGBA16F ≈ 128 MB of GPU memory — generous headroom for a fit-to-window view
+/// plus a few zoom levels of the quad-binned (half-res) full image.
+const VIEWER_TILE_BUDGET: u32 = 256;
+
+impl FerroliteApp {
+    /// Per-frame viewer drive: advance the crossfade, drive the streaming VT
+    /// (request the current view's tiles + drain finished loads), paint the
+    /// preview or full image (swap-on-ready), and request a repaint ONLY while
+    /// there is still work — so a finished/failed viewer goes idle (no busy-loop).
+    ///
+    /// Crossfade approach 4b (swap-on-ready): we keep showing the sharp preview
+    /// until the crossfade ramp completes AND the current view's tiles are all
+    /// resident (`streaming_pending() == 0`), then hard-swap to the full VT. The
+    /// full is already sharp at that point, so there is no blurry pop. True alpha
+    /// blending in the callback would need a second alpha-blended pipeline pass;
+    /// 4b avoids that cost and reads as instant at the 150 ms ramp.
+    fn drive_viewer(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        let dt = ui.ctx().input(|i| i.stable_dt);
+
+        // First, reconcile any stale GPU holder: if the holder belongs to an
+        // image other than the open viewer (navigation happened), cancel its
+        // tile jobs so they stop competing with the new image's loads.
+        let open_id = self.state.viewer.as_ref().map(|v| v.image_id);
+
+        // Drive the streaming VT for the open viewer and learn how many tiles are
+        // still pending (so we can both gate the swap and terminate the repaint).
+        let mut tiles_pending: Option<usize> = None;
+        if let (Some(rs), Some(v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if Some(g.image_id) != open_id {
+                    // Stale holder from a superseded viewer: stop its tile jobs.
+                    if let Some(full) = g.full.as_mut() {
+                        full.cancel_streaming();
+                    }
+                } else if let Some(full) = g.full.as_mut() {
+                    full.request_view(&g.ctx, &v.view, v.viewport);
+                    tiles_pending = full.streaming_pending();
+                }
+            }
+        }
+
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+
+        // If the view changed (pan/zoom in `viewer::paint` already cleared `idle`,
+        // but a programmatic change might not), `request_view` above may have
+        // submitted new tile loads. Resume the drive loop so they drain + display.
+        if matches!(tiles_pending, Some(n) if n > 0) {
+            v.idle = false;
+        }
+
+        // Advance the crossfade ramp; swap to full once it has completed and the
+        // current view's tiles are all resident.
+        let factor = v.tick_crossfade(dt);
+        let tiles_settled = matches!(tiles_pending, Some(0));
+        let show_full = v.full_ready && factor >= 1.0 && tiles_settled;
+
+        // Terminal state: full ready, crossfade done, nothing pending -> idle.
+        if show_full && !v.crossfading {
+            v.idle = true;
+        }
+
+        let crossfading = v.crossfading;
+        // `paint` applies this frame's pan/zoom and clears `idle` when the view
+        // moved, so read `idle` AFTER it to catch an interaction this frame.
+        let loading_preview = viewer::paint(ui, v, show_full);
+        let idle = v.idle;
+
+        // Repaint only while there is pending work:
+        //  - preview not yet uploaded, or
+        //  - crossfade ramp still advancing, or
+        //  - streaming tiles still loading.
+        // Once `idle` (full ready + settled, or a failure marked it idle) we stop.
+        // A pan/zoom clears `idle` so the loop resumes and the new view's tiles
+        // (requested next frame) drain and display.
+        let tiles_loading = matches!(tiles_pending, Some(n) if n > 0);
+        if !idle && (loading_preview || crossfading || tiles_loading) {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// Cancel the streaming VT's in-flight tile-load jobs for the named viewer.
+    /// The VT lives in `callback_resources`; the decode jobs are cancelled
+    /// separately via `ViewerState::cancel_loads`. Guarded on `image_id` so we
+    /// never cancel a holder that already belongs to a newer viewer.
+    fn cancel_viewer_tiles(&self, frame: &eframe::Frame, image_id: i64) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let mut renderer = rs.renderer.write();
+        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+            if g.image_id == image_id {
+                if let Some(full) = g.full.as_mut() {
+                    full.cancel_streaming();
+                }
+            }
+        }
     }
 }
 
@@ -121,10 +293,29 @@ impl eframe::App for FerroliteApp {
         // Drain job results into state; upload textures for ThumbReady events and
         // build the viewer's rung-1 VirtualTexture for PreviewReady events.
         while let Ok(event) = self.state.rx.try_recv() {
-            if let crate::events::AppEvent::PreviewReady { image_id, image } = &event {
-                self.apply_preview_ready(frame, *image_id, image);
-                self.state.dirty = true;
-                continue;
+            match &event {
+                crate::events::AppEvent::PreviewReady { image_id, image } => {
+                    self.apply_preview_ready(frame, *image_id, image);
+                    self.state.dirty = true;
+                    continue;
+                }
+                crate::events::AppEvent::FullDecoded { image_id, image } => {
+                    self.apply_full_decoded(frame, *image_id, image);
+                    self.state.dirty = true;
+                    continue;
+                }
+                crate::events::AppEvent::FullFailed { image_id } => {
+                    // Keep the preview; mark the viewer idle so the repaint loop
+                    // can stop (the error was already logged on the job thread).
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == *image_id {
+                            v.idle = true;
+                        }
+                    }
+                    self.state.dirty = true;
+                    continue;
+                }
+                _ => {}
             }
             if let Some((id, jpeg)) = self.state.apply(event) {
                 self.state.upload_thumbnail(ctx, id, jpeg);
@@ -208,15 +399,20 @@ impl eframe::App for FerroliteApp {
                 crate::library::panel::show(ui, &mut self.state, ctx);
             });
 
-        // Esc closes the viewer.
+        // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
+        // closed image's work stops competing with whatever is opened next.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.state.viewer = None;
+            if let Some(v) = self.state.viewer.take() {
+                v.cancel_loads();
+                self.cancel_viewer_tiles(frame, v.image_id);
+            }
         }
 
-        // Submit the tier-1 preview decode once when a viewer opens.
+        // Submit the tier-1 preview decode once when a viewer opens, and (for RAW)
+        // the tier-2 full decode in parallel.
         if let Some(v) = self.state.viewer.as_mut() {
             if !v.preview_requested {
-                viewer::load::spawn_preview(
+                let h = viewer::load::spawn_preview(
                     &self.state.jobs,
                     &self.state.tx,
                     ctx,
@@ -224,19 +420,28 @@ impl eframe::App for FerroliteApp {
                     v.path.clone(),
                     v.kind,
                 );
+                v.preview_handle = Some(h);
                 v.preview_requested = true;
+            }
+            // Tier-2 is RAW-only: a Standard image's preview is already full-res.
+            if !v.full_requested && v.kind == ferrolite_image::FileKind::Raw {
+                let h = viewer::load::spawn_full(
+                    &self.state.jobs,
+                    &self.state.tx,
+                    ctx,
+                    v.image_id,
+                    v.path.clone(),
+                );
+                v.full_handle = Some(h);
+                v.full_requested = true;
             }
         }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG_CANVAS))
             .show(ctx, |ui| {
-                if let Some(v) = self.state.viewer.as_mut() {
-                    let loading = viewer::paint(ui, v);
-                    if loading {
-                        // Keep animating until the first pixel is ready.
-                        ui.ctx().request_repaint();
-                    }
+                if self.state.viewer.is_some() {
+                    self.drive_viewer(ui, frame);
                 } else if self.module.is_library() {
                     crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else {

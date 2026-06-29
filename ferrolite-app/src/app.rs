@@ -82,6 +82,27 @@ impl eframe::App for FerroliteApp {
             self.state.dirty = false;
         }
 
+        // One-time startup rescan of all roots (first frame, ctx available here).
+        if !self.state.startup_rescan_done {
+            crate::ingest::spawn_startup_rescan(&mut self.state, ctx);
+            self.state.startup_rescan_done = true;
+        }
+
+        // Periodic background watcher for new files in the selected subtree.
+        let now = std::time::Instant::now();
+        if crate::ingest::should_watch(
+            now,
+            self.state.last_watch_check,
+            crate::ingest::WATCH_INTERVAL,
+            self.state.current_folder,
+            self.state.active_ingests,
+        ) {
+            self.state.last_watch_check = Some(now);
+            crate::ingest::spawn_watch_scan(&mut self.state, ctx);
+        }
+        // Wake on the watcher cadence even when otherwise idle.
+        ctx.request_repaint_after(crate::ingest::WATCH_INTERVAL);
+
         egui::TopBottomPanel::top("titlebar")
             .exact_height(30.0)
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))

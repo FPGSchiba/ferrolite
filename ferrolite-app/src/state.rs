@@ -52,12 +52,8 @@ pub struct AppState {
     /// on `IngestDone`.
     pub active_ingests: usize,
     /// Wall-clock of the last watcher tick (for the periodic check).
-    // Used in Task 4 (watcher); forward-declared here for Task 3's counter.
-    #[allow(dead_code)]
     pub last_watch_check: Option<std::time::Instant>,
     /// One-time startup rescan guard (fires on the first update frame).
-    // Used in Task 4; forward-declared here.
-    #[allow(dead_code)]
     pub startup_rescan_done: bool,
 
     /// Recursive (subtree) vs direct folder view. Default true (on).

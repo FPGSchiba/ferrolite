@@ -14,6 +14,28 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+/// How often the background watcher polls the selected folder for new files.
+pub const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Pure predicate: should the periodic watcher fire this frame? True iff a
+/// folder is selected, no ingest is in flight, and at least `interval` has
+/// elapsed since `last_check` (or there has been no check yet).
+pub fn should_watch(
+    now: std::time::Instant,
+    last_check: Option<std::time::Instant>,
+    interval: std::time::Duration,
+    current_folder: Option<i64>,
+    active_ingests: usize,
+) -> bool {
+    if current_folder.is_none() || active_ingests != 0 {
+        return false;
+    }
+    match last_check {
+        None => true,
+        Some(t) => now.duration_since(t) >= interval,
+    }
+}
+
 /// How a (re)ingest treats already-indexed files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReindexMode {
@@ -98,6 +120,51 @@ pub fn spawn_reindex(
     state.dirty = true;
     let handle = submit_ingest(state, ctx, folder_path, mode, Priority::Interactive);
     state.ingest_handle = Some(handle);
+}
+
+/// Spawn a silent Background incremental scan of the currently-selected folder's
+/// subtree (picks up newly-added files). No view/counter reset.
+pub fn spawn_watch_scan(state: &mut AppState, ctx: &egui::Context) {
+    let Some(folder_id) = state.current_folder else {
+        return;
+    };
+    let path = match state.reads.folder_path(folder_id) {
+        Ok(Some(p)) => PathBuf::from(p),
+        _ => return,
+    };
+    let handle = submit_ingest(
+        state,
+        ctx,
+        path,
+        ReindexMode::Incremental,
+        Priority::Background,
+    );
+    state.ingest_handle = Some(handle);
+}
+
+/// One-time startup sweep: a Background incremental scan of every root folder
+/// (parent_id is NULL) so on-disk changes since last launch appear immediately.
+/// A recursive scan per root covers all descendants.
+pub fn spawn_startup_rescan(state: &mut AppState, ctx: &egui::Context) {
+    let roots: Vec<PathBuf> = state
+        .reads
+        .list_folders()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| f.parent_id.is_none())
+        .map(|f| PathBuf::from(f.path))
+        .collect();
+    for root in roots {
+        // Each increments active_ingests; handles are not individually tracked
+        // (cheap, silent, idempotent incremental scans).
+        let _ = submit_ingest(
+            state,
+            ctx,
+            root,
+            ReindexMode::Incremental,
+            Priority::Background,
+        );
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -264,4 +331,29 @@ pub fn spawn_thumbnail(
         ctx.request_repaint();
     })
     .id()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_watch_fires_only_when_idle_selected_and_elapsed() {
+        let iv = Duration::from_secs(10);
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(11);
+        let soon = t0 + Duration::from_secs(3);
+
+        // Happy path: folder selected, no ingest, interval elapsed.
+        assert!(should_watch(later, Some(t0), iv, Some(1), 0));
+        // First-ever check (no last_check) fires.
+        assert!(should_watch(t0, None, iv, Some(1), 0));
+        // Not enough time elapsed.
+        assert!(!should_watch(soon, Some(t0), iv, Some(1), 0));
+        // No folder selected.
+        assert!(!should_watch(later, Some(t0), iv, None, 0));
+        // An ingest is in flight.
+        assert!(!should_watch(later, Some(t0), iv, Some(1), 2));
+    }
 }

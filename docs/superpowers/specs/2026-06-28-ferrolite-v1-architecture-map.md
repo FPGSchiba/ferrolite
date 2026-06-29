@@ -114,12 +114,13 @@ it. This keeps the recompute engine reusable while edits stay domain-specific.
 
 Each is an independent `spec → plan → implementation` cycle. Build order = dependency order.
 
-- **Spec 1 — Speed core (validation slice, IN PROGRESS).**
+- **Spec 1 — Speed core (validation slice — DESIGN WRITTEN).**
   Crates: `jobs` + `gpu` (minimal) + `vt` + `image` + `decode` + `catalog` + `app`
   (browser/viewer). Proves **G1 (browse speed)** + **G2 (load/preview speed)**.
   Validation milestone: *rawler decode → instant embedded-preview display → SQLite
-  catalog with async thumbnails → smooth GPU zoom/pan on 45MP via sparse VT.*
-  Detailed design: see the Spec 1 design doc (next to this file).
+  catalog with async thumbnails → smooth GPU zoom/pan via sparse VT.* Benchmark target
+  24MP initially (expandable to 45MP). UI target: the **Library module** of the design
+  system. Detailed design: `2026-06-28-ferrolite-speed-core-design.md`.
 
 - **Spec 2 — Editing.**
   Crates: `pipeline` (retained edit DAG on top of `ferrolite-gpu`) + sidecar op-stack
@@ -193,4 +194,8 @@ the first-pixel path uses a fast half/quarter-res full decode instead.
 - Original proposal: `2026-06-28-ferrolite-proposal.md` (archived in this directory).
   Goals G1–G5, non-goals NG1–NG6, accepted tradeoffs, settled tech stack. Treat its
   "Settled decisions" as fixed and its "Open questions" as resolved per §2/§4 above.
+- **Design system:** `../../design/ferrolite-design-system.md` — derived from the Claude
+  Design mockup (`../../design/Ferrolite.dc.html`, `../../design/EguiSlider.dc.html`).
+  Canonical theme/widget/layout reference for all UI work. Library module = Spec 1 UI;
+  Develop module = Spec 2/3 UI.
 - RapidRAW (AGPL-3.0): read for ideas only; no code copied into this GPL-3.0 project.

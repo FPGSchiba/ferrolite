@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{ box-sizing:border-box; }
+  ::-webkit-scrollbar{ width:10px; height:10px; }
+  ::-webkit-scrollbar-track{ background:#141414; }
+  ::-webkit-scrollbar-thumb{ background:#383838; border:2px solid #141414; border-radius:5px; }
+  ::-webkit-scrollbar-thumb:hover{ background:#484848; }
+</style>
+</helmet>
+<div style="width:1440px; height:810px; background:#1a1a1a; color:#c8c8c8; font-family:'IBM Plex Sans',system-ui,sans-serif; font-size:12px; overflow:hidden; display:flex; flex-direction:column;">
+
+  <!-- ============ TITLE / MENU BAR ============ -->
+  <div style="height:30px; flex:0 0 30px; background:#161616; border-bottom:1px solid #2a2a2a; display:flex; align-items:center; padding:0 10px; gap:16px; user-select:none;">
+    <div style="display:flex; align-items:center; gap:7px;">
+      <div style="width:13px; height:13px; border:1.5px solid #6d97b5; border-radius:2px; position:relative;">
+        <div style="position:absolute; inset:2.5px; background:#6d97b5;"></div>
+      </div>
+      <span style="font-weight:600; letter-spacing:1.5px; font-size:11px; color:#dcdcdc;">FERROLITE</span>
+    </div>
+    <div style="display:flex; gap:2px; color:#9a9a9a; font-size:11.5px;">
+      <span style="padding:3px 8px; border-radius:3px;">File</span>
+      <span style="padding:3px 8px; border-radius:3px;">Edit</span>
+      <span style="padding:3px 8px; border-radius:3px;">Photo</span>
+      <span style="padding:3px 8px; border-radius:3px;">View</span>
+      <span style="padding:3px 8px; border-radius:3px;">Help</span>
+    </div>
+    <div style="flex:1 1 auto;"></div>
+    <div style="display:flex; gap:1px; background:#0e0e0e; border:1px solid #2a2a2a; border-radius:4px; overflow:hidden;">
+      <div onClick="{{ goLibrary }}" style="padding:4px 18px; font-size:11px; letter-spacing:.5px; cursor:pointer; background:{{ libTabBg }}; color:{{ libTabColor }};">Library</div>
+      <div onClick="{{ goDevelop }}" style="padding:4px 18px; font-size:11px; letter-spacing:.5px; cursor:pointer; background:{{ devTabBg }}; color:{{ devTabColor }};">Develop</div>
+    </div>
+    <div style="flex:1 1 auto;"></div>
+    <div style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#6a6a6a;">v0.4.2</div>
+  </div>
+
+  <!-- ============ LIBRARY VIEW ============ -->
+  <sc-if value="{{ isLibrary }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1 1 auto; display:flex; flex-direction:column; min-height:0;">
+
+    <!-- top toolbar -->
+    <div style="height:40px; flex:0 0 40px; background:#1d1d1d; border-bottom:1px solid #2a2a2a; display:flex; align-items:center; padding:0 10px; gap:10px; user-select:none;">
+      <div style="display:flex; align-items:center; gap:6px; width:230px; height:24px; background:#121212; border:1px solid #303030; border-radius:3px; padding:0 8px;">
+        <span style="color:#6a6a6a; font-size:13px;">⌕</span>
+        <span style="color:#5e5e5e; font-size:11.5px;">Search catalog…</span>
+      </div>
+      <div style="width:1px; height:20px; background:#2a2a2a;"></div>
+      <span style="color:#7a7a7a; font-size:11px;">Sort</span>
+      <div style="display:flex; align-items:center; gap:8px; height:24px; background:#1a1a1a; border:1px solid #303030; border-radius:3px; padding:0 8px; min-width:120px;">
+        <span style="font-size:11.5px; color:#c0c0c0;">Capture Time</span>
+        <span style="flex:1 1 auto;"></span>
+        <span style="color:#7a7a7a; font-size:8px;">▾</span>
+      </div>
+      <div style="width:24px; height:24px; display:flex; align-items:center; justify-content:center; background:#1a1a1a; border:1px solid #303030; border-radius:3px; color:#b0b0b0; font-size:12px;">↓</div>
+      <span style="color:#7a7a7a; font-size:11px; margin-left:4px;">Filter</span>
+      <div style="display:flex; align-items:center; gap:2px; height:24px; background:#1a1a1a; border:1px solid #303030; border-radius:3px; padding:0 7px;">
+        <sc-for list="{{ filterStars }}" as="on" hint-placeholder-count="5">
+          <span style="font-size:12px; color:{{ on.color }};">★</span>
+        </sc-for>
+      </div>
+      <div style="display:flex; align-items:center; gap:5px; height:24px; background:#1a1a1a; border:1px solid #303030; border-radius:3px; padding:0 8px;">
+        <sc-for list="{{ labelSwatches }}" as="c" hint-placeholder-count="5">
+          <span style="width:9px; height:9px; border-radius:50%; background:{{ c.color }}; opacity:{{ c.op }};"></span>
+        </sc-for>
+      </div>
+      <!-- more filters -->
+      <div style="position:relative;">
+        <div onClick="{{ toggleFilters }}" style="display:flex; align-items:center; gap:6px; height:24px; padding:0 9px; background:{{ filtBtnBg }}; border:1px solid {{ filtBtnBorder }}; border-radius:3px; color:{{ filtBtnColor }}; font-size:11px; cursor:pointer;">
+          <span style="font-size:12px;">⛭</span><span>Metadata</span>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:9px; color:#6d97b5;">{{ filtBadge }}</span>
+          <span style="font-size:8px; color:#7a7a7a;">▾</span>
+        </div>
+        <sc-if value="{{ filtersOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; top:30px; right:0; width:300px; background:#1d1d1d; border:1px solid #353535; border-radius:4px; z-index:50; box-shadow:0 6px 18px #000000aa;">
+          <div style="display:flex; align-items:center; padding:9px 12px; border-bottom:1px solid #2a2a2a;">
+            <span style="font-size:10px; letter-spacing:1px; color:#8a8a8a; font-weight:600; flex:1 1 auto;">METADATA FILTERS</span>
+            <span style="font-size:10px; color:#6d97b5; cursor:pointer;">Reset</span>
+          </div>
+          <div style="padding:10px 12px 12px;">
+            <sc-for list="{{ metaCombos }}" as="m" hint-placeholder-count="3">
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:7px;">
+                <span style="font-size:11px; color:#8a8a8a; width:66px; flex:0 0 66px;">{{ m.label }}</span>
+                <div style="display:flex; align-items:center; height:22px; flex:1 1 auto; background:#141414; border:1px solid {{ m.border }}; border-radius:3px; padding:0 8px;">
+                  <span style="font-size:11px; color:{{ m.valColor }}; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ m.value }}</span>
+                  <span style="color:#7a7a7a; font-size:8px;">▾</span>
+                </div>
+              </div>
+            </sc-for>
+
+            <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin:10px 0 6px;">FILE TYPE</div>
+            <div style="display:flex; gap:5px; margin-bottom:4px;">
+              <sc-for list="{{ fileTypes }}" as="ft" hint-placeholder-count="4">
+                <span style="flex:1 1 0; text-align:center; font-size:10px; padding:4px 0; border-radius:3px; background:{{ ft.bg }}; border:1px solid {{ ft.border }}; color:{{ ft.color }};">{{ ft.name }}</span>
+              </sc-for>
+            </div>
+
+            <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin:12px 0 2px;">EXPOSURE RANGE</div>
+            <dc-import name="EguiSlider" label="ISO" value="100" min="50" max="25600" default="100" step="50" decimals="0" hint-size="100%,22px"></dc-import>
+            <dc-import name="EguiSlider" label="Aperture" value="8" min="1" max="22" default="8" step="0.1" decimals="1" unit=" f" hint-size="100%,22px"></dc-import>
+            <dc-import name="EguiSlider" label="Focal" value="14" min="8" max="600" default="14" step="1" decimals="0" unit=" mm" hint-size="100%,22px"></dc-import>
+
+            <div style="display:flex; align-items:center; gap:8px; margin-top:12px;">
+              <span style="flex:1 1 0; text-align:center; font-size:11px; padding:5px 0; border-radius:3px; background:#232b30; border:1px solid #34464f; color:#cfe0ec; cursor:pointer;">Apply Filters</span>
+              <span style="font-size:11px; padding:5px 12px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;" onClick="{{ toggleFilters }}">Close</span>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+      </div>
+      <span style="flex:1 1 auto;"></span>
+      <span style="color:#6a6a6a; font-size:10px;">▦</span>
+      <div onPointerDown="{{ onSizeDown }}" ref="{{ sizeTrackRef }}" style="position:relative; width:120px; height:18px; display:flex; align-items:center; cursor:ew-resize;">
+        <div style="position:absolute; left:0; right:0; top:50%; height:2px; transform:translateY(-50%); background:#3a3a3a; border-radius:1px;"></div>
+        <div style="position:absolute; left:0; top:50%; height:2px; transform:translateY(-50%); width:{{ sizePct }}%; background:#585858; border-radius:1px;"></div>
+        <div style="position:absolute; top:50%; transform:translate(-50%,-50%); left:{{ sizePct }}%; width:11px; height:11px; border-radius:50%; background:#9a9a9a; border:1px solid #161616;"></div>
+      </div>
+      <span style="color:#6a6a6a; font-size:15px;">▦</span>
+    </div>
+
+    <!-- body -->
+    <div style="flex:1 1 auto; display:flex; min-height:0;">
+
+      <!-- LEFT PANEL -->
+      <div style="width:236px; flex:0 0 236px; background:#171717; border-right:1px solid #2a2a2a; overflow-y:auto; user-select:none;">
+        <div style="padding:11px 12px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600;">CATALOG</div>
+        <div style="padding:0 8px;">
+          <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:3px; background:#212a30; color:#dcdcdc;">
+            <span style="font-size:11px;">▦</span><span style="font-size:11.5px;">All Photographs</span>
+            <span style="flex:1 1 auto;"></span><span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#8a8a8a;">2,481</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:3px; color:#b5b5b5;">
+            <span style="font-size:11px; color:#7a7a7a;">◷</span><span style="font-size:11.5px;">Recently Added</span>
+            <span style="flex:1 1 auto;"></span><span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#6a6a6a;">126</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:3px; color:#b5b5b5;">
+            <span style="font-size:11px; color:#7a7a7a;">⚑</span><span style="font-size:11.5px;">Quick Collection</span>
+            <span style="flex:1 1 auto;"></span><span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#6a6a6a;">14</span>
+          </div>
+        </div>
+
+        <div style="padding:14px 12px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; display:flex; align-items:center;">FOLDERS<span style="flex:1 1 auto;"></span><span style="color:#555; font-size:13px;">+</span></div>
+        <div style="padding:0 8px;">
+          <sc-for list="{{ folders }}" as="f" hint-placeholder-count="7">
+            <div style="display:flex; align-items:center; gap:6px; padding:4px 8px; padding-left:{{ f.pad }}px; border-radius:3px; background:{{ f.bg }}; color:{{ f.color }};">
+              <span style="font-size:8px; color:#6a6a6a; width:8px;">{{ f.tri }}</span>
+              <span style="font-size:11px; color:{{ f.icon }};">▸</span>
+              <span style="font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ f.name }}</span>
+              <span style="flex:1 1 auto;"></span>
+              <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#666;">{{ f.count }}</span>
+            </div>
+          </sc-for>
+        </div>
+
+        <div style="padding:14px 12px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; display:flex; align-items:center;">COLLECTIONS<span style="flex:1 1 auto;"></span><span style="color:#555; font-size:13px;">+</span></div>
+        <div style="padding:0 8px 16px;">
+          <sc-for list="{{ collections }}" as="c" hint-placeholder-count="4">
+            <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:3px; color:{{ c.color }}; background:{{ c.bg }};">
+              <span style="font-size:9px; color:{{ c.dot }};">●</span>
+              <span style="font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ c.name }}</span>
+              <span style="flex:1 1 auto;"></span>
+              <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#666;">{{ c.count }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <!-- GRID -->
+      <div style="flex:1 1 auto; display:flex; flex-direction:column; min-width:0; background:#141414;">
+        <div style="height:28px; flex:0 0 28px; display:flex; align-items:center; padding:0 14px; gap:6px; border-bottom:1px solid #232323; color:#8a8a8a; font-size:11px; user-select:none;">
+          <span style="color:#aaa;">2024</span><span style="color:#4a4a4a;">›</span><span style="color:#cfcfcf;">Iceland — Highlands</span>
+          <span style="flex:1 1 auto;"></span>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#6a6a6a;">{{ gridCount }} photos · 1 selected</span>
+        </div>
+        <div style="flex:1 1 auto; overflow-y:auto; padding:14px;">
+          <div style="display:grid; grid-template-columns:{{ gridCols }}; gap:10px;">
+            <sc-for list="{{ thumbs }}" as="t" hint-placeholder-count="18">
+              <div onClick="{{ t.onClick }}" style="position:relative; cursor:pointer;">
+                <div style="position:relative; aspect-ratio:3/2; background:#0d0d0d; border:1px solid {{ t.border }}; outline:{{ t.outline }}; overflow:hidden;">
+                  <img src="{{ t.src }}" loading="lazy" style="width:100%; height:100%; object-fit:cover; display:block;" />
+                  <div style="position:absolute; top:5px; left:6px; width:9px; height:9px; border-radius:50%; background:{{ t.labelColor }}; opacity:{{ t.labelOp }}; box-shadow:0 0 0 1px #00000066;"></div>
+                  <div style="position:absolute; bottom:0; left:0; right:0; height:22px; background:linear-gradient(to top,#000000aa,#0000); display:flex; align-items:flex-end; justify-content:space-between; padding:3px 6px;">
+                    <span style="font-size:11px; letter-spacing:.5px; color:{{ t.starColor }}; text-shadow:0 1px 2px #000;">{{ t.starsText }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace; font-size:9px; color:#cfcfcf; text-shadow:0 1px 2px #000;">{{ t.flag }}</span>
+                  </div>
+                </div>
+                <div style="margin-top:3px; font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:{{ t.nameColor }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ t.name }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <!-- status bar -->
+        <div style="height:24px; flex:0 0 24px; border-top:1px solid #232323; display:flex; align-items:center; padding:0 14px; gap:14px; background:#161616; font-family:'IBM Plex Mono',monospace; font-size:10px; color:#6e6e6e; user-select:none;">
+          <span>NEF · 8256×5504 · ISO 100 · 14mm · f/8 · 1/250s</span>
+          <span style="flex:1 1 auto;"></span>
+          <span style="color:#6d97b5;">●</span><span>2,481 indexed</span>
+          <span>·</span><span>GPU: idle</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ============ DEVELOP VIEW ============ -->
+  <sc-if value="{{ isDevelop }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1 1 auto; display:flex; flex-direction:column; min-height:0;">
+
+    <!-- develop toolbar -->
+    <div style="height:40px; flex:0 0 40px; background:#1d1d1d; border-bottom:1px solid #2a2a2a; display:flex; align-items:center; padding:0 10px; gap:6px; user-select:none;">
+      <sc-for list="{{ devTools }}" as="tl" hint-placeholder-count="4">
+        <div style="display:flex; align-items:center; gap:6px; height:24px; padding:0 9px; background:{{ tl.bg }}; border:1px solid {{ tl.border }}; border-radius:3px; color:{{ tl.color }}; font-size:11px;">
+          <span style="font-size:12px;">{{ tl.icon }}</span><span>{{ tl.name }}</span>
+        </div>
+      </sc-for>
+      <div style="width:1px; height:20px; background:#2a2a2a; margin:0 4px;"></div>
+      <div style="width:26px; height:24px; display:flex; align-items:center; justify-content:center; background:#1a1a1a; border:1px solid #303030; border-radius:3px; color:#9a9a9a; font-size:13px;">↺</div>
+      <div style="width:26px; height:24px; display:flex; align-items:center; justify-content:center; background:#1a1a1a; border:1px solid #303030; border-radius:3px; color:#9a9a9a; font-size:13px;">↻</div>
+
+      <span style="flex:1 1 auto;"></span>
+      <div onClick="{{ toggleBA }}" style="display:flex; align-items:center; gap:6px; height:24px; padding:0 10px; background:{{ baBg }}; border:1px solid {{ baBorder }}; border-radius:3px; color:{{ baColor }}; font-size:11px;">
+        <span style="font-size:12px;">◐</span><span>Before / After</span>
+      </div>
+      <div style="width:1px; height:20px; background:#2a2a2a; margin:0 4px;"></div>
+      <div style="display:flex; align-items:center; gap:8px; height:24px; background:#1a1a1a; border:1px solid #303030; border-radius:3px; padding:0 8px;">
+        <span style="color:#9a9a9a; font-size:12px;">−</span>
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:11px; color:#c0c0c0;">{{ zoomText }}</span>
+        <span style="color:#9a9a9a; font-size:12px;">+</span>
+      </div>
+    </div>
+
+    <!-- body -->
+    <div style="flex:1 1 auto; display:flex; min-height:0;">
+
+      <!-- LEFT: navigator + filmstrip -->
+      <div style="width:160px; flex:0 0 160px; background:#171717; border-right:1px solid #2a2a2a; display:flex; flex-direction:column; user-select:none;">
+        <div style="padding:9px 10px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600;">NAVIGATOR</div>
+        <div style="padding:0 10px 10px;">
+          <div style="position:relative; aspect-ratio:3/2; background:#0d0d0d; border:1px solid #2a2a2a; overflow:hidden;">
+            <img src="{{ heroSrc }}" style="width:100%; height:100%; object-fit:cover; display:block;" />
+            <div style="position:absolute; left:20%; top:18%; width:48%; height:52%; border:1.5px solid #6d97b5; box-shadow:0 0 0 9999px #00000055;"></div>
+          </div>
+        </div>
+        <div style="padding:9px 10px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; border-top:1px solid #232323;">FILMSTRIP</div>
+        <div style="flex:1 1 auto; overflow-y:auto; padding:0 10px 10px; display:flex; flex-direction:column; gap:6px;">
+          <sc-for list="{{ filmstrip }}" as="f" hint-placeholder-count="8">
+            <div style="position:relative; aspect-ratio:3/2; background:#0d0d0d; border:1px solid {{ f.border }}; outline:{{ f.outline }}; overflow:hidden; cursor:pointer;">
+              <img src="{{ f.src }}" loading="lazy" style="width:100%; height:100%; object-fit:cover; display:block;" />
+              <span style="position:absolute; bottom:2px; left:4px; font-size:9px; color:{{ f.starColor }}; text-shadow:0 1px 2px #000;">{{ f.starsText }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <!-- CENTER CANVAS -->
+      <div style="flex:1 1 auto; min-width:0; background:#0e0e0e; display:flex; flex-direction:column; align-items:center; justify-content:center; position:relative;">
+        <div style="position:relative; max-width:86%; max-height:84%;">
+          <img src="{{ heroSrc }}" style="display:block; max-width:100%; max-height:560px; object-fit:contain; box-shadow:0 0 0 1px #2a2a2a;" />
+          <sc-if value="{{ beforeAfter }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute; inset:0; width:50%; overflow:hidden; border-right:1px solid #6d97b5;">
+              <img src="{{ heroSrc }}" style="position:absolute; left:0; top:0; height:100%; width:auto; max-width:none; filter:saturate(.55) contrast(.82) brightness(.92); display:block;" />
+              <span style="position:absolute; top:8px; left:8px; background:#000000aa; color:#cfcfcf; font-family:'IBM Plex Mono',monospace; font-size:9px; padding:2px 6px; letter-spacing:.5px;">BEFORE</span>
+            </div>
+            <span style="position:absolute; top:8px; right:8px; background:#000000aa; color:#6d97b5; font-family:'IBM Plex Mono',monospace; font-size:9px; padding:2px 6px; letter-spacing:.5px;">AFTER</span>
+          </sc-if>
+        </div>
+        <div style="position:absolute; bottom:10px; left:0; right:0; display:flex; justify-content:center; gap:14px; font-family:'IBM Plex Mono',monospace; font-size:10px; color:#6e6e6e; user-select:none;">
+          <span>ICE_4471.NEF</span><span>·</span><span>8256×5504</span><span>·</span><span>ISO 100</span><span>·</span><span>14mm</span><span>·</span><span>f/8</span><span>·</span><span>1/250s</span>
+        </div>
+      </div>
+
+      <!-- RIGHT ADJUSTMENT PANEL -->
+      <div style="width:296px; flex:0 0 296px; background:#1a1a1a; border-left:1px solid #2a2a2a; overflow-y:auto; user-select:none;">
+
+        <!-- histogram -->
+        <div style="padding:10px 12px 8px; border-bottom:1px solid #242424;">
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:6px;">
+            <span style="font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600;">HISTOGRAM</span>
+            <span style="font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:#6a6a6a;">RGB</span>
+          </div>
+          <div style="position:relative; height:92px; background:#0e0e0e; border:1px solid #262626;">
+            <svg viewBox="0 0 270 92" preserveAspectRatio="none" style="width:100%; height:100%; display:block;">
+              <line x1="67.5" y1="0" x2="67.5" y2="92" stroke="#222" stroke-width="1"/>
+              <line x1="135" y1="0" x2="135" y2="92" stroke="#222" stroke-width="1"/>
+              <line x1="202.5" y1="0" x2="202.5" y2="92" stroke="#222" stroke-width="1"/>
+              <path d="{{ histR }}" fill="#b5494980" stroke="#cf6a6a" stroke-width="1"/>
+              <path d="{{ histG }}" fill="#4f9e5680" stroke="#6cc077" stroke-width="1"/>
+              <path d="{{ histB }}" fill="#4a73b580" stroke="#6d97d5" stroke-width="1"/>
+            </svg>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin-top:5px; font-family:'IBM Plex Mono',monospace; font-size:9px; color:#5a5a5a;">
+            <span>Blacks 0</span><span>Shadows</span><span>Highlights</span><span>255</span>
+          </div>
+        </div>
+
+        <!-- Exposure -->
+        <div onClick="{{ toggle.exposure }}" style="display:flex; align-items:center; gap:7px; padding:9px 12px; cursor:pointer; border-bottom:1px solid #242424;">
+          <span style="font-size:9px; color:#7a7a7a; width:8px;">{{ tri.exposure }}</span>
+          <span style="font-size:11.5px; color:#d0d0d0; font-weight:500; flex:1 1 auto;">Exposure</span>
+          <span style="font-size:10px; color:#6d97b5;">●</span>
+        </div>
+        <sc-if value="{{ open.exposure }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:6px 8px 10px;">
+          <dc-import name="EguiSlider" label="Exposure" value="0.35" min="-5" max="5" default="0" step="0.01" decimals="2" bipolar="true" signed="true" unit=" EV" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Contrast" value="12" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Highlights" value="-46" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Shadows" value="34" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Whites" value="8" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Blacks" value="-15" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+        </div>
+        </sc-if>
+
+        <!-- White Balance -->
+        <div onClick="{{ toggle.wb }}" style="display:flex; align-items:center; gap:7px; padding:9px 12px; cursor:pointer; border-bottom:1px solid #242424;">
+          <span style="font-size:9px; color:#7a7a7a; width:8px;">{{ tri.wb }}</span>
+          <span style="font-size:11.5px; color:#d0d0d0; font-weight:500; flex:1 1 auto;">White Balance</span>
+          <span style="font-family:'IBM Plex Mono',monospace; font-size:9.5px; color:#7a7a7a;">As Shot ▾</span>
+        </div>
+        <sc-if value="{{ open.wb }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:6px 8px 10px;">
+          <dc-import name="EguiSlider" label="Temp" value="5450" min="2000" max="12000" default="5500" step="10" decimals="0" unit=" K" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Tint" value="-6" min="-150" max="150" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+        </div>
+        </sc-if>
+
+        <!-- Tone Curve -->
+        <div onClick="{{ toggle.curve }}" style="display:flex; align-items:center; gap:7px; padding:9px 12px; cursor:pointer; border-bottom:1px solid #242424;">
+          <span style="font-size:9px; color:#7a7a7a; width:8px;">{{ tri.curve }}</span>
+          <span style="font-size:11.5px; color:#d0d0d0; font-weight:500; flex:1 1 auto;">Tone Curve</span>
+        </div>
+        <sc-if value="{{ open.curve }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:8px 12px 12px;">
+          <div style="position:relative; aspect-ratio:1/1; max-width:220px; margin:0 auto; background:#0e0e0e; border:1px solid #262626;">
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%; height:100%; display:block;">
+              <line x1="25" y1="0" x2="25" y2="100" stroke="#1e1e1e"/><line x1="50" y1="0" x2="50" y2="100" stroke="#1e1e1e"/><line x1="75" y1="0" x2="75" y2="100" stroke="#1e1e1e"/>
+              <line x1="0" y1="25" x2="100" y2="25" stroke="#1e1e1e"/><line x1="0" y1="50" x2="100" y2="50" stroke="#1e1e1e"/><line x1="0" y1="75" x2="100" y2="75" stroke="#1e1e1e"/>
+              <line x1="0" y1="100" x2="100" y2="0" stroke="#333" stroke-dasharray="2 2"/>
+              <path d="M0,100 C30,78 38,40 60,30 C76,22 88,10 100,4" fill="none" stroke="#6d97b5" stroke-width="1.6"/>
+              <circle cx="0" cy="100" r="2.4" fill="#cfcfcf"/><circle cx="36" cy="62" r="2.4" fill="#cfcfcf"/><circle cx="68" cy="24" r="2.4" fill="#cfcfcf"/><circle cx="100" cy="4" r="2.4" fill="#cfcfcf"/>
+            </svg>
+          </div>
+          <div style="display:flex; gap:4px; margin-top:8px; justify-content:center;">
+            <span style="font-size:10px; padding:2px 8px; background:#232b30; color:#cfe0ec; border:1px solid #34464f; border-radius:3px;">Point</span>
+            <span style="font-size:10px; padding:2px 8px; color:#8a8a8a; border:1px solid #2c2c2c; border-radius:3px;">R</span>
+            <span style="font-size:10px; padding:2px 8px; color:#8a8a8a; border:1px solid #2c2c2c; border-radius:3px;">G</span>
+            <span style="font-size:10px; padding:2px 8px; color:#8a8a8a; border:1px solid #2c2c2c; border-radius:3px;">B</span>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- Contrast / Presence -->
+        <div onClick="{{ toggle.contrast }}" style="display:flex; align-items:center; gap:7px; padding:9px 12px; cursor:pointer; border-bottom:1px solid #242424;">
+          <span style="font-size:9px; color:#7a7a7a; width:8px;">{{ tri.contrast }}</span>
+          <span style="font-size:11.5px; color:#d0d0d0; font-weight:500; flex:1 1 auto;">Presence</span>
+        </div>
+        <sc-if value="{{ open.contrast }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:6px 8px 10px;">
+          <dc-import name="EguiSlider" label="Texture" value="18" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Clarity" value="22" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Dehaze" value="9" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Vibrance" value="14" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Saturation" value="-4" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+        </div>
+        </sc-if>
+
+        <!-- HSL -->
+        <div onClick="{{ toggle.hsl }}" style="display:flex; align-items:center; gap:7px; padding:9px 12px; cursor:pointer; border-bottom:1px solid #242424;">
+          <span style="font-size:9px; color:#7a7a7a; width:8px;">{{ tri.hsl }}</span>
+          <span style="font-size:11.5px; color:#d0d0d0; font-weight:500; flex:1 1 auto;">HSL / Color</span>
+        </div>
+        <sc-if value="{{ open.hsl }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:8px 8px 10px;">
+          <div style="display:flex; gap:4px; padding:0 4px 8px; justify-content:space-between;">
+            <sc-for list="{{ hslSwatches }}" as="s" hint-placeholder-count="8">
+              <div style="width:20px; height:20px; border-radius:3px; background:{{ s.color }}; border:1px solid {{ s.border }}; outline:{{ s.outline }};"></div>
+            </sc-for>
+          </div>
+          <dc-import name="EguiSlider" label="Hue" value="-8" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Saturation" value="26" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Luminance" value="-12" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+        </div>
+        </sc-if>
+
+        <!-- Crop / Rotate -->
+        <div onClick="{{ toggle.crop }}" style="display:flex; align-items:center; gap:7px; padding:9px 12px; cursor:pointer; border-bottom:1px solid #242424;">
+          <span style="font-size:9px; color:#7a7a7a; width:8px;">{{ tri.crop }}</span>
+          <span style="font-size:11.5px; color:#d0d0d0; font-weight:500; flex:1 1 auto;">Crop &amp; Rotate</span>
+        </div>
+        <sc-if value="{{ open.crop }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:8px 12px 12px;">
+          <div style="display:flex; align-items:center; gap:6px; margin-bottom:8px;">
+            <span style="font-size:11px; color:#8a8a8a; width:56px;">Aspect</span>
+            <div style="display:flex; align-items:center; gap:8px; height:22px; flex:1 1 auto; background:#141414; border:1px solid #303030; border-radius:3px; padding:0 8px;">
+              <span style="font-size:11px; color:#c0c0c0; flex:1 1 auto;">Original 3:2</span>
+              <span style="color:#7a7a7a; font-size:8px;">▾</span>
+            </div>
+          </div>
+          <dc-import name="EguiSlider" label="Angle" value="-1.4" min="-45" max="45" default="0" step="0.1" decimals="1" bipolar="true" signed="true" unit="°" hint-size="100%,22px"></dc-import>
+          <div style="display:flex; gap:6px; margin-top:8px;">
+            <span style="flex:1 1 0; text-align:center; font-size:10px; padding:4px 0; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#b0b0b0;">⟲ 90°</span>
+            <span style="flex:1 1 0; text-align:center; font-size:10px; padding:4px 0; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#b0b0b0;">⟳ 90°</span>
+            <span style="flex:1 1 0; text-align:center; font-size:10px; padding:4px 0; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#b0b0b0;">⇋ Flip</span>
+          </div>
+        </div>
+        </sc-if>
+
+        <div style="height:30px;"></div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<!--
+  ORIGINAL CLAUDE DESIGN COMPONENT SOURCE (imported 2026-06-28).
+  The interactive <script type="text/x-dc"> logic block from the source design has been
+  omitted here; this file is kept as the static visual/structural reference for the egui
+  implementation. The behavioral spec is captured in ferrolite-design-system.md.
+  Source project: claude.ai/design "Ferrolite" (1513fd43-811e-4a92-9dd7-51c6928125fa).
+-->
+</body>
+</html>

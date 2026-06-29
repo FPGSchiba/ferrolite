@@ -91,7 +91,11 @@ impl eframe::App for FerroliteApp {
 
         egui::TopBottomPanel::top("toolbar")
             .exact_height(40.0)
-            .frame(egui::Frame::none().fill(theme::BG_TOOLBAR))
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::BG_TOOLBAR)
+                    .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+            )
             .show(ctx, |ui| {
                 if self.module.is_library() {
                     crate::library::toolbar::show(ui, &mut self.thumb_size);
@@ -107,7 +111,17 @@ impl eframe::App for FerroliteApp {
 
         egui::SidePanel::left("left")
             .exact_width(236.0)
-            .frame(egui::Frame::none().fill(theme::BG_PANEL))
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::BG_PANEL)
+                    // Clear left/right padding so content doesn't hug the window edge.
+                    .inner_margin(egui::Margin {
+                        left: 14.0,
+                        right: 12.0,
+                        top: 4.0,
+                        bottom: 8.0,
+                    }),
+            )
             .show(ctx, |ui| {
                 crate::library::panel::show(ui, &mut self.state, ctx);
             });

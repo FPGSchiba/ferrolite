@@ -20,7 +20,9 @@ Three user-requested improvements to the freshly-merged Library folder tree:
    (force re-decode + re-thumbnail everything, and prune catalog rows for files/folders deleted
    from disk).
 3. **Periodic new-file watcher** — cheaply poll the selected folder's subtree (~10s) and
-   auto-ingest newly-appeared files silently, as a quality-of-life convenience.
+   auto-ingest newly-appeared files silently, as a quality-of-life convenience. Plus a **one-time
+   startup rescan** of every root folder so changes made while the app was closed are picked up
+   immediately on launch.
 4. **Window-control alignment** — the close button sits ~8px shy of the window's right edge; make
    it flush.
 
@@ -152,22 +154,24 @@ subtree.
 
 ### 5.1 State & timing
 
-- `AppState` gains `last_watch_check: Option<std::time::Instant>` and `ingest_active: bool`.
+- `AppState` gains `last_watch_check: Option<std::time::Instant>` and `active_ingests: usize` (a
+  counter, not a bool — startup spawns one job per root, so a bool would race the watcher guard).
 - `WATCH_INTERVAL: Duration = 10s` (named constant in `ingest.rs` or `app.rs`).
 - `app.rs::update` calls `ctx.request_repaint_after(WATCH_INTERVAL)` every frame so idle frames still
   wake to tick the watcher.
-- `ingest_active` is set `true` when any ingest job is spawned (open/reindex/watcher) and `false` on
-  `AppEvent::IngestDone`.
+- `active_ingests` is incremented when **any** ingest job is spawned (open/reindex/watcher/startup)
+  and decremented on `AppEvent::IngestDone` (every ingest job emits exactly one `IngestDone`,
+  including when cancelled mid-walk).
 
 ### 5.2 Tick logic (pure, testable)
 
 A pure predicate decides whether to fire:
 
 ```rust
-fn should_watch(now, last_check, interval, current_folder, ingest_active) -> bool
+fn should_watch(now, last_check, interval, current_folder, active_ingests) -> bool
 ```
 
-returns `true` iff a folder is selected, no ingest is active, and `now - last_check ≥ interval`
+returns `true` iff a folder is selected, `active_ingests == 0`, and `now - last_check ≥ interval`
 (or `last_check` is `None`). `app.rs` calls it each frame; on `true` it records `now`, looks up the
 current folder's path, and spawns the watcher job.
 
@@ -182,9 +186,9 @@ current folder's path. It:
 - emits the normal `Indexed`/`ThumbRegistered`/`ThumbReady`/`IngestDone` events, so new files appear
   via the existing dirty-flag grid refresh.
 
-It does **not** reset the view or counters. The `ingest_active` guard prevents overlapping ticks;
-switching folders (`reset_for_new_folder`) cancels any in-flight watcher ingest. It needs the current
-folder's path:
+It does **not** reset the view or counters. The `active_ingests == 0` guard prevents overlapping
+ticks; switching folders (`reset_for_new_folder`) cancels any in-flight watcher ingest. It needs the
+current folder's path:
 
 ```rust
 // ReadPool + Catalog
@@ -192,6 +196,26 @@ pub fn folder_path(&self, folder_id: i64) -> Result<Option<String>, CatalogError
 ```
 
 an indexed single-row lookup on `folders.id`.
+
+### 5.4 One-time startup rescan (all roots)
+
+On launch, the catalog already holds folders from previous sessions, but files may have changed on
+disk while the app was closed. To pick those up immediately without blocking startup, run a one-time
+**Background incremental** scan of every root folder's subtree:
+
+- `AppState` gains `startup_rescan_done: bool` (default `false`).
+- On the **first** `app.rs::update` frame (where the egui `Context` is available for
+  `request_repaint`), if `!startup_rescan_done`: enumerate root folders — `list_folders()` filtered
+  to `parent_id IS NULL` (a recursive `scan_tree` per root covers all descendants, so only roots are
+  scanned, never double-processing subfolders) — and for each spawn a **Background** incremental
+  ingest on its `path`. Set `startup_rescan_done = true`.
+- This reuses the same incremental job as the watcher (§5.3) and Item 2 (DRY): no view/counter reset,
+  silent, `needs_reingest` skips unchanged files (no decode when nothing changed). Each spawn
+  increments `active_ingests`; the watcher therefore waits until the startup sweep drains.
+- The startup jobs run at **Background** priority so they never compete with the user immediately
+  opening or selecting a folder (Interactive). They are not individually tracked by `ingest_handle`
+  (only the latest is); since they are cheap, silent, idempotent incremental scans, leaving them to
+  finish after a folder switch is harmless.
 
 ---
 
@@ -219,8 +243,11 @@ Pure/headless logic carries coverage; painted icons and `request_repaint_after` 
   (decode + `put_thumbnail` overwrite) under `Full`, whereas `Incremental` skips it (assert via a
   spy/҂count or a changed-thumbnail check at the catalog level — e.g. force-mode processes a file
   whose `(mtime,size)` is unchanged).
-- **`should_watch` (pure):** fires only when a folder is selected, no ingest active, and the interval
-  elapsed; respects `None` last-check.
+- **`should_watch` (pure):** fires only when a folder is selected, `active_ingests == 0`, and the
+  interval elapsed; respects `None` last-check.
+- **Startup rescan:** a focused test that root enumeration selects only `parent_id IS NULL` folders
+  (so subtrees aren't double-scanned), and that the `startup_rescan_done` once-guard fires the sweep
+  exactly once. (The actual spawning is UI-thread glue — verified by build + eyeball.)
 - **`cancel_pending_jobs` / `reset_for_new_folder`:** the refactor preserves existing reset behavior
   (existing state tests stay green; add one asserting `cancel_pending_jobs` leaves `images`/
   `current_folder` intact while draining `thumb_jobs`).
@@ -241,8 +268,9 @@ Four independently-testable tasks:
    query.
 3. **Reindex orchestration + UI** — `cancel_pending_jobs` extraction, `spawn_reindex`, refactor
    `spawn_ingest` to share the job body, context-menu entries.
-4. **Watcher** — `last_watch_check`/`ingest_active` state, `should_watch` predicate (+ test),
-   `request_repaint_after` wiring, Background watcher spawn.
+4. **Watcher + startup rescan** — `last_watch_check`/`active_ingests`/`startup_rescan_done` state,
+   `should_watch` predicate (+ test), `request_repaint_after` wiring, Background watcher spawn, and
+   the one-time startup sweep of all roots (`parent_id IS NULL`) at Background priority.
 
 ---
 
@@ -250,6 +278,6 @@ Four independently-testable tasks:
 
 Crisp disclosure/remove icons in the folder tree with a close button flush to the window edge;
 right-click Reindex (new-files / full-rebuild) that updates the view in place, with Full mirroring
-the directory (re-thumbnail + prune deleted); and a silent ~10s watcher that auto-ingests files
-dropped into the selected subtree — all on the existing jobs/WAL/cache contracts, with no schema
-change.
+the directory (re-thumbnail + prune deleted); a one-time startup rescan of all roots so on-disk
+changes appear right after launch; and a silent ~10s watcher that auto-ingests files dropped into
+the selected subtree — all on the existing jobs/WAL/cache contracts, with no schema change.

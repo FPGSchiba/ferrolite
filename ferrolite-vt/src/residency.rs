@@ -50,6 +50,16 @@ impl ResidencySet {
     pub fn contains(&self, t: TileCoord) -> bool {
         self.order.contains(&t)
     }
+    /// Remove `t` from the resident set entirely (used when a slot is freed).
+    pub fn forget(&mut self, t: TileCoord) {
+        if let Some(p) = self.order.iter().position(|&x| x == t) {
+            self.order.remove(p);
+        }
+    }
+    /// The least-recently-used resident tile, if any (front of the order).
+    pub fn lru(&self) -> Option<TileCoord> {
+        self.order.first().copied()
+    }
     pub fn touch(&mut self, t: TileCoord) {
         if let Some(p) = self.order.iter().position(|&x| x == t) {
             self.order.remove(p);
@@ -112,5 +122,38 @@ mod tests {
         let (to_load, to_evict) = r.diff(&needed);
         assert_eq!(to_load, vec![tc(0, 1, 0)]);
         assert_eq!(to_evict, vec![tc(0, 9, 9)]);
+    }
+
+    #[test]
+    fn panning_evicts_offscreen_and_loads_newly_visible() {
+        use crate::pool::SlotAllocator;
+        let image = (2048u32, 2048u32);
+        let vp = (256.0f32, 256.0f32);
+        let mut res = ResidencySet::new(64);
+        let mut alloc = SlotAllocator::new(64);
+        // View A: top-left.
+        let a = ViewTransform {
+            zoom: 1.0,
+            pan: (-800.0, -800.0),
+        };
+        for t in needed_tiles(image, &a, vp, 4) {
+            res.insert(t);
+            alloc.alloc(t);
+        }
+        // View B: bottom-right (disjoint).
+        let b = ViewTransform {
+            zoom: 1.0,
+            pan: (800.0, 800.0),
+        };
+        let needed_b = needed_tiles(image, &b, vp, 4);
+        let (to_load, to_evict) = res.diff(&needed_b);
+        assert!(!to_load.is_empty(), "new tiles needed");
+        assert!(!to_evict.is_empty(), "old tiles evicted");
+        for t in &to_evict {
+            alloc.free(*t);
+        }
+        for t in &to_load {
+            assert!(alloc.alloc(*t).is_some(), "freed slots make room");
+        }
     }
 }

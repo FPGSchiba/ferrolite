@@ -50,6 +50,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 @group(0) @binding(3) var tiles: texture_2d_array<f32>;
 @group(0) @binding(4) var<storage, read> slots: array<u32>;
 
+// Sentinel slot index meaning "tile not resident" (matches Rust `pool::NOT_RESIDENT`).
+const NOT_RESIDENT: u32 = 0xFFFFFFFFu;
+
 struct TileMeta {
     level_count: u32,
     _pad: vec3<u32>,
@@ -74,12 +77,33 @@ fn fs_tiled(in: VsOut) -> @location(0) vec4<f32> {
         return vec4(0.05, 0.05, 0.05, 1.0);
     }
     let lod = pick_lod(img_px);
-    let lod_px = img_px / f32(1u << lod);
-    let tx = u32(lod_px.x) / 256u;
-    let ty = u32(lod_px.y) / 256u;
-    let cols = tmeta.levels[lod].x;
-    let offset = tmeta.levels[lod].y;
-    let slot = slots[offset + ty * cols + tx];
+    // Coarse-LOD fallback: start at the picked LOD and walk up to coarser levels
+    // until a resident tile is found. The in-tile UV uses `lvl` (the resolved
+    // level), never the originally picked `lod`.
+    var lvl = lod;
+    var slot = NOT_RESIDENT;
+    var lod_px = vec2<f32>(0.0, 0.0);
+    var tx = 0u;
+    var ty = 0u;
+    loop {
+        lod_px = img_px / f32(1u << lvl);
+        tx = u32(lod_px.x) / 256u;
+        ty = u32(lod_px.y) / 256u;
+        let cols = tmeta.levels[lvl].x;
+        let offset = tmeta.levels[lvl].y;
+        let cand = slots[offset + ty * cols + tx];
+        if (cand != NOT_RESIDENT) {
+            slot = cand;
+            break;
+        }
+        if (lvl + 1u >= tmeta.level_count) {
+            break;
+        }
+        lvl = lvl + 1u;
+    }
+    if (slot == NOT_RESIDENT) {
+        return vec4(0.05, 0.05, 0.05, 1.0);
+    }
     let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
     let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
     return vec4(linear_to_srgb(lin), 1.0);

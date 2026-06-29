@@ -1,6 +1,10 @@
 mod common;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use ferrolite_gpu::GpuContext;
-use ferrolite_vt::{ViewTransform, VirtualTexture};
+use ferrolite_jobs::JobSystem;
+use ferrolite_vt::{PyramidTileSource, TileSource, ViewTransform, VirtualTexture};
 
 const TOL: u8 = 4; // absorbs driver float differences
 
@@ -57,4 +61,107 @@ fn rung2_tiled_matches_single_texture() {
     let diff = common::max_abs_diff(&single, &tiled);
     eprintln!("rung2 max_abs_diff = {diff}");
     assert!(diff <= 24, "tiled diverges from single-texture reference");
+}
+
+/// Rung 3: with a budget large enough to hold every needed tile, the streaming
+/// path (after loads land) must broadly match the rung-2 resident render at the
+/// same view. Exercises the live `request_view` + `drain_loaded` GPU path and the
+/// coarse-LOD shader fallback (which returns the resolved tile once loaded).
+#[test]
+fn rung3_streaming_matches_resident_after_loads() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let (iw, ih) = (300u32, 200u32);
+    let mut px = Vec::new();
+    for y in 0..ih {
+        for x in 0..iw {
+            px.extend_from_slice(&[x as f32 / iw as f32, y as f32 / ih as f32, 0.25, 1.0]);
+        }
+    }
+    let img = ferrolite_image::LinearRgbaF32::new(iw, ih, px).unwrap();
+    let (w, h) = (128u32, 128u32);
+    let view = ViewTransform::fit((iw, ih), (w as f32, h as f32));
+
+    // Reference: rung-2 fully-resident render.
+    let src_ref = PyramidTileSource::new(img.clone());
+    let resident =
+        VirtualTexture::render_tiled_to_image(&ctx, &src_ref, &view, (w as f32, h as f32), w, h);
+
+    // Streaming: budget covers all tiles of all levels (generous).
+    let src: Arc<dyn TileSource + Send + Sync> = Arc::new(PyramidTileSource::new(img));
+    let total: u32 = (0..src.level_count())
+        .map(|lod| {
+            let (lw, lh) = src.level_size(lod);
+            lw.div_ceil(256) * lh.div_ceil(256)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(2));
+    let mut vt = VirtualTexture::streaming(
+        &ctx,
+        Arc::clone(&src),
+        Arc::clone(&jobs),
+        total,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+
+    // Drive request_view + drain until tiles load (jobs run on worker threads).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        vt.request_view(&ctx, &view, (w as f32, h as f32));
+        ctx.device.poll(wgpu::Maintain::Poll);
+        let n = vt.drain_loaded(&ctx);
+        if n == 0 && Instant::now() < deadline {
+            // Give workers a moment to produce results, then re-drain.
+            std::thread::sleep(Duration::from_millis(20));
+            let m = vt.drain_loaded(&ctx);
+            if m == 0 {
+                // Nothing pending and nothing arrived: assume converged.
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    // Final reconcile so the slot table reflects all resident tiles.
+    vt.request_view(&ctx, &view, (w as f32, h as f32));
+    vt.drain_loaded(&ctx);
+
+    // Render the streaming VT offscreen.
+    let target = ctx.render_target(w, h, wgpu::TextureFormat::Rgba8Unorm);
+    let tview = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-stream-offscreen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &tview,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        vt.render_streaming(&ctx, &mut pass, &view, (w as f32, h as f32));
+    }
+    ctx.queue.submit([enc.finish()]);
+    let streamed = ctx.read_rgba8(&target, w, h);
+
+    let diff = common::max_abs_diff(&resident, &streamed);
+    eprintln!("rung3 max_abs_diff vs resident = {diff}");
+    // Once the needed tiles are resident the streaming render should closely
+    // match the resident render (same pipeline, same tiles). Allow a small
+    // tolerance for any not-yet-landed tiles served by the coarse-LOD fallback.
+    assert!(
+        diff <= 32,
+        "streaming render diverges from resident reference (diff={diff})"
+    );
 }

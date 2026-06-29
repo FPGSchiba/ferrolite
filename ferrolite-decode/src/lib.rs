@@ -16,7 +16,7 @@ use crate::error::rawler as rawler_err;
 
 /// rawler `Rational` → f32.
 /// rawler 0.7.2 uses `n: u32` / `d: u32` (not `num`/`den`).
-fn rat(n: u64, d: u64) -> Option<f32> {
+fn rat(n: u32, d: u32) -> Option<f32> {
     if d == 0 {
         None
     } else {
@@ -39,19 +39,15 @@ pub fn read_metadata(path: &Path) -> Result<Metadata, DecodeError> {
     Ok(Metadata {
         make: meta.make.clone(),
         model: meta.model.clone(),
-        width: dims.width as u32,
-        height: dims.height as u32,
+        width: u32::try_from(dims.width)
+            .map_err(|_| DecodeError::Rawler("RAW width exceeds u32".into()))?,
+        height: u32::try_from(dims.height)
+            .map_err(|_| DecodeError::Rawler("RAW height exceeds u32".into()))?,
         orientation: Orientation::from_exif(e.orientation.unwrap_or(1)),
         iso: e.iso_speed_ratings.map(u32::from),
-        aperture: e.fnumber.as_ref().and_then(|r| rat(r.n as u64, r.d as u64)),
-        shutter: e
-            .exposure_time
-            .as_ref()
-            .and_then(|r| rat(r.n as u64, r.d as u64)),
-        focal_length: e
-            .focal_length
-            .as_ref()
-            .and_then(|r| rat(r.n as u64, r.d as u64)),
+        aperture: e.fnumber.as_ref().and_then(|r| rat(r.n, r.d)),
+        shutter: e.exposure_time.as_ref().and_then(|r| rat(r.n, r.d)),
+        focal_length: e.focal_length.as_ref().and_then(|r| rat(r.n, r.d)),
         capture_time: e.date_time_original.clone(),
         lens: e.lens_model.clone(),
     })

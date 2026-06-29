@@ -33,6 +33,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             .unwrap_or_default();
 
         ui.horizontal(|ui| {
+            // Tighter gap between the disclosure cell and the name (~2/3 of the
+            // 8px default), to match the shrunk icon.
+            ui.spacing_mut().item_spacing.x = 5.0;
             ui.add_space(node.depth as f32 * 14.0);
 
             // Disclosure triangle — painted (egui's native rotating icon), never a
@@ -45,7 +48,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                 let openness = if open { 1.0 } else { 0.0 };
                 let mut icon_resp = resp.clone();
                 icon_resp.rect = resp.rect.shrink(2.5);
-                egui::collapsing_header::paint_default_icon(ui, openness, &icon_resp);
+                // Hover changes the triangle's colour (via fg_stroke) but must not
+                // change its size: paint with the widget expansion zeroed so it
+                // doesn't grow on hover.
+                ui.scope(|ui| {
+                    let w = &mut ui.style_mut().visuals.widgets;
+                    w.inactive.expansion = 0.0;
+                    w.hovered.expansion = 0.0;
+                    w.active.expansion = 0.0;
+                    w.open.expansion = 0.0;
+                    egui::collapsing_header::paint_default_icon(ui, openness, &icon_resp);
+                });
                 if resp.clicked() {
                     if open {
                         state.expanded_folders.remove(&node.id);

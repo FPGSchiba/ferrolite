@@ -6,13 +6,13 @@
 pub enum Orientation {
     #[default]
     Normal, // 1
-    FlipH,     // 2: mirror horizontal
-    Rotate180, // 3
-    FlipV,     // 4: mirror vertical
-    Transpose, // 5: mirror across main diagonal
-    Rotate90,  // 6: 90° clockwise
+    FlipH,      // 2: mirror horizontal
+    Rotate180,  // 3
+    FlipV,      // 4: mirror vertical
+    Transpose,  // 5: mirror across main diagonal
+    Rotate90,   // 6: 90° clockwise
     Transverse, // 7: mirror across anti-diagonal
-    Rotate270, // 8: 270° clockwise
+    Rotate270,  // 8: 270° clockwise
 }
 
 impl Orientation {

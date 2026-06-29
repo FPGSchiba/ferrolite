@@ -143,6 +143,11 @@ impl AppState {
     pub fn cancel_pending_jobs(&mut self) {
         if let Some(h) = self.ingest_handle.take() {
             h.cancel();
+            // A queued-but-not-yet-dispatched job is skipped by the worker and
+            // never emits IngestDone, so decrement here to keep the counter
+            // balanced. If the job was already running it will still emit
+            // IngestDone; the extra decrement is absorbed by saturating_sub.
+            self.active_ingests = self.active_ingests.saturating_sub(1);
         }
         for (_image_id, job_id) in self.thumb_jobs.drain() {
             self.jobs.cancel(job_id);
@@ -398,6 +403,29 @@ mod tests {
         assert_eq!(s.current_folder, Some(7), "current folder preserved");
         assert_eq!(s.selected, Some(3), "selection preserved");
         assert_eq!(s.indexed, 5, "counters not zeroed by cancel_pending_jobs");
+    }
+
+    #[test]
+    fn cancel_pending_jobs_decrements_active_and_clears_handle() {
+        let mut s = AppState::for_test();
+        s.current_folder = Some(7);
+        s.selected = Some(3);
+        // Simulate one in-flight ingest with a real handle.
+        let handle = s
+            .jobs
+            .submit(ferrolite_jobs::Priority::Background, |_cancel| {});
+        s.ingest_handle = Some(handle);
+        s.active_ingests = 1;
+
+        s.cancel_pending_jobs();
+
+        assert_eq!(
+            s.active_ingests, 0,
+            "active_ingests decremented when a handle was cancelled"
+        );
+        assert!(s.ingest_handle.is_none(), "ingest_handle cleared");
+        assert_eq!(s.current_folder, Some(7), "view preserved");
+        assert_eq!(s.selected, Some(3), "selection preserved");
     }
 
     #[test]

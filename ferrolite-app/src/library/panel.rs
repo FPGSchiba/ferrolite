@@ -64,7 +64,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                     crate::ingest::spawn_reindex(
                         state,
                         ctx,
-                        std::path::PathBuf::from(&node_path),
+                        node_path.clone().into(),
                         crate::ingest::ReindexMode::Incremental,
                     );
                     ui.close_menu();
@@ -73,7 +73,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                     crate::ingest::spawn_reindex(
                         state,
                         ctx,
-                        std::path::PathBuf::from(&node_path),
+                        node_path.clone().into(),
                         crate::ingest::ReindexMode::Full,
                     );
                     ui.close_menu();

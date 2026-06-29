@@ -99,12 +99,17 @@ fn ingest_job(
         };
         let _ = tx.send(AppEvent::Indexed { added: 1 });
         if new_image.decode_status != DecodeStatus::Failed {
-            spawn_thumbnail(&jobs, &writer, &tx, &ctx, id, path);
+            let job_id = spawn_thumbnail(&jobs, &writer, &tx, &ctx, id, path);
+            state_total_inc(&tx, id, job_id);
         }
         ctx.request_repaint();
     }
     let _ = tx.send(AppEvent::IngestDone);
     ctx.request_repaint();
+}
+
+fn state_total_inc(tx: &Sender<AppEvent>, image_id: i64, job_id: ferrolite_jobs::JobId) {
+    let _ = tx.send(AppEvent::ThumbRegistered { image_id, job_id });
 }
 
 /// Submit one Background thumbnail job: decode preview → resize/encode → write

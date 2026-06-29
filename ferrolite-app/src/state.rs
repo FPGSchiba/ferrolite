@@ -3,7 +3,7 @@
 
 use ferrolite_catalog::{Catalog, ImageRecord, ReadPool};
 use ferrolite_jobs::{JobHandle, JobId, JobSystem};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -29,6 +29,11 @@ pub struct AppState {
     /// image_id → its pending/running thumbnail job (for reprioritization/cancel).
     pub thumb_jobs: HashMap<i64, JobId>,
     pub ingest_handle: Option<JobHandle>,
+
+    /// LRU cache of decoded thumbnail textures (cap 512).
+    pub textures: crate::library::texture_cache::TextureCache,
+    /// IDs visible in the grid on the last frame (for delta reprioritization).
+    pub last_visible: HashSet<i64>,
 }
 
 impl AppState {
@@ -59,7 +64,21 @@ impl AppState {
             thumb_done: 0,
             thumb_jobs: HashMap::new(),
             ingest_handle: None,
+            textures: crate::library::texture_cache::TextureCache::new(512),
+            last_visible: HashSet::new(),
         })
+    }
+
+    /// Decode a thumbnail JPEG and upload it as an egui texture into the cache.
+    pub fn upload_thumbnail(&mut self, ctx: &egui::Context, image_id: i64, jpeg: Vec<u8>) {
+        let Ok(img) = image::load_from_memory(&jpeg) else {
+            return;
+        };
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        let color = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+        let tex = ctx.load_texture(format!("thumb-{image_id}"), color, egui::TextureOptions::LINEAR);
+        self.textures.insert(image_id, tex);
     }
 
     /// Reload the visible folder's rows from the read pool (called after ingest
@@ -97,6 +116,8 @@ impl AppState {
             thumb_done: 0,
             thumb_jobs: HashMap::new(),
             ingest_handle: None,
+            textures: crate::library::texture_cache::TextureCache::new(512),
+            last_visible: HashSet::new(),
         }
     }
 }

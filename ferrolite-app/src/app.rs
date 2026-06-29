@@ -67,9 +67,11 @@ fn window_resize(ctx: &egui::Context) {
 
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain job results into state (textures uploaded in Task 7).
+        // Drain job results into state; upload textures for ThumbReady events.
         while let Ok(event) = self.state.rx.try_recv() {
-            let _ = self.state.apply(event);
+            if let Some((id, jpeg)) = self.state.apply(event) {
+                self.state.upload_thumbnail(ctx, id, jpeg);
+            }
         }
         self.state.refresh_images();
 
@@ -118,8 +120,12 @@ impl eframe::App for FerroliteApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG_CANVAS))
             .show(ctx, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                canvas::paint(ui, rect);
+                if self.module.is_library() {
+                    crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
+                } else {
+                    let rect = ui.available_rect_before_wrap();
+                    canvas::paint(ui, rect); // Develop stub keeps the wgpu canvas
+                }
             });
 
         // 1px window border — full-window foreground stroke so it never double-draws

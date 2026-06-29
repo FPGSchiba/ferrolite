@@ -12,6 +12,8 @@ pub enum AppEvent {
     ThumbReady { image_id: i64, jpeg: Vec<u8> },
     /// A thumbnail (or its decode) failed; the cell shows a broken placeholder.
     ThumbFailed { image_id: i64 },
+    /// A thumbnail job was submitted; record its JobId for reprioritization.
+    ThumbRegistered { image_id: i64, job_id: ferrolite_jobs::JobId },
     /// The ingest walk + row upserts completed.
     IngestDone,
 }
@@ -34,6 +36,11 @@ impl AppState {
             AppEvent::ThumbFailed { image_id } => {
                 self.thumb_done += 1;
                 self.thumb_jobs.remove(&image_id);
+                None
+            }
+            AppEvent::ThumbRegistered { image_id, job_id } => {
+                self.thumb_total += 1;
+                self.thumb_jobs.insert(image_id, job_id);
                 None
             }
             AppEvent::IngestDone => None,
@@ -68,5 +75,15 @@ mod tests {
         let out = s.apply(AppEvent::ThumbFailed { image_id: 9 });
         assert_eq!(out, None);
         assert_eq!(s.thumb_done, 1);
+    }
+
+    #[test]
+    fn thumb_registered_increments_total_and_records_job() {
+        let mut s = AppState::for_test();
+        let job_id = ferrolite_jobs::JobId(42);
+        let out = s.apply(AppEvent::ThumbRegistered { image_id: 5, job_id });
+        assert_eq!(out, None);
+        assert_eq!(s.thumb_total, 1);
+        assert_eq!(s.thumb_jobs.get(&5), Some(&job_id));
     }
 }

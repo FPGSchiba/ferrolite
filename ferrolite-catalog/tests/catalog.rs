@@ -167,6 +167,52 @@ fn thumbnail_store_blob_round_trip() {
     );
 }
 
+/// Path to the shared fixture folder (contains the CC0 RAW from Task 2).
+fn fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/raw")
+}
+
+#[test]
+fn ingest_folder_indexes_images_and_thumbnails() {
+    let dir = tempdir();
+    let cat = Catalog::open(&dir.join("catalog.db")).unwrap();
+
+    let summary = cat.ingest_folder(&fixture_dir()).expect("ingest");
+    assert!(summary.scanned >= 1, "should scan the fixture RAW");
+    assert!(summary.added >= 1, "should add at least one image");
+    assert_eq!(summary.failed, 0, "fixture must decode cleanly");
+    assert!(cat.image_count().unwrap() >= 1);
+
+    // Every indexed image has a decodable thumbnail within the size cap.
+    let folder = cat.upsert_folder(&fixture_dir()).unwrap();
+    let images = cat.list_images(folder).unwrap();
+    assert!(!images.is_empty());
+    for rec in images {
+        let thumb = cat
+            .get_thumbnail(rec.id)
+            .unwrap()
+            .expect("thumbnail present");
+        assert!(thumb.width <= 256 && thumb.height <= 256);
+        image::load_from_memory(&thumb.bytes).expect("thumb decodes");
+    }
+}
+
+#[test]
+fn second_ingest_skips_unchanged_files() {
+    let dir = tempdir();
+    let cat = Catalog::open(&dir.join("catalog.db")).unwrap();
+
+    let first = cat.ingest_folder(&fixture_dir()).unwrap();
+    assert!(first.added >= 1);
+
+    let second = cat.ingest_folder(&fixture_dir()).unwrap();
+    assert_eq!(second.added, 0, "nothing changed → no adds");
+    assert_eq!(
+        second.skipped, first.added,
+        "all previously-added files skipped"
+    );
+}
+
 /// Minimal temp dir without an extra dependency: unique path under the OS temp
 /// dir using the test thread name + a process-unique counter.
 fn tempdir() -> std::path::PathBuf {

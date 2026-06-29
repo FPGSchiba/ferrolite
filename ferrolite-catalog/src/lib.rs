@@ -2,6 +2,7 @@
 
 mod catalog;
 mod error;
+mod ingest;
 mod model;
 mod schema;
 mod thumbnail;

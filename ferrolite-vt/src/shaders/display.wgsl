@@ -44,3 +44,43 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let lin = textureSampleLevel(img_tex, img_samp, uv, 0.0).rgb;
     return vec4(linear_to_srgb(lin), 1.0);
 }
+
+// ---- Rung 2: tiled mip pyramid + per-fragment LOD selection ----
+
+@group(0) @binding(3) var tiles: texture_2d_array<f32>;
+@group(0) @binding(4) var<storage, read> slots: array<u32>;
+
+struct TileMeta {
+    level_count: u32,
+    _pad: vec3<u32>,
+    // Per-level packing for up to 8 levels: x = cols (tiles per row), y = flat slot offset.
+    levels: array<vec4<u32>, 8>,
+};
+@group(0) @binding(5) var<uniform> tmeta: TileMeta;
+
+fn pick_lod(img_px: vec2<f32>) -> u32 {
+    let dx = length(dpdx(img_px));
+    let dy = length(dpdy(img_px));
+    let d = max(max(dx, dy), 1.0);
+    return min(u32(max(log2(d), 0.0)), tmeta.level_count - 1u);
+}
+
+@fragment
+fn fs_tiled(in: VsOut) -> @location(0) vec4<f32> {
+    let screen_px = in.screen_uv * xf.viewport;
+    let center = xf.image * 0.5 + xf.pan;
+    let img_px = center + (screen_px - xf.viewport * 0.5) / xf.zoom;
+    if (img_px.x < 0.0 || img_px.x >= xf.image.x || img_px.y < 0.0 || img_px.y >= xf.image.y) {
+        return vec4(0.05, 0.05, 0.05, 1.0);
+    }
+    let lod = pick_lod(img_px);
+    let lod_px = img_px / f32(1u << lod);
+    let tx = u32(lod_px.x) / 256u;
+    let ty = u32(lod_px.y) / 256u;
+    let cols = tmeta.levels[lod].x;
+    let offset = tmeta.levels[lod].y;
+    let slot = slots[offset + ty * cols + tx];
+    let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
+    let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
+    return vec4(linear_to_srgb(lin), 1.0);
+}

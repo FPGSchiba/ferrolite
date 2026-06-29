@@ -28,3 +28,33 @@ fn rung1_fit_view_matches_golden() {
         "rendered output drifted from golden beyond tolerance"
     );
 }
+
+#[test]
+fn rung2_tiled_matches_single_texture() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    // A larger gradient so multiple tiles exist.
+    let (iw, ih) = (300u32, 200u32);
+    let mut px = Vec::new();
+    for y in 0..ih {
+        for x in 0..iw {
+            px.extend_from_slice(&[x as f32 / iw as f32, y as f32 / ih as f32, 0.25, 1.0]);
+        }
+    }
+    let img = ferrolite_image::LinearRgbaF32::new(iw, ih, px).unwrap();
+    let (w, h) = (128u32, 128u32);
+    let view = ViewTransform::fit((iw, ih), (w as f32, h as f32));
+
+    let single = VirtualTexture::render_to_image(&ctx, &img, &view, (w as f32, h as f32), w, h);
+    let src = ferrolite_vt::PyramidTileSource::new(img);
+    let tiled =
+        VirtualTexture::render_tiled_to_image(&ctx, &src, &view, (w as f32, h as f32), w, h);
+
+    // At fit zoom the tiled path samples a coarse LOD; allow a generous tolerance
+    // vs the single-texture reference (different filtering), but they must broadly agree.
+    let diff = common::max_abs_diff(&single, &tiled);
+    eprintln!("rung2 max_abs_diff = {diff}");
+    assert!(diff <= 24, "tiled diverges from single-texture reference");
+}

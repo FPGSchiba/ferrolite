@@ -18,57 +18,6 @@ const TILE_BG: Color32 = Color32::from_rgb(0x16, 0x1a, 0x1f);
 const TILE_RECT: [f32; 4] = [2.0, 2.0, 62.0, 62.0];
 const TILE_RADIUS: f32 = 13.0;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn px_at(buf: &[u8], px: u32, x: u32, y: u32) -> [u8; 4] {
-        let i = ((y * px + x) * 4) as usize;
-        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
-    }
-
-    #[test]
-    fn rgba_buffer_has_correct_length() {
-        assert_eq!(icon_rgba(64).len(), 64 * 64 * 4);
-        assert_eq!(icon_rgba(32).len(), 32 * 32 * 4);
-    }
-
-    #[test]
-    fn f_stem_pixel_is_accent() {
-        // 64-space (24,35) is inside the stem; at px=64 that's pixel (24,35).
-        let buf = icon_rgba(64);
-        let [r, g, b, a] = px_at(&buf, 64, 24, 35);
-        assert_eq!([r, g, b], [0x6d, 0x97, 0xb5]);
-        assert_eq!(a, 255);
-    }
-
-    #[test]
-    fn facet_band_pixel_is_brighter_than_accent() {
-        // 64-space (24,20): stem within the bright facet band -> blended brighter.
-        let buf = icon_rgba(64);
-        let [_, _, b, a] = px_at(&buf, 64, 24, 20);
-        assert!(b > 0xb5, "facet blue {b} should exceed accent blue 0xb5");
-        assert_eq!(a, 255);
-    }
-
-    #[test]
-    fn tile_interior_outside_f_is_tile_color() {
-        // 64-space (40,45): inside tile, outside the F.
-        let buf = icon_rgba(64);
-        let [r, g, b, a] = px_at(&buf, 64, 40, 45);
-        assert_eq!([r, g, b], [0x16, 0x1a, 0x1f]);
-        assert_eq!(a, 255);
-    }
-
-    #[test]
-    fn rounded_corner_is_transparent() {
-        // 64-space (4,4): outside the rounded tile corner -> fully transparent.
-        let buf = icon_rgba(64);
-        let [_, _, _, a] = px_at(&buf, 64, 4, 4);
-        assert_eq!(a, 0);
-    }
-}
-
 fn in_rect(x: f32, y: f32, r: &[f32; 4]) -> bool {
     x >= r[0] && x < r[2] && y >= r[1] && y < r[3]
 }
@@ -170,4 +119,55 @@ pub fn paint_mark(painter: &Painter, rect: Rect) {
         FACET_ALPHA,
     );
     painter.rect_filled(scaled(&FACET, origin, s), Rounding::ZERO, facet);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px_at(buf: &[u8], px: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * px + x) * 4) as usize;
+        [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+    }
+
+    #[test]
+    fn rgba_buffer_has_correct_length() {
+        assert_eq!(icon_rgba(64).len(), 64 * 64 * 4);
+        assert_eq!(icon_rgba(32).len(), 32 * 32 * 4);
+    }
+
+    #[test]
+    fn f_stem_pixel_is_accent() {
+        // 64-space (24,35) is inside the stem; at px=64 that's pixel (24,35).
+        let buf = icon_rgba(64);
+        let [r, g, b, a] = px_at(&buf, 64, 24, 35);
+        assert_eq!([r, g, b], [0x6d, 0x97, 0xb5]);
+        assert_eq!(a, 255);
+    }
+
+    #[test]
+    fn facet_band_pixel_is_brighter_than_accent() {
+        // 64-space (24,20): stem within the bright facet band -> blended brighter.
+        let buf = icon_rgba(64);
+        let [_, _, b, a] = px_at(&buf, 64, 24, 20);
+        assert!(b > 0xb5, "facet blue {b} should exceed accent blue 0xb5");
+        assert_eq!(a, 255);
+    }
+
+    #[test]
+    fn tile_interior_outside_f_is_tile_color() {
+        // 64-space (40,45): inside tile, outside the F.
+        let buf = icon_rgba(64);
+        let [r, g, b, a] = px_at(&buf, 64, 40, 45);
+        assert_eq!([r, g, b], [0x16, 0x1a, 0x1f]);
+        assert_eq!(a, 255);
+    }
+
+    #[test]
+    fn rounded_corner_is_transparent() {
+        // 64-space (4,4): outside the rounded tile corner -> fully transparent.
+        let buf = icon_rgba(64);
+        let [_, _, _, a] = px_at(&buf, 64, 4, 4);
+        assert_eq!(a, 0);
+    }
 }

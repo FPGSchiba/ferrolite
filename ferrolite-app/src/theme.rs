@@ -9,10 +9,8 @@ pub const BG_TOOLBAR: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x1d);
 pub const BG_BASE: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
 pub const BG_CANVAS: Color32 = Color32::from_rgb(0x0e, 0x0e, 0x0e);
 // Canonical design palette (design-system §2) — full token set kept for use across later specs.
-#[allow(dead_code)]
 pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x2a, 0x2a, 0x2a);
 pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xdc, 0xdc, 0xdc);
-#[allow(dead_code)]
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x8a);
 pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
 pub const ACCENT: Color32 = Color32::from_rgb(0x6d, 0x97, 0xb5);

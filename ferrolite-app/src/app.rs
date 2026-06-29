@@ -22,36 +22,61 @@ impl FerroliteApp {
     }
 }
 
+/// Invisible 6px resize grips along the four window edges.
+/// Uses four transparent `egui::Area`s with `Sense::drag()` (the Area path),
+/// because `ctx.interact(LayerId, Id, Rect, Sense)` does not exist in egui 0.29.
+fn window_resize_grips(ctx: &egui::Context) {
+    use egui::{Area, CursorIcon, Id, Order, Rect, ResizeDirection, Sense, ViewportCommand};
+    let r = ctx.screen_rect();
+    let m = 6.0_f32; // grip thickness
+    let edges: [(Rect, ResizeDirection, CursorIcon); 4] = [
+        (
+            Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + m)),
+            ResizeDirection::North,
+            CursorIcon::ResizeVertical,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(r.left(), r.bottom() - m), r.right_bottom()),
+            ResizeDirection::South,
+            CursorIcon::ResizeVertical,
+        ),
+        (
+            Rect::from_min_max(r.left_top(), egui::pos2(r.left() + m, r.bottom())),
+            ResizeDirection::West,
+            CursorIcon::ResizeHorizontal,
+        ),
+        (
+            Rect::from_min_max(egui::pos2(r.right() - m, r.top()), r.right_bottom()),
+            ResizeDirection::East,
+            CursorIcon::ResizeHorizontal,
+        ),
+    ];
+    for (i, (rect, dir, cursor)) in edges.into_iter().enumerate() {
+        let resp = Area::new(Id::new(("resize_grip", i)))
+            .order(Order::Foreground)
+            .fixed_pos(rect.min)
+            .interactable(true)
+            .sense(Sense::drag())
+            .show(ctx, |ui| {
+                // allocate the full grip rect so the Area covers the edge
+                ui.allocate_rect(rect, Sense::drag())
+            });
+        if resp.inner.hovered() {
+            ctx.set_cursor_icon(cursor);
+        }
+        if resp.inner.drag_started() {
+            ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
+        }
+    }
+}
+
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::TopBottomPanel::top("titlebar")
             .exact_height(30.0)
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
             .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.colored_label(theme::ACCENT, "■");
-                    ui.label("FERROLITE");
-                    ui.add_space(12.0);
-                    for m in ["File", "Edit", "Photo", "View", "Help"] {
-                        ui.label(m);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.monospace("v0.0.1");
-                        ui.add_space(12.0);
-                        if ui
-                            .selectable_label(!self.module.is_library(), "Develop")
-                            .clicked()
-                        {
-                            self.module = Module::Develop;
-                        }
-                        if ui
-                            .selectable_label(self.module.is_library(), "Library")
-                            .clicked()
-                        {
-                            self.module = Module::Library;
-                        }
-                    });
-                });
+                crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1");
             });
 
         egui::SidePanel::left("left")
@@ -98,5 +123,19 @@ impl eframe::App for FerroliteApp {
                 let rect = ui.available_rect_before_wrap();
                 canvas::paint(ui, rect);
             });
+
+        // 1px window border — full-window foreground stroke so it never double-draws
+        // against the side panel or status bar edges.
+        ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("win_border"),
+        ))
+        .rect_stroke(
+            ctx.screen_rect().shrink(0.5),
+            0.0,
+            egui::Stroke::new(1.0, theme::BORDER_STRONG),
+        );
+
+        window_resize_grips(ctx);
     }
 }

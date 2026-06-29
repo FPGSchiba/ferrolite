@@ -21,6 +21,8 @@ Three user-requested improvements to the freshly-merged Library folder tree:
    from disk).
 3. **Periodic new-file watcher** — cheaply poll the selected folder's subtree (~10s) and
    auto-ingest newly-appeared files silently, as a quality-of-life convenience.
+4. **Window-control alignment** — the close button sits ~8px shy of the window's right edge; make
+   it flush.
 
 ## 2. Cross-cutting contracts honored
 
@@ -55,6 +57,26 @@ so they render as `□`. Replace both with painted shapes (no font dependency, a
 
 No behavior change beyond rendering; the click semantics (toggle expand, select, remove) are
 identical to today.
+
+### 3.1 Window-control right-edge alignment (Item 4)
+
+In `ferrolite-app/src/chrome/mod.rs::title_bar`, the right-hand control group is a right-to-left
+child Ui over the full bar (`bar = ui.max_rect()`, which spans the window width — the titlebar panel
+has no inner margin). It currently begins with `ui.add_space(8.0)` **before** `controls_ui`, so the
+rightmost (close) button is inset 8px from `bar.right()` — the visible gap.
+
+Fix:
+
+- Remove that leading `ui.add_space(8.0)` so the close button's right edge is flush with
+  `bar.right()` (the window's right edge).
+- Set the control group's `ui.spacing_mut().item_spacing.x = 0.0` so the three 44px buttons stay
+  contiguous and inter-item spacing cannot silently reintroduce a right-edge gap.
+- Keep the existing `add_space(8.0)` between the controls and the version label.
+
+The 1px foreground window border (`app.rs`, `screen_rect().shrink(0.5)`) still draws over the
+button's outer edge — that hairline frame is the intended borderless-window look, not a gap. This is
+a pure layout tweak in `title_bar`; the `window_controls` button rendering and `command` mapping are
+unchanged (their existing unit tests stay green). Verified by build + eyeball.
 
 ---
 
@@ -211,8 +233,9 @@ Pure/headless logic carries coverage; painted icons and `request_repaint_after` 
 
 Four independently-testable tasks:
 
-1. **Tree-icon paint fix** (`panel.rs`) — painted disclosure triangle + reserved/painted ✕; build +
-   manual verify.
+1. **UI fixes** — tree-icon paint fix (`panel.rs`: painted disclosure triangle + reserved/painted ✕)
+   and window-control right-edge alignment (`chrome/mod.rs`: drop leading `add_space`, zero control
+   `item_spacing.x`); build + manual verify.
 2. **Catalog prune + ingest `ReindexMode`** — `prune_subtree` (+ integration test); thread
    `ReindexMode { Incremental, Full }` and the force/prune logic into the ingest job; `folder_path`
    query.
@@ -225,7 +248,8 @@ Four independently-testable tasks:
 
 ## 9. Deliverable
 
-Crisp disclosure/remove icons in the folder tree; right-click Reindex (new-files / full-rebuild)
-that updates the view in place, with Full mirroring the directory (re-thumbnail + prune deleted);
-and a silent ~10s watcher that auto-ingests files dropped into the selected subtree — all on the
-existing jobs/WAL/cache contracts, with no schema change.
+Crisp disclosure/remove icons in the folder tree with a close button flush to the window edge;
+right-click Reindex (new-files / full-rebuild) that updates the view in place, with Full mirroring
+the directory (re-thumbnail + prune deleted); and a silent ~10s watcher that auto-ingests files
+dropped into the selected subtree — all on the existing jobs/WAL/cache contracts, with no schema
+change.

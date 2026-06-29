@@ -55,6 +55,7 @@ pub struct EguiSlider<'a> {
     pub signed: bool,
 }
 
+use crate::theme;
 use egui::{pos2, vec2, Color32, Response, Sense, Stroke, Ui, Widget};
 
 // Design-system §5 slider tokens.
@@ -62,7 +63,6 @@ const TRACK: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
 const FILL_IDLE: Color32 = Color32::from_rgb(0x58, 0x58, 0x58);
 const HANDLE_IDLE: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
 const HANDLE_BORDER: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-const ACCENT: Color32 = Color32::from_rgb(0x6d, 0x97, 0xb5);
 const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xa9, 0xc7, 0xdd);
 const LABEL: Color32 = Color32::from_rgb(0x8c, 0x8c, 0x8c);
 const VALUE_IDLE: Color32 = Color32::from_rgb(0xbd, 0xbd, 0xbd);
@@ -98,6 +98,7 @@ impl<'a> Widget for EguiSlider<'a> {
         }
         *self.value = value;
 
+        // `active` reflects this frame's interaction state; read after writeback is intentional (writeback doesn't affect `response`).
         let active = response.dragged();
         let frac = math::fraction(value, self.min, self.max);
         let (fill_left, fill_w) = math::fill(frac, self.min, self.max, self.bipolar);
@@ -117,7 +118,7 @@ impl<'a> Widget for EguiSlider<'a> {
             Stroke::new(2.0, TRACK),
         );
         // fill
-        let fill_color = if active { ACCENT } else { FILL_IDLE };
+        let fill_color = if active { theme::ACCENT } else { FILL_IDLE };
         painter.line_segment(
             [
                 pos2(track_left + fill_left * track_w, mid_y),
@@ -128,9 +129,14 @@ impl<'a> Widget for EguiSlider<'a> {
         // handle
         let hx = track_left + frac * track_w;
         let handle_color = if active { ACCENT_BRIGHT } else { HANDLE_IDLE };
-        painter.circle(pos2(hx, mid_y), 5.5, handle_color, Stroke::new(1.0, HANDLE_BORDER));
+        painter.circle(
+            pos2(hx, mid_y),
+            5.5,
+            handle_color,
+            Stroke::new(1.0, HANDLE_BORDER),
+        );
         // value text
-        let value_color = if active { ACCENT } else { VALUE_IDLE };
+        let value_color = if active { theme::ACCENT } else { VALUE_IDLE };
         painter.text(
             pos2(rect.right() - 4.0, mid_y),
             egui::Align2::RIGHT_CENTER,

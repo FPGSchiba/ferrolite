@@ -82,6 +82,7 @@ impl eframe::App for FerroliteApp {
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
+                    // TODO(catalog): bind to selected-image metadata once ferrolite-decode/catalog land (Plan 2).
                     ui.monospace("NEF · 8256×5504 · ISO 100 · 14mm · f/8 · 1/250s");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.monospace("GPU: idle");

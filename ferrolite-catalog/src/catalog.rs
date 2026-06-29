@@ -3,6 +3,7 @@ use crate::model::{DecodeStatus, ImageRecord, NewImage};
 use crate::schema;
 use ferrolite_image::Orientation;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use std::path::Path;
 
 /// SQLite-backed catalog. The catalog is a *cache*: source of truth is the files
@@ -136,7 +137,7 @@ impl Catalog {
                 rusqlite::params![folder_id, filename],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .ok();
+            .optional()?;
         Ok(match existing {
             Some((m, s)) => m != mtime || s != size,
             None => true,

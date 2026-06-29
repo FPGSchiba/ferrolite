@@ -1,11 +1,22 @@
 [workspace]
 resolver = "2"
-members = ["ferrolite-app"]
+members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog"]
 
 [workspace.package]
 edition = "2021"
 license = "GPL-3.0-only"
-rust-version = "1.85"
+rust-version = "1.88"
+
+[workspace.dependencies]
+ferrolite-image = { path = "ferrolite-image" }
+ferrolite-decode = { path = "ferrolite-decode" }
+rawler = "0.7.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
+image = { version = "0.25", default-features = false }
+fast_image_resize = "6.0"
+rayon = "1.10"
+walkdir = "2.5"
+thiserror = "2.0"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

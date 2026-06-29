@@ -86,8 +86,7 @@ impl<'a> Widget for EguiSlider<'a> {
         if response.double_clicked() {
             value = self.default;
             response.mark_changed();
-        }
-        if let Some(p) = response.interact_pointer_pos() {
+        } else if let Some(p) = response.interact_pointer_pos() {
             if response.dragged() || response.clicked() {
                 let frac = ((p.x - track_left) / track_w).clamp(0.0, 1.0);
                 let new = math::value_at(frac, self.min, self.max, self.step);

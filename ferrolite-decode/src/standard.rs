@@ -14,9 +14,20 @@ fn read_exif(path: &Path) -> Option<exif::Exif> {
     exif::Reader::new().read_from_container(&mut buf).ok()
 }
 
+/// Trim EXIF ASCII padding (trailing NULs and surrounding whitespace).
+fn clean_ascii(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_end_matches('\0')
+        .trim()
+        .to_string()
+}
+
 fn ascii(e: &exif::Exif, tag: exif::Tag) -> Option<String> {
     e.get_field(tag, exif::In::PRIMARY)
-        .map(|f| f.display_value().to_string())
+        .and_then(|f| match &f.value {
+            exif::Value::Ascii(v) => v.first().map(|s| clean_ascii(s)),
+            _ => None,
+        })
 }
 
 fn uint(e: &exif::Exif, tag: exif::Tag) -> Option<u32> {
@@ -94,4 +105,24 @@ pub fn decode_preview_standard(path: &Path) -> Result<ImageBuffer, DecodeError> 
     let (w, h) = (rgb.width(), rgb.height());
     Ok(ImageBuffer::new(w, h, PixelFormat::Rgb8, rgb.into_raw())
         .expect("RGB8 buffer length is w*h*3 by construction"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clean_ascii;
+
+    #[test]
+    fn clean_ascii_strips_trailing_nul() {
+        assert_eq!(clean_ascii(b"Canon\0"), "Canon");
+    }
+
+    #[test]
+    fn clean_ascii_strips_trailing_space() {
+        assert_eq!(clean_ascii(b"Canon "), "Canon");
+    }
+
+    #[test]
+    fn clean_ascii_preserves_internal_spaces() {
+        assert_eq!(clean_ascii(b"NIKON Z 6"), "NIKON Z 6");
+    }
 }

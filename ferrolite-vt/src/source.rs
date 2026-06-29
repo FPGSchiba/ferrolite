@@ -3,8 +3,8 @@
 //! builds an in-memory LOD pyramid (box-downsample) from one full image.
 
 use ferrolite_image::{
-    level_size as img_level_size, pyramid_level_count, tile_pixel_origin, LinearRgbaF32,
-    TileCoord, TILE_SIZE,
+    level_size as img_level_size, pyramid_level_count, tile_pixel_origin, LinearRgbaF32, TileCoord,
+    TILE_SIZE,
 };
 
 pub trait TileSource {
@@ -97,7 +97,10 @@ mod tests {
     #[test]
     fn level_count_matches_pyramid_math() {
         let src = PyramidTileSource::new(solid(1024, 512, [0.5, 0.5, 0.5]));
-        assert_eq!(src.level_count(), ferrolite_image::pyramid_level_count(1024, 512));
+        assert_eq!(
+            src.level_count(),
+            ferrolite_image::pyramid_level_count(1024, 512)
+        );
         assert_eq!(src.level_size(1), (512, 256));
     }
 

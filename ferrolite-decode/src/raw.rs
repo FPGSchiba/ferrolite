@@ -63,12 +63,7 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
     // --- White level ---
     // WhiteLevel(Vec<u32>)  (rawler 0.7.2, rawimage.rs:27)
     // Use the first component; default to 65535 if the vec is empty.
-    let white_level = img
-        .whitelevel
-        .0
-        .first()
-        .copied()
-        .unwrap_or(65535) as f32;
+    let white_level = img.whitelevel.0.first().copied().unwrap_or(65535) as f32;
 
     // --- White-balance coefficients ---
     // img.wb_coeffs: [f32; 4]  order: [R, G1, B, G2]  (rawimage.rs:216)

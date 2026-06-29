@@ -42,7 +42,10 @@ pub struct ResidencySet {
 
 impl ResidencySet {
     pub fn new(capacity: usize) -> Self {
-        Self { capacity: capacity.max(1), order: Vec::new() }
+        Self {
+            capacity: capacity.max(1),
+            order: Vec::new(),
+        }
     }
     pub fn contains(&self, t: TileCoord) -> bool {
         self.order.contains(&t)
@@ -65,7 +68,11 @@ impl ResidencySet {
     /// Given the needed set, return (to_load = needed∖resident, to_evict =
     /// resident∖needed). Does not mutate; caller drives load/evict via jobs.
     pub fn diff(&self, needed: &[TileCoord]) -> (Vec<TileCoord>, Vec<TileCoord>) {
-        let to_load = needed.iter().copied().filter(|t| !self.contains(*t)).collect();
+        let to_load = needed
+            .iter()
+            .copied()
+            .filter(|t| !self.contains(*t))
+            .collect();
         let to_evict = self
             .order
             .iter()
@@ -81,7 +88,9 @@ mod tests {
     use super::*;
     use ferrolite_image::TileCoord;
 
-    fn tc(lod: u32, x: u32, y: u32) -> TileCoord { TileCoord { lod, x, y } }
+    fn tc(lod: u32, x: u32, y: u32) -> TileCoord {
+        TileCoord { lod, x, y }
+    }
 
     #[test]
     fn insert_evicts_least_recently_used_over_capacity() {

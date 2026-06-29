@@ -12,7 +12,10 @@ pub struct GpuContext {
 impl GpuContext {
     /// Borrow eframe's already-created device/queue (the app path).
     pub fn from_render_state(rs: &egui_wgpu::RenderState) -> Self {
-        Self { device: rs.device.clone(), queue: rs.queue.clone() }
+        Self {
+            device: rs.device.clone(),
+            queue: rs.queue.clone(),
+        }
     }
 
     /// Create a standalone headless context for tests. Returns `None` if no
@@ -34,14 +37,21 @@ impl GpuContext {
             None,
         ))
         .ok()?;
-        Some(Self { device: Arc::new(device), queue: Arc::new(queue) })
+        Some(Self {
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+        })
     }
 
     /// A `RENDER_ATTACHMENT | COPY_SRC` texture for offscreen rendering.
     pub fn render_target(&self, w: u32, h: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
         self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ferrolite-render-target"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -80,7 +90,11 @@ impl GpuContext {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit([enc.finish()]);
         let slice = buf.slice(..);
@@ -121,7 +135,12 @@ mod tests {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 1.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

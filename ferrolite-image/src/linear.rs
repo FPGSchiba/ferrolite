@@ -19,9 +19,16 @@ impl LinearRgbaF32 {
     pub fn new(width: u32, height: u32, pixels: Vec<f32>) -> Result<Self, ImageBufferError> {
         let expected = Self::expected_len(width, height);
         if pixels.len() != expected {
-            return Err(ImageBufferError { expected, actual: pixels.len() });
+            return Err(ImageBufferError {
+                expected,
+                actual: pixels.len(),
+            });
         }
-        Ok(Self { width, height, pixels })
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
     }
 
     /// Opaque black image (RGB 0, A 1).
@@ -30,7 +37,11 @@ impl LinearRgbaF32 {
         for px in pixels.chunks_exact_mut(4) {
             px[3] = 1.0;
         }
-        Self { width, height, pixels }
+        Self {
+            width,
+            height,
+            pixels,
+        }
     }
 }
 

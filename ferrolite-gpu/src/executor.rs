@@ -25,12 +25,20 @@ pub struct Graph<O> {
 
 impl<O: Clone> Graph<O> {
     pub fn new() -> Self {
-        Self { nodes: Vec::new(), eval_count: 0 }
+        Self {
+            nodes: Vec::new(),
+            eval_count: 0,
+        }
     }
 
     pub fn add_node(&mut self, node: Box<dyn Node<O>>, inputs: Vec<NodeId>) -> NodeId {
         let id = NodeId(self.nodes.len());
-        self.nodes.push(Entry { node, inputs, cache: None, dirty: true });
+        self.nodes.push(Entry {
+            node,
+            inputs,
+            cache: None,
+            dirty: true,
+        });
         id
     }
 
@@ -56,7 +64,10 @@ impl<O: Clone> Graph<O> {
     /// their cached output. Returns a reference into the cache.
     pub fn evaluate(&mut self, id: NodeId) -> &O {
         self.eval_recursive(id);
-        self.nodes[id.0].cache.as_ref().expect("evaluated node has a cache")
+        self.nodes[id.0]
+            .cache
+            .as_ref()
+            .expect("evaluated node has a cache")
     }
 
     pub fn eval_count(&self) -> usize {
@@ -95,11 +106,15 @@ mod tests {
 
     struct Const(i64);
     impl Node<i64> for Const {
-        fn evaluate(&self, _inputs: &[&i64]) -> i64 { self.0 }
+        fn evaluate(&self, _inputs: &[&i64]) -> i64 {
+            self.0
+        }
     }
     struct Add;
     impl Node<i64> for Add {
-        fn evaluate(&self, inputs: &[&i64]) -> i64 { inputs.iter().copied().sum() }
+        fn evaluate(&self, inputs: &[&i64]) -> i64 {
+            inputs.iter().copied().sum()
+        }
     }
 
     #[test]
@@ -120,7 +135,11 @@ mod tests {
         assert_eq!(*g.evaluate(sum), 5);
         let after_first = g.eval_count();
         assert_eq!(*g.evaluate(sum), 5); // all clean -> cache hit
-        assert_eq!(g.eval_count(), after_first, "no node re-evaluated when all clean");
+        assert_eq!(
+            g.eval_count(),
+            after_first,
+            "no node re-evaluated when all clean"
+        );
     }
 
     #[test]

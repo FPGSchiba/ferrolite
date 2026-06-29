@@ -1117,6 +1117,17 @@ version = "0.0.1"
 [[package]]
 name = "ferrolite-vt"
 version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "fast_image_resize",
+ "ferrolite-gpu",
+ "ferrolite-image",
+ "ferrolite-jobs",
+ "half",
+ "image",
+ "pollster 0.4.0",
+ "wgpu",
+]
 
 [[package]]
 name = "find-msvc-tools"

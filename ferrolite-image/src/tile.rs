@@ -75,6 +75,9 @@ mod tests {
     #[test]
     fn tile_origin_multiplies_by_tile_size() {
         assert_eq!(tile_pixel_origin(TileCoord { lod: 0, x: 0, y: 0 }), (0, 0));
-        assert_eq!(tile_pixel_origin(TileCoord { lod: 3, x: 2, y: 1 }), (512, 256));
+        assert_eq!(
+            tile_pixel_origin(TileCoord { lod: 3, x: 2, y: 1 }),
+            (512, 256)
+        );
     }
 }

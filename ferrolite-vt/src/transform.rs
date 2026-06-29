@@ -13,7 +13,10 @@ impl ViewTransform {
     pub fn fit(image: (u32, u32), viewport: (f32, f32)) -> Self {
         let zx = viewport.0 / image.0 as f32;
         let zy = viewport.1 / image.1 as f32;
-        Self { zoom: zx.min(zy).max(f32::MIN_POSITIVE), pan: (0.0, 0.0) }
+        Self {
+            zoom: zx.min(zy).max(f32::MIN_POSITIVE),
+            pan: (0.0, 0.0),
+        }
     }
 
     /// LOD whose texels are ~1 screen pixel: `lod = floor(log2(1/zoom))`, clamped.
@@ -40,7 +43,10 @@ mod tests {
     #[test]
     fn lod_increases_as_zoom_decreases() {
         // Zoomed way out -> coarse LOD; at 1:1 -> LOD 0.
-        let mut t = ViewTransform { zoom: 1.0, pan: (0.0, 0.0) };
+        let mut t = ViewTransform {
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+        };
         assert_eq!(t.lod_for((4096, 4096), 6), 0);
         t.zoom = 0.25; // 1 screen px = 4 image px -> LOD ~2
         assert_eq!(t.lod_for((4096, 4096), 6), 2);

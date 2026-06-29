@@ -11,5 +11,6 @@ workspace = true
 [dependencies]
 ferrolite-image = { workspace = true }
 rawler = { workspace = true }
-image = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "tiff", "webp", "bmp", "gif"] }
+exif = { workspace = true }
 thiserror = { workspace = true }

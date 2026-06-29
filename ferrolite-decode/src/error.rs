@@ -10,6 +10,8 @@ pub enum DecodeError {
     NoPreview(PathBuf),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("exif error: {0}")]
+    Exif(String),
 }
 
 /// rawler's error type implements `Display`; we flatten it to a string so this

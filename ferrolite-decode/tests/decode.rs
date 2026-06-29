@@ -1,3 +1,4 @@
+use ferrolite_image::FileKind;
 use std::path::{Path, PathBuf};
 
 /// First file in the shared fixture directory (extension-agnostic).
@@ -13,7 +14,7 @@ fn fixture() -> PathBuf {
 
 #[test]
 fn read_metadata_returns_camera_and_dimensions() {
-    let meta = ferrolite_decode::read_metadata(&fixture()).expect("metadata");
+    let meta = ferrolite_decode::read_metadata(&fixture(), FileKind::Raw).expect("metadata");
     assert!(!meta.make.is_empty(), "make should be populated");
     assert!(!meta.model.is_empty(), "model should be populated");
     assert!(
@@ -25,7 +26,7 @@ fn read_metadata_returns_camera_and_dimensions() {
 #[test]
 fn decode_preview_returns_nonempty_rgb8() {
     use ferrolite_image::PixelFormat;
-    let buf = ferrolite_decode::decode_preview(&fixture()).expect("preview");
+    let buf = ferrolite_decode::decode_preview(&fixture(), FileKind::Raw).expect("preview");
     assert_eq!(buf.format, PixelFormat::Rgb8);
     assert!(buf.width > 0 && buf.height > 0);
     assert_eq!(
@@ -36,7 +37,7 @@ fn decode_preview_returns_nonempty_rgb8() {
 
 #[test]
 fn decode_full_matches_metadata_dimensions_and_buffer() {
-    let meta = ferrolite_decode::read_metadata(&fixture()).expect("metadata");
+    let meta = ferrolite_decode::read_metadata(&fixture(), FileKind::Raw).expect("metadata");
     let full = ferrolite_decode::decode_full(&fixture()).expect("full decode");
     assert_eq!(full.width, meta.width);
     assert_eq!(full.height, meta.height);

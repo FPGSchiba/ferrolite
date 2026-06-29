@@ -14,7 +14,6 @@ pub struct AppState {
     pub jobs: Arc<JobSystem>,
     pub writer: Arc<Mutex<Catalog>>,
     pub reads: Arc<ReadPool>,
-    pub db_path: PathBuf,
     pub tx: Sender<AppEvent>,
     pub rx: Receiver<AppEvent>,
 
@@ -53,7 +52,6 @@ impl AppState {
             jobs: Arc::new(JobSystem::new(workers)),
             writer: Arc::new(Mutex::new(writer)),
             reads: Arc::new(reads),
-            db_path,
             tx,
             rx,
             current_folder: None,
@@ -77,7 +75,11 @@ impl AppState {
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width() as usize, rgba.height() as usize);
         let color = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
-        let tex = ctx.load_texture(format!("thumb-{image_id}"), color, egui::TextureOptions::LINEAR);
+        let tex = ctx.load_texture(
+            format!("thumb-{image_id}"),
+            color,
+            egui::TextureOptions::LINEAR,
+        );
         self.textures.insert(image_id, tex);
     }
 
@@ -95,8 +97,8 @@ impl AppState {
     pub fn for_test() -> Self {
         // Use a unique ID per test (thread + process) to avoid concurrent collision.
         let tid = format!("{:?}", std::thread::current().id()).replace(['(', ')'], "");
-        let path = std::env::temp_dir()
-            .join(format!("ferrolite-test-{}-{}.db", std::process::id(), tid));
+        let path =
+            std::env::temp_dir().join(format!("ferrolite-test-{}-{}.db", std::process::id(), tid));
         let _ = std::fs::remove_file(&path);
         let writer = Catalog::open(&path).unwrap();
         let reads = ReadPool::open(&path, 1).unwrap();
@@ -105,7 +107,6 @@ impl AppState {
             jobs: Arc::new(JobSystem::new(1)),
             writer: Arc::new(Mutex::new(writer)),
             reads: Arc::new(reads),
-            db_path: path,
             tx,
             rx,
             current_folder: None,

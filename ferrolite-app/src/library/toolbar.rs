@@ -4,7 +4,10 @@ use crate::widgets::EguiSlider;
 
 pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32) {
     ui.horizontal(|ui| {
-        ui.add_enabled(false, egui::TextEdit::singleline(&mut String::new()).hint_text("Search"));
+        ui.add_enabled(
+            false,
+            egui::TextEdit::singleline(&mut String::new()).hint_text("Search"),
+        );
         ui.separator();
         ui.label("Sort:");
         ui.add_enabled(false, egui::Label::new("Filename"));

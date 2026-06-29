@@ -1,10 +1,14 @@
 //! The live status bar: selected-image EXIF, "N indexed", and job activity.
 
 use crate::state::AppState;
-use crate::theme;
 
 /// Pure formatter for the right-hand activity string, so it is unit-testable.
-pub fn activity_text(active: usize, pending: usize, thumb_done: usize, thumb_total: usize) -> String {
+pub fn activity_text(
+    active: usize,
+    pending: usize,
+    thumb_done: usize,
+    thumb_total: usize,
+) -> String {
     if active + pending == 0 {
         "Idle".to_string()
     } else {
@@ -22,14 +26,21 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
             ui.monospace("·");
             ui.monospace(format!("{} indexed", state.indexed));
             ui.monospace("·");
-            ui.monospace(activity_text(active, pending, state.thumb_done, state.thumb_total));
+            ui.monospace(activity_text(
+                active,
+                pending,
+                state.thumb_done,
+                state.thumb_total,
+            ));
         });
     });
-    let _ = theme::TEXT_DIM; // (kept for styling parity; remove if unused)
 }
 
 fn selected_exif(state: &AppState) -> String {
-    match state.selected.and_then(|id| state.images.iter().find(|i| i.id == id)) {
+    match state
+        .selected
+        .and_then(|id| state.images.iter().find(|i| i.id == id))
+    {
         Some(img) => {
             let dims = match (img.width, img.height) {
                 (Some(w), Some(h)) => format!("{w}×{h}"),

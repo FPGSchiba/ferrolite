@@ -83,8 +83,7 @@ pub(crate) fn get_thumbnail(
     conn: &Connection,
     image_id: i64,
 ) -> Result<Option<Thumbnail>, CatalogError> {
-    let mut stmt =
-        conn.prepare("SELECT w, h, format, blob FROM thumbnails WHERE image_id = ?1")?;
+    let mut stmt = conn.prepare("SELECT w, h, format, blob FROM thumbnails WHERE image_id = ?1")?;
     let mut rows = stmt.query_map(rusqlite::params![image_id], |row| {
         Ok(Thumbnail {
             width: row.get::<_, i64>(0)? as u32,

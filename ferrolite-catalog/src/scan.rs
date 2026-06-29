@@ -30,7 +30,11 @@ pub struct RawFile {
 /// Enumerate RAW files directly in `folder` (depth 1, like the synchronous path).
 pub fn scan_raw_files(folder: &Path) -> Vec<RawFile> {
     let mut out = Vec::new();
-    for entry in WalkDir::new(folder).max_depth(1).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(folder)
+        .max_depth(1)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         let p = entry.path();
         if !p.is_file() || !is_raw(p) {
             continue;

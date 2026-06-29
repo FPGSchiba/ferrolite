@@ -39,6 +39,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) {
             let rec = state.images[idx].clone();
             let row = idx / m.columns;
             let col = idx % m.columns;
+            // col stride equals row_height because cells are square (cell+GAP == row_height).
             let x = ui.min_rect().left() + col as f32 * m.row_height;
             let y = ui.min_rect().top() + row as f32 * m.row_height;
             let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell, cell));
@@ -68,7 +69,9 @@ fn paint_cell(
     rect: egui::Rect,
 ) {
     // Pull a ready thumbnail from the pool on demand if not yet cached.
-    if !state.textures.contains(rec.id) && rec.decode_status != ferrolite_catalog::DecodeStatus::Failed {
+    if !state.textures.contains(rec.id)
+        && rec.decode_status != ferrolite_catalog::DecodeStatus::Failed
+    {
         if let Ok(Some(thumb)) = state.reads.get_thumbnail(rec.id) {
             let jpeg = thumb.bytes;
             state.upload_thumbnail(ui.ctx(), rec.id, jpeg);

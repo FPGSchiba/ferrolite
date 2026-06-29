@@ -4,7 +4,7 @@
 //! the pool.
 
 use crate::priority::{CancelToken, JobId, Priority};
-use crate::queue::{QueuedJob, Queue};
+use crate::queue::{Queue, QueuedJob};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -56,7 +56,10 @@ impl JobSystem {
             let shared = Arc::clone(&shared);
             handles.push(std::thread::spawn(move || worker_loop(shared)));
         }
-        Self { shared, workers: handles }
+        Self {
+            shared,
+            workers: handles,
+        }
     }
 
     pub fn submit<F>(&self, priority: Priority, run: F) -> JobHandle
@@ -65,14 +68,22 @@ impl JobSystem {
     {
         let id = JobId(self.shared.next_id.fetch_add(1, Ordering::Relaxed) as u64);
         let token = CancelToken::new();
-        let job = QueuedJob { priority, token: token.clone(), run: Box::new(run) };
+        let job = QueuedJob {
+            priority,
+            token: token.clone(),
+            run: Box::new(run),
+        };
         self.shared.queue.lock().expect("queue mutex").push(id, job);
         self.shared.cvar.notify_one();
         JobHandle { id, token }
     }
 
     pub fn reprioritize(&self, id: JobId, priority: Priority) {
-        self.shared.queue.lock().expect("queue mutex").reprioritize(id, priority);
+        self.shared
+            .queue
+            .lock()
+            .expect("queue mutex")
+            .reprioritize(id, priority);
         self.shared.cvar.notify_one();
     }
 
@@ -175,7 +186,7 @@ mod tests {
         });
         handle.cancel(); // cancel while still queued
         gate_tx.send(()).unwrap(); // release the worker
-        // Cancelled-before-dispatch jobs are skipped, so we never receive.
+                                   // Cancelled-before-dispatch jobs are skipped, so we never receive.
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err());
     }
 }

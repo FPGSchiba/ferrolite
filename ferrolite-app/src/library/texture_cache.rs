@@ -10,7 +10,10 @@ struct Lru {
 
 impl Lru {
     fn new(capacity: usize) -> Self {
-        Self { capacity: capacity.max(1), order: Vec::new() }
+        Self {
+            capacity: capacity.max(1),
+            order: Vec::new(),
+        }
     }
     fn touch(&mut self, id: i64) {
         if let Some(pos) = self.order.iter().position(|&x| x == id) {
@@ -36,7 +39,10 @@ pub struct TextureCache {
 
 impl TextureCache {
     pub fn new(capacity: usize) -> Self {
-        Self { lru: Lru::new(capacity), textures: HashMap::new() }
+        Self {
+            lru: Lru::new(capacity),
+            textures: HashMap::new(),
+        }
     }
     pub fn contains(&self, id: i64) -> bool {
         self.textures.contains_key(&id)
@@ -55,9 +61,15 @@ impl TextureCache {
         }
         self.textures.insert(id, tex);
     }
+    /// Number of cached textures. Not called in the current UI but kept as a
+    /// public API for future diagnostics / Plan 4 memory-pressure logic.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.textures.len()
     }
+    /// Returns true when no textures are cached. Companion to `len`; kept for
+    /// the same future Plan 4 diagnostics use.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.textures.is_empty()
     }

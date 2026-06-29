@@ -4,10 +4,10 @@
 
 use crate::events::AppEvent;
 use crate::state::AppState;
-use ferrolite_catalog::{scan_raw_files, Catalog, DecodeStatus, NewImage, ReadPool};
+use ferrolite_catalog::{scan_raw_files, Catalog, DecodeStatus, NewImage, ReadPool, Thumbnail};
 use ferrolite_jobs::{CancelToken, JobSystem, Priority};
 use rayon::prelude::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -44,7 +44,16 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
 
     let jobs_for_closure = Arc::clone(&jobs);
     let handle = jobs.submit(Priority::Interactive, move |cancel| {
-        ingest_job(folder, folder_id, writer, reads, jobs_for_closure, tx, ctx, cancel);
+        ingest_job(
+            folder,
+            folder_id,
+            writer,
+            reads,
+            jobs_for_closure,
+            tx,
+            ctx,
+            cancel,
+        );
     });
     state.ingest_handle = Some(handle);
 }
@@ -112,6 +121,28 @@ fn state_total_inc(tx: &Sender<AppEvent>, image_id: i64, job_id: ferrolite_jobs:
     let _ = tx.send(AppEvent::ThumbRegistered { image_id, job_id });
 }
 
+/// Headless thumbnail helper: decode preview → resize/encode → persist BLOB.
+/// Returns the committed `Thumbnail` on success, or an error string on failure.
+/// Called by both `spawn_thumbnail` (inside a job closure) and `bench_browse`
+/// (directly, without an egui context). This keeps the real decode path DRY.
+pub fn thumbnail_blocking(
+    writer: &Arc<Mutex<Catalog>>,
+    image_id: i64,
+    path: &Path,
+) -> Result<Thumbnail, String> {
+    let preview = ferrolite_decode::decode_preview(path).map_err(|e| e.to_string())?;
+    let thumb = ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())?;
+    {
+        use ferrolite_catalog::ThumbnailStore;
+        writer
+            .lock()
+            .expect("writer")
+            .put_thumbnail(image_id, &thumb)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(thumb)
+}
+
 /// Submit one Background thumbnail job: decode preview → resize/encode → write
 /// BLOB → send JPEG bytes for immediate display. Returns the JobId so the caller
 /// can record it for reprioritization. (Called from `ingest_job`; the returned
@@ -131,20 +162,12 @@ pub fn spawn_thumbnail(
         if cancel.is_cancelled() {
             return;
         }
-        let result = ferrolite_decode::decode_preview(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|preview| {
-                ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())
-            });
-        match result {
+        match thumbnail_blocking(&writer, image_id, &path) {
             Ok(thumb) => {
-                {
-                    use ferrolite_catalog::ThumbnailStore;
-                    if let Err(e) = writer.lock().expect("writer").put_thumbnail(image_id, &thumb) {
-                        eprintln!("ferrolite: put_thumbnail failed: {e}");
-                    }
-                }
-                let _ = tx.send(AppEvent::ThumbReady { image_id, jpeg: thumb.bytes });
+                let _ = tx.send(AppEvent::ThumbReady {
+                    image_id,
+                    jpeg: thumb.bytes,
+                });
             }
             Err(msg) => {
                 eprintln!("ferrolite: thumbnail failed for #{image_id}: {msg}");

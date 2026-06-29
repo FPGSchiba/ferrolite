@@ -16,7 +16,11 @@ impl FerroliteApp {
             rs.renderer.write().callback_resources.insert(res);
         }
         let state = crate::state::AppState::new().expect("open catalog");
-        Self { module: Module::default(), thumb_size: 46.0, state }
+        Self {
+            module: Module::default(),
+            thumb_size: 46.0,
+            state,
+        }
     }
 }
 

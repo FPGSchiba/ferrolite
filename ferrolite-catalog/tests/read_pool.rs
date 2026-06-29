@@ -34,14 +34,20 @@ fn new_image(folder_id: i64, filename: &str) -> NewImage {
 fn read_pool_sees_writes_committed_by_the_writer() {
     let path = temp_db();
     let catalog = Catalog::open(&path).unwrap();
-    let folder_id = catalog.upsert_folder(std::path::Path::new("/tmp/photos")).unwrap();
+    let folder_id = catalog
+        .upsert_folder(std::path::Path::new("/tmp/photos"))
+        .unwrap();
     let pool = ReadPool::open(&path, 2).unwrap();
 
     assert_eq!(pool.image_count().unwrap(), 0);
 
     // Writer inserts while a reader is live; WAL lets the reader proceed.
-    catalog.upsert_image(&new_image(folder_id, "a.nef")).unwrap();
-    catalog.upsert_image(&new_image(folder_id, "b.nef")).unwrap();
+    catalog
+        .upsert_image(&new_image(folder_id, "a.nef"))
+        .unwrap();
+    catalog
+        .upsert_image(&new_image(folder_id, "b.nef"))
+        .unwrap();
 
     assert_eq!(pool.image_count().unwrap(), 2);
     let imgs = pool.list_images(folder_id).unwrap();

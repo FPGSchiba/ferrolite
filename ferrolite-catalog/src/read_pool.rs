@@ -29,7 +29,10 @@ impl ReadPool {
         for _ in 0..size.max(1) {
             conns.push(open_read_only(path)?);
         }
-        Ok(Self { path: path.to_path_buf(), conns: Mutex::new(conns) })
+        Ok(Self {
+            path: path.to_path_buf(),
+            conns: Mutex::new(conns),
+        })
     }
 
     fn with_conn<R>(

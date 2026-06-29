@@ -13,7 +13,11 @@ pub struct GridMetrics {
 pub fn metrics(available_width: f32, cell: f32, gap: f32) -> GridMetrics {
     let step = cell + gap;
     let columns = (((available_width + gap) / step).floor() as usize).max(1);
-    GridMetrics { columns, cell, row_height: cell + gap }
+    GridMetrics {
+        columns,
+        cell,
+        row_height: cell + gap,
+    }
 }
 
 /// Inclusive-exclusive range of item indices intersecting the viewport, padded
@@ -55,7 +59,11 @@ mod tests {
 
     #[test]
     fn visible_items_windows_around_scroll() {
-        let m = GridMetrics { columns: 5, cell: 100.0, row_height: 110.0 };
+        let m = GridMetrics {
+            columns: 5,
+            cell: 100.0,
+            row_height: 110.0,
+        };
         // scrolled to row ~9 (990px), 600px tall viewport.
         let r = visible_items(990.0, 600.0, &m, 1000);
         // first_row = 9-1=8 → start=40; last_row=ceil(1590/110)+1=16 → end=80
@@ -65,13 +73,21 @@ mod tests {
 
     #[test]
     fn visible_items_empty_when_no_items() {
-        let m = GridMetrics { columns: 5, cell: 100.0, row_height: 110.0 };
+        let m = GridMetrics {
+            columns: 5,
+            cell: 100.0,
+            row_height: 110.0,
+        };
         assert_eq!(visible_items(0.0, 600.0, &m, 0), 0..0);
     }
 
     #[test]
     fn visible_items_clamps_to_item_count() {
-        let m = GridMetrics { columns: 5, cell: 100.0, row_height: 110.0 };
+        let m = GridMetrics {
+            columns: 5,
+            cell: 100.0,
+            row_height: 110.0,
+        };
         let r = visible_items(0.0, 10_000.0, &m, 12);
         assert_eq!(r.end, 12);
     }

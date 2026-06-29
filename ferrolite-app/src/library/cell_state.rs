@@ -38,7 +38,10 @@ mod tests {
 
     #[test]
     fn failed_row_is_failed_even_without_texture() {
-        assert_eq!(cell_state(&rec(DecodeStatus::Failed), false), CellState::Failed);
+        assert_eq!(
+            cell_state(&rec(DecodeStatus::Failed), false),
+            CellState::Failed
+        );
     }
 
     #[test]
@@ -48,6 +51,9 @@ mod tests {
 
     #[test]
     fn done_without_texture_is_placeholder() {
-        assert_eq!(cell_state(&rec(DecodeStatus::Done), false), CellState::Placeholder);
+        assert_eq!(
+            cell_state(&rec(DecodeStatus::Done), false),
+            CellState::Placeholder
+        );
     }
 }

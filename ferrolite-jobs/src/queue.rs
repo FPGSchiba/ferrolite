@@ -51,7 +51,11 @@ impl Queue {
 
     /// Remove and return the highest-priority live job, or `None` if empty.
     pub fn pop_highest(&mut self) -> Option<(JobId, QueuedJob)> {
-        for p in [Priority::Interactive, Priority::Visible, Priority::Background] {
+        for p in [
+            Priority::Interactive,
+            Priority::Visible,
+            Priority::Background,
+        ] {
             let bucket = &mut self.buckets[p.index()];
             while let Some(id) = bucket.pop_front() {
                 match self.jobs.get(&id) {
@@ -85,7 +89,11 @@ mod tests {
     }
 
     fn job_at(p: Priority) -> QueuedJob {
-        QueuedJob { priority: p, token: CancelToken::new(), run: Box::new(|_| {}) }
+        QueuedJob {
+            priority: p,
+            token: CancelToken::new(),
+            run: Box::new(|_| {}),
+        }
     }
 
     #[test]

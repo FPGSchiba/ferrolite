@@ -120,6 +120,53 @@ fn needs_reingest_detects_changes() {
     );
 }
 
+use ferrolite_catalog::{generate_thumbnail, ThumbnailStore, THUMB_MAX_EDGE};
+use ferrolite_image::{ImageBuffer, PixelFormat};
+
+fn solid_rgb(width: u32, height: u32) -> ImageBuffer {
+    let pixels = vec![120u8; (width * height * 3) as usize];
+    ImageBuffer::new(width, height, PixelFormat::Rgb8, pixels).unwrap()
+}
+
+#[test]
+fn generate_thumbnail_fits_within_max_edge_and_is_decodable_jpeg() {
+    let thumb = generate_thumbnail(&solid_rgb(1024, 512)).expect("thumb");
+    assert!(thumb.width <= THUMB_MAX_EDGE && thumb.height <= THUMB_MAX_EDGE);
+    assert_eq!(thumb.format, "jpeg");
+    // Aspect ratio preserved: 2:1 source → wider than tall.
+    assert!(thumb.width > thumb.height);
+    // Bytes decode as a JPEG of the reported size.
+    let decoded = image::load_from_memory(&thumb.bytes)
+        .expect("decodes")
+        .to_rgb8();
+    assert_eq!(decoded.width(), thumb.width);
+    assert_eq!(decoded.height(), thumb.height);
+}
+
+#[test]
+fn thumbnail_store_blob_round_trip() {
+    let cat = Catalog::open_in_memory().unwrap();
+    let folder = cat
+        .upsert_folder(std::path::Path::new("/photos/a"))
+        .unwrap();
+    let id = cat
+        .upsert_image(&sample_image(folder, "DSC_0001.NEF"))
+        .unwrap();
+
+    let thumb = generate_thumbnail(&solid_rgb(640, 480)).unwrap();
+    cat.put_thumbnail(id, &thumb).unwrap();
+
+    let got = cat.get_thumbnail(id).unwrap().expect("stored thumb");
+    assert_eq!(got.width, thumb.width);
+    assert_eq!(got.height, thumb.height);
+    assert_eq!(got.format, "jpeg");
+    assert_eq!(got.bytes, thumb.bytes);
+    assert!(
+        cat.get_thumbnail(999_999).unwrap().is_none(),
+        "missing → None"
+    );
+}
+
 /// Minimal temp dir without an extra dependency: unique path under the OS temp
 /// dir using the test thread name + a process-unique counter.
 fn tempdir() -> std::path::PathBuf {

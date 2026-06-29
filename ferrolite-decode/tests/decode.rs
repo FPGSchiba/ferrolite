@@ -21,3 +21,15 @@ fn read_metadata_returns_camera_and_dimensions() {
         "dimensions should be > 0"
     );
 }
+
+#[test]
+fn decode_preview_returns_nonempty_rgb8() {
+    use ferrolite_image::PixelFormat;
+    let buf = ferrolite_decode::decode_preview(&fixture()).expect("preview");
+    assert_eq!(buf.format, PixelFormat::Rgb8);
+    assert!(buf.width > 0 && buf.height > 0);
+    assert_eq!(
+        buf.pixels.len(),
+        buf.width as usize * buf.height as usize * 3
+    );
+}

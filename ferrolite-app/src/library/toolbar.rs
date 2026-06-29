@@ -16,11 +16,12 @@ fn dim(text: &str) -> egui::RichText {
         .size(11.0)
 }
 
-pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32) {
+/// Returns true if the include-subfolders toggle changed this frame.
+pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, include_subfolders: &mut bool) -> bool {
+    let mut changed = false;
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
 
-        // Search — fixed width, dim input background (mockup: 230px box).
         let mut query = String::new();
         ui.add_enabled(
             false,
@@ -29,11 +30,9 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32) {
                 .desired_width(206.0),
         );
 
-        // Sort.
         ui.label(dim("Sort"));
         ui.add_enabled(false, egui::Button::new("Capture Time  ▾"));
 
-        // Filter affordances (visual stubs; real filtering is a later phase).
         ui.label(dim("Filter"));
         ui.add_enabled(
             false,
@@ -41,7 +40,9 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32) {
         );
         ui.add_enabled(false, egui::Button::new("Metadata  ▾"));
 
-        // Thumbnail-size slider, pinned right at a fixed width.
+        // Real toggle: include images from subfolders in the grid.
+        changed = ui.checkbox(include_subfolders, "Subfolders").changed();
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(SIZE_SLIDER_W, ui.available_height()),
@@ -63,4 +64,5 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32) {
             );
         });
     });
+    changed
 }

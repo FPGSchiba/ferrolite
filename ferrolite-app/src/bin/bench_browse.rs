@@ -17,7 +17,9 @@
 //!   N            number of thumbnails to time for M1b (default: 100)
 
 use ferrolite_app::ingest::thumbnail_blocking;
-use ferrolite_catalog::{scan_raw_files, Catalog, DecodeStatus, NewImage, ThumbnailStore};
+use ferrolite_catalog::{
+    scan_raw_files, Catalog, DecodeStatus, FileKind, NewImage, ThumbnailStore,
+};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -114,7 +116,7 @@ fn main() {
     let mut errors = 0usize;
 
     for (image_id, path) in &image_ids {
-        match thumbnail_blocking(&writer, *image_id, path) {
+        match thumbnail_blocking(&writer, *image_id, path, FileKind::Raw) {
             Ok(_) => done += 1,
             Err(e) => {
                 errors += 1;
@@ -131,7 +133,7 @@ fn main() {
 
     // Continue decoding remaining images for throughput number.
     for (image_id, path) in image_ids.iter().skip(n_actual) {
-        match thumbnail_blocking(&writer, *image_id, path) {
+        match thumbnail_blocking(&writer, *image_id, path, FileKind::Raw) {
             Ok(_) => done += 1,
             Err(_) => errors += 1,
         }

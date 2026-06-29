@@ -57,6 +57,86 @@ fn recursive_ingest_wires_tree_and_keys_per_directory() {
 }
 
 #[test]
+fn prune_subtree_deletes_absent_files_and_folders() {
+    use std::collections::HashSet;
+    let root = nested_fixture("prune");
+    let db = std::env::temp_dir().join(format!("ferro-prune-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+    let cat = Catalog::open(&db).unwrap();
+    cat.ingest_folder(&root).unwrap();
+
+    let reads = ReadPool::open(&db, 1).unwrap();
+    let folders = reads.list_folders().unwrap();
+    let root_id = folders.iter().find(|f| f.parent_id.is_none()).unwrap().id;
+    let folder_2025 = folders
+        .iter()
+        .find(|f| f.path.ends_with("2025"))
+        .unwrap()
+        .id;
+    let all = reads.list_images_recursive(root_id).unwrap();
+    assert_eq!(all.len(), 3);
+
+    // Simulate a Full rescan where 2025 (folder + its image) vanished from disk
+    // and one 2024 image was deleted: keep everything else.
+    let drop_2024_img = all
+        .iter()
+        .find(|i| i.folder_id != root_id && i.folder_id != folder_2025)
+        .map(|i| i.id)
+        .unwrap();
+    // The image inside 2025, whose whole folder vanishes (folder-level prune path).
+    let drop_2025_img = all
+        .iter()
+        .find(|i| i.folder_id == folder_2025)
+        .map(|i| i.id)
+        .unwrap();
+    let kept_folders: HashSet<i64> = folders
+        .iter()
+        .map(|f| f.id)
+        .filter(|id| *id != folder_2025)
+        .collect();
+    let kept_images: HashSet<i64> = all
+        .iter()
+        .map(|i| i.id)
+        .filter(|id| *id != drop_2024_img)
+        .filter(|id| {
+            // also drop 2025's image (its folder vanished)
+            all.iter()
+                .find(|i| i.id == *id)
+                .map(|i| i.folder_id != folder_2025)
+                .unwrap_or(false)
+        })
+        .collect();
+
+    cat.prune_subtree(root_id, &kept_folders, &kept_images)
+        .unwrap();
+
+    let after_folders = reads.list_folders().unwrap();
+    assert!(
+        after_folders.iter().all(|f| f.id != folder_2025),
+        "vanished folder pruned"
+    );
+    let after_images = reads.list_images_recursive(root_id).unwrap();
+    assert!(
+        after_images.iter().all(|i| i.id != drop_2024_img),
+        "deleted file pruned"
+    );
+    assert_eq!(
+        after_images.len(),
+        1,
+        "only the kept top-level image remains"
+    );
+    assert!(reads.get_thumbnail(drop_2024_img).unwrap().is_none());
+    // Folder-level prune must also drop the thumbnail of an image in a vanished folder.
+    assert!(
+        reads.get_thumbnail(drop_2025_img).unwrap().is_none(),
+        "thumbnail of an image in a pruned folder is removed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
 fn remove_folder_deletes_subtree_only() {
     let root = nested_fixture("rm");
     let db = std::env::temp_dir().join(format!("ferro-tree-rm-{}.db", std::process::id()));

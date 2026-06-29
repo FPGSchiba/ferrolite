@@ -47,6 +47,15 @@ pub struct AppState {
     /// `refresh_images()` so idle frames issue zero SQL queries.
     pub dirty: bool,
 
+    /// Number of ingest jobs currently in flight (open/reindex/watcher/startup).
+    /// The watcher fires only when this is 0. Incremented on spawn, decremented
+    /// on `IngestDone`.
+    pub active_ingests: usize,
+    /// Wall-clock of the last watcher tick (for the periodic check).
+    pub last_watch_check: Option<std::time::Instant>,
+    /// One-time startup rescan guard (fires on the first update frame).
+    pub startup_rescan_done: bool,
+
     /// Recursive (subtree) vs direct folder view. Default true (on).
     pub include_subfolders: bool,
     /// Folder ids whose children are shown in the left-panel tree.
@@ -85,6 +94,9 @@ impl AppState {
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
             dirty: true,
+            active_ingests: 0,
+            last_watch_check: None,
+            startup_rescan_done: false,
             include_subfolders: true,
             expanded_folders: HashSet::new(),
             pending_remove: None,
@@ -122,16 +134,25 @@ impl AppState {
         }
     }
 
-    /// Reset per-folder job + counter state when switching folders: cancel any
-    /// pending thumbnail jobs, drop their handles, zero the progress counters,
-    /// and mark the view dirty so the grid reloads.
-    pub fn reset_for_new_folder(&mut self) {
+    /// Cancel any in-flight ingest + pending thumbnail jobs, without touching the
+    /// view (images/current_folder/selection) or counters. Used by reindex.
+    pub fn cancel_pending_jobs(&mut self) {
         if let Some(h) = self.ingest_handle.take() {
             h.cancel();
+            // A queued-but-not-yet-dispatched job is skipped by the worker and
+            // never emits IngestDone, so decrement here to keep the counter
+            // balanced. If the job was already running it will still emit
+            // IngestDone; the extra decrement is absorbed by saturating_sub.
+            self.active_ingests = self.active_ingests.saturating_sub(1);
         }
         for (_image_id, job_id) in self.thumb_jobs.drain() {
             self.jobs.cancel(job_id);
         }
+    }
+
+    /// Reset per-folder job + counter state when switching folders.
+    pub fn reset_for_new_folder(&mut self) {
+        self.cancel_pending_jobs();
         self.indexed = 0;
         self.thumb_total = 0;
         self.thumb_done = 0;
@@ -211,6 +232,9 @@ impl AppState {
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
             dirty: true,
+            active_ingests: 0,
+            last_watch_check: None,
+            startup_rescan_done: false,
             include_subfolders: true,
             expanded_folders: HashSet::new(),
             pending_remove: None,
@@ -357,6 +381,47 @@ mod tests {
             !remaining.contains(&sibling),
             "removed folder must be absent from list"
         );
+    }
+
+    #[test]
+    fn cancel_pending_jobs_keeps_view_but_drains_jobs() {
+        let mut s = AppState::for_test();
+        s.current_folder = Some(7);
+        s.images = vec![]; // (kept as-is; view not cleared)
+        s.selected = Some(3);
+        s.indexed = 5;
+        s.thumb_jobs.insert(1, ferrolite_jobs::JobId(100));
+        s.thumb_jobs.insert(2, ferrolite_jobs::JobId(101));
+
+        s.cancel_pending_jobs();
+
+        assert!(s.thumb_jobs.is_empty(), "thumb jobs drained");
+        assert_eq!(s.current_folder, Some(7), "current folder preserved");
+        assert_eq!(s.selected, Some(3), "selection preserved");
+        assert_eq!(s.indexed, 5, "counters not zeroed by cancel_pending_jobs");
+    }
+
+    #[test]
+    fn cancel_pending_jobs_decrements_active_and_clears_handle() {
+        let mut s = AppState::for_test();
+        s.current_folder = Some(7);
+        s.selected = Some(3);
+        // Simulate one in-flight ingest with a real handle.
+        let handle = s
+            .jobs
+            .submit(ferrolite_jobs::Priority::Background, |_cancel| {});
+        s.ingest_handle = Some(handle);
+        s.active_ingests = 1;
+
+        s.cancel_pending_jobs();
+
+        assert_eq!(
+            s.active_ingests, 0,
+            "active_ingests decremented when a handle was cancelled"
+        );
+        assert!(s.ingest_handle.is_none(), "ingest_handle cleared");
+        assert_eq!(s.current_folder, Some(7), "view preserved");
+        assert_eq!(s.selected, Some(3), "selection preserved");
     }
 
     #[test]

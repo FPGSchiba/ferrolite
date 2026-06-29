@@ -233,6 +233,16 @@ fn kind_round_trips_and_schema_is_v2() {
     assert_eq!(rows[1].kind, FileKind::Standard); // s.jpg
 }
 
+#[test]
+fn folder_path_round_trips() {
+    let cat = ferrolite_catalog::Catalog::open_in_memory().unwrap();
+    let id = cat
+        .upsert_folder(std::path::Path::new("/photos/a"), None)
+        .unwrap();
+    assert_eq!(cat.folder_path(id).unwrap().as_deref(), Some("/photos/a"));
+    assert_eq!(cat.folder_path(999_999).unwrap(), None);
+}
+
 /// Minimal temp dir without an extra dependency: unique path under the OS temp
 /// dir using the test thread name + a process-unique counter.
 fn tempdir() -> std::path::PathBuf {

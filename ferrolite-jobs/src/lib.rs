@@ -2,5 +2,6 @@
 //! cooperative cancellation, and panic isolation. Engine-transferable.
 
 mod priority;
+mod queue;
 
 pub use priority::{CancelToken, JobId, Priority};

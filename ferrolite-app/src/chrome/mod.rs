@@ -31,6 +31,7 @@ pub fn title_bar(ctx: &Context, ui: &mut egui::Ui, module: &mut Module, version:
 
     // Right cluster: window controls (close rightmost) + version, in a bounded
     // right-anchored rect. Drawn after the drag region so the buttons receive clicks.
+    let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
     let right_w = 3.0 * window_controls::BTN_W + 72.0;
     let right_rect = Rect::from_min_max(pos2(bar.right() - right_w, bar.top()), bar.right_bottom());
     let control_clicked = ui
@@ -39,7 +40,7 @@ pub fn title_bar(ctx: &Context, ui: &mut egui::Ui, module: &mut Module, version:
                 .max_rect(right_rect)
                 .layout(Layout::right_to_left(Align::Center)),
             |ui| {
-                let clicked = window_controls::controls_ui(ui);
+                let clicked = window_controls::controls_ui(ui, is_maximized);
                 ui.add_space(8.0);
                 ui.monospace(version);
                 clicked
@@ -47,8 +48,7 @@ pub fn title_bar(ctx: &Context, ui: &mut egui::Ui, module: &mut Module, version:
         )
         .inner;
     if let Some(action) = control_clicked {
-        let max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-        ctx.send_viewport_cmd(window_controls::command(action, max));
+        ctx.send_viewport_cmd(window_controls::command(action, is_maximized));
     }
 
     // Left cluster: icon mark + wordmark + menu labels, bounded so it can't reach

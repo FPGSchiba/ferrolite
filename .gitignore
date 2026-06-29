@@ -20,3 +20,6 @@ debug
 #.idea/
 
 /target
+
+# SDD / superpowers scratch
+.superpowers/

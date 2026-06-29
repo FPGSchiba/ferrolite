@@ -25,6 +25,53 @@ impl FerroliteApp {
     }
 }
 
+impl FerroliteApp {
+    /// Handle a tier-1 preview: convert to display-linear, build the rung-1
+    /// `VirtualTexture`, stash it (+ GpuContext) in eframe's `callback_resources`,
+    /// and fit the view. Stale events (no open viewer, or a different image_id)
+    /// are dropped — the user may have closed/switched the viewer mid-decode.
+    fn apply_preview_ready(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        image: &ferrolite_image::ImageBuffer,
+    ) {
+        let Some(v) = self.state.viewer.as_mut() else {
+            return; // viewer closed while decoding
+        };
+        if v.image_id != image_id {
+            return; // stale: a different image is now open
+        }
+        let Some(rs) = frame.wgpu_render_state() else {
+            return; // no wgpu backend (should not happen in this build)
+        };
+
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let linear = viewer::load::preview_to_linear(image);
+        let dims = (linear.width, linear.height);
+        let vt = ferrolite_vt::VirtualTexture::single_texture(&gpu, &linear, rs.target_format);
+
+        // Fit to the last-known viewport; fall back to the image's own size when
+        // the canvas has not painted yet (zoom is normalized away by fit anyway).
+        let viewport = if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
+            v.viewport
+        } else {
+            (dims.0 as f32, dims.1 as f32)
+        };
+        v.view = ferrolite_vt::ViewTransform::fit(dims, viewport);
+        v.loaded = true;
+
+        rs.renderer
+            .write()
+            .callback_resources
+            .insert(viewer::ViewerGpu {
+                ctx: gpu,
+                vt,
+                image_id,
+            });
+    }
+}
+
 /// Title-bar height; resize edges start below it so they never fight the bar.
 const TITLE_BAR_H: f32 = 30.0;
 
@@ -70,9 +117,15 @@ fn window_resize(ctx: &egui::Context) {
 }
 
 impl eframe::App for FerroliteApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Drain job results into state; upload textures for ThumbReady events.
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Drain job results into state; upload textures for ThumbReady events and
+        // build the viewer's rung-1 VirtualTexture for PreviewReady events.
         while let Ok(event) = self.state.rx.try_recv() {
+            if let crate::events::AppEvent::PreviewReady { image_id, image } = &event {
+                self.apply_preview_ready(frame, *image_id, image);
+                self.state.dirty = true;
+                continue;
+            }
             if let Some((id, jpeg)) = self.state.apply(event) {
                 self.state.upload_thumbnail(ctx, id, jpeg);
             }
@@ -160,11 +213,30 @@ impl eframe::App for FerroliteApp {
             self.state.viewer = None;
         }
 
+        // Submit the tier-1 preview decode once when a viewer opens.
+        if let Some(v) = self.state.viewer.as_mut() {
+            if !v.preview_requested {
+                viewer::load::spawn_preview(
+                    &self.state.jobs,
+                    &self.state.tx,
+                    ctx,
+                    v.image_id,
+                    v.path.clone(),
+                    v.kind,
+                );
+                v.preview_requested = true;
+            }
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG_CANVAS))
             .show(ctx, |ui| {
-                if self.state.viewer.is_some() {
-                    viewer::paint(ui);
+                if let Some(v) = self.state.viewer.as_mut() {
+                    let loading = viewer::paint(ui, v);
+                    if loading {
+                        // Keep animating until the first pixel is ready.
+                        ui.ctx().request_repaint();
+                    }
                 } else if self.module.is_library() {
                     crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else {

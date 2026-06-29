@@ -1,23 +1,33 @@
-//! Single-image viewer state + pure pan/zoom input math. The two-tier load and
-//! GPU wiring are layered on in later tasks.
+//! Single-image viewer state + pure pan/zoom input math, plus the tier-1
+//! preview decode → upload → paint wiring (egui↔wgpu callback).
+
+pub mod callback;
+pub mod load;
+
+pub use callback::{ViewerCallback, ViewerGpu};
 
 use std::path::PathBuf;
 
 use ferrolite_image::FileKind;
 use ferrolite_vt::ViewTransform;
 
-// Fields are read by Tasks 14–15 (preview decode + GPU wiring).
-#[allow(dead_code)]
 pub struct ViewerState {
     pub image_id: i64,
     pub path: PathBuf,
     pub kind: FileKind,
     pub view: ViewTransform,
+    /// Last painted canvas size (image-space fit + zoom/pan math need it).
+    pub viewport: (f32, f32),
+    /// True once an `Interactive` preview decode has been submitted (one-shot).
+    pub preview_requested: bool,
+    /// True once the rung-1 `VirtualTexture` is uploaded and the view fitted; the
+    /// VT itself lives in eframe's `callback_resources` (paint reads it there).
+    pub loaded: bool,
 }
 
 impl ViewerState {
     /// Open the viewer for the given image. The viewport size is not yet known;
-    /// `ViewTransform::fit` will be called on the first paint frame.
+    /// `ViewTransform::fit` will be called when the preview arrives.
     pub fn open(image_id: i64, path: PathBuf, kind: FileKind) -> Self {
         Self {
             image_id,
@@ -27,6 +37,9 @@ impl ViewerState {
                 zoom: 1.0,
                 pan: (0.0, 0.0),
             },
+            viewport: (0.0, 0.0),
+            preview_requested: false,
+            loaded: false,
         }
     }
 }
@@ -86,10 +99,54 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
     }
 }
 
-/// Stub paint: clears the canvas area. Real GPU wiring lands in Task 14.
-pub fn paint(ui: &mut egui::Ui) {
+/// Paint the viewer's central canvas: fill black, read scroll/drag input into
+/// the view transform, record the viewport size, and (once the rung-1 preview
+/// texture is loaded) enqueue the egui↔wgpu paint callback. Returns `true` while
+/// the preview is still loading so the caller can `request_repaint` for a prompt
+/// first pixel.
+pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
     let rect = ui.available_rect_before_wrap();
-    ui.painter().rect_filled(rect, 0.0, egui::Color32::BLACK);
+    let painter = ui.painter();
+    painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+
+    let viewport = (rect.width(), rect.height());
+    state.viewport = viewport;
+
+    // Pointer interaction over the canvas: drag pans, scroll zooms about cursor.
+    let resp = ui.interact(
+        rect,
+        ui.id().with(("viewer-canvas", state.image_id)),
+        egui::Sense::click_and_drag(),
+    );
+    if state.loaded {
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            state.view = apply_pan(state.view, (d.x, d.y));
+        }
+        let scroll = ui.input(|i| i.raw_scroll_delta.y);
+        if scroll.abs() > f32::EPSILON {
+            if let Some(pos) = resp.hover_pos() {
+                let cursor = (pos.x - rect.left(), pos.y - rect.top());
+                // Normalize wheel notches (~50px) into the apply_zoom step scale.
+                state.view = apply_zoom(state.view, scroll / 50.0, cursor, viewport);
+            }
+        }
+    }
+
+    if state.loaded {
+        ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+            rect,
+            ViewerCallback {
+                image_id: state.image_id,
+                view: state.view,
+                viewport,
+            },
+        ));
+        false
+    } else {
+        // Texture not ready yet — keep animating so the first pixel arrives fast.
+        true
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,13 @@ pub enum AppEvent {
     },
     /// The ingest walk + row upserts completed.
     IngestDone,
+    /// A viewer tier-1 embedded preview finished decoding off-thread. Carries the
+    /// upright RGB8/RGBA8 buffer for upload as a rung-1 `VirtualTexture`. Handled
+    /// directly in `app.rs` (needs the GPU render state), not folded by `apply`.
+    PreviewReady {
+        image_id: i64,
+        image: ferrolite_image::ImageBuffer,
+    },
 }
 
 impl AppState {
@@ -50,6 +57,8 @@ impl AppState {
                 self.active_ingests = self.active_ingests.saturating_sub(1);
                 None
             }
+            // Handled in `app.rs` (needs GPU state) before reaching `apply`.
+            AppEvent::PreviewReady { .. } => None,
         }
     }
 }

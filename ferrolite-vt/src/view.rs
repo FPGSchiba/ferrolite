@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::{tiles_per_level, LinearRgbaF32, TileCoord, TILE_SIZE};
@@ -59,10 +59,15 @@ pub struct TiledResources {
 /// Rung-1 (single-texture) GPU resources.
 struct SingleResources {
     texture: wgpu::Texture,
+    texture_view: wgpu::TextureView,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     image_dims: (u32, u32),
+    /// Per-frame uniform buffer (transform), reused and rewritten via `prepare_single`.
+    uniform_buf: wgpu::Buffer,
+    /// Bind group built in `prepare_single`, consumed by `draw_single`.
+    bind_group: Option<wgpu::BindGroup>,
 }
 
 /// Per-level slot-table geometry: tiles-per-row and flat-slot offset for each LOD.
@@ -85,7 +90,10 @@ struct StreamingResources {
     source: Arc<dyn TileSource + Send + Sync>,
     jobs: Arc<JobSystem>,
     tx: Sender<(TileCoord, LinearRgbaF32)>,
-    rx: Receiver<(TileCoord, LinearRgbaF32)>,
+    // `Mutex` so the enclosing `VirtualTexture` is `Sync` (required to live in
+    // eframe's `callback_resources` for the rung-1 path). Drained single-threaded
+    // on the render thread, so the lock is uncontended.
+    rx: Mutex<Receiver<(TileCoord, LinearRgbaF32)>>,
     in_flight: HashMap<TileCoord, JobHandle>,
     // CPU mirror of the slot table (all NOT_RESIDENT until a tile is uploaded).
     slots: Vec<u32>,
@@ -112,7 +120,8 @@ struct SparseResources {
     source: Arc<dyn TileSource + Send + Sync>,
     jobs: Arc<JobSystem>,
     tx: Sender<(TileCoord, LinearRgbaF32)>,
-    rx: Receiver<(TileCoord, LinearRgbaF32)>,
+    // See `StreamingResources::rx` — `Mutex` keeps `VirtualTexture: Sync`.
+    rx: Mutex<Receiver<(TileCoord, LinearRgbaF32)>>,
     in_flight: HashMap<TileCoord, JobHandle>,
     // CPU mirror of the per-tile slot (all NOT_RESIDENT until uploaded).
     slots: Vec<u32>,
@@ -234,18 +243,92 @@ impl VirtualTexture {
             ..Default::default()
         });
 
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Persistent uniform buffer rewritten each frame by `prepare_single`.
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-xf"),
+            size: std::mem::size_of::<TransformUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             single: Some(SingleResources {
                 texture,
+                texture_view,
                 bind_group_layout: bgl,
                 sampler,
                 pipeline,
                 image_dims: (image.width, image.height),
+                uniform_buf,
+                bind_group: None,
             }),
             tiled: None,
             streaming: None,
             sparse: None,
         }
+    }
+
+    /// Image dimensions of the rung-1 texture, if this is a single-texture VT.
+    pub fn single_dims(&self) -> Option<(u32, u32)> {
+        self.single.as_ref().map(|s| s.image_dims)
+    }
+
+    /// Prepare-half of the rung-1 paint (egui_wgpu `CallbackTrait::prepare`):
+    /// rewrite the per-frame transform uniform (via `queue.write_buffer`, no new
+    /// allocation) and build the bind group, stashing it for `draw_single`.
+    /// Call once per frame before `draw_single`.
+    pub fn prepare_single(&mut self, ctx: &GpuContext, view: &ViewTransform, viewport: (f32, f32)) {
+        let single = self
+            .single
+            .as_mut()
+            .expect("prepare_single called on a non-single VirtualTexture");
+        let uniform = TransformUniform {
+            zoom: view.zoom,
+            _pad0: 0.0,
+            pan: [view.pan.0, view.pan.1],
+            viewport: [viewport.0, viewport.1],
+            image: [single.image_dims.0 as f32, single.image_dims.1 as f32],
+        };
+        ctx.queue
+            .write_buffer(&single.uniform_buf, 0, bytemuck::bytes_of(&uniform));
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vt-bind"),
+            layout: &single.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&single.texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&single.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: single.uniform_buf.as_entire_binding(),
+                },
+            ],
+        });
+        single.bind_group = Some(bind);
+    }
+
+    /// Paint-half of the rung-1 paint (egui_wgpu `CallbackTrait::paint`): set the
+    /// pipeline + the bind group built by `prepare_single` and draw the
+    /// full-screen triangle. No device/queue needed. A no-op if `prepare_single`
+    /// has not run.
+    pub fn draw_single(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let single = self
+            .single
+            .as_ref()
+            .expect("draw_single called on a non-single VirtualTexture");
+        let Some(bind) = single.bind_group.as_ref() else {
+            return;
+        };
+        pass.set_pipeline(&single.pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     pub fn render(
@@ -736,7 +819,7 @@ impl VirtualTexture {
             source,
             jobs,
             tx,
-            rx,
+            rx: Mutex::new(rx),
             in_flight: HashMap::new(),
             slots,
             array_view,
@@ -829,7 +912,8 @@ impl VirtualTexture {
         };
         let mut made_resident = 0;
         // Collect first so we don't hold the receiver borrow across mutation.
-        let ready: Vec<(TileCoord, LinearRgbaF32)> = s.rx.try_iter().collect();
+        let ready: Vec<(TileCoord, LinearRgbaF32)> =
+            s.rx.get_mut().expect("vt rx mutex").try_iter().collect();
         for (coord, tile) in ready {
             s.in_flight.remove(&coord);
             // If a budget-driven eviction freed a slot, evict an LRU resident to
@@ -992,7 +1076,7 @@ impl VirtualTexture {
             source,
             jobs,
             tx,
-            rx,
+            rx: Mutex::new(rx),
             in_flight: HashMap::new(),
             slots,
             page_table,
@@ -1087,7 +1171,8 @@ impl VirtualTexture {
             None => return 0,
         };
         let mut made_resident = 0;
-        let ready: Vec<(TileCoord, LinearRgbaF32)> = s.rx.try_iter().collect();
+        let ready: Vec<(TileCoord, LinearRgbaF32)> =
+            s.rx.get_mut().expect("vt rx mutex").try_iter().collect();
         for (coord, tile) in ready {
             s.in_flight.remove(&coord);
             let slot = match s.allocator.alloc(coord) {

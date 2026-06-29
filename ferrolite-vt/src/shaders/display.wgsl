@@ -108,3 +108,72 @@ fn fs_tiled(in: VsOut) -> @location(0) vec4<f32> {
     let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
     return vec4(linear_to_srgb(lin), 1.0);
 }
+
+// ---- Rung 4: page-table indirection + GPU feedback pass ----
+//
+// The slot for a virtual tile is resolved from a page-table texture (`page_table`)
+// instead of the `slots` storage buffer. The shader ALSO marks the tile it wanted
+// (at the picked LOD) into the `feedback` storage buffer, which the CPU reads back
+// one frame later to drive streaming (GPU-truth visibility).
+
+@group(0) @binding(6) var page_table: texture_2d<u32>;
+@group(0) @binding(7) var<storage, read_write> feedback: array<atomic<u32>>;
+
+// Flat index of (lvl, tx, ty) into the page-table / feedback arrays.
+fn flat_at(lvl: u32, tx: u32, ty: u32) -> u32 {
+    let cols = tmeta.levels[lvl].x;
+    let offset = tmeta.levels[lvl].y;
+    return offset + ty * cols + tx;
+}
+
+// Resolve a virtual tile's slot from the page table.
+fn page_table_slot(flat: u32) -> u32 {
+    return textureLoad(page_table, vec2<i32>(i32(flat), 0), 0).r;
+}
+
+@fragment
+fn fs_sparse(in: VsOut) -> @location(0) vec4<f32> {
+    let screen_px = in.screen_uv * xf.viewport;
+    let center = xf.image * 0.5 + xf.pan;
+    let img_px = center + (screen_px - xf.viewport * 0.5) / xf.zoom;
+    if (img_px.x < 0.0 || img_px.x >= xf.image.x || img_px.y < 0.0 || img_px.y >= xf.image.y) {
+        return vec4(0.05, 0.05, 0.05, 1.0);
+    }
+    let lod = pick_lod(img_px);
+
+    // Mark the desired tile (at the PICKED lod) as needed — GPU-truth feedback of
+    // what the shader wanted, independent of which level the fallback resolves to.
+    let picked_px = img_px / f32(1u << lod);
+    let picked_tx = u32(picked_px.x) / 256u;
+    let picked_ty = u32(picked_px.y) / 256u;
+    let picked_flat = flat_at(lod, picked_tx, picked_ty);
+    atomicOr(&feedback[picked_flat], 1u);
+
+    // Coarse-LOD fallback: climb to coarser levels until a resident tile is found,
+    // resolving the slot from the page table. In-tile UV uses the resolved `lvl`.
+    var lvl = lod;
+    var slot = NOT_RESIDENT;
+    var lod_px = vec2<f32>(0.0, 0.0);
+    var tx = 0u;
+    var ty = 0u;
+    loop {
+        lod_px = img_px / f32(1u << lvl);
+        tx = u32(lod_px.x) / 256u;
+        ty = u32(lod_px.y) / 256u;
+        let cand = page_table_slot(flat_at(lvl, tx, ty));
+        if (cand != NOT_RESIDENT) {
+            slot = cand;
+            break;
+        }
+        if (lvl + 1u >= tmeta.level_count) {
+            break;
+        }
+        lvl = lvl + 1u;
+    }
+    if (slot == NOT_RESIDENT) {
+        return vec4(0.05, 0.05, 0.05, 1.0);
+    }
+    let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
+    let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
+    return vec4(linear_to_srgb(lin), 1.0);
+}

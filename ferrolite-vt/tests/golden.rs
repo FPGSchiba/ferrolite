@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ferrolite_gpu::GpuContext;
+use ferrolite_image::{TileCoord, TILE_SIZE};
 use ferrolite_jobs::JobSystem;
 use ferrolite_vt::{PyramidTileSource, TileSource, ViewTransform, VirtualTexture};
 
@@ -163,5 +164,118 @@ fn rung3_streaming_matches_resident_after_loads() {
     assert!(
         diff <= 32,
         "streaming render diverges from resident reference (diff={diff})"
+    );
+}
+
+/// Render the sparse VT offscreen one frame. The fragment shader marks the tiles
+/// it wanted into the feedback buffer as a side effect of drawing.
+fn render_sparse_frame(
+    ctx: &GpuContext,
+    vt: &VirtualTexture,
+    view: &ViewTransform,
+    w: u32,
+    h: u32,
+) {
+    let target = ctx.render_target(w, h, wgpu::TextureFormat::Rgba8Unorm);
+    let tview = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-sparse-offscreen"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &tview,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        vt.render_sparse(ctx, &mut pass, view, (w as f32, h as f32));
+    }
+    ctx.queue.submit([enc.finish()]);
+    ctx.device.poll(wgpu::Maintain::Wait);
+}
+
+/// Rung 4 (the full engine-style sparse VT): the display shader marks the tiles
+/// it actually sampled into a GPU feedback buffer; the CPU reads that back one
+/// frame later and loads the missing tiles, updating the page table. After a few
+/// render→feedback→process cycles the tile covering the viewport center — which
+/// the shader demonstrably wanted — must become resident.
+#[test]
+fn rung4_feedback_makes_center_tile_resident() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+
+    // A multi-tile gradient (>1 tile per side at LOD 0).
+    let (iw, ih) = (600u32, 500u32);
+    let mut px = Vec::new();
+    for y in 0..ih {
+        for x in 0..iw {
+            px.extend_from_slice(&[x as f32 / iw as f32, y as f32 / ih as f32, 0.25, 1.0]);
+        }
+    }
+    let img = ferrolite_image::LinearRgbaF32::new(iw, ih, px).unwrap();
+
+    let (w, h) = (256u32, 256u32);
+    // Zoom 1.0 so `pick_lod` resolves to LOD 0: the center pixel then maps to a
+    // deterministic LOD-0 tile (the image-space center divided by TILE_SIZE).
+    let view = ViewTransform {
+        zoom: 1.0,
+        pan: (0.0, 0.0),
+    };
+    // Center pixel -> image px = image center (pan 0). Tile that covers it:
+    let center_x = (iw / 2) / TILE_SIZE;
+    let center_y = (ih / 2) / TILE_SIZE;
+    let center = TileCoord {
+        lod: 0,
+        x: center_x,
+        y: center_y,
+    };
+
+    let src: Arc<dyn TileSource + Send + Sync> = Arc::new(PyramidTileSource::new(img));
+    let total: u32 = (0..src.level_count())
+        .map(|lod| {
+            let (lw, lh) = src.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(2));
+    let mut vt = VirtualTexture::sparse(
+        &ctx,
+        Arc::clone(&src),
+        Arc::clone(&jobs),
+        total,
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
+
+    // Feedback is one frame latent: render (marks feedback) -> process (reads it
+    // back, submits loads, updates the page table) -> repeat until the worker jobs
+    // land and the center tile resolves. Bounded by a wall-clock deadline.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        render_sparse_frame(&ctx, &vt, &view, w, h);
+        vt.request_view_feedback(&ctx);
+        ctx.device.poll(wgpu::Maintain::Poll);
+        vt.drain_loaded_sparse(&ctx);
+        if vt.is_resident(center) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    assert!(
+        vt.is_resident(center),
+        "feedback round-trip should make the center tile {center:?} resident"
     );
 }

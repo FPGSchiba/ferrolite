@@ -11,6 +11,7 @@ use ferrolite_jobs::{JobHandle, JobSystem, Priority};
 use half::f16;
 use wgpu::util::DeviceExt;
 
+use crate::page_table::{FeedbackBuffer, LevelLayout as FlatLayout, PageTable};
 use crate::pool::{SlotAllocator, TilePool, NOT_RESIDENT};
 use crate::residency::{needed_tiles, ResidencySet};
 use crate::{TileSource, ViewTransform};
@@ -99,10 +100,39 @@ struct StreamingResources {
     image_dims: (u32, u32),
 }
 
+/// Rung-4 sparse resources: everything in `StreamingResources`, but the NEEDED
+/// set is GPU-truth (read back from a `FeedbackBuffer` the display shader marks)
+/// rather than a CPU rect estimate, and the shader resolves slots through a
+/// `PageTable` indirection texture instead of a plain storage buffer.
+struct SparseResources {
+    pool: TilePool,
+    allocator: SlotAllocator,
+    residency: ResidencySet,
+    layout: FlatLayout,
+    source: Arc<dyn TileSource + Send + Sync>,
+    jobs: Arc<JobSystem>,
+    tx: Sender<(TileCoord, LinearRgbaF32)>,
+    rx: Receiver<(TileCoord, LinearRgbaF32)>,
+    in_flight: HashMap<TileCoord, JobHandle>,
+    // CPU mirror of the per-tile slot (all NOT_RESIDENT until uploaded).
+    slots: Vec<u32>,
+
+    // GPU bind resources.
+    page_table: PageTable,
+    feedback: FeedbackBuffer,
+    array_view: wgpu::TextureView,
+    meta_buf: wgpu::Buffer,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    pipeline: wgpu::RenderPipeline,
+    image_dims: (u32, u32),
+}
+
 pub struct VirtualTexture {
     single: Option<SingleResources>,
     tiled: Option<TiledResources>,
     streaming: Option<StreamingResources>,
+    sparse: Option<SparseResources>,
 }
 
 impl VirtualTexture {
@@ -214,6 +244,7 @@ impl VirtualTexture {
             }),
             tiled: None,
             streaming: None,
+            sparse: None,
         }
     }
 
@@ -527,6 +558,7 @@ impl VirtualTexture {
             single: None,
             tiled: Some(tiled),
             streaming: None,
+            sparse: None,
         }
     }
 
@@ -720,6 +752,7 @@ impl VirtualTexture {
             single: None,
             tiled: None,
             streaming: Some(streaming),
+            sparse: None,
         }
     }
 
@@ -728,12 +761,7 @@ impl VirtualTexture {
     /// no longer needed, submits `Visible` jobs for newly-needed tiles, and drains
     /// any tiles that finished loading (uploading them to the pool on this thread).
     /// GPU access is single-threaded — call this from the main/render thread.
-    pub fn request_view(
-        &mut self,
-        ctx: &GpuContext,
-        view: &ViewTransform,
-        viewport: (f32, f32),
-    ) {
+    pub fn request_view(&mut self, ctx: &GpuContext, view: &ViewTransform, viewport: (f32, f32)) {
         // First absorb anything that finished since last frame.
         self.drain_loaded(ctx);
 
@@ -742,12 +770,7 @@ impl VirtualTexture {
             .as_mut()
             .expect("request_view called on a non-streaming VirtualTexture");
 
-        let needed = needed_tiles(
-            s.image_dims,
-            view,
-            viewport,
-            s.layout.level_count,
-        );
+        let needed = needed_tiles(s.image_dims, view, viewport, s.layout.level_count);
         let (to_load, to_evict) = s.residency.diff(&needed);
 
         // Evict: free physical slots + drop residency + clear the slot-table entry.
@@ -898,6 +921,294 @@ impl VirtualTexture {
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
     }
+
+    /// Rung 4: the full engine-style sparse virtual texture. Like `streaming`, but
+    /// the display shader resolves slots through a `PageTable` indirection texture
+    /// and marks the tiles it actually wanted into a `FeedbackBuffer`. The CPU reads
+    /// that feedback back (one frame latent) to compute the GPU-truth needed set in
+    /// `request_view_feedback`, replacing the rung-3 CPU rect estimate.
+    pub fn sparse(
+        ctx: &GpuContext,
+        source: Arc<dyn TileSource + Send + Sync>,
+        jobs: Arc<JobSystem>,
+        budget_tiles: u32,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        let device = &ctx.device;
+        let (img_w, img_h) = source.level_size(0);
+        let level_count = source.level_count().min(MAX_LEVELS as u32);
+
+        // Per-level (cols, rows) grid; drives both the flat layout and TileMeta.
+        let mut dims = Vec::with_capacity(level_count as usize);
+        for lod in 0..level_count {
+            let (lw, lh) = source.level_size(lod);
+            dims.push((lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE)));
+        }
+        let layout = FlatLayout::new(&dims);
+        let total_tiles = layout.total().max(1);
+
+        let pool = TilePool::new(ctx, budget_tiles);
+        let array_view = pool.texture().create_view(&wgpu::TextureViewDescriptor {
+            label: Some("vt-sparse-pool-view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        // TileMeta uniform (cols + flat offset per level), same layout as rungs 2/3.
+        let mut levels = [[0u32; 4]; MAX_LEVELS];
+        for (lod, slot) in levels.iter_mut().enumerate().take(level_count as usize) {
+            let (cols, _) = layout.dims(lod as u32);
+            slot[0] = cols;
+            slot[1] = layout.offsets()[lod];
+        }
+        let meta = TileMetaUniform {
+            level_count,
+            _pad: [0; 7],
+            levels,
+        };
+        let meta_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vt-sparse-meta"),
+            contents: bytemuck::bytes_of(&meta),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+        // Page table starts fully non-resident; feedback starts clear.
+        let slots: Vec<u32> = vec![NOT_RESIDENT; total_tiles as usize];
+        let page_table = PageTable::new(ctx, total_tiles);
+        page_table.update(ctx, &slots);
+        let feedback = FeedbackBuffer::new(ctx, total_tiles);
+        feedback.clear(ctx);
+
+        let (bind_group_layout, sampler, pipeline) =
+            build_sparse_pipeline(device, target_format, "vt-sparse");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let sparse = SparseResources {
+            pool,
+            allocator: SlotAllocator::new(budget_tiles),
+            residency: ResidencySet::new(budget_tiles as usize),
+            layout,
+            source,
+            jobs,
+            tx,
+            rx,
+            in_flight: HashMap::new(),
+            slots,
+            page_table,
+            feedback,
+            array_view,
+            meta_buf,
+            bind_group_layout,
+            sampler,
+            pipeline,
+            image_dims: (img_w, img_h),
+        };
+
+        Self {
+            single: None,
+            tiled: None,
+            streaming: None,
+            sparse: Some(sparse),
+        }
+    }
+
+    /// Rung 4: reconcile residency against GPU-truth visibility. Reads back the
+    /// previous frame's feedback (the tiles the shader actually wanted), diffs vs
+    /// residency, frees evicted slots, cancels stale loads, submits `Visible` jobs
+    /// for missing tiles, drains any that finished (uploading + allocating), then
+    /// pushes the updated page table and clears feedback for the next frame.
+    /// GPU access is single-threaded — call from the main/render thread.
+    pub fn request_view_feedback(&mut self, ctx: &GpuContext) {
+        // Absorb anything that finished loading since last frame.
+        self.drain_loaded_sparse(ctx);
+
+        let s = self
+            .sparse
+            .as_mut()
+            .expect("request_view_feedback called on a non-sparse VirtualTexture");
+
+        // GPU-truth needed set: the tiles the shader marked last frame.
+        let needed = s.feedback.read_back(ctx, &s.layout);
+        let (to_load, to_evict) = s.residency.diff(&needed);
+
+        // Evict: free physical slots + drop residency + clear the page-table entry.
+        for t in &to_evict {
+            s.allocator.free(*t);
+            s.residency.forget(*t);
+            if let Some(idx) = flat_index(&s.layout, *t) {
+                s.slots[idx] = NOT_RESIDENT;
+            }
+        }
+
+        // Cancel in-flight loads for tiles no longer needed.
+        let needed_set: std::collections::HashSet<TileCoord> = needed.iter().copied().collect();
+        let stale: Vec<TileCoord> = s
+            .in_flight
+            .keys()
+            .copied()
+            .filter(|t| !needed_set.contains(t))
+            .collect();
+        for t in stale {
+            if let Some(h) = s.in_flight.remove(&t) {
+                h.cancel();
+            }
+        }
+
+        // Submit loads for newly-needed tiles not already resident or in flight.
+        for t in to_load {
+            if s.residency.contains(t) || s.in_flight.contains_key(&t) {
+                continue;
+            }
+            let tx = s.tx.clone();
+            let source = Arc::clone(&s.source);
+            let coord = t;
+            let handle = s.jobs.submit(Priority::Visible, move |token| {
+                if token.is_cancelled() {
+                    return;
+                }
+                let tile = source.tile(coord);
+                let _ = tx.send((coord, tile));
+            });
+            s.in_flight.insert(t, handle);
+        }
+
+        // Push the (possibly updated) page table and clear feedback for next frame.
+        s.page_table.update(ctx, &s.slots);
+        s.feedback.clear(ctx);
+    }
+
+    /// Drain tiles that finished loading into the sparse pool: allocate a slot
+    /// (evicting an LRU resident if the pool is full), upload pixels, touch
+    /// residency, and update the CPU slot mirror. Returns the count made resident.
+    pub fn drain_loaded_sparse(&mut self, ctx: &GpuContext) -> usize {
+        let s = match self.sparse.as_mut() {
+            Some(s) => s,
+            None => return 0,
+        };
+        let mut made_resident = 0;
+        let ready: Vec<(TileCoord, LinearRgbaF32)> = s.rx.try_iter().collect();
+        for (coord, tile) in ready {
+            s.in_flight.remove(&coord);
+            let slot = match s.allocator.alloc(coord) {
+                Some(slot) => slot,
+                None => {
+                    // Pool full: evict the LRU resident tile to free a slot.
+                    if let Some(victim) = s.residency.lru() {
+                        s.allocator.free(victim);
+                        s.residency.forget(victim);
+                        if let Some(idx) = flat_index(&s.layout, victim) {
+                            s.slots[idx] = NOT_RESIDENT;
+                        }
+                    }
+                    match s.allocator.alloc(coord) {
+                        Some(slot) => slot,
+                        None => continue, // still no room (capacity 0); drop tile
+                    }
+                }
+            };
+            s.pool.upload(ctx, slot, &tile);
+            s.residency.touch(coord);
+            if let Some(idx) = flat_index(&s.layout, coord) {
+                s.slots[idx] = slot;
+            }
+            made_resident += 1;
+        }
+        if made_resident > 0 {
+            s.page_table.update(ctx, &s.slots);
+        }
+        made_resident
+    }
+
+    /// Rung 4: bind the sparse resources (page table + feedback) and draw the
+    /// full-screen triangle. The shader marks feedback as a side effect.
+    pub fn render_sparse(
+        &self,
+        ctx: &GpuContext,
+        pass: &mut wgpu::RenderPass<'_>,
+        view: &ViewTransform,
+        viewport: (f32, f32),
+    ) {
+        let s = self
+            .sparse
+            .as_ref()
+            .expect("render_sparse called on a non-sparse VirtualTexture");
+        let uniform = TransformUniform {
+            zoom: view.zoom,
+            _pad0: 0.0,
+            pan: [view.pan.0, view.pan.1],
+            viewport: [viewport.0, viewport.1],
+            image: [s.image_dims.0 as f32, s.image_dims.1 as f32],
+        };
+        let ubuf = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vt-sparse-xf"),
+                contents: bytemuck::bytes_of(&uniform),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vt-sparse-bind"),
+            layout: &s.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&s.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&s.array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: s.meta_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(s.page_table.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: s.feedback.buffer().as_entire_binding(),
+                },
+            ],
+        });
+        pass.set_pipeline(&s.pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Test-introspection: is `t` currently resident (has a physical slot)?
+    /// Works on the sparse path (rung 4) and the streaming path (rung 3).
+    pub fn is_resident(&self, t: TileCoord) -> bool {
+        if let Some(s) = self.sparse.as_ref() {
+            return s.allocator.slot_of(t).is_some();
+        }
+        if let Some(s) = self.streaming.as_ref() {
+            return s.allocator.slot_of(t).is_some();
+        }
+        false
+    }
+}
+
+/// Flat index into the page table / slot mirror for `t`, or `None` if out of range.
+fn flat_index(layout: &FlatLayout, t: TileCoord) -> Option<usize> {
+    if t.lod >= layout.level_count() {
+        return None;
+    }
+    let (cols, rows) = layout.dims(t.lod);
+    if t.x >= cols || t.y >= rows {
+        return None;
+    }
+    let idx = layout.flat_index(t.lod, t.x, t.y);
+    if idx >= layout.total() {
+        return None;
+    }
+    Some(idx as usize)
 }
 
 /// Flat index into the slot table for `t`, or `None` if out of range (e.g. an LOD
@@ -997,6 +1308,119 @@ fn build_tiled_pipeline(
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: "fs_tiled",
+            targets: &[Some(target_format.into())],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
+
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some(&format!("{label_prefix}-sampler")),
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    (bgl, sampler, pipeline)
+}
+
+/// Build the rung-4 `fs_sparse` bind-group layout + sampler + render pipeline:
+/// like `fs_tiled` but the slot storage buffer (binding 4) is replaced by a page
+/// table texture (binding 6) and a read-write feedback storage buffer (binding 7).
+fn build_sparse_pipeline(
+    device: &wgpu::Device,
+    target_format: wgpu::TextureFormat,
+    label_prefix: &str,
+) -> (wgpu::BindGroupLayout, wgpu::Sampler, wgpu::RenderPipeline) {
+    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("vt-sparse-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Page table: Rg32Uint texture, sampled via textureLoad (non-filterable).
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // Feedback: read-write storage buffer of atomic<u32>.
+            wgpu::BindGroupLayoutEntry {
+                binding: 7,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("vt-display"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/display.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(&format!("{label_prefix}-pl")),
+        bind_group_layouts: &[&bgl],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(&format!("{label_prefix}-pipeline")),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs_main",
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs_sparse",
             targets: &[Some(target_format.into())],
             compilation_options: Default::default(),
         }),

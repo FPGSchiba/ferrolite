@@ -83,6 +83,12 @@ fn prune_subtree_deletes_absent_files_and_folders() {
         .find(|i| i.folder_id != root_id && i.folder_id != folder_2025)
         .map(|i| i.id)
         .unwrap();
+    // The image inside 2025, whose whole folder vanishes (folder-level prune path).
+    let drop_2025_img = all
+        .iter()
+        .find(|i| i.folder_id == folder_2025)
+        .map(|i| i.id)
+        .unwrap();
     let kept_folders: HashSet<i64> = folders
         .iter()
         .map(|f| f.id)
@@ -120,6 +126,11 @@ fn prune_subtree_deletes_absent_files_and_folders() {
         "only the kept top-level image remains"
     );
     assert!(reads.get_thumbnail(drop_2024_img).unwrap().is_none());
+    // Folder-level prune must also drop the thumbnail of an image in a vanished folder.
+    assert!(
+        reads.get_thumbnail(drop_2025_img).unwrap().is_none(),
+        "thumbnail of an image in a pruned folder is removed"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_file(&db);

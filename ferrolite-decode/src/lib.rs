@@ -4,10 +4,12 @@
 mod error;
 mod metadata;
 mod preview;
+mod raw;
 
 pub use error::DecodeError;
 pub use metadata::Metadata;
 pub use preview::decode_preview;
+pub use raw::{decode_full, RawDecoded};
 
 use ferrolite_image::Orientation;
 use rawler::decoders::RawDecodeParams;

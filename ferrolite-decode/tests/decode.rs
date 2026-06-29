@@ -33,3 +33,16 @@ fn decode_preview_returns_nonempty_rgb8() {
         buf.width as usize * buf.height as usize * 3
     );
 }
+
+#[test]
+fn decode_full_matches_metadata_dimensions_and_buffer() {
+    let meta = ferrolite_decode::read_metadata(&fixture()).expect("metadata");
+    let full = ferrolite_decode::decode_full(&fixture()).expect("full decode");
+    assert_eq!(full.width, meta.width);
+    assert_eq!(full.height, meta.height);
+    assert!(full.cpp >= 1);
+    assert_eq!(
+        full.pixels.len(),
+        full.width as usize * full.height as usize * full.cpp
+    );
+}

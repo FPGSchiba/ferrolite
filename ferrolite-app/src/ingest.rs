@@ -139,6 +139,11 @@ pub fn spawn_watch_scan(state: &mut AppState, ctx: &egui::Context) {
         ReindexMode::Incremental,
         Priority::Background,
     );
+    // Safe to overwrite without cancelling the prior handle: the only caller
+    // (the per-frame tick) is gated by `should_watch`, which requires
+    // `active_ingests == 0`, so any previously-stored ingest has already
+    // drained. Storing it (rather than discarding like the startup sweep) lets
+    // a subsequent folder switch cancel this watcher scan of the now-stale folder.
     state.ingest_handle = Some(handle);
 }
 

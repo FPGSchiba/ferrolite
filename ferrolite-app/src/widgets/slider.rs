@@ -41,6 +41,109 @@ pub mod math {
     }
 }
 
+/// The widget handle (egui rendering added in Task 4).
+pub struct EguiSlider<'a> {
+    pub label: &'a str,
+    pub value: &'a mut f32,
+    pub min: f32,
+    pub max: f32,
+    pub default: f32,
+    pub step: f32,
+    pub decimals: usize,
+    pub unit: &'a str,
+    pub bipolar: bool,
+    pub signed: bool,
+}
+
+use egui::{pos2, vec2, Color32, Response, Sense, Stroke, Ui, Widget};
+
+// Design-system §5 slider tokens.
+const TRACK: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
+const FILL_IDLE: Color32 = Color32::from_rgb(0x58, 0x58, 0x58);
+const HANDLE_IDLE: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
+const HANDLE_BORDER: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
+const ACCENT: Color32 = Color32::from_rgb(0x6d, 0x97, 0xb5);
+const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xa9, 0xc7, 0xdd);
+const LABEL: Color32 = Color32::from_rgb(0x8c, 0x8c, 0x8c);
+const VALUE_IDLE: Color32 = Color32::from_rgb(0xbd, 0xbd, 0xbd);
+
+const LABEL_W: f32 = 74.0;
+const VALUE_W: f32 = 48.0;
+const ROW_H: f32 = 22.0;
+
+impl<'a> Widget for EguiSlider<'a> {
+    fn ui(self, ui: &mut Ui) -> Response {
+        let full = ui.available_width();
+        let (rect, mut response) =
+            ui.allocate_exact_size(vec2(full, ROW_H), Sense::click_and_drag());
+
+        let track_left = rect.left() + LABEL_W + 8.0;
+        let track_right = rect.right() - VALUE_W - 8.0;
+        let track_w = (track_right - track_left).max(1.0);
+        let mid_y = rect.center().y;
+
+        let mut value = *self.value;
+        if response.double_clicked() {
+            value = self.default;
+            response.mark_changed();
+        }
+        if let Some(p) = response.interact_pointer_pos() {
+            if response.dragged() || response.clicked() {
+                let frac = ((p.x - track_left) / track_w).clamp(0.0, 1.0);
+                let new = math::value_at(frac, self.min, self.max, self.step);
+                if (new - value).abs() > f32::EPSILON {
+                    value = new;
+                    response.mark_changed();
+                }
+            }
+        }
+        *self.value = value;
+
+        let active = response.dragged();
+        let frac = math::fraction(value, self.min, self.max);
+        let (fill_left, fill_w) = math::fill(frac, self.min, self.max, self.bipolar);
+
+        let painter = ui.painter();
+        // label
+        painter.text(
+            pos2(rect.left() + 4.0, mid_y),
+            egui::Align2::LEFT_CENTER,
+            self.label,
+            egui::FontId::proportional(11.0),
+            LABEL,
+        );
+        // base track line
+        painter.line_segment(
+            [pos2(track_left, mid_y), pos2(track_right, mid_y)],
+            Stroke::new(2.0, TRACK),
+        );
+        // fill
+        let fill_color = if active { ACCENT } else { FILL_IDLE };
+        painter.line_segment(
+            [
+                pos2(track_left + fill_left * track_w, mid_y),
+                pos2(track_left + (fill_left + fill_w) * track_w, mid_y),
+            ],
+            Stroke::new(2.0, fill_color),
+        );
+        // handle
+        let hx = track_left + frac * track_w;
+        let handle_color = if active { ACCENT_BRIGHT } else { HANDLE_IDLE };
+        painter.circle(pos2(hx, mid_y), 5.5, handle_color, Stroke::new(1.0, HANDLE_BORDER));
+        // value text
+        let value_color = if active { ACCENT } else { VALUE_IDLE };
+        painter.text(
+            pos2(rect.right() - 4.0, mid_y),
+            egui::Align2::RIGHT_CENTER,
+            math::format(value, self.decimals, self.unit, self.signed),
+            egui::FontId::monospace(11.0),
+            value_color,
+        );
+
+        response
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::math::*;
@@ -84,18 +187,4 @@ mod tests {
         assert_eq!(format(-46.0, 0, "", true), "-46");
         assert_eq!(format(5450.0, 0, " K", false), "5450 K");
     }
-}
-
-/// The widget handle (egui rendering added in Task 4).
-pub struct EguiSlider<'a> {
-    pub label: &'a str,
-    pub value: &'a mut f32,
-    pub min: f32,
-    pub max: f32,
-    pub default: f32,
-    pub step: f32,
-    pub decimals: usize,
-    pub unit: &'a str,
-    pub bipolar: bool,
-    pub signed: bool,
 }

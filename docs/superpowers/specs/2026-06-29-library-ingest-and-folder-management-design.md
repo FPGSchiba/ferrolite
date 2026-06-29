@@ -34,7 +34,8 @@ Library that browses an actual on-disk tree:
 **Out of scope (deferred):** HEIC/AVIF/JPEG-XL **input** (C-library deps — note `ravif`/`jpegxl-rs`
 remain *export* encoders in Spec 3, not input here). GPU context, virtual texture, single-image
 viewer, two-tier load (Plan 4). Edit/color/export (Specs 2–3). RAW-only / standard-only grid
-**filters** (would justify a persisted `kind` column; YAGNI now).
+**filters** — the `kind` column **is** persisted now (§3), so the filter UI is a later, migration-free
+add; only the UI itself is deferred.
 
 ---
 
@@ -47,39 +48,54 @@ viewer, two-tier load (Plan 4). Edit/color/export (Specs 2–3). RAW-only / stan
   through the single `Catalog` writer; new reads (`list_images_recursive`, `list_folders` with
   `parent_id`) are served from the `ReadPool`.
 - **Catalog is a rebuildable cache.** `remove_folder` deletes **catalog rows only — never files on
-  disk**. A removed folder is re-ingested by re-opening it. No schema migration is required (§3).
+  disk**. A removed folder is re-ingested by re-opening it. The only schema change is one small
+  additive `kind` column (§3); the folder tree itself needs no migration.
 - **Decode yields format-agnostic products.** Both routes return the same `ImageBuffer` / `Metadata`
   vocabulary, so the catalog, jobs, grid, thumbnail store, and (future) viewer are unchanged by the
   addition of standard-raster input.
 
 ---
 
-## 3. Schema: no migration required
+## 3. Schema: folder tree needs none; persist `FileKind` via a small v2 migration
 
-The Plan 2 schema (`schema.rs`, `SCHEMA_VERSION = 1`) already provides everything needed:
+The Plan 2 schema (`schema.rs`, `SCHEMA_VERSION = 1`) already supports the **folder tree** with no
+migration:
 
 - `folders.parent_id INTEGER` — exists, currently always `NULL`. This plan finally **wires it**.
 - `images … UNIQUE(folder_id, filename)` — already the correct key for **per-directory** images, so
   the same filename in two sibling subfolders (e.g. `2024/IMG_001.JPG` and `2025/IMG_001.JPG`) keys
   to two different `folder_id`s and never collides.
 
-**`FileKind` is derived from the file extension, not persisted.** A `kind` column would only pay off
-once we add RAW-only/standard-only grid filters, which is out of scope. Decode routing re-derives the
-kind from the extension at decode time (free). Therefore **`SCHEMA_VERSION` stays `1`; this plan adds
-no migration block.** (When a future plan adds format filters, bump to 2 and backfill `kind`.)
+**`FileKind` is persisted, not re-inferred.** The kind (RAW vs standard) is a real, fixed attribute
+of a catalog row; classifying it once at ingest is safer than re-deriving it at every consumer, and
+it is independent of the in-memory extension lists (which may change between releases). Persisting it
+now also lets **Plan 4's viewer route an image's decode by `image_id` alone** (it opens rows, not
+paths) and makes the future RAW-only/standard-only filter a migration-free add. This costs **one
+small additive migration**:
+
+- Bump `SCHEMA_VERSION` to **2** with a `if version < 2 { … }` block (the ladder `schema.rs` is
+  built for) that runs `ALTER TABLE images ADD COLUMN kind INTEGER NOT NULL DEFAULT 0;`.
+- Existing rows default to `0` = `Raw`, which is **correct**: every image ingested before this plan
+  was RAW (Plans 2–3 were RAW-only). No backfill walk needed.
+
+`FileKind { Raw, Standard }` lives in **`ferrolite-image`** (the shared vocabulary crate — see §4.1)
+with `as_i64`/`from_i64` helpers mirroring `DecodeStatus`.
 
 ---
 
 ## 4. Formats & the non-RAW decode route (items 1 & 2)
 
-### 4.1 `FileKind` placement (avoids a dependency cycle)
+### 4.1 `FileKind` placement (shared vocabulary, no dependency cycle)
 
-`scan.rs` lives in `ferrolite-catalog`; the decode route also needs the kind; and `catalog` depends
-on `decode` (never the reverse). So:
+`FileKind` is now needed by three crates — `scan`/`catalog` (classify + persist), `decode` (route),
+and potentially `app` — and all three already depend on **`ferrolite-image`**, whose stated role is
+"core vocabulary types shared across crates." So:
 
-- **`FileKind { Raw, Standard }` is defined in `ferrolite-decode`** (it selects the decode route).
-- **The extension lists + `classify(path) -> Option<FileKind>` live in `scan.rs`**, returning
-  `ferrolite_decode::FileKind`. This keeps the format classifier in `scan` (item 2) with no cycle.
+- **`FileKind { Raw, Standard }` is defined in `ferrolite-image`**, with `as_i64`/`from_i64` helpers
+  (mirroring `Orientation`/`DecodeStatus`) for catalog persistence.
+- **The extension lists + `classify(path) -> Option<FileKind>` live in `scan.rs`** (item 2),
+  returning `ferrolite_image::FileKind`. `decode` and `catalog` both consume the same type with no
+  cycle (both already depend on `ferrolite-image`).
 
 ### 4.2 `scan.rs` changes
 
@@ -176,6 +192,15 @@ This mirrors the filesystem exactly (no "compressed" tree that skips image-less 
 - **Roll-up counts are computed in-app** from the flat folder list (children map + post-order sum) —
   a few hundred folders at most, trivial, and it avoids a second recursive query each frame.
 
+### 5.5 Row model & the `kind` column
+
+- **`NewImage`** gains `kind: FileKind` (set from the scanned file's classification). Its
+  `from_metadata` and `failed` constructors both take the kind — a `Failed` row still records whether
+  it was a RAW or a standard file (the scan knows this regardless of decode outcome).
+- **`upsert_image`** writes `kind` (insert + `ON CONFLICT … DO UPDATE`).
+- **`ImageRecord`** gains `kind: FileKind`; `IMAGE_COLS` adds `kind`; `row_to_record` reads it via
+  `FileKind::from_i64`. The recursive and direct list queries share `IMAGE_COLS`, so both return it.
+
 ---
 
 ## 6. App: tree UI, subfolder toggle, remove dialog (item 4 + UX)
@@ -242,7 +267,9 @@ are unchanged.
 - **decode (standard):** generate a tiny PNG and JPEG in-test (via the `image` crate) →
   `read_metadata_standard` reports correct dimensions and empty `make`; `decode_preview_standard`
   returns an upright `ImageBuffer`; `apply_orientation` shared path exercised.
-- **catalog:** recursive ingest wires `parent_id` and keys images to their actual directories;
+- **catalog:** the v2 migration adds `kind` and existing rows read back as `Raw` (default `0`);
+  `kind` round-trips through `upsert_image` → `list_images` for both Raw and Standard;
+  recursive ingest wires `parent_id` and keys images to their actual directories;
   **duplicate filenames in sibling subfolders both ingest** (no `UNIQUE` collision);
   `list_images_recursive` returns the subtree union while `list_images` returns direct-only;
   `remove_folder` deletes the subtree (thumbnails + images + folders) and leaves siblings intact —
@@ -261,8 +288,9 @@ One cohesive plan, ~5 phased, independently-testable tasks (suits subagent-drive
    recursive `scan_tree`; unit tests.
 2. **Standard decode route** — `orient` module, `standard` module, kind-dispatching entry points,
    Cargo (`kamadak-exif` + `image` features); unit tests.
-3. **Catalog tree** — `upsert_folder(parent_id)`, recursive ingest, `list_images_recursive`,
-   `list_folders` + `parent_id`, `remove_folder`; integration tests.
+3. **Catalog tree** — v2 migration (`kind` column), `NewImage`/`ImageRecord`/`IMAGE_COLS` + `kind`,
+   `upsert_folder(parent_id)`, recursive ingest, `list_images_recursive`, `list_folders` +
+   `parent_id`, `remove_folder`; integration tests.
 4. **App tree UI** — left-panel tree + roll-up, expand/collapse state, include-subfolders toggle,
    remove affordance + confirm dialog, ReadPool-side refresh; pure-function tests.
 5. **Wiring & gate** — end-to-end ingest of a nested mixed fixture, `reset_for_new_folder` on remove,
@@ -274,6 +302,7 @@ One cohesive plan, ~5 phased, independently-testable tasks (suits subagent-drive
 
 Open a real, deeply-nested, mixed-format folder and browse it: every directory appears as an
 indented tree node with roll-up counts; selecting a folder shows its subtree (toggle to direct-only);
-RAW and standard rasters thumbnail through the same format-agnostic pipeline; remove a folder
-(catalog-only, with a confirm for subtrees) and watch the tree refresh — all off the UI thread,
-honoring the architecture-map contracts, with **no schema migration**.
+RAW and standard rasters thumbnail through the same format-agnostic pipeline (each row recording its
+persisted `kind`); remove a folder (catalog-only, with a confirm for subtrees) and watch the tree
+refresh — all off the UI thread, honoring the architecture-map contracts, behind a single small
+additive migration (the `kind` column; the folder tree needs none).

@@ -22,7 +22,7 @@ impl Catalog {
         let folder_id = self.upsert_folder(path)?;
         let mut summary = IngestSummary::default();
 
-        let mut to_process: Vec<crate::RawFile> = Vec::new();
+        let mut to_process: Vec<crate::ScannedFile> = Vec::new();
         for f in crate::scan_raw_files(path) {
             summary.scanned += 1;
             if self.needs_reingest(folder_id, &f.filename, f.mtime, f.size)? {

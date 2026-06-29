@@ -48,7 +48,8 @@ pub fn title_bar(ctx: &Context, ui: &mut egui::Ui, module: &mut Module, version:
             .layout(Layout::top_down(Align::Center)),
         |ui| {
             // top_down starts the cursor at bar.min.y; nudge down so the row is vertically centered.
-            let row_h = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().button_padding.y * 2.0;
+            let row_h =
+                ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().button_padding.y * 2.0;
             ui.add_space(((bar.height() - row_h) * 0.5).max(0.0));
             ui.horizontal(|ui| {
                 if ui

@@ -127,7 +127,11 @@ impl<'a> Widget for EguiSlider<'a> {
         );
         // handle
         let hx = track_left + frac * track_w;
-        let handle_color = if active { theme::ACCENT_BRIGHT } else { HANDLE_IDLE };
+        let handle_color = if active {
+            theme::ACCENT_BRIGHT
+        } else {
+            HANDLE_IDLE
+        };
         painter.circle(
             pos2(hx, mid_y),
             5.5,

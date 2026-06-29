@@ -1,3 +1,4 @@
+mod canvas;
 mod module;
 mod theme;
 mod widgets;

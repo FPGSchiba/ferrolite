@@ -62,6 +62,9 @@ pub struct AppState {
     pub expanded_folders: HashSet<i64>,
     /// A folder pending a remove-confirmation (set when it has subfolders).
     pub pending_remove: Option<PendingRemove>,
+
+    /// Non-None while the single-image viewer is open.
+    pub viewer: Option<crate::viewer::ViewerState>,
 }
 
 impl AppState {
@@ -100,6 +103,7 @@ impl AppState {
             include_subfolders: true,
             expanded_folders: HashSet::new(),
             pending_remove: None,
+            viewer: None,
         })
     }
 
@@ -238,6 +242,7 @@ impl AppState {
             include_subfolders: true,
             expanded_folders: HashSet::new(),
             pending_remove: None,
+            viewer: None,
         }
     }
 }

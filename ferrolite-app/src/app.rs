@@ -1,6 +1,7 @@
 use crate::canvas::{self, CanvasResources};
 use crate::module::Module;
 use crate::theme;
+use crate::viewer;
 
 pub struct FerroliteApp {
     module: Module,
@@ -154,10 +155,17 @@ impl eframe::App for FerroliteApp {
                 crate::library::panel::show(ui, &mut self.state, ctx);
             });
 
+        // Esc closes the viewer.
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.state.viewer = None;
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG_CANVAS))
             .show(ctx, |ui| {
-                if self.module.is_library() {
+                if self.state.viewer.is_some() {
+                    viewer::paint(ui);
+                } else if self.module.is_library() {
                     crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else {
                     let rect = ui.available_rect_before_wrap();

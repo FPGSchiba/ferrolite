@@ -8,4 +8,5 @@ pub mod library;
 pub mod state;
 pub mod status_bar;
 pub mod theme;
+pub mod viewer;
 pub mod widgets;

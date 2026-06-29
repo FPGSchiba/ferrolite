@@ -101,10 +101,16 @@ fn paint_cell(
         }
     }
 
-    // Selection: click toggles the selected id.
+    // Selection: single click selects; double-click opens the viewer.
     let resp = ui.interact(rect, ui.id().with(("cell", rec.id)), egui::Sense::click());
     if resp.clicked() {
         state.selected = Some(rec.id);
+    }
+    if resp.double_clicked() {
+        if let Ok(Some(folder_path)) = state.reads.folder_path(rec.folder_id) {
+            let path = std::path::PathBuf::from(folder_path).join(&rec.filename);
+            state.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
+        }
     }
     if state.selected == Some(rec.id) {
         painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::ACCENT));

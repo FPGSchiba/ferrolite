@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["ferrolite-app"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-only"
+rust-version = "1.85"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -25,6 +25,9 @@ ferrolite-jobs = { workspace = true }
 ferrolite-catalog = { workspace = true }
 ferrolite-decode = { workspace = true }
 ferrolite-image = { workspace = true }
-image = { workspace = true }
+image = { workspace = true, features = ["jpeg"] }
 rayon = { workspace = true }
 rfd = { workspace = true }
+
+[dev-dependencies]
+image = { workspace = true, features = ["png"] }

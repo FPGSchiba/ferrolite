@@ -1,22 +1,41 @@
-//! RAW decode: the three independently-consumable products (preview, full,
-//! metadata) the two-tier load path relies on. Wraps `rawler` 0.7.x.
+//! Unified decode entry point: routes preview and metadata requests by
+//! `FileKind` — RAW files via `rawler` 0.7.x, standard rasters via `image` +
+//! `kamadak-exif` — returning the same three separable products in both cases.
 
 mod error;
 mod metadata;
+mod orient;
 mod preview;
 mod raw;
+mod standard;
 
 pub use error::DecodeError;
 pub use metadata::Metadata;
-pub use preview::decode_preview;
 pub use raw::{decode_full, RawDecoded};
+pub use standard::{decode_preview_standard, read_metadata_standard};
 
-use ferrolite_image::Orientation;
+use ferrolite_image::{FileKind, ImageBuffer, Orientation};
 use rawler::decoders::RawDecodeParams;
 use rawler::rawsource::RawSource;
 use std::path::Path;
 
 use crate::error::rawler as rawler_err;
+
+/// Decode an upright RGB8 preview, routed by `kind`.
+pub fn decode_preview(path: &Path, kind: FileKind) -> Result<ImageBuffer, DecodeError> {
+    match kind {
+        FileKind::Raw => preview::decode_preview_raw(path),
+        FileKind::Standard => standard::decode_preview_standard(path),
+    }
+}
+
+/// Read camera/exposure metadata + dimensions, routed by `kind`.
+pub fn read_metadata(path: &Path, kind: FileKind) -> Result<Metadata, DecodeError> {
+    match kind {
+        FileKind::Raw => read_metadata_raw(path),
+        FileKind::Standard => standard::read_metadata_standard(path),
+    }
+}
 
 /// rawler `Rational` → f32.
 /// rawler 0.7.2 uses `n: u32` / `d: u32` (not `num`/`den`).
@@ -28,9 +47,8 @@ fn rat(n: u32, d: u32) -> Option<f32> {
     }
 }
 
-/// Read camera/exposure metadata and image dimensions without decoding pixels.
-/// Dimensions come from a `dummy` raw_image call (fills geometry, skips pixels).
-pub fn read_metadata(path: &Path) -> Result<Metadata, DecodeError> {
+/// RAW metadata via rawler (dimensions from a `dummy` decode; no pixel work).
+fn read_metadata_raw(path: &Path) -> Result<Metadata, DecodeError> {
     let src = RawSource::new(path).map_err(rawler_err)?;
     let decoder = rawler::get_decoder(&src).map_err(rawler_err)?;
     let params = RawDecodeParams::default();

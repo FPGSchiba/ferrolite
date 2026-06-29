@@ -37,12 +37,15 @@ impl Catalog {
         &self.conn
     }
 
-    /// Insert a folder by path, or return the existing id. Idempotent.
-    pub fn upsert_folder(&self, path: &Path) -> Result<i64, CatalogError> {
+    /// Insert a folder by path with an optional parent, or return the existing
+    /// id. A non-null `parent_id` overwrites; a `None` keeps any existing parent
+    /// (so re-opening a subfolder as a root does not orphan its wired parent).
+    pub fn upsert_folder(&self, path: &Path, parent_id: Option<i64>) -> Result<i64, CatalogError> {
         let p = path.to_string_lossy();
         self.conn().execute(
-            "INSERT INTO folders (path) VALUES (?1) ON CONFLICT(path) DO NOTHING",
-            rusqlite::params![p],
+            "INSERT INTO folders (path, parent_id) VALUES (?1, ?2)
+             ON CONFLICT(path) DO UPDATE SET parent_id = COALESCE(?2, parent_id)",
+            rusqlite::params![p, parent_id],
         )?;
         let id = self.conn().query_row(
             "SELECT id FROM folders WHERE path = ?1",
@@ -57,11 +60,12 @@ impl Catalog {
         self.conn().execute(
             "INSERT INTO images
                (folder_id, filename, mtime, size, camera_make, camera_model,
-                width, height, orientation, capture_time, iso, decode_status)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+                width, height, orientation, capture_time, iso, decode_status, kind)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
              ON CONFLICT(folder_id, filename) DO UPDATE SET
                 mtime=?3, size=?4, camera_make=?5, camera_model=?6, width=?7,
-                height=?8, orientation=?9, capture_time=?10, iso=?11, decode_status=?12",
+                height=?8, orientation=?9, capture_time=?10, iso=?11,
+                decode_status=?12, kind=?13",
             rusqlite::params![
                 img.folder_id,
                 img.filename,
@@ -75,6 +79,7 @@ impl Catalog {
                 img.capture_time,
                 img.iso,
                 img.decode_status.as_i64(),
+                img.kind.as_i64(),
             ],
         )?;
         let id = self.conn().query_row(
@@ -95,6 +100,48 @@ impl Catalog {
 
     pub fn list_images(&self, folder_id: i64) -> Result<Vec<ImageRecord>, CatalogError> {
         crate::queries::list_images(self.conn(), folder_id)
+    }
+
+    pub fn list_images_recursive(&self, folder_id: i64) -> Result<Vec<ImageRecord>, CatalogError> {
+        crate::queries::list_images_recursive(self.conn(), folder_id)
+    }
+
+    /// Delete a folder subtree from the catalog (thumbnails → images → folders),
+    /// in one transaction. Cache only — never touches files on disk.
+    pub fn remove_folder(&self, folder_id: i64) -> Result<(), CatalogError> {
+        let tx = self.conn().unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM thumbnails WHERE image_id IN (
+                 WITH RECURSIVE subtree(id) AS (
+                     SELECT id FROM folders WHERE id = ?1
+                     UNION ALL
+                     SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+                 )
+                 SELECT id FROM images WHERE folder_id IN (SELECT id FROM subtree))",
+            rusqlite::params![folder_id],
+        )?;
+        tx.execute(
+            "DELETE FROM images WHERE folder_id IN (
+                 WITH RECURSIVE subtree(id) AS (
+                     SELECT id FROM folders WHERE id = ?1
+                     UNION ALL
+                     SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+                 )
+                 SELECT id FROM subtree)",
+            rusqlite::params![folder_id],
+        )?;
+        tx.execute(
+            "DELETE FROM folders WHERE id IN (
+                 WITH RECURSIVE subtree(id) AS (
+                     SELECT id FROM folders WHERE id = ?1
+                     UNION ALL
+                     SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+                 )
+                 SELECT id FROM subtree)",
+            rusqlite::params![folder_id],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn image_count(&self) -> Result<u64, CatalogError> {

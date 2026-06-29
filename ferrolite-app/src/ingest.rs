@@ -1,26 +1,21 @@
-//! Job orchestration: folder ingest (Interactive) fans out per-image thumbnail
-//! jobs (Background). All photo/catalog knowledge lives here in the app; the
+//! Job orchestration: recursive folder ingest (Interactive) fans out per-image
+//! thumbnail jobs (Background). All photo/catalog knowledge lives here; the
 //! `ferrolite-jobs` crate stays domain-agnostic.
 
 use crate::events::AppEvent;
 use crate::state::AppState;
-use ferrolite_catalog::{scan_raw_files, Catalog, DecodeStatus, NewImage, ReadPool, Thumbnail};
+use ferrolite_catalog::{
+    collect_dirs, scan_tree, Catalog, DecodeStatus, FileKind, NewImage, ReadPool, Thumbnail,
+};
 use ferrolite_jobs::{CancelToken, JobSystem, Priority};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-/// Start ingesting `folder`: cancels any in-flight ingest + pending thumbnails,
-/// resets counters, then submits the Interactive walk/upsert job.
 pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) {
-    // Cancel superseded work and zero all per-folder counters (contract §5.1).
     state.reset_for_new_folder();
-    // Note: a late `ThumbRegistered` or `ThumbReady` from the just-cancelled
-    // prior ingest may transiently re-touch `thumb_jobs`/counters before the
-    // cancel propagates. This is benign: textures are keyed by globally-unique
-    // `image_id`, so a stale thumbnail is cached-but-never-painted and only
-    // causes a transient status-bar count drift until the next reset.
 
     let writer = Arc::clone(&state.writer);
     let reads = Arc::clone(&state.reads);
@@ -28,8 +23,7 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
     let tx = state.tx.clone();
     let ctx = ctx.clone();
 
-    // Resolve folder_id up front (quick write) so the job can key rows.
-    let folder_id = match writer.lock().expect("writer").upsert_folder(&folder) {
+    let folder_id = match writer.lock().expect("writer").upsert_folder(&folder, None) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("ferrolite: upsert_folder failed: {e}");
@@ -40,16 +34,7 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
 
     let jobs_for_closure = Arc::clone(&jobs);
     let handle = jobs.submit(Priority::Interactive, move |cancel| {
-        ingest_job(
-            folder,
-            folder_id,
-            writer,
-            reads,
-            jobs_for_closure,
-            tx,
-            ctx,
-            cancel,
-        );
+        ingest_job(folder, writer, reads, jobs_for_closure, tx, ctx, cancel);
     });
     state.ingest_handle = Some(handle);
 }
@@ -57,7 +42,6 @@ pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) 
 #[allow(clippy::too_many_arguments)]
 fn ingest_job(
     folder: PathBuf,
-    folder_id: i64,
     writer: Arc<Mutex<Catalog>>,
     reads: Arc<ReadPool>,
     jobs: Arc<JobSystem>,
@@ -65,33 +49,53 @@ fn ingest_job(
     ctx: egui::Context,
     cancel: &CancelToken,
 ) {
-    let files = scan_raw_files(&folder);
+    let files = scan_tree(&folder);
+
+    // Create folder rows top-down, wiring parent_id.
+    let mut dir_ids: HashMap<PathBuf, i64> = HashMap::new();
+    for dir in collect_dirs(&files, &folder) {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let parent_id = dir.parent().and_then(|p| dir_ids.get(p).copied());
+        match writer
+            .lock()
+            .expect("writer")
+            .upsert_folder(&dir, parent_id)
+        {
+            Ok(id) => {
+                dir_ids.insert(dir, id);
+            }
+            Err(e) => eprintln!("ferrolite: upsert_folder failed: {e}"),
+        }
+    }
 
     // Parallel metadata decode for files needing (re)ingest. No DB writes here.
-    let rows: Vec<(NewImage, PathBuf)> = files
+    let rows: Vec<(NewImage, PathBuf, FileKind)> = files
         .par_iter()
         .filter(|_| !cancel.is_cancelled())
         .filter_map(|f| {
+            let folder_id = *f.path.parent().and_then(|p| dir_ids.get(p))?;
             match reads.needs_reingest(folder_id, &f.filename, f.mtime, f.size) {
                 Ok(true) => {}
-                Ok(false) => return None,
-                Err(_) => return None,
+                _ => return None,
             }
-            match ferrolite_decode::read_metadata(&f.path) {
-                Ok(meta) => Some((
-                    NewImage::from_metadata(folder_id, f.filename.clone(), f.mtime, f.size, &meta),
-                    f.path.clone(),
-                )),
-                Err(_) => Some((
-                    NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size),
-                    f.path.clone(),
-                )),
-            }
+            let new_image = match ferrolite_decode::read_metadata(&f.path, f.kind) {
+                Ok(meta) => NewImage::from_metadata(
+                    folder_id,
+                    f.filename.clone(),
+                    f.mtime,
+                    f.size,
+                    &meta,
+                    f.kind,
+                ),
+                Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, f.kind),
+            };
+            Some((new_image, f.path.clone(), f.kind))
         })
         .collect();
 
-    // Serial row upserts under the writer lock; enqueue a thumbnail job per row.
-    for (new_image, path) in rows {
+    for (new_image, path, kind) in rows {
         if cancel.is_cancelled() {
             break;
         }
@@ -104,8 +108,11 @@ fn ingest_job(
         };
         let _ = tx.send(AppEvent::Indexed { added: 1 });
         if new_image.decode_status != DecodeStatus::Failed {
-            let job_id = spawn_thumbnail(&jobs, &writer, &tx, &ctx, id, path);
-            state_total_inc(&tx, id, job_id);
+            let job_id = spawn_thumbnail(&jobs, &writer, &tx, &ctx, id, path, kind);
+            let _ = tx.send(AppEvent::ThumbRegistered {
+                image_id: id,
+                job_id,
+            });
         }
         ctx.request_repaint();
     }
@@ -113,20 +120,14 @@ fn ingest_job(
     ctx.request_repaint();
 }
 
-fn state_total_inc(tx: &Sender<AppEvent>, image_id: i64, job_id: ferrolite_jobs::JobId) {
-    let _ = tx.send(AppEvent::ThumbRegistered { image_id, job_id });
-}
-
 /// Headless thumbnail helper: decode preview → resize/encode → persist BLOB.
-/// Returns the committed `Thumbnail` on success, or an error string on failure.
-/// Called by both `spawn_thumbnail` (inside a job closure) and `bench_browse`
-/// (directly, without an egui context). This keeps the real decode path DRY.
 pub fn thumbnail_blocking(
     writer: &Arc<Mutex<Catalog>>,
     image_id: i64,
     path: &Path,
+    kind: FileKind,
 ) -> Result<Thumbnail, String> {
-    let preview = ferrolite_decode::decode_preview(path).map_err(|e| e.to_string())?;
+    let preview = ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?;
     let thumb = ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())?;
     {
         use ferrolite_catalog::ThumbnailStore;
@@ -139,10 +140,7 @@ pub fn thumbnail_blocking(
     Ok(thumb)
 }
 
-/// Submit one Background thumbnail job: decode preview → resize/encode → write
-/// BLOB → send JPEG bytes for immediate display. Returns the JobId so the caller
-/// can record it for reprioritization. (Called from `ingest_job`; the returned
-/// id is recorded by the app via the `ThumbReady`/registration path in Task 7.)
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_thumbnail(
     jobs: &Arc<JobSystem>,
     writer: &Arc<Mutex<Catalog>>,
@@ -150,6 +148,7 @@ pub fn spawn_thumbnail(
     ctx: &egui::Context,
     image_id: i64,
     path: PathBuf,
+    kind: FileKind,
 ) -> ferrolite_jobs::JobId {
     let writer = Arc::clone(writer);
     let tx = tx.clone();
@@ -158,7 +157,7 @@ pub fn spawn_thumbnail(
         if cancel.is_cancelled() {
             return;
         }
-        match thumbnail_blocking(&writer, image_id, &path) {
+        match thumbnail_blocking(&writer, image_id, &path, kind) {
             Ok(thumb) => {
                 let _ = tx.send(AppEvent::ThumbReady {
                     image_id,

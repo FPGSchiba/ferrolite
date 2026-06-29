@@ -98,7 +98,14 @@ impl eframe::App for FerroliteApp {
             )
             .show(ctx, |ui| {
                 if self.module.is_library() {
-                    crate::library::toolbar::show(ui, &mut self.thumb_size);
+                    let changed = crate::library::toolbar::show(
+                        ui,
+                        &mut self.thumb_size,
+                        &mut self.state.include_subfolders,
+                    );
+                    if changed {
+                        self.state.dirty = true;
+                    }
                 }
             });
 
@@ -136,6 +143,41 @@ impl eframe::App for FerroliteApp {
                     canvas::paint(ui, rect); // Develop stub keeps the wgpu canvas
                 }
             });
+
+        // Remove-folder confirmation (subtrees only; leaves remove immediately).
+        if let Some(pending) = self.state.pending_remove.clone() {
+            let mut open = true;
+            egui::Window::new("Remove folder from catalog")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Remove \u{201c}{}\u{201d} and its subfolders ({} images) from the catalog?",
+                        pending.name, pending.subtree_count
+                    ));
+                    ui.label(
+                        egui::RichText::new("Files on disk are not deleted.")
+                            .color(theme::TEXT_DIM)
+                            .size(11.0),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Remove").clicked() {
+                            self.state.remove_folder_cascade(pending.id);
+                            self.state.pending_remove = None;
+                            open = false;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.state.pending_remove = None;
+                            open = false;
+                        }
+                    });
+                });
+            if !open {
+                self.state.pending_remove = None;
+            }
+        }
 
         // 1px window border — full-window foreground stroke so it never double-draws
         // against the side panel or status bar edges.

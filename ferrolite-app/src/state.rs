@@ -10,6 +10,14 @@ use std::sync::{Arc, Mutex};
 
 use crate::events::AppEvent;
 
+/// A folder awaiting remove confirmation (shown in a modal).
+#[derive(Debug, Clone)]
+pub struct PendingRemove {
+    pub id: i64,
+    pub name: String,
+    pub subtree_count: u64,
+}
+
 pub struct AppState {
     pub jobs: Arc<JobSystem>,
     pub writer: Arc<Mutex<Catalog>>,
@@ -38,6 +46,13 @@ pub struct AppState {
     /// folder switch). `app.rs` checks this flag before calling
     /// `refresh_images()` so idle frames issue zero SQL queries.
     pub dirty: bool,
+
+    /// Recursive (subtree) vs direct folder view. Default true (on).
+    pub include_subfolders: bool,
+    /// Folder ids whose children are shown in the left-panel tree.
+    pub expanded_folders: HashSet<i64>,
+    /// A folder pending a remove-confirmation (set when it has subfolders).
+    pub pending_remove: Option<PendingRemove>,
 }
 
 impl AppState {
@@ -70,6 +85,9 @@ impl AppState {
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
             dirty: true,
+            include_subfolders: true,
+            expanded_folders: HashSet::new(),
+            pending_remove: None,
         })
     }
 
@@ -93,7 +111,12 @@ impl AppState {
     /// progress / folder switch). Cheap: indexed query, no filesystem walk.
     pub fn refresh_images(&mut self) {
         if let Some(folder_id) = self.current_folder {
-            if let Ok(rows) = self.reads.list_images(folder_id) {
+            let rows = if self.include_subfolders {
+                self.reads.list_images_recursive(folder_id)
+            } else {
+                self.reads.list_images(folder_id)
+            };
+            if let Ok(rows) = rows {
                 self.images = rows;
             }
         }
@@ -123,6 +146,44 @@ impl AppState {
         self.current_folder = Some(folder_id);
     }
 
+    /// Remove a folder subtree from the catalog (cache only). If the current
+    /// folder is inside the removed subtree, reset selection/jobs first.
+    pub fn remove_folder_cascade(&mut self, folder_id: i64) {
+        let removed_set = self.subtree_ids(folder_id);
+        if self
+            .current_folder
+            .map(|c| removed_set.contains(&c))
+            .unwrap_or(false)
+        {
+            self.reset_for_new_folder();
+            self.current_folder = None;
+        }
+        if let Err(e) = self.writer.lock().expect("writer").remove_folder(folder_id) {
+            eprintln!("ferrolite: remove_folder failed: {e}");
+            return;
+        }
+        self.expanded_folders.retain(|id| !removed_set.contains(id));
+        self.dirty = true;
+    }
+
+    /// Folder ids in the subtree rooted at `folder_id`, computed from the flat
+    /// folder list (read pool).
+    fn subtree_ids(&self, folder_id: i64) -> HashSet<i64> {
+        let folders = self.reads.list_folders().unwrap_or_default();
+        let mut out = HashSet::new();
+        let mut stack = vec![folder_id];
+        while let Some(id) = stack.pop() {
+            if out.insert(id) {
+                for f in &folders {
+                    if f.parent_id == Some(id) {
+                        stack.push(f.id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     #[cfg(test)]
     pub fn for_test() -> Self {
         // Use a unique ID per test (thread + process) to avoid concurrent collision.
@@ -150,6 +211,9 @@ impl AppState {
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
             dirty: true,
+            include_subfolders: true,
+            expanded_folders: HashSet::new(),
+            pending_remove: None,
         }
     }
 }
@@ -212,5 +276,115 @@ mod tests {
         assert_eq!(s.thumb_done, 0);
         assert!(s.thumb_jobs.is_empty());
         assert!(s.dirty);
+    }
+
+    #[test]
+    fn refresh_images_honors_include_subfolders() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+        // Build root(parent None) with a child; one image in each.
+        let (root, child) = {
+            let w = s.writer.lock().unwrap();
+            let root = w.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            let child = w
+                .upsert_folder(std::path::Path::new("/p/sub"), Some(root))
+                .unwrap();
+            w.upsert_image(&NewImage::failed(root, "a.nef".into(), 1, 1, FileKind::Raw))
+                .unwrap();
+            w.upsert_image(&NewImage::failed(
+                child,
+                "b.jpg".into(),
+                1,
+                1,
+                FileKind::Standard,
+            ))
+            .unwrap();
+            (root, child)
+        };
+        let _ = child;
+        s.current_folder = Some(root);
+
+        s.include_subfolders = false;
+        s.refresh_images();
+        assert_eq!(s.images.len(), 1, "direct view: only root's image");
+
+        s.include_subfolders = true;
+        s.refresh_images();
+        assert_eq!(s.images.len(), 2, "recursive view: root + child images");
+    }
+
+    #[test]
+    fn remove_folder_cascade_preserves_current_when_outside_subtree() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+        let (root, sibling, other) = {
+            let w = s.writer.lock().unwrap();
+            let root = w.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            let sibling = w
+                .upsert_folder(std::path::Path::new("/p/a"), Some(root))
+                .unwrap();
+            let other = w
+                .upsert_folder(std::path::Path::new("/p/b"), Some(root))
+                .unwrap();
+            w.upsert_image(&NewImage::failed(
+                sibling,
+                "a.jpg".into(),
+                1,
+                1,
+                FileKind::Standard,
+            ))
+            .unwrap();
+            (root, sibling, other)
+        };
+        let _ = root;
+        // current_folder is `other` (not under `sibling`)
+        s.current_folder = Some(other);
+        s.remove_folder_cascade(sibling); // remove a different branch
+        assert_eq!(
+            s.current_folder,
+            Some(other),
+            "current_folder must be unchanged when outside removed subtree"
+        );
+        // `sibling` should no longer appear in the folder list
+        let remaining: Vec<i64> = s
+            .reads
+            .list_folders()
+            .unwrap()
+            .iter()
+            .map(|f| f.id)
+            .collect();
+        assert!(
+            !remaining.contains(&sibling),
+            "removed folder must be absent from list"
+        );
+    }
+
+    #[test]
+    fn remove_folder_cascade_clears_current_when_inside_subtree() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+        let (root, child) = {
+            let w = s.writer.lock().unwrap();
+            let root = w.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            let child = w
+                .upsert_folder(std::path::Path::new("/p/sub"), Some(root))
+                .unwrap();
+            w.upsert_image(&NewImage::failed(
+                child,
+                "b.jpg".into(),
+                1,
+                1,
+                FileKind::Standard,
+            ))
+            .unwrap();
+            (root, child)
+        };
+        s.current_folder = Some(child);
+        s.remove_folder_cascade(root); // removing an ancestor of current
+        assert_eq!(
+            s.current_folder, None,
+            "current cleared when in removed subtree"
+        );
+        assert!(s.reads.list_folders().unwrap().is_empty());
     }
 }

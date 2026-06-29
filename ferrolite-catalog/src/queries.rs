@@ -4,12 +4,13 @@
 use crate::error::CatalogError;
 use crate::model::{DecodeStatus, ImageRecord};
 use crate::thumbnail::Thumbnail;
-use ferrolite_image::Orientation;
+use ferrolite_image::{FileKind, Orientation};
 use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     let orientation_exif: Option<i64> = row.get(5)?;
     let status: i64 = row.get(8)?;
+    let kind: i64 = row.get(9)?;
     Ok(ImageRecord {
         id: row.get(0)?,
         folder_id: row.get(1)?,
@@ -20,11 +21,12 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
         capture_time: row.get(6)?,
         iso: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
         decode_status: DecodeStatus::from_i64(status),
+        kind: FileKind::from_i64(kind),
     })
 }
 
 const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
-                          capture_time, iso, decode_status";
+                          capture_time, iso, decode_status, kind";
 
 pub(crate) fn list_images(
     conn: &Connection,
@@ -98,17 +100,41 @@ pub(crate) fn get_thumbnail(
     })
 }
 
+pub(crate) fn list_images_recursive(
+    conn: &Connection,
+    folder_id: i64,
+) -> Result<Vec<ImageRecord>, CatalogError> {
+    let sql = format!(
+        "WITH RECURSIVE subtree(id) AS (
+             SELECT id FROM folders WHERE id = ?1
+             UNION ALL
+             SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+         )
+         SELECT {IMAGE_COLS} FROM images
+         WHERE folder_id IN (SELECT id FROM subtree)
+         ORDER BY filename"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params![folder_id], row_to_record)?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>, CatalogError> {
     let mut stmt = conn.prepare(
-        "SELECT f.id, f.path, COUNT(i.id)
+        "SELECT f.id, f.path, f.parent_id, COUNT(i.id)
          FROM folders f LEFT JOIN images i ON i.folder_id = f.id
-         GROUP BY f.id, f.path ORDER BY f.path",
+         GROUP BY f.id, f.path, f.parent_id ORDER BY f.path",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(crate::FolderRecord {
             id: row.get(0)?,
             path: row.get(1)?,
-            image_count: row.get::<_, i64>(2)? as u64,
+            parent_id: row.get(2)?,
+            image_count: row.get::<_, i64>(3)? as u64,
         })
     })?;
     let mut out = Vec::new();

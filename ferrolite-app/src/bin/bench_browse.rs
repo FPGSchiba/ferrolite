@@ -17,7 +17,9 @@
 //!   N            number of thumbnails to time for M1b (default: 100)
 
 use ferrolite_app::ingest::thumbnail_blocking;
-use ferrolite_catalog::{scan_raw_files, Catalog, DecodeStatus, NewImage, ThumbnailStore};
+use ferrolite_catalog::{
+    scan_raw_files, Catalog, DecodeStatus, FileKind, NewImage, ThumbnailStore,
+};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -68,7 +70,7 @@ fn main() {
     let folder_id = writer
         .lock()
         .expect("writer lock")
-        .upsert_folder(&folder)
+        .upsert_folder(&folder, None)
         .expect("upsert_folder failed");
 
     let files = scan_raw_files(&folder);
@@ -76,11 +78,12 @@ fn main() {
 
     let mut image_ids: Vec<(i64, PathBuf)> = Vec::with_capacity(files.len());
     for f in &files {
-        let new_image = match ferrolite_decode::read_metadata(&f.path) {
+        let kind = f.kind;
+        let new_image = match ferrolite_decode::read_metadata(&f.path, kind) {
             Ok(meta) => {
-                NewImage::from_metadata(folder_id, f.filename.clone(), f.mtime, f.size, &meta)
+                NewImage::from_metadata(folder_id, f.filename.clone(), f.mtime, f.size, &meta, kind)
             }
-            Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size),
+            Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, kind),
         };
         match writer.lock().expect("writer lock").upsert_image(&new_image) {
             Ok(id) => {
@@ -113,7 +116,7 @@ fn main() {
     let mut errors = 0usize;
 
     for (image_id, path) in &image_ids {
-        match thumbnail_blocking(&writer, *image_id, path) {
+        match thumbnail_blocking(&writer, *image_id, path, FileKind::Raw) {
             Ok(_) => done += 1,
             Err(e) => {
                 errors += 1;
@@ -130,7 +133,7 @@ fn main() {
 
     // Continue decoding remaining images for throughput number.
     for (image_id, path) in image_ids.iter().skip(n_actual) {
-        match thumbnail_blocking(&writer, *image_id, path) {
+        match thumbnail_blocking(&writer, *image_id, path, FileKind::Raw) {
             Ok(_) => done += 1,
             Err(_) => errors += 1,
         }

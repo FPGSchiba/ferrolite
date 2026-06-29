@@ -1,4 +1,4 @@
-use ferrolite_catalog::{Catalog, DecodeStatus, NewImage, ReadPool};
+use ferrolite_catalog::{Catalog, DecodeStatus, FileKind, NewImage, ReadPool};
 use ferrolite_image::Orientation;
 
 fn temp_db() -> std::path::PathBuf {
@@ -27,6 +27,7 @@ fn new_image(folder_id: i64, filename: &str) -> NewImage {
         capture_time: None,
         iso: Some(100),
         decode_status: DecodeStatus::Done,
+        kind: FileKind::Raw,
     }
 }
 
@@ -35,7 +36,7 @@ fn read_pool_sees_writes_committed_by_the_writer() {
     let path = temp_db();
     let catalog = Catalog::open(&path).unwrap();
     let folder_id = catalog
-        .upsert_folder(std::path::Path::new("/tmp/photos"))
+        .upsert_folder(std::path::Path::new("/tmp/photos"), None)
         .unwrap();
     let pool = ReadPool::open(&path, 2).unwrap();
 

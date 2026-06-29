@@ -15,6 +15,7 @@ ferrolite-jobs = { path = "ferrolite-jobs" }
 rawler = "0.7.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 image = { version = "0.25", default-features = false }
+exif = { package = "kamadak-exif", version = "0.6" }
 fast_image_resize = "6.0"
 rayon = "1.10"
 walkdir = "2.5"

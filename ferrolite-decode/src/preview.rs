@@ -15,7 +15,8 @@ pub fn decode_preview(path: &Path) -> Result<ImageBuffer, DecodeError> {
 
     let dynimg = decoder
         .preview_image(&src, &params)
-        .map_err(rawler_err)?
+        .ok()
+        .flatten()
         .or_else(|| decoder.full_image(&src, &params).ok().flatten())
         .or_else(|| decoder.thumbnail_image(&src, &params).ok().flatten())
         .ok_or_else(|| DecodeError::NoPreview(path.to_path_buf()))?;

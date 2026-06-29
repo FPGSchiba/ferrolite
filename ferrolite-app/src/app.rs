@@ -22,19 +22,17 @@ impl FerroliteApp {
     }
 }
 
-/// Invisible 6px resize grips along the four window edges.
-/// Uses four transparent `egui::Area`s with `Sense::drag()` (the Area path),
+/// Invisible 6px resize grips along the South, West, and East window edges.
+/// North is intentionally omitted: the 30px custom title bar owns the top edge
+/// (drag-to-move + double-click-to-maximize), and a North grip at
+/// `Order::Foreground` would hijack pointer events in that strip.
+/// Uses three transparent `egui::Area`s with `Sense::drag()` (the Area path),
 /// because `ctx.interact(LayerId, Id, Rect, Sense)` does not exist in egui 0.29.
 fn window_resize_grips(ctx: &egui::Context) {
     use egui::{Area, CursorIcon, Id, Order, Rect, ResizeDirection, Sense, ViewportCommand};
     let r = ctx.screen_rect();
     let m = 6.0_f32; // grip thickness
-    let edges: [(Rect, ResizeDirection, CursorIcon); 4] = [
-        (
-            Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + m)),
-            ResizeDirection::North,
-            CursorIcon::ResizeVertical,
-        ),
+    let edges: [(Rect, ResizeDirection, CursorIcon); 3] = [
         (
             Rect::from_min_max(egui::pos2(r.left(), r.bottom() - m), r.right_bottom()),
             ResizeDirection::South,

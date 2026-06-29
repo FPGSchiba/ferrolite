@@ -65,6 +65,9 @@ impl Catalog {
         }
 
         // 2) Decode + thumbnail in parallel (no DB access here).
+        // folder_id is resolved up-front (upsert_folder above) and copied into each
+        // parallel task; the NewImage is fully built off-thread, so no Catalog/DB
+        // handle crosses a thread boundary.
         let decoded: Vec<Decoded> = to_process
             .into_par_iter()
             .map(|(path, filename, mtime, size)| Decoded {
@@ -83,7 +86,8 @@ impl Catalog {
                     self.put_thumbnail(id, &thumb)?;
                     summary.added += 1;
                 }
-                Err(_msg) => {
+                Err(msg) => {
+                    eprintln!("ferrolite-catalog: decode failed for {}: {msg}", d.filename);
                     // Record a failed row so the grid shows a placeholder and we
                     // don't retry forever. One bad file never downs the pass.
                     let failed = NewImage {

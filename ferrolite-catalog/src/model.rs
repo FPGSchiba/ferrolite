@@ -64,3 +64,47 @@ pub struct IngestSummary {
     pub skipped: usize,
     pub failed: usize,
 }
+
+impl NewImage {
+    /// Build a `Done` row from decoded metadata.
+    pub fn from_metadata(
+        folder_id: i64,
+        filename: String,
+        mtime: i64,
+        size: i64,
+        meta: &ferrolite_decode::Metadata,
+    ) -> Self {
+        Self {
+            folder_id,
+            filename,
+            mtime,
+            size,
+            make: Some(meta.make.clone()),
+            model: Some(meta.model.clone()),
+            width: Some(meta.width),
+            height: Some(meta.height),
+            orientation: meta.orientation,
+            capture_time: meta.capture_time.clone(),
+            iso: meta.iso,
+            decode_status: DecodeStatus::Done,
+        }
+    }
+
+    /// Build a `Failed` placeholder row (decode failed; grid shows a broken cell).
+    pub fn failed(folder_id: i64, filename: String, mtime: i64, size: i64) -> Self {
+        Self {
+            folder_id,
+            filename,
+            mtime,
+            size,
+            make: None,
+            model: None,
+            width: None,
+            height: None,
+            orientation: Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: DecodeStatus::Failed,
+        }
+    }
+}

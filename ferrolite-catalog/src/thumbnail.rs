@@ -92,20 +92,6 @@ impl ThumbnailStore for Catalog {
     }
 
     fn get_thumbnail(&self, image_id: i64) -> Result<Option<Thumbnail>, CatalogError> {
-        let mut stmt = self
-            .conn()
-            .prepare("SELECT w, h, format, blob FROM thumbnails WHERE image_id = ?1")?;
-        let mut rows = stmt.query_map(rusqlite::params![image_id], |row| {
-            Ok(Thumbnail {
-                width: row.get::<_, i64>(0)? as u32,
-                height: row.get::<_, i64>(1)? as u32,
-                format: row.get(2)?,
-                bytes: row.get(3)?,
-            })
-        })?;
-        match rows.next() {
-            Some(t) => Ok(Some(t?)),
-            None => Ok(None),
-        }
+        crate::queries::get_thumbnail(self.conn(), image_id)
     }
 }

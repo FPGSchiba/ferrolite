@@ -1,9 +1,7 @@
 use crate::error::CatalogError;
 use crate::model::{DecodeStatus, ImageRecord, NewImage};
 use crate::schema;
-use ferrolite_image::Orientation;
 use rusqlite::Connection;
-use rusqlite::OptionalExtension;
 use std::path::Path;
 
 /// SQLite-backed catalog. The catalog is a *cache*: source of truth is the files
@@ -16,6 +14,10 @@ impl Catalog {
     pub fn open(path: &Path) -> Result<Self, CatalogError> {
         let conn = Connection::open(path)?;
         schema::migrate(&conn)?;
+        // WAL lets the read pool query concurrently with the single writer.
+        // (In-memory DBs ignore journal_mode; harmless there.)
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         Ok(Self { conn })
     }
 
@@ -88,37 +90,15 @@ impl Catalog {
         folder_id: i64,
         filename: &str,
     ) -> Result<Option<ImageRecord>, CatalogError> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, folder_id, filename, width, height, orientation,
-                    capture_time, iso, decode_status
-             FROM images WHERE folder_id = ?1 AND filename = ?2",
-        )?;
-        let mut rows = stmt.query_map(rusqlite::params![folder_id, filename], row_to_record)?;
-        match rows.next() {
-            Some(r) => Ok(Some(r?)),
-            None => Ok(None),
-        }
+        crate::queries::image_by_name(self.conn(), folder_id, filename)
     }
 
     pub fn list_images(&self, folder_id: i64) -> Result<Vec<ImageRecord>, CatalogError> {
-        let mut stmt = self.conn().prepare(
-            "SELECT id, folder_id, filename, width, height, orientation,
-                    capture_time, iso, decode_status
-             FROM images WHERE folder_id = ?1 ORDER BY filename",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![folder_id], row_to_record)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        crate::queries::list_images(self.conn(), folder_id)
     }
 
     pub fn image_count(&self) -> Result<u64, CatalogError> {
-        let n: i64 = self
-            .conn()
-            .query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0))?;
-        Ok(n as u64)
+        crate::queries::image_count(self.conn())
     }
 
     /// True when the file is new or its (mtime, size) differ from the catalog —
@@ -130,33 +110,19 @@ impl Catalog {
         mtime: i64,
         size: i64,
     ) -> Result<bool, CatalogError> {
-        let existing: Option<(i64, i64)> = self
-            .conn()
-            .query_row(
-                "SELECT mtime, size FROM images WHERE folder_id = ?1 AND filename = ?2",
-                rusqlite::params![folder_id, filename],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        Ok(match existing {
-            Some((m, s)) => m != mtime || s != size,
-            None => true,
-        })
+        crate::queries::needs_reingest(self.conn(), folder_id, filename, mtime, size)
     }
-}
 
-fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
-    let orientation_exif: Option<i64> = row.get(5)?;
-    let status: i64 = row.get(8)?;
-    Ok(ImageRecord {
-        id: row.get(0)?,
-        folder_id: row.get(1)?,
-        filename: row.get(2)?,
-        width: row.get::<_, Option<i64>>(3)?.map(|v| v as u32),
-        height: row.get::<_, Option<i64>>(4)?.map(|v| v as u32),
-        orientation: Orientation::from_exif(orientation_exif.unwrap_or(1) as u16),
-        capture_time: row.get(6)?,
-        iso: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
-        decode_status: DecodeStatus::from_i64(status),
-    })
+    /// Set a row's decode status (used to mark a file `Failed` from a thumbnail job).
+    pub fn set_decode_status(
+        &self,
+        image_id: i64,
+        status: DecodeStatus,
+    ) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "UPDATE images SET decode_status = ?1 WHERE id = ?2",
+            rusqlite::params![status.as_i64(), image_id],
+        )?;
+        Ok(())
+    }
 }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog"]
+members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog", "ferrolite-jobs"]
 
 [workspace.package]
 edition = "2021"
@@ -10,6 +10,8 @@ rust-version = "1.88"
 [workspace.dependencies]
 ferrolite-image = { path = "ferrolite-image" }
 ferrolite-decode = { path = "ferrolite-decode" }
+ferrolite-catalog = { path = "ferrolite-catalog" }
+ferrolite-jobs = { path = "ferrolite-jobs" }
 rawler = "0.7.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 image = { version = "0.25", default-features = false }
@@ -17,6 +19,7 @@ fast_image_resize = "6.0"
 rayon = "1.10"
 walkdir = "2.5"
 thiserror = "2.0"
+rfd = "0.15"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

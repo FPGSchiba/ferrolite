@@ -85,6 +85,11 @@ impl JobSystem {
     pub fn pending_count(&self) -> usize {
         self.shared.queue.lock().expect("queue mutex").pending_len()
     }
+
+    /// Drop a still-pending job from the queue (no-op if already running/done).
+    pub fn cancel(&self, id: JobId) {
+        self.shared.queue.lock().expect("queue mutex").cancel(id);
+    }
 }
 
 impl Drop for JobSystem {

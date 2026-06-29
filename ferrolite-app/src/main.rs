@@ -1,7 +1,11 @@
 mod app;
 mod canvas;
 mod chrome;
+mod events;
+mod ingest;
 mod module;
+mod state;
+mod status_bar;
 mod theme;
 mod widgets;
 

@@ -6,6 +6,7 @@ use crate::widgets::EguiSlider;
 pub struct FerroliteApp {
     module: Module,
     thumb_size: f32,
+    state: crate::state::AppState,
 }
 
 impl FerroliteApp {
@@ -15,10 +16,8 @@ impl FerroliteApp {
             let res = CanvasResources::new(rs);
             rs.renderer.write().callback_resources.insert(res);
         }
-        Self {
-            module: Module::default(),
-            thumb_size: 46.0,
-        }
+        let state = crate::state::AppState::new().expect("open catalog");
+        Self { module: Module::default(), thumb_size: 46.0, state }
     }
 }
 
@@ -68,6 +67,12 @@ fn window_resize(ctx: &egui::Context) {
 
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Drain job results into state (textures uploaded in Task 7).
+        while let Ok(event) = self.state.rx.try_recv() {
+            let _ = self.state.apply(event);
+        }
+        self.state.refresh_images();
+
         egui::TopBottomPanel::top("titlebar")
             .exact_height(30.0)
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
@@ -82,6 +87,11 @@ impl eframe::App for FerroliteApp {
                 ui.add_space(8.0);
                 ui.colored_label(theme::TEXT_FAINT, "CATALOG");
                 ui.label("All Photographs");
+                if ui.button("Open folder…").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                        crate::ingest::spawn_ingest(&mut self.state, ctx, folder);
+                    }
+                }
                 ui.add_space(12.0);
                 ui.colored_label(theme::TEXT_FAINT, "THUMBNAIL SIZE");
                 ui.add(EguiSlider {
@@ -102,15 +112,7 @@ impl eframe::App for FerroliteApp {
             .exact_height(24.0)
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
             .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    // TODO(catalog): bind to selected-image metadata once ferrolite-decode/catalog land (Plan 2).
-                    ui.monospace("NEF · 8256×5504 · ISO 100 · 14mm · f/8 · 1/250s");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.monospace("GPU: idle");
-                        ui.monospace("·");
-                        ui.monospace("0 indexed");
-                    });
-                });
+                crate::status_bar::show(ui, &self.state);
             });
 
         egui::CentralPanel::default()

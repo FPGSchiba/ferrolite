@@ -31,7 +31,7 @@ pub struct ViewerState {
 
     /// True once the tier-2 full decode has been submitted (one-shot).
     pub full_requested: bool,
-    /// True once the streaming (tier-2) `VirtualTexture` is built and stored in
+    /// True once the sparse (tier-2) `VirtualTexture` is built and stored in
     /// `ViewerGpu`; the paint then drives it per frame and crossfades toward it.
     pub full_ready: bool,
     /// True while the preview→full crossfade ramp is advancing.
@@ -74,7 +74,7 @@ impl ViewerState {
         }
     }
 
-    /// Begin the preview→full crossfade ramp (called when the full streaming VT
+    /// Begin the preview→full crossfade ramp (called when the full sparse VT
     /// becomes available).
     pub fn begin_crossfade(&mut self) {
         self.crossfading = true;
@@ -96,7 +96,7 @@ impl ViewerState {
         factor
     }
 
-    /// Cancel the in-flight decode jobs for this viewer. The streaming tile jobs
+    /// Cancel the in-flight decode jobs for this viewer. The sparse tile jobs
     /// are cancelled separately (they live in the `ViewerGpu` holder, owned by
     /// `callback_resources`) when that holder is dropped/replaced.
     pub fn cancel_loads(&self) {
@@ -167,7 +167,7 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 /// Paint the viewer's central canvas: fill black, read scroll/drag input into
 /// the view transform, record the viewport size, and (once the rung-1 preview
 /// texture is loaded) enqueue the egui↔wgpu paint callback. `show_full` selects
-/// the streaming full-res VT over the preview (swap-on-ready crossfade). Returns
+/// the sparse full-res VT over the preview (swap-on-ready crossfade). Returns
 /// `true` while the preview is still loading so the caller can `request_repaint`
 /// for a prompt first pixel.
 pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> bool {

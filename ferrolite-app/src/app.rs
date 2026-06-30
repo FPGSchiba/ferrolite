@@ -79,7 +79,7 @@ impl FerroliteApp {
     }
 
     /// Handle a tier-2 full decode: build a `PyramidTileSource` from the
-    /// display-linear image, wrap it as a streaming (rung-3) `VirtualTexture`,
+    /// display-linear image, wrap it as a sparse (rung-4) `VirtualTexture`,
     /// store it alongside the preview in `ViewerGpu`, and begin the preview→full
     /// crossfade. Stale events (no open viewer / different image_id) are dropped.
     fn apply_full_decoded(
@@ -106,7 +106,7 @@ impl FerroliteApp {
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
         let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
             std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
-        let full = ferrolite_vt::VirtualTexture::streaming(
+        let full = ferrolite_vt::VirtualTexture::sparse(
             &gpu,
             source,
             std::sync::Arc::clone(&self.state.jobs),
@@ -141,20 +141,20 @@ impl FerroliteApp {
     }
 }
 
-/// Physical tile-pool budget for the viewer's streaming VT. 256 tiles × 256² ×
+/// Physical tile-pool budget for the viewer's sparse VT. 256 tiles × 256² ×
 /// RGBA16F ≈ 128 MB of GPU memory — generous headroom for a fit-to-window view
 /// plus a few zoom levels of the quad-binned (half-res) full image.
 const VIEWER_TILE_BUDGET: u32 = 256;
 
 impl FerroliteApp {
-    /// Per-frame viewer drive: advance the crossfade, drive the streaming VT
-    /// (request the current view's tiles + drain finished loads), paint the
+    /// Per-frame viewer drive: advance the crossfade, drive the sparse VT
+    /// (reconcile against GPU-truth feedback + drain finished loads), paint the
     /// preview or full image (swap-on-ready), and request a repaint ONLY while
     /// there is still work — so a finished/failed viewer goes idle (no busy-loop).
     ///
     /// Crossfade approach 4b (swap-on-ready): we keep showing the sharp preview
     /// until the crossfade ramp completes AND the current view's tiles are all
-    /// resident (`streaming_pending() == 0`), then hard-swap to the full VT. The
+    /// resident (`sparse_pending() == 0`), then hard-swap to the full VT. The
     /// full is already sharp at that point, so there is no blurry pop. True alpha
     /// blending in the callback would need a second alpha-blended pipeline pass;
     /// 4b avoids that cost and reads as instant at the 150 ms ramp.
@@ -166,20 +166,24 @@ impl FerroliteApp {
         // tile jobs so they stop competing with the new image's loads.
         let open_id = self.state.viewer.as_ref().map(|v| v.image_id);
 
-        // Drive the streaming VT for the open viewer and learn how many tiles are
+        // Drive the sparse VT for the open viewer and learn how many tiles are
         // still pending (so we can both gate the swap and terminate the repaint).
+        // `request_view_feedback` reconciles residency against the PRIOR frame's
+        // GPU feedback marks (one frame latent); the paint callback's `draw_sparse`
+        // marks the CURRENT frame. This converges over frames; the coarse-LOD
+        // fallback keeps showing tiles meanwhile.
         let mut tiles_pending: Option<usize> = None;
-        if let (Some(rs), Some(v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
+        if let (Some(rs), Some(_v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if Some(g.image_id) != open_id {
                     // Stale holder from a superseded viewer: stop its tile jobs.
                     if let Some(full) = g.full.as_mut() {
-                        full.cancel_streaming();
+                        full.cancel_sparse();
                     }
                 } else if let Some(full) = g.full.as_mut() {
-                    full.request_view(&g.ctx, &v.view, v.viewport);
-                    tiles_pending = full.streaming_pending();
+                    full.request_view_feedback(&g.ctx);
+                    tiles_pending = full.sparse_pending();
                 }
             }
         }
@@ -189,8 +193,8 @@ impl FerroliteApp {
         };
 
         // If the view changed (pan/zoom in `viewer::paint` already cleared `idle`,
-        // but a programmatic change might not), `request_view` above may have
-        // submitted new tile loads. Resume the drive loop so they drain + display.
+        // but a programmatic change might not), `request_view_feedback` above may
+        // have submitted new tile loads. Resume the drive loop so they drain + display.
         if matches!(tiles_pending, Some(n) if n > 0) {
             v.idle = false;
         }
@@ -215,7 +219,7 @@ impl FerroliteApp {
         // Repaint only while there is pending work:
         //  - preview not yet uploaded, or
         //  - crossfade ramp still advancing, or
-        //  - streaming tiles still loading.
+        //  - sparse tiles still loading.
         // Once `idle` (full ready + settled, or a failure marked it idle) we stop.
         // A pan/zoom clears `idle` so the loop resumes and the new view's tiles
         // (requested next frame) drain and display.
@@ -225,7 +229,7 @@ impl FerroliteApp {
         }
     }
 
-    /// Cancel the streaming VT's in-flight tile-load jobs for the named viewer.
+    /// Cancel the sparse VT's in-flight tile-load jobs for the named viewer.
     /// The VT lives in `callback_resources`; the decode jobs are cancelled
     /// separately via `ViewerState::cancel_loads`. Guarded on `image_id` so we
     /// never cancel a holder that already belongs to a newer viewer.
@@ -237,7 +241,7 @@ impl FerroliteApp {
         if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
             if g.image_id == image_id {
                 if let Some(full) = g.full.as_mut() {
-                    full.cancel_streaming();
+                    full.cancel_sparse();
                 }
             }
         }

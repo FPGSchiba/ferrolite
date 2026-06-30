@@ -140,6 +140,11 @@ struct SparseResources {
     sampler: wgpu::Sampler,
     pipeline: wgpu::RenderPipeline,
     image_dims: (u32, u32),
+    /// Per-frame transform uniform, rewritten by `prepare_sparse` (so the
+    /// egui-callback paint split has no allocation in the render pass).
+    uniform_buf: wgpu::Buffer,
+    /// Bind group built in `prepare_sparse`, consumed by `draw_sparse`.
+    bind_group: Option<wgpu::BindGroup>,
 }
 
 pub struct VirtualTexture {
@@ -1172,6 +1177,14 @@ impl VirtualTexture {
         let (bind_group_layout, sampler, pipeline) =
             build_sparse_pipeline(device, target_format, "vt-sparse");
 
+        // Persistent transform uniform, rewritten each frame by `prepare_sparse`.
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-sparse-xf"),
+            size: std::mem::size_of::<TransformUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let (tx, rx) = std::sync::mpsc::channel();
 
         let sparse = SparseResources {
@@ -1193,6 +1206,8 @@ impl VirtualTexture {
             sampler,
             pipeline,
             image_dims: (img_w, img_h),
+            uniform_buf,
+            bind_group: None,
         };
 
         Self {
@@ -1209,6 +1224,10 @@ impl VirtualTexture {
     /// for missing tiles, drains any that finished (uploading + allocating), then
     /// pushes the updated page table and clears feedback for the next frame.
     /// GPU access is single-threaded — call from the main/render thread.
+    ///
+    /// Call exactly once per frame: it reads the PRIOR frame's feedback marks
+    /// (visibility is one frame latent) and clears feedback before returning, so
+    /// the current frame's `draw_sparse` paint starts from a clean slate.
     pub fn request_view_feedback(&mut self, ctx: &GpuContext) {
         // Absorb anything that finished loading since last frame.
         self.drain_loaded_sparse(ctx);
@@ -1373,6 +1392,98 @@ impl VirtualTexture {
         pass.set_pipeline(&s.pipeline);
         pass.set_bind_group(0, &bind, &[]);
         pass.draw(0..3, 0..1);
+    }
+
+    /// Prepare-half of the rung-4 paint (egui_wgpu `CallbackTrait::prepare`):
+    /// rewrite the per-frame transform uniform and build the bind group (page
+    /// table + feedback + pool + sampler + uniform), stashing it for `draw_sparse`.
+    /// The page table is uploaded separately by `request_view_feedback`. Call once
+    /// per frame before `draw_sparse`.
+    ///
+    /// The feedback buffer is bound read-write here: `fs_sparse` does `atomicOr`
+    /// into it during paint, and `request_view_feedback` reads/clears it next frame.
+    pub fn prepare_sparse(&mut self, ctx: &GpuContext, view: &ViewTransform, viewport: (f32, f32)) {
+        let s = self
+            .sparse
+            .as_mut()
+            .expect("prepare_sparse called on a non-sparse VirtualTexture");
+        let uniform = TransformUniform {
+            zoom: view.zoom,
+            _pad0: 0.0,
+            pan: [view.pan.0, view.pan.1],
+            viewport: [viewport.0, viewport.1],
+            image: [s.image_dims.0 as f32, s.image_dims.1 as f32],
+        };
+        ctx.queue
+            .write_buffer(&s.uniform_buf, 0, bytemuck::bytes_of(&uniform));
+        let bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("vt-sparse-bind"),
+            layout: &s.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&s.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: s.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&s.array_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: s.meta_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(s.page_table.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: s.feedback.buffer().as_entire_binding(),
+                },
+            ],
+        });
+        s.bind_group = Some(bind);
+    }
+
+    /// Paint-half of the rung-4 paint (egui_wgpu `CallbackTrait::paint`): bind the
+    /// pipeline + the bind group built by `prepare_sparse` and draw the full-screen
+    /// triangle (which marks feedback as a side effect). No device/queue needed; a
+    /// no-op if `prepare_sparse` has not run.
+    pub fn draw_sparse(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let s = self
+            .sparse
+            .as_ref()
+            .expect("draw_sparse called on a non-sparse VirtualTexture");
+        let Some(bind) = s.bind_group.as_ref() else {
+            return;
+        };
+        pass.set_pipeline(&s.pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
+    /// Rung 4: number of tiles still in flight (jobs submitted, not yet drained).
+    /// `None` if this is not a sparse VT. Mirrors `streaming_pending`: used by the
+    /// viewer to gate the crossfade swap and terminate the repaint loop. Note: 0
+    /// in-flight means everything requested has arrived; the next
+    /// `request_view_feedback` may submit more once the feedback marks change.
+    pub fn sparse_pending(&self) -> Option<usize> {
+        self.sparse.as_ref().map(|s| s.in_flight.len())
+    }
+
+    /// Rung 4: cancel every in-flight tile-load job. Called on navigation so a
+    /// superseded image's tile jobs stop competing with the newly-opened one.
+    /// Idempotent; a no-op on a non-sparse VT. Mirrors `cancel_streaming`.
+    pub fn cancel_sparse(&mut self) {
+        if let Some(s) = self.sparse.as_mut() {
+            for (_coord, handle) in s.in_flight.drain() {
+                handle.cancel();
+            }
+        }
     }
 
     /// Test-introspection: is `t` currently resident (has a physical slot)?

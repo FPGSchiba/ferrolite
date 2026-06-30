@@ -27,7 +27,7 @@ pub enum AppEvent {
         image: ferrolite_image::ImageBuffer,
     },
     /// A viewer tier-2 full RAW decode + quad-bin finished off-thread. Carries the
-    /// display-linear RGBA f32 image for upload as a streaming `VirtualTexture`.
+    /// display-linear RGBA f32 image for upload as a sparse `VirtualTexture`.
     /// Handled directly in `app.rs` (needs the GPU render state), not folded by
     /// `apply`.
     FullDecoded {

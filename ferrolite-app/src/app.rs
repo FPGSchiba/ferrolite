@@ -414,9 +414,13 @@ impl eframe::App for FerroliteApp {
         }
 
         // Enter opens the selected image in the viewer (library grid only, no
-        // viewer already open, exactly one image selected).
+        // viewer already open, exactly one image selected). Suppressed while the
+        // remove-confirmation modal is up or a text field holds focus (so a
+        // future search box's Enter won't pop the viewer).
         if self.module.is_library()
             && self.state.viewer.is_none()
+            && self.state.pending_remove.is_none()
+            && !ctx.wants_keyboard_input()
             && ctx.input(|i| i.key_pressed(egui::Key::Enter))
         {
             if let Some(sel_id) = self.state.selected {

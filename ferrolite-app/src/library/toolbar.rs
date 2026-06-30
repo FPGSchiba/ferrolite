@@ -102,6 +102,82 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             changed = true;
         }
 
+        // Metadata range popover: camera model, ISO range, date range.
+        let popup_id = ui.make_persistent_id("meta_popover");
+        let btn = ui.button("Metadata  ▾");
+        if btn.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+        }
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &btn,
+            egui::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                ui.set_min_width(240.0);
+                // Camera model.
+                let cameras = state.reads.distinct_cameras().unwrap_or_default();
+                egui::ComboBox::from_label("Camera")
+                    .selected_text(state.filter.camera.clone().unwrap_or_else(|| "Any".into()))
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(state.filter.camera.is_none(), "Any")
+                            .clicked()
+                        {
+                            state.filter.camera = None;
+                            changed = true;
+                        }
+                        for c in &cameras {
+                            if ui
+                                .selectable_label(state.filter.camera.as_deref() == Some(c), c)
+                                .clicked()
+                            {
+                                state.filter.camera = Some(c.clone());
+                                changed = true;
+                            }
+                        }
+                    });
+                // ISO range.
+                if let Ok(Some((lo, hi))) = state.reads.iso_bounds() {
+                    let (mut a, mut b) = state.filter.iso.unwrap_or((lo, hi));
+                    let mut af = a as f32;
+                    let mut bf = b as f32;
+                    let r1 =
+                        ui.add(egui::Slider::new(&mut af, lo as f32..=hi as f32).text("ISO min"));
+                    let r2 =
+                        ui.add(egui::Slider::new(&mut bf, lo as f32..=hi as f32).text("ISO max"));
+                    if r1.changed() || r2.changed() {
+                        a = af as u32;
+                        b = bf as u32;
+                        state.filter.iso = Some((a.min(b), a.max(b)));
+                        changed = true;
+                    }
+                    if ui.button("Clear ISO").clicked() {
+                        state.filter.iso = None;
+                        changed = true;
+                    }
+                }
+                // Date range (ISO-8601 text inputs; lexical compare).
+                if let Ok(Some((lo, hi))) = state.reads.date_bounds() {
+                    let (mut from, mut to) = state
+                        .filter
+                        .date
+                        .clone()
+                        .unwrap_or((lo.clone(), hi.clone()));
+                    let r1 = ui.add(egui::TextEdit::singleline(&mut from).hint_text("from"));
+                    let r2 = ui.add(egui::TextEdit::singleline(&mut to).hint_text("to"));
+                    if r1.changed() || r2.changed() {
+                        state.filter.date = Some((from, to));
+                        changed = true;
+                    }
+                    if ui.button("Clear dates").clicked() {
+                        state.filter.date = None;
+                        changed = true;
+                    }
+                }
+            },
+        );
+
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(SIZE_SLIDER_W, ui.available_height()),

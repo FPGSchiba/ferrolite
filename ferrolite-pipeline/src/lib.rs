@@ -1,4 +1,6 @@
-//! ferrolite-pipeline — the photo edit DAG (see crate docs in the final lib.rs).
+//! ferrolite-pipeline — the photo edit DAG. An ordered `OpStack` document model
+//! and a retained GPU pipeline built on `ferrolite-gpu`'s generic executor; WGSL
+//! compute passes implement the edits. Photo tier (GPL-OK).
 mod image;
 mod nodes;
 mod op;
@@ -11,7 +13,7 @@ pub use nodes::upload_source;
 pub use op::{Contrast, Exposure, Op, OpKind, OpStack, WhiteBalance, STACK_VERSION};
 pub use pipeline::{blit_to_rgba8, EditPipeline};
 pub use serialize::{deserialize, serialize};
-pub use uniforms::{
-    contrast_gain_pivot, contrast_uniform, exposure_gain, exposure_uniform, wb_multipliers,
-    wb_uniform, ContrastUniform, ExposureUniform, WbUniform, CONTRAST_PIVOT,
-};
+// The uniform structs are exported as the documented GPU memory layout the
+// edit passes consume; the param→uniform helper fns + math are crate-internal
+// (used by `pipeline`/`uniforms`), so they are not part of the public surface.
+pub use uniforms::{ContrastUniform, ExposureUniform, WbUniform};

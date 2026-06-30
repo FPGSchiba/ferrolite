@@ -13,7 +13,6 @@ use std::collections::HashSet;
 
 const GAP: f32 = 8.0;
 const SEL_ROUND: f32 = 6.0;
-const SEL_BORDER_W: f32 = 3.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = ui.available_width();
@@ -214,15 +213,13 @@ fn paint_cell(
         opened = Some(rec.id);
     }
 
-    // Soft gradient selection border: blue at the band centerline, fading to
-    // black at the inner and outer edges.
+    // Selection: a clean solid blue rounded border, inset 1px so it sits fully
+    // inside the cell (no bleed into the inter-cell gap).
     if selected {
-        crate::library::icons::gradient_border(
-            &painter,
-            rect,
+        painter.rect_stroke(
+            rect.shrink(1.0),
             SEL_ROUND,
-            SEL_BORDER_W,
-            theme::ACCENT,
+            egui::Stroke::new(2.0, theme::ACCENT),
         );
     }
 

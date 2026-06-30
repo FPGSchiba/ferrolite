@@ -137,7 +137,16 @@ fn paint_cell(
         let gap = 2.0_f32;
         let row_y = img_rect.bottom() - 8.0;
         let origin = egui::pos2(img_rect.left() + 4.0 + r, row_y);
-        icons::rating_stars(&painter, origin, r, gap, rec.rating.get(), 5, theme::ACCENT);
+        icons::rating_stars(
+            &painter,
+            origin,
+            r,
+            gap,
+            rec.rating.get(),
+            5,
+            theme::ACCENT,
+            true,
+        );
     }
 
     // #8 — Flag icon (top-left): drawn shapes instead of glyphs.
@@ -149,6 +158,7 @@ fn paint_cell(
                 10.0,
                 true,
                 theme::SEMANTIC_GREEN,
+                true,
             );
         }
         Flag::Reject => {
@@ -158,6 +168,7 @@ fn paint_cell(
                 10.0,
                 true,
                 theme::SEMANTIC_RED,
+                true,
             );
         }
         Flag::None => {}

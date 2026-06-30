@@ -5,7 +5,7 @@
 //! as ★, ⚑, ▾).  Every function is pure geometry: no state, no allocation
 //! beyond the shape list appended to the painter.
 
-use egui::{Color32, Painter, Pos2, Shape, Stroke, Vec2};
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -58,6 +58,7 @@ pub fn star(painter: &Painter, center: Pos2, r: f32, filled: bool, color: Color3
 ///
 /// Not yet called in the toolbar (individual star calls handle per-star click
 /// targets), but called by the grid cell pass.
+#[allow(clippy::too_many_arguments)]
 pub fn rating_stars(
     painter: &Painter,
     origin: Pos2,
@@ -66,7 +67,17 @@ pub fn rating_stars(
     filled: u8,
     total: u8,
     color: Color32,
+    bg: bool,
 ) -> f32 {
+    if bg && total > 0 {
+        let pad = 3.0;
+        let w = advance_width(r, gap, total);
+        let bg_rect = Rect::from_min_max(
+            Pos2::new(origin.x - pad, origin.y - r - pad),
+            Pos2::new(origin.x + w + pad, origin.y + r + pad),
+        );
+        painter.rect_filled(bg_rect, 3.0, Color32::from_black_alpha(120));
+    }
     let cell = r * 2.0 + gap;
     for i in 0..total {
         let cx = origin.x + r + (i as f32) * cell;
@@ -89,7 +100,15 @@ pub fn advance_width(r: f32, gap: f32, n: u8) -> f32 {
 ///
 /// `h` is the total height of the icon (pole + pennant).
 /// `filled = true` fills the pennant head; `false` draws an outline only.
-pub fn flag(painter: &Painter, base: Pos2, h: f32, filled: bool, color: Color32) {
+pub fn flag(painter: &Painter, base: Pos2, h: f32, filled: bool, color: Color32, bg: bool) {
+    if bg {
+        let pad = 2.5;
+        let bg_rect = Rect::from_min_max(
+            Pos2::new(base.x - pad, base.y - h - pad),
+            Pos2::new(base.x + h * 0.55 + pad, base.y + pad),
+        );
+        painter.rect_filled(bg_rect, 3.0, Color32::from_black_alpha(120));
+    }
     let pole_x = base.x;
     // Pole: vertical line from base upward.
     let pole_top = Pos2::new(pole_x, base.y - h);

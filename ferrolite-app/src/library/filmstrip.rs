@@ -75,6 +75,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                                 rating,
                                 rating,
                                 theme::ACCENT,
+                                true,
                             );
                         }
                         let flag_color = match flag {
@@ -89,6 +90,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                                 10.0,
                                 true,
                                 c,
+                                true,
                             );
                         }
                     }

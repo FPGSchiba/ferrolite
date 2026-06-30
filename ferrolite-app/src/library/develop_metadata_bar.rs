@@ -45,6 +45,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
                 12.0,
                 active,
                 color,
+                false,
             );
             if resp.on_hover_text(label).clicked() {
                 let new = if active { Flag::None } else { f };

@@ -882,6 +882,27 @@ impl eframe::App for FerroliteApp {
                         crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else if self.state.viewer.is_some() {
                     self.drive_viewer(ui, frame);
+                    // Crop overlay: shown while the Geometry section is open.
+                    // Gather all viewer data into locals BEFORE calling apply_edit
+                    // (which needs &mut self) — mirrors the panel-outcome pattern.
+                    if self.state.viewer.as_ref().map(|v| v.crop_active).unwrap_or(false) {
+                        let (stack, dims, view, viewport) = {
+                            let v = self.state.viewer.as_ref().unwrap();
+                            (
+                                v.op_stack.clone(),
+                                v.image_dims.unwrap_or((1, 1)),
+                                v.view,
+                                v.viewport,
+                            )
+                        };
+                        let image_rect =
+                            crate::viewer::image_screen_rect(ui.min_rect(), dims, view, viewport);
+                        if let Some(o) =
+                            crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)
+                        {
+                            self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                        }
+                    }
                     if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
                         let rect = ui.min_rect();
                         let resp =

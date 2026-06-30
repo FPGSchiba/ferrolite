@@ -1,10 +1,12 @@
 //! Pure crop-overlay geometry in image-normalized [0,1] space. egui-free; the
 //! overlay widget converts screen↔image coords and routes pointer events here.
-#![allow(dead_code)] // crop widget not yet wired (Tasks 12–13)
 
 use ferrolite_pipeline::{Aspect, CropRect};
 
+/// `#[repr(u8)]` makes `handle as u8` well-defined and lets crop_overlay index
+/// into HANDLES with a simple cast (`HANDLES[h as usize]`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum Handle {
     TopLeft,
     Top,
@@ -114,6 +116,8 @@ pub fn move_body(c: CropRect, delta: (f32, f32)) -> CropRect {
     CropRect { x, y, w: c.w, h: c.h }
 }
 
+// rotate_angle is reserved for the rotate-handle; the Angle slider wires it in a later task.
+#[allow(dead_code)]
 pub fn rotate_angle(center: (f32, f32), pos: (f32, f32)) -> f32 {
     let dy = pos.1 - center.1;
     let dx = pos.0 - center.0;

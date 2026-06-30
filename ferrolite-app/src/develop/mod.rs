@@ -3,6 +3,7 @@
 
 pub mod adjustment_panel;
 pub mod crop_math;
+pub mod crop_overlay;
 pub mod curve_math;
 pub mod curve_widget;
 pub mod history;

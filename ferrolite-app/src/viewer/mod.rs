@@ -310,6 +310,44 @@ pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> boo
     }
 }
 
+/// Map image bounds to the on-screen rect using the same zoom/pan convention
+/// as the display shader (`display.wgsl`):
+///
+/// ```wgsl
+/// let center = image * 0.5 + pan;
+/// let img_px = center + (screen_px - viewport * 0.5) / zoom;
+/// ```
+///
+/// Inverting: `screen_px = viewport/2 + (img_px − center) * zoom`.
+/// So `center = (image_w/2 + pan_x, image_h/2 + pan_y)` is the image-space
+/// point that maps to the viewport centre.
+///
+/// This is a pure helper — no GPU, no egui state. The fit case (pan = 0,
+/// zoom = min(vw/iw, vh/ih)) returns the sub-rect of `canvas` that the image
+/// occupies; the zoomed/panned case correctly maps to wherever the image sits.
+pub fn image_screen_rect(
+    canvas: egui::Rect,
+    dims: (u32, u32),
+    view: ferrolite_vt::ViewTransform,
+    viewport: (f32, f32),
+) -> egui::Rect {
+    let (iw, ih) = (dims.0 as f32, dims.1 as f32);
+    let (vw, vh) = viewport;
+    let zoom = view.zoom;
+    let (pan_x, pan_y) = view.pan;
+    // Image-space point that maps to the viewport centre (matches the shader).
+    let cx = iw * 0.5 + pan_x;
+    let cy = ih * 0.5 + pan_y;
+    // Canvas offset of the viewport centre.
+    let ox = canvas.left() + vw * 0.5;
+    let oy = canvas.top() + vh * 0.5;
+    let left = ox + (0.0 - cx) * zoom;
+    let top = oy + (0.0 - cy) * zoom;
+    let right = ox + (iw - cx) * zoom;
+    let bottom = oy + (ih - cy) * zoom;
+    egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +388,36 @@ mod tests {
         // point under the cursor fixed, the viewport center must shift right in
         // image space (pan.0 increases).
         assert!(z.pan.0 > 0.0, "zoom about off-center cursor pans toward it");
+    }
+
+    #[test]
+    fn image_screen_rect_fit_square_equals_canvas() {
+        // Square image, square canvas, fit zoom → image fills the entire canvas.
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let dims = (100u32, 100u32);
+        let viewport = (100.0f32, 100.0f32);
+        let view = ViewTransform::fit(dims, viewport);
+        let r = super::image_screen_rect(canvas, dims, view, viewport);
+        assert!((r.left() - canvas.left()).abs() < 1e-4, "left: {}", r.left());
+        assert!((r.top() - canvas.top()).abs() < 1e-4, "top: {}", r.top());
+        assert!((r.right() - canvas.right()).abs() < 1e-4, "right: {}", r.right());
+        assert!((r.bottom() - canvas.bottom()).abs() < 1e-4, "bottom: {}", r.bottom());
+    }
+
+    #[test]
+    fn image_screen_rect_fit_landscape_letterboxed() {
+        // 200×100 image in a 100×100 canvas: zoom = 0.5, image fills width, letterboxed top/bottom.
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let dims = (200u32, 100u32);
+        let viewport = (100.0f32, 100.0f32);
+        let view = ViewTransform::fit(dims, viewport);
+        // zoom = min(100/200, 100/100) = 0.5; image screen size = 100×50
+        let r = super::image_screen_rect(canvas, dims, view, viewport);
+        assert!((r.left() - 0.0).abs() < 1e-4, "left should be 0, got {}", r.left());
+        assert!((r.right() - 100.0).abs() < 1e-4, "right should be 100, got {}", r.right());
+        // Vertical center: image height on screen = 50, centered in 100 → top=25, bottom=75
+        assert!((r.top() - 25.0).abs() < 1e-4, "top should be 25, got {}", r.top());
+        assert!((r.bottom() - 75.0).abs() < 1e-4, "bottom should be 75, got {}", r.bottom());
     }
 
     #[test]

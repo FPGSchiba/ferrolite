@@ -61,7 +61,6 @@ pub struct ViewerState {
     pub full_handle: Option<JobHandle>,
 
     // ── Edit state (Task 8 / Plan 4) — read by Tasks 9+ ────────────────────
-
     /// The full-res linear source retained for re-evaluation when the op stack
     /// changes (built from the tier-2 full decode).
     pub preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
@@ -398,10 +397,22 @@ mod tests {
         let viewport = (100.0f32, 100.0f32);
         let view = ViewTransform::fit(dims, viewport);
         let r = super::image_screen_rect(canvas, dims, view, viewport);
-        assert!((r.left() - canvas.left()).abs() < 1e-4, "left: {}", r.left());
+        assert!(
+            (r.left() - canvas.left()).abs() < 1e-4,
+            "left: {}",
+            r.left()
+        );
         assert!((r.top() - canvas.top()).abs() < 1e-4, "top: {}", r.top());
-        assert!((r.right() - canvas.right()).abs() < 1e-4, "right: {}", r.right());
-        assert!((r.bottom() - canvas.bottom()).abs() < 1e-4, "bottom: {}", r.bottom());
+        assert!(
+            (r.right() - canvas.right()).abs() < 1e-4,
+            "right: {}",
+            r.right()
+        );
+        assert!(
+            (r.bottom() - canvas.bottom()).abs() < 1e-4,
+            "bottom: {}",
+            r.bottom()
+        );
     }
 
     #[test]
@@ -413,11 +424,27 @@ mod tests {
         let view = ViewTransform::fit(dims, viewport);
         // zoom = min(100/200, 100/100) = 0.5; image screen size = 100×50
         let r = super::image_screen_rect(canvas, dims, view, viewport);
-        assert!((r.left() - 0.0).abs() < 1e-4, "left should be 0, got {}", r.left());
-        assert!((r.right() - 100.0).abs() < 1e-4, "right should be 100, got {}", r.right());
+        assert!(
+            (r.left() - 0.0).abs() < 1e-4,
+            "left should be 0, got {}",
+            r.left()
+        );
+        assert!(
+            (r.right() - 100.0).abs() < 1e-4,
+            "right should be 100, got {}",
+            r.right()
+        );
         // Vertical center: image height on screen = 50, centered in 100 → top=25, bottom=75
-        assert!((r.top() - 25.0).abs() < 1e-4, "top should be 25, got {}", r.top());
-        assert!((r.bottom() - 75.0).abs() < 1e-4, "bottom should be 75, got {}", r.bottom());
+        assert!(
+            (r.top() - 25.0).abs() < 1e-4,
+            "top should be 25, got {}",
+            r.top()
+        );
+        assert!(
+            (r.bottom() - 75.0).abs() < 1e-4,
+            "bottom should be 75, got {}",
+            r.bottom()
+        );
     }
 
     #[test]

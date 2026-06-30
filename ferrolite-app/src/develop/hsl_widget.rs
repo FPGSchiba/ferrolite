@@ -17,16 +17,20 @@ const SWATCHES: [(u8, u8, u8); 8] = [
 ];
 
 pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<EditOutcome> {
-    let mut hsl = stack
-        .hsl()
-        .unwrap_or(Hsl { bands: [HslBand { hue: 0.0, sat: 0.0, lum: 0.0 }; 8] });
+    let mut hsl = stack.hsl().unwrap_or(Hsl {
+        bands: [HslBand {
+            hue: 0.0,
+            sat: 0.0,
+            lum: 0.0,
+        }; 8],
+    });
     let mut out = None;
 
     ui.horizontal(|ui| {
         for (i, (r, g, b)) in SWATCHES.iter().enumerate() {
-            let (rect, resp) =
-                ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
-            ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(*r, *g, *b));
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+            ui.painter()
+                .rect_filled(rect, 2.0, egui::Color32::from_rgb(*r, *g, *b));
             if i == *band {
                 ui.painter().rect_stroke(
                     rect,
@@ -86,12 +90,20 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<Edit
             .bands
             .iter()
             .all(|x| x.hue == 0.0 && x.sat == 0.0 && x.lum == 0.0);
-        let s = if all_zero { stack.reset(OpKind::Hsl) } else { stack.set_op(Op::Hsl(hsl)) };
+        let s = if all_zero {
+            stack.reset(OpKind::Hsl)
+        } else {
+            stack.set_op(Op::Hsl(hsl))
+        };
         let commit = rh.drag_stopped()
             || rs.drag_stopped()
             || rl.drag_stopped()
             || !(rh.dragged() || rs.dragged() || rl.dragged());
-        out = Some(EditOutcome { stack: s, kind: OpKind::Hsl, commit });
+        out = Some(EditOutcome {
+            stack: s,
+            kind: OpKind::Hsl,
+            commit,
+        });
     }
     out
 }

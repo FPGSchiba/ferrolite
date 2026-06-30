@@ -67,7 +67,12 @@ pub fn resize(c: CropRect, handle: Handle, pos: (f32, f32), aspect: Option<f32>)
         Handle::Bottom | Handle::BottomLeft | Handle::BottomRight => b = py.max(t + MIN_SIZE),
         _ => {}
     }
-    let mut out = CropRect { x: l, y: t, w: rt - l, h: b - t };
+    let mut out = CropRect {
+        x: l,
+        y: t,
+        w: rt - l,
+        h: b - t,
+    };
     if let Some(ar) = aspect {
         match handle {
             // Vertical handles drive HEIGHT; derive width from height, keep the
@@ -113,7 +118,12 @@ pub fn resize(c: CropRect, handle: Handle, pos: (f32, f32), aspect: Option<f32>)
 pub fn move_body(c: CropRect, delta: (f32, f32)) -> CropRect {
     let x = (c.x + delta.0).clamp(0.0, (1.0 - c.w).max(0.0));
     let y = (c.y + delta.1).clamp(0.0, (1.0 - c.h).max(0.0));
-    CropRect { x, y, w: c.w, h: c.h }
+    CropRect {
+        x,
+        y,
+        w: c.w,
+        h: c.h,
+    }
 }
 
 // rotate_angle is reserved for the rotate-handle; the Angle slider wires it in a later task.
@@ -152,33 +162,65 @@ mod tests {
 
     #[test]
     fn hit_test_corners_and_body() {
-        let c = CropRect { x: 0.2, y: 0.2, w: 0.6, h: 0.6 };
+        let c = CropRect {
+            x: 0.2,
+            y: 0.2,
+            w: 0.6,
+            h: 0.6,
+        };
         assert_eq!(hit_test(c, (0.2, 0.2), 0.05), Some(Handle::TopLeft));
         assert_eq!(hit_test(c, (0.8, 0.8), 0.05), Some(Handle::BottomRight));
         assert_eq!(hit_test(c, (0.5, 0.5), 0.05), Some(Handle::Body));
-        assert_eq!(hit_test(c, (0.95, 0.05), 0.02), None, "outside any handle/body");
+        assert_eq!(
+            hit_test(c, (0.95, 0.05), 0.02),
+            None,
+            "outside any handle/body"
+        );
     }
 
     #[test]
     fn resize_clamps_into_unit_square() {
         let r = resize(full(), Handle::TopLeft, (-0.3, -0.3), None);
         assert!(r.x >= 0.0 && r.y >= 0.0, "origin in bounds");
-        assert!(r.x + r.w <= 1.0 + 1e-6 && r.y + r.h <= 1.0 + 1e-6, "extent in bounds");
-        assert!(r.w >= MIN_SIZE - 1e-6 && r.h >= MIN_SIZE - 1e-6, "min size enforced");
+        assert!(
+            r.x + r.w <= 1.0 + 1e-6 && r.y + r.h <= 1.0 + 1e-6,
+            "extent in bounds"
+        );
+        assert!(
+            r.w >= MIN_SIZE - 1e-6 && r.h >= MIN_SIZE - 1e-6,
+            "min size enforced"
+        );
     }
 
     #[test]
     fn resize_with_aspect_holds_ratio() {
-        let c = CropRect { x: 0.1, y: 0.1, w: 0.4, h: 0.4 };
+        let c = CropRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.4,
+            h: 0.4,
+        };
         let r = resize(c, Handle::BottomRight, (0.9, 0.6), Some(2.0)); // 2:1
-        assert!((r.w / r.h - 2.0).abs() < 1e-3, "aspect held at 2:1, got {}", r.w / r.h);
+        assert!(
+            (r.w / r.h - 2.0).abs() < 1e-3,
+            "aspect held at 2:1, got {}",
+            r.w / r.h
+        );
     }
 
     #[test]
     fn move_body_clamps_inside() {
-        let c = CropRect { x: 0.6, y: 0.6, w: 0.5, h: 0.5 };
+        let c = CropRect {
+            x: 0.6,
+            y: 0.6,
+            w: 0.5,
+            h: 0.5,
+        };
         let m = move_body(c, (0.5, 0.5));
-        assert!(m.x + m.w <= 1.0 + 1e-6 && m.y + m.h <= 1.0 + 1e-6, "stays inside");
+        assert!(
+            m.x + m.w <= 1.0 + 1e-6 && m.y + m.h <= 1.0 + 1e-6,
+            "stays inside"
+        );
     }
 
     #[test]
@@ -199,25 +241,60 @@ mod tests {
     fn resize_aspect_top_handle_changes_crop_and_holds_ratio() {
         // Drag the Top handle up; with a 2:1 lock the crop must actually change
         // (the old code left it inert) and hold the ratio.
-        let c = CropRect { x: 0.1, y: 0.1, w: 0.4, h: 0.4 };
+        let c = CropRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.4,
+            h: 0.4,
+        };
         let r = resize(c, Handle::Top, (0.5, 0.0), Some(2.0));
-        assert!(r.h > c.h, "top-handle drag changed the crop (not inert); h={}", r.h);
-        assert!((r.w / r.h - 2.0).abs() < 1e-2, "2:1 held; got {}", r.w / r.h);
+        assert!(
+            r.h > c.h,
+            "top-handle drag changed the crop (not inert); h={}",
+            r.h
+        );
+        assert!(
+            (r.w / r.h - 2.0).abs() < 1e-2,
+            "2:1 held; got {}",
+            r.w / r.h
+        );
     }
 
     #[test]
     fn resize_aspect_left_handle_holds_ratio() {
-        let c = CropRect { x: 0.3, y: 0.3, w: 0.4, h: 0.4 };
+        let c = CropRect {
+            x: 0.3,
+            y: 0.3,
+            w: 0.4,
+            h: 0.4,
+        };
         let r = resize(c, Handle::Left, (0.0, 0.5), Some(2.0));
-        assert!((r.w / r.h - 2.0).abs() < 1e-2, "2:1 held; got {}", r.w / r.h);
+        assert!(
+            (r.w / r.h - 2.0).abs() < 1e-2,
+            "2:1 held; got {}",
+            r.w / r.h
+        );
     }
 
     #[test]
     fn resize_adversarial_does_not_panic() {
         // Near-full rect + tall aspect + every handle: must not panic on the clamps.
-        for h in [Handle::Top, Handle::Bottom, Handle::Left, Handle::Right,
-                  Handle::TopLeft, Handle::TopRight, Handle::BottomLeft, Handle::BottomRight] {
-            let c = CropRect { x: 0.0, y: 0.0, w: 0.98, h: 0.98 };
+        for h in [
+            Handle::Top,
+            Handle::Bottom,
+            Handle::Left,
+            Handle::Right,
+            Handle::TopLeft,
+            Handle::TopRight,
+            Handle::BottomLeft,
+            Handle::BottomRight,
+        ] {
+            let c = CropRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.98,
+                h: 0.98,
+            };
             let _ = resize(c, h, (0.99, 0.99), Some(0.1));
             let _ = resize(c, h, (-0.5, -0.5), Some(50.0));
         }
@@ -225,7 +302,12 @@ mod tests {
 
     #[test]
     fn move_body_oversized_crop_does_not_panic() {
-        let c = CropRect { x: 0.0, y: 0.0, w: 1.5, h: 1.5 }; // invalid but must not panic
+        let c = CropRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1.5,
+            h: 1.5,
+        }; // invalid but must not panic
         let m = move_body(c, (0.2, 0.2));
         assert_eq!((m.x, m.y), (0.0, 0.0), "pinned to 0 when oversize");
     }

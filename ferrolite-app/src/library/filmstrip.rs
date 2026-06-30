@@ -97,7 +97,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                         // "Edited" pip (top-right) when the image carries edits.
                         if has_edits {
                             let c = rect.right_top() + egui::vec2(-7.0, 7.0);
-                            ui.painter().circle_filled(c, 3.0, crate::theme::ACCENT_BRIGHT);
+                            ui.painter()
+                                .circle_filled(c, 3.0, crate::theme::ACCENT_BRIGHT);
                         }
                     }
                     // Keep the current image centered in the strip. egui clamps

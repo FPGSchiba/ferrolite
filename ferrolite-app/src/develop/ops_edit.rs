@@ -1,9 +1,7 @@
 //! Pure helpers: map a UI value to a new immutable `OpStack`. A value at its
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
-use ferrolite_pipeline::{
-    sharpen_halo, Contrast, Exposure, Op, OpStack, Sharpen, WhiteBalance,
-};
+use ferrolite_pipeline::{sharpen_halo, Contrast, Exposure, Op, OpStack, Sharpen, WhiteBalance};
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
     if ev == 0.0 {
@@ -41,8 +39,7 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
 /// construction; only a change to either requires discarding + rebuilding it.
 /// Color-only changes are applied via `TileEditPipeline::set_stack`.
 pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
-    old.geometry() != new.geometry()
-        || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
+    old.geometry() != new.geometry() || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
 }
 
 #[cfg(test)]
@@ -70,14 +67,23 @@ mod tests {
         let s = set_sharpen(&OpStack::default(), 0.0, 3);
         assert!(s.sharpen().is_none(), "zero amount = no sharpen");
         let s = set_sharpen(&OpStack::default(), 0.4, 2);
-        assert_eq!(s.sharpen(), Some(ferrolite_pipeline::Sharpen { amount: 0.4, radius: 2 }));
+        assert_eq!(
+            s.sharpen(),
+            Some(ferrolite_pipeline::Sharpen {
+                amount: 0.4,
+                radius: 2
+            })
+        );
     }
 
     #[test]
     fn needs_full_rebuild_on_geometry_and_halo_only() {
         let base = set_exposure(&OpStack::default(), 0.5);
         let color_only = set_contrast(&base, 0.3);
-        assert!(!needs_full_rebuild(&base, &color_only), "color ops: no rebuild");
+        assert!(
+            !needs_full_rebuild(&base, &color_only),
+            "color ops: no rebuild"
+        );
         let sharper = set_sharpen(&base, 0.5, 5);
         assert!(needs_full_rebuild(&base, &sharper), "halo change: rebuild");
         let geo = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {

@@ -114,7 +114,8 @@ mod tests {
         assert_eq!(h.redo(), Some(a));
         assert_eq!(h.undo(), Some(OpStack::default()));
         // A new push after an undo drops the redo tail.
-        let b = OpStack::default().set_op(Op::Contrast(ferrolite_pipeline::Contrast { amount: 0.2 }));
+        let b =
+            OpStack::default().set_op(Op::Contrast(ferrolite_pipeline::Contrast { amount: 0.2 }));
         h.push(OpKind::Contrast, b);
         assert!(!h.can_redo(), "redo tail dropped after a fresh push");
     }
@@ -123,15 +124,19 @@ mod tests {
     fn cap_drops_oldest() {
         let mut h = History::new(OpStack::default(), 2); // initial + 1 more
         h.push(OpKind::Exposure, ev(&OpStack::default(), 0.1));
-        h.push(OpKind::Contrast, OpStack::default().set_op(Op::Contrast(
-            ferrolite_pipeline::Contrast { amount: 0.2 },
-        )));
+        h.push(
+            OpKind::Contrast,
+            OpStack::default().set_op(Op::Contrast(ferrolite_pipeline::Contrast { amount: 0.2 })),
+        );
         // Capacity 2 means at most 2 entries; the oldest (identity) was dropped.
         let mut steps = 0;
         while h.undo().is_some() {
             steps += 1;
         }
-        assert_eq!(steps, 1, "cap=2: exactly one undo step survives after eviction");
+        assert_eq!(
+            steps, 1,
+            "cap=2: exactly one undo step survives after eviction"
+        );
     }
 
     #[test]
@@ -147,7 +152,11 @@ mod tests {
         // Now exactly one undo step should be reachable (back to identity), and the
         // push must have truncated any redo tail.
         assert!(!h.can_redo(), "push after undo dropped the redo tail");
-        assert_eq!(h.undo(), Some(OpStack::default()), "fresh step undoes to identity");
+        assert_eq!(
+            h.undo(),
+            Some(OpStack::default()),
+            "fresh step undoes to identity"
+        );
         assert!(!h.can_undo(), "only one step existed after the undo+push");
     }
 }

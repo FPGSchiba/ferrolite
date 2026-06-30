@@ -83,7 +83,10 @@ pub fn show(
     if resp.drag_started() {
         if let Some(p) = resp.interact_pointer_pos() {
             let h = crop_math::hit_test(crop, to_norm(p), HANDLE_R);
-            ui.memory_mut(|m| m.data.insert_temp(resp.id, h.map(|h| h as u8).unwrap_or(255)));
+            ui.memory_mut(|m| {
+                m.data
+                    .insert_temp(resp.id, h.map(|h| h as u8).unwrap_or(255))
+            });
         }
     }
     if resp.dragged() {
@@ -149,8 +152,7 @@ mod tests {
     fn handles_array_matches_enum_discriminants() {
         for (i, &h) in HANDLES.iter().enumerate() {
             assert_eq!(
-                h as usize,
-                i,
+                h as usize, i,
                 "HANDLES[{i}] discriminant mismatch: array has {h:?} but expected discriminant {i}"
             );
         }

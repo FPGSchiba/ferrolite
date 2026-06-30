@@ -54,7 +54,11 @@ pub fn move_point(points: &[(f32, f32)], idx: usize, p: (f32, f32)) -> Vec<(f32,
         let x = clamp01(p.0);
         // Guard degenerate case: when neighbors are within 2e-4 of each other,
         // lo > hi and f32::clamp would panic. Pin to lo in that case.
-        if lo <= hi { x.clamp(lo, hi) } else { lo }
+        if lo <= hi {
+            x.clamp(lo, hi)
+        } else {
+            lo
+        }
     };
     out[idx] = (x, y);
     out
@@ -89,7 +93,9 @@ mod tests {
     fn insert_keeps_x_sorted_and_clamps() {
         let pts = insert_point(&identity_points(), (1.5, -0.2));
         assert!(pts.windows(2).all(|w| w[0].0 <= w[1].0), "x ascending");
-        assert!(pts.iter().all(|p| (0.0..=1.0).contains(&p.0) && (0.0..=1.0).contains(&p.1)));
+        assert!(pts
+            .iter()
+            .all(|p| (0.0..=1.0).contains(&p.0) && (0.0..=1.0).contains(&p.1)));
     }
 
     #[test]
@@ -104,26 +110,46 @@ mod tests {
         let pts = vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)];
         // Try to drag the middle point past the right endpoint in x.
         let moved = move_point(&pts, 1, (1.4, 0.8));
-        assert!(moved[1].0 < moved[2].0, "x stays left of the right neighbor");
-        assert!(moved[1].0 > moved[0].0, "x stays right of the left neighbor");
+        assert!(
+            moved[1].0 < moved[2].0,
+            "x stays left of the right neighbor"
+        );
+        assert!(
+            moved[1].0 > moved[0].0,
+            "x stays right of the left neighbor"
+        );
     }
 
     #[test]
     fn move_endpoints_keep_x_fixed() {
         let pts = identity_points();
         let m0 = move_point(&pts, 0, (0.3, 0.4));
-        assert!(approx((m0[0].0, m0[0].1), (0.0, 0.4)), "left endpoint x pinned at 0");
+        assert!(
+            approx((m0[0].0, m0[0].1), (0.0, 0.4)),
+            "left endpoint x pinned at 0"
+        );
         let last = pts.len() - 1;
         let m1 = move_point(&pts, last, (0.7, 0.2));
-        assert!(approx((m1[last].0, m1[last].1), (1.0, 0.2)), "right endpoint x pinned at 1");
+        assert!(
+            approx((m1[last].0, m1[last].1), (1.0, 0.2)),
+            "right endpoint x pinned at 1"
+        );
     }
 
     #[test]
     fn delete_keeps_endpoints() {
         let pts = vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)];
         assert_eq!(delete_point(&pts, 1).len(), 2, "interior deletable");
-        assert_eq!(delete_point(&pts, 0).len(), 3, "left endpoint not deletable");
-        assert_eq!(delete_point(&pts, 2).len(), 3, "right endpoint not deletable");
+        assert_eq!(
+            delete_point(&pts, 0).len(),
+            3,
+            "left endpoint not deletable"
+        );
+        assert_eq!(
+            delete_point(&pts, 2).len(),
+            3,
+            "right endpoint not deletable"
+        );
     }
 
     #[test]
@@ -139,15 +165,27 @@ mod tests {
             (1.0, 1.0),
         ];
         let moved = move_point(&pts, 2, (0.9, 0.3)); // reaching this line proves no panic
-        // Result is finite and within the unit square (guard pins to `lo`).
+                                                     // Result is finite and within the unit square (guard pins to `lo`).
         assert!(moved[2].0.is_finite());
-        assert!((0.0..=1.0).contains(&moved[2].0), "x in [0,1]; got {}", moved[2].0);
+        assert!(
+            (0.0..=1.0).contains(&moved[2].0),
+            "x in [0,1]; got {}",
+            moved[2].0
+        );
     }
 
     #[test]
     fn delete_two_point_curve_keeps_both_endpoints() {
         let two = identity_points();
-        assert_eq!(delete_point(&two, 0).len(), 2, "left endpoint of 2-point curve not deletable");
-        assert_eq!(delete_point(&two, 1).len(), 2, "right endpoint of 2-point curve not deletable");
+        assert_eq!(
+            delete_point(&two, 0).len(),
+            2,
+            "left endpoint of 2-point curve not deletable"
+        );
+        assert_eq!(
+            delete_point(&two, 1).len(),
+            2,
+            "right endpoint of 2-point curve not deletable"
+        );
     }
 }

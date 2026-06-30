@@ -547,10 +547,20 @@ mod has_edits_tests {
             ))
             .unwrap();
         db.set_has_edits(id, true).unwrap();
-        let rec = db.list_images(folder).unwrap().into_iter().find(|r| r.id == id).unwrap();
+        let rec = db
+            .list_images(folder)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
         assert!(rec.has_edits, "has_edits read back true");
         db.set_has_edits(id, false).unwrap();
-        let rec = db.list_images(folder).unwrap().into_iter().find(|r| r.id == id).unwrap();
+        let rec = db
+            .list_images(folder)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
         assert!(!rec.has_edits, "has_edits read back false");
     }
 }

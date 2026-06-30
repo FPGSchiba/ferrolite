@@ -1533,7 +1533,11 @@ mod single_update_tests {
         // A 4x4 Rgba16Float texture with TEXTURE_BINDING (mirrors a pipeline output).
         let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test-edit-out"),
-            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1542,6 +1546,10 @@ mod single_update_tests {
             view_formats: &[],
         });
         vt.update_single_from_texture(std::sync::Arc::new(tex), (4, 4));
-        assert_eq!(vt.single_dims(), Some((4, 4)), "dims reflect the swapped texture");
+        assert_eq!(
+            vt.single_dims(),
+            Some((4, 4)),
+            "dims reflect the swapped texture"
+        );
     }
 }

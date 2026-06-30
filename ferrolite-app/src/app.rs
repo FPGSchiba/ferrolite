@@ -168,9 +168,8 @@ impl FerroliteApp {
                     // Build the GPU-resident pyramid UNCONDITIONALLY so the
                     // full-res edit producer can be created on the first edit even
                     // for an image that opened unedited (identity stack).
-                    let pyramid = std::sync::Arc::new(
-                        ferrolite_pipeline::GpuPyramidSource::new(&gpu, image),
-                    );
+                    let pyramid =
+                        std::sync::Arc::new(ferrolite_pipeline::GpuPyramidSource::new(&gpu, image));
                     v.pyramid = Some(std::sync::Arc::clone(&pyramid));
                     if !v.op_stack.is_identity() {
                         // Build the per-tile edit pipeline + attach the producer.
@@ -264,7 +263,8 @@ impl FerroliteApp {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let tep = ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, stack.clone());
+                    let tep =
+                        ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, stack.clone());
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {
@@ -845,9 +845,7 @@ impl eframe::App for FerroliteApp {
                     // Gather viewer scalars into locals before the iter_mut borrow.
                     if let Some(v) = self.state.viewer.as_ref() {
                         let (image_id, path) = (v.image_id, v.path.clone());
-                        if let Some(rec) =
-                            self.state.images.iter_mut().find(|r| r.id == image_id)
-                        {
+                        if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
                             rec.has_edits = !stack.is_identity();
                         }
                         crate::develop::ops_persist::spawn_ops_write(
@@ -912,7 +910,11 @@ impl eframe::App for FerroliteApp {
             let mut outcome = None;
             egui::SidePanel::right("develop_adjust")
                 .exact_width(296.0)
-                .frame(egui::Frame::none().fill(theme::BG_APP).inner_margin(egui::Margin::symmetric(12.0, 8.0)))
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_APP)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
                 .show(ctx, |ui| {
                     outcome = crate::develop::adjustment_panel::show(ui, &mut self.state);
                 });
@@ -934,7 +936,13 @@ impl eframe::App for FerroliteApp {
                     // Crop overlay: shown while the Geometry section is open.
                     // Gather all viewer data into locals BEFORE calling apply_edit
                     // (which needs &mut self) — mirrors the panel-outcome pattern.
-                    if self.state.viewer.as_ref().map(|v| v.crop_active).unwrap_or(false) {
+                    if self
+                        .state
+                        .viewer
+                        .as_ref()
+                        .map(|v| v.crop_active)
+                        .unwrap_or(false)
+                    {
                         let (stack, dims, view, viewport) = {
                             let v = self.state.viewer.as_ref().unwrap();
                             (

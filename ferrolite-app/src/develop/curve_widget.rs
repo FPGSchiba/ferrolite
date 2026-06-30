@@ -40,12 +40,16 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     }
 
     // Coord transforms: image y is inverted on screen (0 at bottom).
-    let to_screen = |p: (f32, f32)| egui::pos2(rect.left() + p.0 * SIZE, rect.bottom() - p.1 * SIZE);
+    let to_screen =
+        |p: (f32, f32)| egui::pos2(rect.left() + p.0 * SIZE, rect.bottom() - p.1 * SIZE);
     let to_norm = |s: egui::Pos2| ((s.x - rect.left()) / SIZE, (rect.bottom() - s.y) / SIZE);
 
     // Curve polyline.
     let poly: Vec<egui::Pos2> = points.iter().map(|&p| to_screen(p)).collect();
-    painter.add(egui::Shape::line(poly, egui::Stroke::new(1.5, theme::ACCENT)));
+    painter.add(egui::Shape::line(
+        poly,
+        egui::Stroke::new(1.5, theme::ACCENT),
+    ));
     for &p in &points {
         painter.circle(
             to_screen(p),
@@ -103,7 +107,11 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         } else {
             stack.set_op(Op::ToneCurve(ToneCurve { points }))
         };
-        return Some(EditOutcome { stack: s, kind: OpKind::ToneCurve, commit });
+        return Some(EditOutcome {
+            stack: s,
+            kind: OpKind::ToneCurve,
+            commit,
+        });
     }
     None
 }

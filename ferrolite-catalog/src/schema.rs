@@ -88,9 +88,7 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
     }
 
     if version < 4 {
-        conn.execute_batch(
-            "ALTER TABLE images ADD COLUMN has_edits INTEGER NOT NULL DEFAULT 0;",
-        )?;
+        conn.execute_batch("ALTER TABLE images ADD COLUMN has_edits INTEGER NOT NULL DEFAULT 0;")?;
         version = 4;
     }
 
@@ -131,7 +129,10 @@ mod tests {
         let img = table_columns(&conn, "images");
         assert!(img.contains(&"flag".to_string()));
         assert!(img.contains(&"added_at".to_string()));
-        assert!(img.contains(&"has_edits".to_string()), "has_edits column added");
+        assert!(
+            img.contains(&"has_edits".to_string()),
+            "has_edits column added"
+        );
 
         for t in ["tags", "image_tags", "collections", "collection_images"] {
             let n: i64 = conn

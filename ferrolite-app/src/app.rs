@@ -239,7 +239,7 @@ impl FerroliteApp {
             }
         }
         if let Some(ep) = v.preview_edit.as_mut() {
-            ep.set_stack(shown);
+            ep.set_stack(shown.clone());
             // Evaluate BEFORE taking the renderer lock; pass the resulting texture
             // (cheap Arc clone) into the write scope. (`ep` borrows `self.state`,
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
@@ -256,23 +256,29 @@ impl FerroliteApp {
         }
 
         // Full-res tier (only meaningful once the full decode + pyramid exist).
+        // Render `shown` here too (not the live `stack`): in before/after mode
+        // `shown` is identity, so `set_producing(false)` makes the sparse VT fall
+        // back to the raw CPU-upload path = the correct unedited "before" at 1:1,
+        // regardless of the edited stack's geometry/halo. The opstack_version bump
+        // above invalidates stale produced tiles so the new (edited or raw) tiles
+        // are re-produced on toggle.
         if v.full_ready {
             let rebuild = v.edit_producer.is_none()
-                || crate::develop::ops_edit::needs_full_rebuild(&old, &stack);
+                || crate::develop::ops_edit::needs_full_rebuild(&old, &shown);
             if rebuild {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
                     let tep =
-                        ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, stack.clone());
+                        ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, shown.clone());
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {
                 // Color-only change: update params in place.
-                producer.set_stack(stack.clone());
+                producer.set_stack(shown.clone());
             }
             let version = v.opstack_version;
-            let identity = stack.is_identity();
+            let identity = shown.is_identity();
             let image_id = v.image_id;
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {

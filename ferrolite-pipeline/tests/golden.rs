@@ -203,3 +203,46 @@ fn geometry_crop_rotate_matches_golden() {
     // out dims = round(0.8 * 64) x round(0.8 * 48) = 51 x 38.
     common::assert_golden(&pixels, 51, 38, "geometry_crop_rotate.png");
 }
+
+#[test]
+fn full_seven_op_stack_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default()
+        .set_op(Op::Exposure(Exposure { ev: 0.3 }))
+        .set_op(Op::WhiteBalance(WhiteBalance {
+            temp: 0.2,
+            tint: 0.0,
+        }))
+        .set_op(Op::Contrast(Contrast { amount: 0.3 }))
+        .set_op(Op::ToneCurve(ToneCurve {
+            points: vec![(0.0, 0.0), (0.5, 0.4), (1.0, 1.0)],
+        }))
+        .set_op(Op::Hsl(Hsl {
+            bands: [HslBand {
+                hue: 0.0,
+                sat: 0.2,
+                lum: 0.0,
+            }; 8],
+        }))
+        .set_op(Op::Sharpen(Sharpen {
+            amount: 0.5,
+            radius: 1,
+        }))
+        .set_op(Op::Geometry(Geometry {
+            crop: CropRect {
+                x: 0.05,
+                y: 0.05,
+                w: 0.9,
+                h: 0.9,
+            },
+            angle_deg: 3.0,
+            aspect: Aspect::Free,
+        }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let pixels = pipe.render_to_image();
+    // out dims = round(0.9*64) x round(0.9*48) = 58 x 43.
+    common::assert_golden(&pixels, 58, 43, "full_seven_op_stack.png");
+}

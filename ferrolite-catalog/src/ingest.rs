@@ -3,7 +3,7 @@ use crate::error::CatalogError;
 use crate::model::{IngestSummary, NewImage};
 use crate::thumbnail::{generate_thumbnail, Thumbnail, ThumbnailStore};
 use crate::ScannedFile;
-use ferrolite_image::FileKind;
+use ferrolite_image::{FileKind, Rating};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -71,7 +71,8 @@ impl Catalog {
                 }
                 Err(msg) => {
                     eprintln!("ferrolite-catalog: decode failed for {}: {msg}", d.filename);
-                    let failed = NewImage::failed(d.folder_id, d.filename, d.mtime, d.size, d.kind);
+                    let failed =
+                        NewImage::failed(d.folder_id, d.filename, d.mtime, d.size, d.kind, 0);
                     self.upsert_image(&failed)?;
                     summary.failed += 1;
                 }
@@ -99,8 +100,16 @@ fn decode_one(
     let meta = ferrolite_decode::read_metadata(path, kind).map_err(|e| e.to_string())?;
     let preview = ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?;
     let thumb = generate_thumbnail(&preview).map_err(|e| e.to_string())?;
-    let new_image =
-        NewImage::from_metadata(folder_id, filename.to_string(), mtime, size, &meta, kind);
+    let new_image = NewImage::from_metadata(
+        folder_id,
+        filename.to_string(),
+        mtime,
+        size,
+        &meta,
+        kind,
+        Rating::default(),
+        0,
+    );
     Ok((new_image, thumb))
 }
 

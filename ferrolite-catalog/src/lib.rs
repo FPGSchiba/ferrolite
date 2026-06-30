@@ -12,7 +12,7 @@ mod thumbnail;
 
 pub use catalog::Catalog;
 pub use error::CatalogError;
-pub use ferrolite_image::FileKind;
+pub use ferrolite_image::{Color, FileKind, Flag, Rating, TagId};
 pub use model::{DecodeStatus, ImageRecord, IngestSummary, NewImage};
 pub use read_pool::ReadPool;
 pub use scan::{classify, collect_dirs, is_raw, scan_raw_files, scan_tree, ScannedFile};

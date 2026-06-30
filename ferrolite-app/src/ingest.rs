@@ -226,8 +226,12 @@ fn ingest_job(
                     f.size,
                     &meta,
                     f.kind,
+                    ferrolite_catalog::Rating::default(),
+                    0,
                 ),
-                Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, f.kind),
+                Err(_) => {
+                    NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, f.kind, 0)
+                }
             };
             Some((new_image, f.path.clone(), f.kind))
         })

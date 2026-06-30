@@ -20,7 +20,7 @@ pub fn cell_state(rec: &ImageRecord, has_texture: bool) -> CellState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrolite_catalog::FileKind;
+    use ferrolite_catalog::{FileKind, Flag, Rating};
     use ferrolite_image::Orientation;
 
     fn rec(status: DecodeStatus) -> ImageRecord {
@@ -35,6 +35,8 @@ mod tests {
             iso: None,
             decode_status: status,
             kind: FileKind::Raw,
+            rating: Rating::default(),
+            flag: Flag::None,
         }
     }
 

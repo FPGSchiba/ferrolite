@@ -331,14 +331,22 @@ mod tests {
             let child = w
                 .upsert_folder(std::path::Path::new("/p/sub"), Some(root))
                 .unwrap();
-            w.upsert_image(&NewImage::failed(root, "a.nef".into(), 1, 1, FileKind::Raw))
-                .unwrap();
+            w.upsert_image(&NewImage::failed(
+                root,
+                "a.nef".into(),
+                1,
+                1,
+                FileKind::Raw,
+                0,
+            ))
+            .unwrap();
             w.upsert_image(&NewImage::failed(
                 child,
                 "b.jpg".into(),
                 1,
                 1,
                 FileKind::Standard,
+                0,
             ))
             .unwrap();
             (root, child)
@@ -374,6 +382,7 @@ mod tests {
                 1,
                 1,
                 FileKind::Standard,
+                0,
             ))
             .unwrap();
             (root, sibling, other)
@@ -458,6 +467,7 @@ mod tests {
                 1,
                 1,
                 FileKind::Standard,
+                0,
             ))
             .unwrap();
             (root, child)

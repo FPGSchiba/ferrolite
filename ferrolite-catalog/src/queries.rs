@@ -4,13 +4,15 @@
 use crate::error::CatalogError;
 use crate::model::{DecodeStatus, ImageRecord};
 use crate::thumbnail::Thumbnail;
-use ferrolite_image::{FileKind, Orientation};
+use ferrolite_image::{FileKind, Flag, Orientation, Rating};
 use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     let orientation_exif: Option<i64> = row.get(5)?;
     let status: i64 = row.get(8)?;
     let kind: i64 = row.get(9)?;
+    let rating: i64 = row.get(10)?;
+    let flag: i64 = row.get(11)?;
     Ok(ImageRecord {
         id: row.get(0)?,
         folder_id: row.get(1)?,
@@ -22,11 +24,13 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
         iso: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
         decode_status: DecodeStatus::from_i64(status),
         kind: FileKind::from_i64(kind),
+        rating: Rating::from_i64(rating),
+        flag: Flag::from_i64(flag),
     })
 }
 
 const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
-                          capture_time, iso, decode_status, kind";
+                          capture_time, iso, decode_status, kind, rating, flag";
 
 pub(crate) fn list_images(
     conn: &Connection,

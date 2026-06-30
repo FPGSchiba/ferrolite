@@ -1,4 +1,4 @@
-use ferrolite_image::{FileKind, Orientation};
+use ferrolite_image::{FileKind, Flag, Orientation, Rating};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeStatus {
@@ -41,6 +41,8 @@ pub struct NewImage {
     pub iso: Option<u32>,
     pub decode_status: DecodeStatus,
     pub kind: FileKind,
+    pub rating: Rating,
+    pub added_at: i64,
 }
 
 /// Row read back from the catalog for the grid/status bar.
@@ -56,6 +58,8 @@ pub struct ImageRecord {
     pub iso: Option<u32>,
     pub decode_status: DecodeStatus,
     pub kind: FileKind,
+    pub rating: Rating,
+    pub flag: Flag,
 }
 
 /// Result of an ingest pass.
@@ -69,6 +73,7 @@ pub struct IngestSummary {
 
 impl NewImage {
     /// Build a `Done` row from decoded metadata.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_metadata(
         folder_id: i64,
         filename: String,
@@ -76,6 +81,8 @@ impl NewImage {
         size: i64,
         meta: &ferrolite_decode::Metadata,
         kind: FileKind,
+        rating: Rating,
+        added_at: i64,
     ) -> Self {
         Self {
             folder_id,
@@ -91,11 +98,20 @@ impl NewImage {
             iso: meta.iso,
             decode_status: DecodeStatus::Done,
             kind,
+            rating,
+            added_at,
         }
     }
 
     /// Build a `Failed` placeholder row (decode failed; grid shows a broken cell).
-    pub fn failed(folder_id: i64, filename: String, mtime: i64, size: i64, kind: FileKind) -> Self {
+    pub fn failed(
+        folder_id: i64,
+        filename: String,
+        mtime: i64,
+        size: i64,
+        kind: FileKind,
+        added_at: i64,
+    ) -> Self {
         Self {
             folder_id,
             filename,
@@ -110,6 +126,8 @@ impl NewImage {
             iso: None,
             decode_status: DecodeStatus::Failed,
             kind,
+            rating: Rating::default(),
+            added_at,
         }
     }
 }

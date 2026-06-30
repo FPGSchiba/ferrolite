@@ -3,7 +3,7 @@
 //! headless (no egui), mirroring the interactive path's helpers.
 
 use ferrolite_app::ingest::thumbnail_blocking;
-use ferrolite_catalog::{collect_dirs, scan_tree, Catalog, FileKind, NewImage, ReadPool};
+use ferrolite_catalog::{collect_dirs, scan_tree, Catalog, FileKind, NewImage, Rating, ReadPool};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -45,6 +45,8 @@ fn nested_mixed_ingest_builds_tree_and_thumbnails_standard() {
             f.size,
             &meta,
             f.kind,
+            Rating::default(),
+            0,
         );
         let id = writer.lock().unwrap().upsert_image(&row).unwrap();
         first_id.get_or_insert((id, f.path.clone(), f.kind));

@@ -63,12 +63,13 @@ impl Catalog {
         self.conn().execute(
             "INSERT INTO images
                (folder_id, filename, mtime, size, camera_make, camera_model,
-                width, height, orientation, capture_time, iso, decode_status, kind)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                width, height, orientation, capture_time, iso, decode_status, kind,
+                rating, added_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(folder_id, filename) DO UPDATE SET
                 mtime=?3, size=?4, camera_make=?5, camera_model=?6, width=?7,
                 height=?8, orientation=?9, capture_time=?10, iso=?11,
-                decode_status=?12, kind=?13",
+                decode_status=?12, kind=?13, rating=?14",
             rusqlite::params![
                 img.folder_id,
                 img.filename,
@@ -83,6 +84,8 @@ impl Catalog {
                 img.iso,
                 img.decode_status.as_i64(),
                 img.kind.as_i64(),
+                img.rating.as_i64(),
+                img.added_at,
             ],
         )?;
         let id = self.conn().query_row(
@@ -230,5 +233,39 @@ impl Catalog {
             rusqlite::params![status.as_i64(), image_id],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod rating_tests {
+    use super::*;
+    use crate::model::NewImage;
+    use ferrolite_image::{FileKind, Rating};
+
+    #[test]
+    fn upsert_persists_rating_and_added_at_then_refreshes_rating_only() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let mut img = NewImage::failed(f, "a.nef".into(), 1, 1, FileKind::Raw, 1000);
+        img.rating = Rating::new(3);
+        let id = cat.upsert_image(&img).unwrap();
+
+        let rec = cat.list_images(f).unwrap().into_iter().next().unwrap();
+        assert_eq!(rec.rating, Rating::new(3));
+        assert_eq!(rec.flag, ferrolite_image::Flag::None);
+
+        // Re-upsert with a new rating + later added_at: rating updates, added_at is preserved.
+        let mut img2 = NewImage::failed(f, "a.nef".into(), 2, 2, FileKind::Raw, 9999);
+        img2.rating = Rating::new(5);
+        cat.upsert_image(&img2).unwrap();
+        let added: Option<i64> = cat
+            .conn()
+            .query_row("SELECT added_at FROM images WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(added, Some(1000), "added_at preserved on conflict");
+        let rec = cat.list_images(f).unwrap().into_iter().next().unwrap();
+        assert_eq!(rec.rating, Rating::new(5), "rating refreshed on conflict");
     }
 }

@@ -57,8 +57,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                             ui.painter().rect_filled(rect, 2.0, theme::BG_PANEL);
                         }
                         if Some(id) == current_id {
-                            ui.painter()
-                                .rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::ACCENT));
+                            ui.painter().rect_stroke(
+                                rect,
+                                2.0,
+                                egui::Stroke::new(2.0, theme::ACCENT),
+                            );
                         }
                     }
                     // Scroll regardless of visibility so an off-screen current image

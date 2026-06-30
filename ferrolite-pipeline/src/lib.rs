@@ -22,4 +22,5 @@ pub use serialize::{deserialize, serialize};
 // Exception: `sharpen_halo` is part of the public API for Plan 3's tile producer.
 pub use uniforms::{
     sharpen_halo, ContrastUniform, ExposureUniform, HslUniform, SharpenUniform, WbUniform,
+    MAX_SHARPEN_RADIUS,
 };

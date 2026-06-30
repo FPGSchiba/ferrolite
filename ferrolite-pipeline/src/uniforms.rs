@@ -9,6 +9,10 @@ use crate::op::{Contrast, Exposure, Hsl, Sharpen, WhiteBalance};
 /// constant; Spec 3 may refine once the working space is fixed.
 pub const CONTRAST_PIVOT: f32 = 0.18;
 
+/// Safety cap on sharpen radius (pixels). Far above any realistic preview-res
+/// sharpen; bounds the box-blur loop and prevents a u32->i32 wrap to negative.
+pub const MAX_SHARPEN_RADIUS: u32 = 256;
+
 /// EV (stops) -> linear gain. `2^ev`. ev=0 -> 1.0 (identity).
 pub fn exposure_gain(ev: f32) -> f32 {
     2.0f32.powf(ev)
@@ -147,7 +151,7 @@ pub fn sharpen_uniform(op: Option<Sharpen>) -> SharpenUniform {
     let (amount, radius) = op.map(|s| (s.amount, s.radius)).unwrap_or((0.0, 0));
     SharpenUniform {
         amount,
-        radius: radius as i32,
+        radius: radius.min(MAX_SHARPEN_RADIUS) as i32,
         pad: [0.0; 2],
     }
 }
@@ -156,7 +160,7 @@ pub fn sharpen_uniform(op: Option<Sharpen>) -> SharpenUniform {
 /// op is absent or a no-op (amount 0). Consumed by Plan 3's tile producer.
 pub fn sharpen_halo(op: Option<Sharpen>) -> u32 {
     match op {
-        Some(s) if s.amount != 0.0 => s.radius,
+        Some(s) if s.amount != 0.0 => s.radius.min(MAX_SHARPEN_RADIUS),
         _ => 0,
     }
 }
@@ -303,5 +307,21 @@ mod tests {
             })),
             4
         );
+    }
+
+    #[test]
+    fn sharpen_radius_is_clamped_to_max() {
+        use crate::op::Sharpen;
+        let huge = Sharpen {
+            amount: 0.5,
+            radius: u32::MAX,
+        };
+        assert_eq!(
+            sharpen_uniform(Some(huge)).radius,
+            MAX_SHARPEN_RADIUS as i32
+        );
+        assert_eq!(sharpen_halo(Some(huge)), MAX_SHARPEN_RADIUS);
+        // No wrap to negative.
+        assert!(sharpen_uniform(Some(huge)).radius > 0);
     }
 }

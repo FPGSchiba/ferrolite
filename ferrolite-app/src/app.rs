@@ -549,11 +549,11 @@ impl eframe::App for FerroliteApp {
             if let Some(dir) = dir {
                 let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
                 if let Some(cur_id) = cur_id {
-                    if let Some(pos) = self.state.images.iter().position(|r| r.id == cur_id) {
-                        if let Some(n) =
-                            crate::viewer::nav::neighbor_index(pos, self.state.images.len(), dir)
+                    let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
+                    if let Some(next_id) = crate::viewer::nav::neighbor_in_set(&ids, cur_id, dir) {
+                        if let Some(rec) =
+                            self.state.images.iter().find(|r| r.id == next_id).cloned()
                         {
-                            let rec = self.state.images[n].clone();
                             self.open_record(ctx, frame, &rec);
                         }
                     }

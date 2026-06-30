@@ -12,8 +12,8 @@ use ferrolite_jobs::Priority;
 use std::collections::HashSet;
 
 const GAP: f32 = 8.0;
-const SEL_PAD: f32 = 5.0;
 const SEL_ROUND: f32 = 6.0;
+const SEL_BORDER_W: f32 = 3.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = ui.available_width();
@@ -99,14 +99,9 @@ fn paint_cell(
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
 
-    // Selected cells: fill the cell with a rounded blue frame first, so the inset
-    // thumbnail sits inside a clean blue border.
-    if selected {
-        painter.rect_filled(rect, SEL_ROUND, theme::ACCENT);
-    }
-
-    // img_rect: inset for selected cells (thumbnail floats inside the blue frame), full rect otherwise.
-    let img_rect = if selected { rect.shrink(SEL_PAD) } else { rect };
+    // Thumbnail fills the full cell in both states; the gradient border is
+    // drawn on top at the end of the function.
+    let img_rect = rect;
 
     match cell_state(rec, has_tex) {
         CellState::Ready => {
@@ -219,10 +214,16 @@ fn paint_cell(
         opened = Some(rec.id);
     }
 
-    // Lightroom-style selection highlight: rounded dark-blue border around the full cell.
-    // Replaces the old thin inset ACCENT_BRIGHT outline.
+    // Soft gradient selection border: blue at the band centerline, fading to
+    // black at the inner and outer edges.
     if selected {
-        painter.rect_stroke(rect, SEL_ROUND, egui::Stroke::new(2.0, theme::ACCENT));
+        crate::library::icons::gradient_border(
+            &painter,
+            rect,
+            SEL_ROUND,
+            SEL_BORDER_W,
+            theme::ACCENT,
+        );
     }
 
     // #5 — Right-click context menu (shared helper).

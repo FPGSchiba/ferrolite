@@ -5,7 +5,46 @@
 //! as ★, ⚑, ▾).  Every function is pure geometry: no state, no allocation
 //! beyond the shape list appended to the painter.
 
-use egui::{Color32, Painter, Pos2, Shape, Stroke, Vec2};
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
+
+// ── colour / gradient helpers ────────────────────────────────────────────────
+
+/// Fade `c` toward black: `t = 0.0` keeps `c`, `t = 1.0` → black.
+pub fn scale_to_black(c: Color32, t: f32) -> Color32 {
+    let f = (1.0 - t).clamp(0.0, 1.0);
+    Color32::from_rgb(
+        (c.r() as f32 * f) as u8,
+        (c.g() as f32 * f) as u8,
+        (c.b() as f32 * f) as u8,
+    )
+}
+
+/// Draw a soft selection border on `rect`'s edge: `color` at the band
+/// centerline, fading to black at the inner and outer edges.  `width` is the
+/// total band thickness.  Approximated with a few concentric rounded strokes
+/// (egui has no gradient stroke).
+pub fn gradient_border(
+    painter: &egui::Painter,
+    rect: Rect,
+    rounding: f32,
+    width: f32,
+    color: Color32,
+) {
+    const STEPS: usize = 6;
+    let step_w = width / STEPS as f32;
+    for i in 0..STEPS {
+        let t = (i as f32 + 0.5) / STEPS as f32; // 0..1 across the band
+        let off = -width / 2.0 + t * width; // <0 outside the edge, >0 inside
+        let d = ((t - 0.5).abs()) * 2.0; // 0 at centerline, 1 at edges
+        let c = scale_to_black(color, d);
+        let r = if off >= 0.0 {
+            rect.shrink(off)
+        } else {
+            rect.expand(-off)
+        };
+        painter.rect_stroke(r, rounding, egui::Stroke::new(step_w + 0.6, c));
+    }
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -145,6 +184,38 @@ pub fn caret(painter: &Painter, center: Pos2, half_w: f32, color: Color32, down:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── scale_to_black ────────────────────────────────────────────────────────
+
+    #[test]
+    fn scale_to_black_t0_preserves_color() {
+        let c = Color32::from_rgb(100, 150, 200);
+        let out = scale_to_black(c, 0.0);
+        assert_eq!(out.r(), 100);
+        assert_eq!(out.g(), 150);
+        assert_eq!(out.b(), 200);
+    }
+
+    #[test]
+    fn scale_to_black_t1_produces_black() {
+        let c = Color32::from_rgb(100, 150, 200);
+        let out = scale_to_black(c, 1.0);
+        assert_eq!(out.r(), 0);
+        assert_eq!(out.g(), 0);
+        assert_eq!(out.b(), 0);
+    }
+
+    #[test]
+    fn scale_to_black_t_half_roughly_halves_channels() {
+        let c = Color32::from_rgb(200, 100, 50);
+        let out = scale_to_black(c, 0.5);
+        // f = 0.5; integer truncation means we expect floor(channel * 0.5)
+        assert_eq!(out.r(), 100); // 200 * 0.5 = 100
+        assert_eq!(out.g(), 50); //  100 * 0.5 = 50
+        assert_eq!(out.b(), 25); //   50 * 0.5 = 25
+    }
+
+    // ── advance_width ─────────────────────────────────────────────────────────
 
     #[test]
     fn advance_width_zero_stars_is_zero() {

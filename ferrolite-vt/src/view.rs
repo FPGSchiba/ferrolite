@@ -60,7 +60,7 @@ pub struct TiledResources {
 
 /// Rung-1 (single-texture) GPU resources.
 struct SingleResources {
-    texture: wgpu::Texture,
+    texture: std::sync::Arc<wgpu::Texture>,
     texture_view: wgpu::TextureView,
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     sampler: Arc<wgpu::Sampler>,
@@ -209,7 +209,7 @@ impl VirtualTexture {
 
         Self {
             single: Some(SingleResources {
-                texture,
+                texture: std::sync::Arc::new(texture),
                 texture_view,
                 bind_group_layout: bgl,
                 sampler,
@@ -227,6 +227,23 @@ impl VirtualTexture {
     /// Image dimensions of the rung-1 texture, if this is a single-texture VT.
     pub fn single_dims(&self) -> Option<(u32, u32)> {
         self.single.as_ref().map(|s| s.image_dims)
+    }
+
+    /// Replace the rung-1 single texture with an externally-owned GPU texture
+    /// (e.g. an edit-pipeline output). The texture must be `Rgba16Float` with
+    /// `TEXTURE_BINDING` usage. The next `prepare_single` rebuilds the bind group
+    /// from the new view; a no-op on a non-single VT.
+    pub fn update_single_from_texture(
+        &mut self,
+        texture: std::sync::Arc<wgpu::Texture>,
+        dims: (u32, u32),
+    ) {
+        if let Some(s) = self.single.as_mut() {
+            s.texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            s.texture = texture;
+            s.image_dims = dims;
+            s.bind_group = None; // force rebuild in prepare_single
+        }
     }
 
     /// Prepare-half of the rung-1 paint (egui_wgpu `CallbackTrait::prepare`):
@@ -1496,4 +1513,35 @@ fn slot_index(layout: &LevelLayout, t: TileCoord) -> Option<usize> {
         return None;
     }
     Some(idx as usize)
+}
+
+#[cfg(test)]
+mod single_update_tests {
+    use super::*;
+    use ferrolite_image::LinearRgbaF32;
+
+    #[test]
+    fn update_single_swaps_dims() {
+        let Some(ctx) = GpuContext::headless() else {
+            return; // CI headless: skip (spec §10 GPU-test convention)
+        };
+        let pipelines = DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+        let img = LinearRgbaF32::new(2, 2, vec![0.0; 2 * 2 * 4]).unwrap();
+        let mut vt = VirtualTexture::single_texture(&ctx, &img, &pipelines);
+        assert_eq!(vt.single_dims(), Some((2, 2)));
+
+        // A 4x4 Rgba16Float texture with TEXTURE_BINDING (mirrors a pipeline output).
+        let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-edit-out"),
+            size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        vt.update_single_from_texture(std::sync::Arc::new(tex), (4, 4));
+        assert_eq!(vt.single_dims(), Some((4, 4)), "dims reflect the swapped texture");
+    }
 }

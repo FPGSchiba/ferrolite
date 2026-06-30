@@ -18,7 +18,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
     // Snapshot the ids/decode-status/rating/flag up front so we don't hold an
     // immutable borrow of `state.images` while mutably borrowing `state` for
     // thumbnails.
-    let cells: Vec<(i64, bool, u8, ferrolite_image::Flag)> = state
+    let cells: Vec<(i64, bool, u8, ferrolite_image::Flag, bool)> = state
         .images
         .iter()
         .map(|r| {
@@ -27,6 +27,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                 r.decode_status != ferrolite_catalog::DecodeStatus::Failed,
                 r.rating.get(),
                 r.flag,
+                r.has_edits,
             )
         })
         .collect();
@@ -36,7 +37,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
-                for (id, decodable, rating, flag) in cells {
+                for (id, decodable, rating, flag, has_edits) in cells {
                     // Always reserve the cell's space so the scroll extent and
                     // `scroll_to_rect` stay correct, but only do the expensive
                     // thumbnail work (DB read + JPEG decode + GPU upload + paint)
@@ -92,6 +93,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                                 c,
                                 true,
                             );
+                        }
+                        // "Edited" pip (top-right) when the image carries edits.
+                        if has_edits {
+                            let c = rect.right_top() + egui::vec2(-7.0, 7.0);
+                            ui.painter().circle_filled(c, 3.0, crate::theme::ACCENT_BRIGHT);
                         }
                     }
                     // Keep the current image centered in the strip. egui clamps

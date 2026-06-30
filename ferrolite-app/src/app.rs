@@ -231,8 +231,15 @@ impl FerroliteApp {
     }
 
     /// The single image-open path: cancel the previously-open viewer's in-flight
-    /// tile jobs, open the new image's two-tier load, and switch to Develop.
-    fn open_record(&mut self, frame: &mut eframe::Frame, rec: &ferrolite_catalog::ImageRecord) {
+    /// tile jobs, open the new image's two-tier load, switch to Develop, and request
+    /// a repaint so the viewer is drawn on the very next frame (otherwise egui would
+    /// idle on the grid until the next input event, which reads as a stall).
+    fn open_record(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        rec: &ferrolite_catalog::ImageRecord,
+    ) {
         if let Some(old) = self.state.viewer.as_ref() {
             let old_id = old.image_id;
             old.cancel_loads();
@@ -240,6 +247,7 @@ impl FerroliteApp {
         }
         self.state.open_image_in_viewer(rec);
         self.module = crate::module::Module::Develop;
+        ctx.request_repaint();
     }
 
     /// Cancel the sparse VT's in-flight tile-load jobs for the named viewer.
@@ -398,7 +406,7 @@ impl eframe::App for FerroliteApp {
             });
         if let Some(id) = film_clicked {
             if let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() {
-                self.open_record(frame, &rec);
+                self.open_record(ctx, frame, &rec);
             }
         }
 
@@ -450,7 +458,7 @@ impl eframe::App for FerroliteApp {
         {
             if let Some(sel_id) = self.state.selected {
                 if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
-                    self.open_record(frame, &rec);
+                    self.open_record(ctx, frame, &rec);
                 }
             }
         }
@@ -477,7 +485,7 @@ impl eframe::App for FerroliteApp {
                             crate::viewer::nav::neighbor_index(pos, self.state.images.len(), dir)
                         {
                             let rec = self.state.images[n].clone();
-                            self.open_record(frame, &rec);
+                            self.open_record(ctx, frame, &rec);
                         }
                     }
                 }
@@ -530,7 +538,7 @@ impl eframe::App for FerroliteApp {
             });
         if let Some(id) = opened {
             if let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() {
-                self.open_record(frame, &rec);
+                self.open_record(ctx, frame, &rec);
             }
         }
 

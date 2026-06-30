@@ -174,8 +174,12 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 /// for a prompt first pixel.
 pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> bool {
     let rect = ui.available_rect_before_wrap();
-    let painter = ui.painter();
-    painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+    // Scope the painter so it drops before any `ui.put` / mutable-borrow calls
+    // further down (the `!state.loaded` spinner branch needs `ui` mutably).
+    {
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+    }
 
     let viewport = (rect.width(), rect.height());
     state.viewport = viewport;
@@ -234,7 +238,23 @@ pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> boo
         ));
         false
     } else {
-        // Texture not ready yet — keep animating so the first pixel arrives fast.
+        // First pixel not ready yet: show a spinner + "Loading…" so the decode
+        // wait reads as working, and keep animating so it spins + we pick up the
+        // preview as soon as it arrives.
+        let center = rect.center();
+        let spinner_size = 32.0;
+        let spinner_rect = egui::Rect::from_center_size(
+            center - egui::vec2(0.0, 10.0),
+            egui::vec2(spinner_size, spinner_size),
+        );
+        ui.put(spinner_rect, egui::Spinner::new().size(spinner_size));
+        ui.painter().text(
+            center + egui::vec2(0.0, 22.0),
+            egui::Align2::CENTER_CENTER,
+            "Loading\u{2026}",
+            egui::FontId::proportional(12.0),
+            crate::theme::TEXT_DIM,
+        );
         true
     }
 }

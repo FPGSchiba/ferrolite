@@ -174,7 +174,9 @@ impl<U: bytemuck::Pod> PointOpNode<U> {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: PIPELINE_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             *out = Some(PipelineImage {
@@ -369,7 +371,9 @@ impl GeometryNode {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: PIPELINE_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             *out = Some(PipelineImage {
@@ -551,7 +555,9 @@ impl CurveNode {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: PIPELINE_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             *out = Some(PipelineImage {

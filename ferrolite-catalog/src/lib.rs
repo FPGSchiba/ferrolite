@@ -21,7 +21,7 @@ pub use read_pool::ReadPool;
 pub use scan::{classify, collect_dirs, is_raw, scan_raw_files, scan_tree, ScannedFile};
 pub use schema::SCHEMA_VERSION;
 pub use thumbnail::{generate_thumbnail, Thumbnail, ThumbnailStore, THUMB_MAX_EDGE, THUMB_QUALITY};
-pub use xmp::{read_rating, sidecar_path, write_rating};
+pub use xmp::{read_ops, read_rating, sidecar_path, write_ops, write_rating};
 
 /// A folder with its image count (left-panel tree row).
 #[derive(Debug, Clone, PartialEq, Eq)]

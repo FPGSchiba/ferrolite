@@ -43,6 +43,10 @@ pub struct ViewerState {
     /// set the paint loop stops requesting repaints to avoid a busy-loop.
     pub idle: bool,
 
+    /// Image dimensions in pixels, stored once the preview arrives (needed for
+    /// the fit↔1:1 double-click toggle and any future fit-on-resize logic).
+    pub image_dims: Option<(u32, u32)>,
+
     /// In-flight decode jobs (preview + full). Cancelled on navigation so a
     /// superseded image's decode does not race the newly-opened one.
     pub preview_handle: Option<JobHandle>,
@@ -69,6 +73,7 @@ impl ViewerState {
             crossfading: false,
             crossfade_elapsed: 0.0,
             idle: false,
+            image_dims: None,
             preview_handle: None,
             full_handle: None,
         }
@@ -112,10 +117,8 @@ impl ViewerState {
 /// Zoom about the cursor: keep the image point under the cursor fixed.
 ///
 /// `pan` follows the `ViewTransform` convention: image-space px offset of the
-/// viewport center (i.e. `cx = image_width/2 + pan.0` etc.).  The test
+/// viewport center (i.e. `cx = viewport_width/2 + pan.0` etc.).  The test
 /// invariant is that the image point under the cursor does not move on screen.
-// Called by the viewer input handler in Task 14.
-#[allow(dead_code)]
 pub fn apply_zoom(
     view: ViewTransform,
     scroll: f32,
@@ -139,7 +142,7 @@ pub fn apply_zoom(
     );
     ViewTransform {
         zoom: new_zoom,
-        // pan = center - viewport/2  (center = image origin + pan)
+        // pan = new_center - viewport/2  (new_center is the new image-space viewport center)
         pan: (
             new_center.0 - viewport.0 * 0.5,
             new_center.1 - viewport.1 * 0.5,
@@ -152,8 +155,6 @@ pub fn apply_zoom(
 /// Dragging the image to the right means the viewport center moves left in
 /// image space, so pan decreases.  Dividing by zoom converts screen px to
 /// image px.
-// Called by the viewer input handler in Task 14.
-#[allow(dead_code)]
 pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
     ViewTransform {
         zoom: view.zoom,
@@ -199,6 +200,23 @@ pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> boo
                 state.view = apply_zoom(state.view, scroll / 50.0, cursor, viewport);
                 // Zoom changes the visible LOD/tiles: wake the drive loop.
                 state.idle = false;
+            }
+        }
+        // Double-click toggles between fit-to-screen and 1:1 (zoom = 1.0, centered).
+        if resp.double_clicked() {
+            if let Some(dims) = state.image_dims {
+                let fit = ferrolite_vt::ViewTransform::fit(dims, viewport);
+                // If already near the fit zoom, switch to 1:1; otherwise fit.
+                if (state.view.zoom - fit.zoom).abs() < fit.zoom * 0.05 {
+                    state.view = ferrolite_vt::ViewTransform {
+                        zoom: 1.0,
+                        pan: (0.0, 0.0),
+                    };
+                } else {
+                    state.view = fit;
+                }
+                state.idle = false;
+                ui.ctx().request_repaint();
             }
         }
     }

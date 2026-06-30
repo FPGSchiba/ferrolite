@@ -59,6 +59,7 @@ impl FerroliteApp {
             (dims.0 as f32, dims.1 as f32)
         };
         v.view = ferrolite_vt::ViewTransform::fit(dims, viewport);
+        v.image_dims = Some(dims);
         v.loaded = true;
         // A Standard image's preview IS the full-resolution image, so there is no
         // tier-2 to wait for — go idle once the preview is up so the repaint loop
@@ -409,6 +410,19 @@ impl eframe::App for FerroliteApp {
             if let Some(v) = self.state.viewer.take() {
                 v.cancel_loads();
                 self.cancel_viewer_tiles(frame, v.image_id);
+            }
+        }
+
+        // Enter opens the selected image in the viewer (library grid only, no
+        // viewer already open, exactly one image selected).
+        if self.module.is_library()
+            && self.state.viewer.is_none()
+            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+        {
+            if let Some(sel_id) = self.state.selected {
+                if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
+                    self.state.open_image_in_viewer(&rec);
+                }
             }
         }
 

@@ -107,16 +107,10 @@ fn paint_cell(
         state.selected = Some(rec.id);
     }
     if resp.double_clicked() {
-        if let Ok(Some(folder_path)) = state.reads.folder_path(rec.folder_id) {
-            let path = std::path::PathBuf::from(folder_path).join(&rec.filename);
-            // Cancel the previously-open viewer's in-flight decode jobs before
-            // replacing it; its sparse VT tile jobs are cancelled in `app.rs`
-            // once the holder is superseded (it needs the GPU render state).
-            if let Some(old) = state.viewer.as_ref() {
-                old.cancel_loads();
-            }
-            state.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
-        }
+        // Cancel the previously-open viewer's in-flight decode jobs before
+        // replacing it; its sparse VT tile jobs are cancelled in `app.rs`
+        // once the holder is superseded (it needs the GPU render state).
+        state.open_image_in_viewer(rec);
     }
     if state.selected == Some(rec.id) {
         painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::ACCENT));

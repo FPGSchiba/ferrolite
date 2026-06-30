@@ -138,6 +138,19 @@ impl AppState {
         }
     }
 
+    /// Open `rec` in the viewer, cancelling any currently-open viewer first.
+    /// Shared by the grid double-click (in `grid.rs`) and the Enter-key handler
+    /// (in `app.rs`) so the two code paths stay in sync.
+    pub fn open_image_in_viewer(&mut self, rec: &ferrolite_catalog::ImageRecord) {
+        if let Ok(Some(folder_path)) = self.reads.folder_path(rec.folder_id) {
+            let path = std::path::PathBuf::from(folder_path).join(&rec.filename);
+            if let Some(old) = self.viewer.as_ref() {
+                old.cancel_loads();
+            }
+            self.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
+        }
+    }
+
     /// Cancel any in-flight ingest + pending thumbnail jobs, without touching the
     /// view (images/current_folder/selection) or counters. Used by reindex.
     pub fn cancel_pending_jobs(&mut self) {

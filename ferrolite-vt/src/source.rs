@@ -55,8 +55,8 @@ impl TileSource for PyramidTileSource {
     }
 }
 
-/// Simple 2×2-average downsample to `(dst_w, dst_h)`. (Box filter is adequate for
-/// the display pyramid; `fast_image_resize` can replace this for quality later.)
+/// Simple 2×2-average downsample to `(dst_w, dst_h)`. Box filter is adequate for
+/// the display pyramid; a higher-quality resize can be wired in here if needed.
 fn box_downsample(src: &LinearRgbaF32, dst_w: u32, dst_h: u32) -> LinearRgbaF32 {
     let mut px = vec![0.0f32; LinearRgbaF32::expected_len(dst_w, dst_h)];
     for dy in 0..dst_h {

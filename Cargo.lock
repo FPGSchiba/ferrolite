@@ -1103,7 +1103,6 @@ version = "0.0.1"
 dependencies = [
  "bytemuck",
  "egui-wgpu",
- "ferrolite-image",
  "half",
  "pollster 0.4.0",
  "wgpu",
@@ -1122,7 +1121,6 @@ name = "ferrolite-vt"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
- "fast_image_resize",
  "ferrolite-gpu",
  "ferrolite-image",
  "ferrolite-jobs",

@@ -26,6 +26,7 @@ ferrolite-catalog = { workspace = true }
 ferrolite-decode = { workspace = true }
 ferrolite-gpu = { workspace = true }
 ferrolite-image = { workspace = true }
+ferrolite-pipeline = { path = "../ferrolite-pipeline" }
 ferrolite-vt = { workspace = true }
 half = { workspace = true }
 image = { workspace = true, features = ["jpeg"] }

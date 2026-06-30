@@ -162,6 +162,32 @@ impl FerroliteApp {
                 if v.image_id == image_id {
                     v.full_ready = true;
                     v.begin_crossfade();
+                    if !v.op_stack.is_identity() {
+                        // Build the GPU-resident pyramid + per-tile edit pipeline.
+                        let ctx_arc = std::sync::Arc::new(
+                            ferrolite_gpu::GpuContext::from_render_state(rs),
+                        );
+                        let pyramid = std::sync::Arc::new(
+                            ferrolite_pipeline::GpuPyramidSource::new(&gpu, image),
+                        );
+                        let tep = ferrolite_pipeline::TileEditPipeline::new(
+                            ctx_arc,
+                            pyramid,
+                            v.op_stack.clone(),
+                        );
+                        v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                        // Mark the VT producer-driven + bump its version so the
+                        // producer fills tiles instead of the CPU path.
+                        let mut renderer = rs.renderer.write();
+                        if let Some(g) =
+                            renderer.callback_resources.get_mut::<viewer::ViewerGpu>()
+                        {
+                            if let Some(full) = g.full.as_mut() {
+                                full.set_producing(true);
+                                full.set_opstack_version(&g.ctx, 1);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -172,6 +198,10 @@ impl FerroliteApp {
 /// RGBA16F ≈ 128 MB of GPU memory — generous headroom for a fit-to-window view
 /// plus a few zoom levels of the quad-binned (half-res) full image.
 const VIEWER_TILE_BUDGET: u32 = 256;
+
+/// Max edited tiles rendered per frame on the render thread (bounds GPU work;
+/// CLAUDE.md GPU rule). Remaining needed tiles are produced on subsequent frames.
+const MAX_PRODUCE_PER_FRAME: usize = 8;
 
 impl FerroliteApp {
     /// Per-frame viewer drive: advance the crossfade, drive the sparse VT
@@ -210,6 +240,15 @@ impl FerroliteApp {
                     }
                 } else if let Some(full) = g.full.as_mut() {
                     full.request_view_feedback(&g.ctx);
+                    // Plan 3: when an edit producer is present, render the needed
+                    // tiles on the render thread (bounded). `produce_view` borrows
+                    // the producer (which lives in ViewerState) by &mut per call.
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if let Some(producer) = v.edit_producer.as_mut() {
+                            let needed = full.needed_now();
+                            full.produce_view(&g.ctx, producer, &needed, MAX_PRODUCE_PER_FRAME);
+                        }
+                    }
                     tiles_pending = full.sparse_pending();
                 }
             }

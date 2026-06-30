@@ -2,15 +2,18 @@
 //! preview decode → upload → paint wiring (egui↔wgpu callback).
 
 pub mod callback;
+pub mod edit_producer;
 pub mod load;
 pub mod nav;
 
 pub use callback::{ViewerCallback, ViewerGpu, ViewerPipelines};
+pub use edit_producer::EditTileProducer;
 
 use std::path::PathBuf;
 
 use ferrolite_image::FileKind;
 use ferrolite_jobs::JobHandle;
+use ferrolite_pipeline::OpStack;
 use ferrolite_vt::ViewTransform;
 
 /// Preview→full crossfade duration (seconds). Short enough to read as instant,
@@ -21,6 +24,10 @@ pub struct ViewerState {
     pub image_id: i64,
     pub path: PathBuf,
     pub kind: FileKind,
+    pub op_stack: OpStack,
+    /// Plan 3: the full-res edit producer (built on full-decode when the stack is
+    /// non-identity). `!Send`/`!Sync`, so it lives here, never in callback_resources.
+    pub edit_producer: Option<edit_producer::EditTileProducer>,
     pub view: ViewTransform,
     /// Last painted canvas size (image-space fit + zoom/pan math need it).
     pub viewport: (f32, f32),
@@ -62,6 +69,8 @@ impl ViewerState {
             image_id,
             path,
             kind,
+            op_stack: OpStack::default(),
+            edit_producer: None,
             view: ViewTransform {
                 zoom: 1.0,
                 pan: (0.0, 0.0),

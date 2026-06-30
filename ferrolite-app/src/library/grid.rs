@@ -137,13 +137,16 @@ fn paint_cell(
         let gap = 2.0_f32;
         let row_y = img_rect.bottom() - 8.0;
         let origin = egui::pos2(img_rect.left() + 4.0 + r, row_y);
+        // Show only the filled stars (no empty outlines): the grid overlay is a
+        // status indicator, not an editable control — empties would imply clicks
+        // that the grid doesn't handle. Matches the filmstrip.
         icons::rating_stars(
             &painter,
             origin,
             r,
             gap,
             rec.rating.get(),
-            5,
+            rec.rating.get(),
             theme::STAR,
             true,
         );

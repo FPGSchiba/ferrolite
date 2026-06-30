@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 pub enum MetaEdit {
     SetRating(Rating),
     SetFlag(Flag),
+    // Reserved for future tag-panel H tasks; not yet wired to a key command.
+    #[allow(dead_code)]
     ToggleTag(TagId),
 }
 

@@ -39,8 +39,6 @@ pub enum AppEvent {
     FullFailed { image_id: i64 },
     /// Result of an off-thread metadata persist. `ok==false` → reload truth;
     /// `warning` → surface in the status bar.
-    // Constructed by `metadata::spawn_metadata_write` (off-thread job).
-    #[allow(dead_code)]
     MetadataResult { ok: bool, warning: Option<String> },
 }
 

@@ -276,6 +276,45 @@ impl FerroliteApp {
         ctx.request_repaint();
     }
 
+    /// Apply a metadata edit to the current selection: optimistic in-memory update
+    /// of every affected grid row, then an off-thread persist (DB + xmp:Rating).
+    fn apply_metadata_edit(&mut self, ctx: &egui::Context, edit: crate::metadata::MetaEdit) {
+        // Resolve the target id set (multi-selection, else the single selected).
+        let mut targets: Vec<i64> = self.state.selection.iter().copied().collect();
+        if targets.is_empty() {
+            if let Some(id) = self.state.selected {
+                targets.push(id);
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        // Optimistic in-memory update + collect (id, path) for the persist job.
+        let mut image_paths: Vec<(i64, std::path::PathBuf)> = Vec::new();
+        for id in &targets {
+            if let Some(rec) = self.state.images.iter().find(|r| r.id == *id).cloned() {
+                if let Ok(Some(fp)) = self.state.reads.folder_path(rec.folder_id) {
+                    image_paths.push((*id, std::path::PathBuf::from(fp).join(&rec.filename)));
+                }
+            }
+        }
+        for id in &targets {
+            let mut tags = self.state.visible_tags.get(id).cloned().unwrap_or_default();
+            if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == *id) {
+                crate::metadata::apply_edit_in_memory(rec, &mut tags, edit);
+            }
+            self.state.visible_tags.insert(*id, tags);
+        }
+        crate::metadata::spawn_metadata_write(
+            &self.state.jobs,
+            &self.state.writer,
+            &self.state.tx,
+            ctx,
+            edit,
+            image_paths,
+        );
+    }
+
     /// Cancel the sparse VT's in-flight tile-load jobs for the named viewer.
     /// The VT lives in `callback_resources`; the decode jobs are cancelled
     /// separately via `ViewerState::cancel_loads`. Guarded on `image_id` so we
@@ -483,6 +522,43 @@ impl eframe::App for FerroliteApp {
                 if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
                     self.open_record(ctx, frame, &rec);
                 }
+            }
+        }
+
+        // Keyboard metadata commands: rating 0–5, flag P/X/U (Library only, no
+        // viewer, no pending modal, no text-field focus).
+        if self.module.is_library()
+            && self.state.viewer.is_none()
+            && self.state.pending_remove.is_none()
+            && !ctx.wants_keyboard_input()
+        {
+            use ferrolite_image::{Flag, Rating};
+            let edit = ctx.input(|i| {
+                for n in 0..=5u8 {
+                    let key = match n {
+                        0 => egui::Key::Num0,
+                        1 => egui::Key::Num1,
+                        2 => egui::Key::Num2,
+                        3 => egui::Key::Num3,
+                        4 => egui::Key::Num4,
+                        _ => egui::Key::Num5,
+                    };
+                    if i.key_pressed(key) {
+                        return Some(crate::metadata::MetaEdit::SetRating(Rating::new(n)));
+                    }
+                }
+                if i.key_pressed(egui::Key::P) {
+                    Some(crate::metadata::MetaEdit::SetFlag(Flag::Pick))
+                } else if i.key_pressed(egui::Key::X) {
+                    Some(crate::metadata::MetaEdit::SetFlag(Flag::Reject))
+                } else if i.key_pressed(egui::Key::U) {
+                    Some(crate::metadata::MetaEdit::SetFlag(Flag::None))
+                } else {
+                    None
+                }
+            });
+            if let Some(edit) = edit {
+                self.apply_metadata_edit(ctx, edit);
             }
         }
 

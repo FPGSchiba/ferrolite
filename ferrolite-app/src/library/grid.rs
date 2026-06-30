@@ -218,15 +218,17 @@ fn paint_cell(
         opened = Some(rec.id);
     }
 
-    // Selection border: a bright-blue rounded ring over a thin dark halo, so it
-    // stays distinct on both dark and light/bluish thumbnails. Inset 1px to sit
-    // fully inside the cell.
+    // Selection border: a bright-blue rounded ring with a ~1px dark keyline on
+    // each side, so it stays distinct on both dark and light/bluish thumbnails.
+    // The whole 4px band is inset 2px so it sits fully inside the cell — the
+    // painter is clipped to `rect`, so a band centered nearer the edge would have
+    // its outer half clipped away (which hid the halo before).
     if selected {
-        let path = rect.shrink(1.0);
+        let path = rect.shrink(2.0);
         painter.rect_stroke(
             path,
             SEL_ROUND,
-            egui::Stroke::new(3.5, egui::Color32::from_black_alpha(160)),
+            egui::Stroke::new(4.0, egui::Color32::from_black_alpha(200)),
         );
         painter.rect_stroke(
             path,

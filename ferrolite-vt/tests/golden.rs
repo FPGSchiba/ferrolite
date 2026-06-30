@@ -279,7 +279,7 @@ fn producer_fills_requested_tiles_and_version_bump_invalidates() {
     assert_eq!(vt.produce_view(&ctx, &mut producer, &needed, 8), 0, "already current");
 
     // A version bump invalidates them; they must re-produce.
-    vt.set_opstack_version(1);
+    vt.set_opstack_version(&ctx, 1);
     assert!(!vt.is_resident(needed[0]), "stale tile freed by version bump");
     assert_eq!(
         vt.produce_view(&ctx, &mut producer, &needed, 8),

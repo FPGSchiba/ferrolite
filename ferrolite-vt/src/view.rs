@@ -1376,17 +1376,21 @@ impl VirtualTexture {
     }
 
     /// Plan 3: set the active opstack version. On change, free the slots of every
-    /// resident tile produced at an older version and clear their page-table
-    /// entries so they re-produce lazily for the current view. No-op if unchanged
-    /// or non-sparse.
-    pub fn set_opstack_version(&mut self, version: u64) {
+    /// resident tile produced at an older version, clear their CPU slot-mirror
+    /// entries, AND flush the GPU page table so the shader never samples a
+    /// freed/aliased slot for a frame. No-op if unchanged or non-sparse.
+    pub fn set_opstack_version(&mut self, ctx: &GpuContext, version: u64) {
         let Some(s) = self.sparse.as_mut() else { return };
-        for t in s.versions.set_version(version) {
-            s.allocator.free(t);
-            s.residency.forget(t);
-            if let Some(idx) = flat_index(&s.layout, t) {
+        let stale = s.versions.set_version(version);
+        for t in &stale {
+            s.allocator.free(*t);
+            s.residency.forget(*t);
+            if let Some(idx) = flat_index(&s.layout, *t) {
                 s.slots[idx] = NOT_RESIDENT;
             }
+        }
+        if !stale.is_empty() {
+            s.page_table.update(ctx, &s.slots);
         }
     }
 

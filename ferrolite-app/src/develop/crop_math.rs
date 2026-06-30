@@ -66,28 +66,50 @@ pub fn resize(c: CropRect, handle: Handle, pos: (f32, f32), aspect: Option<f32>)
     }
     let mut out = CropRect { x: l, y: t, w: rt - l, h: b - t };
     if let Some(ar) = aspect {
-        // Re-derive height from width at the dragged corner, anchored opposite.
-        let new_h = (out.w / ar).clamp(MIN_SIZE, 1.0);
         match handle {
-            Handle::TopLeft | Handle::TopRight | Handle::Top => out.y = (b - new_h).max(0.0),
-            _ => {}
+            // Vertical handles drive HEIGHT; derive width from height, keep the
+            // horizontal center fixed.
+            Handle::Top | Handle::Bottom => {
+                let new_w = (out.h * ar).clamp(MIN_SIZE, 1.0);
+                let cx = c.x + c.w * 0.5;
+                out.x = clamp01(cx - new_w * 0.5);
+                out.w = new_w;
+            }
+            // Horizontal handles drive WIDTH; derive height, keep vertical center fixed.
+            Handle::Left | Handle::Right => {
+                let new_h = (out.w / ar).clamp(MIN_SIZE, 1.0);
+                let cy = c.y + c.h * 0.5;
+                out.y = clamp01(cy - new_h * 0.5);
+                out.h = new_h;
+            }
+            // Corners drive WIDTH; derive height, anchored at the opposite corner.
+            _ => {
+                let new_h = (out.w / ar).clamp(MIN_SIZE, 1.0);
+                if matches!(handle, Handle::TopLeft | Handle::TopRight) {
+                    out.y = (b - new_h).max(0.0);
+                }
+                out.h = new_h;
+            }
         }
-        out.h = new_h;
         if out.y + out.h > 1.0 {
-            out.h = 1.0 - out.y;
+            out.h = (1.0 - out.y).max(MIN_SIZE);
             out.w = out.h * ar;
+        }
+        if out.x + out.w > 1.0 {
+            out.w = (1.0 - out.x).max(MIN_SIZE);
         }
     }
     out.x = clamp01(out.x);
     out.y = clamp01(out.y);
-    out.w = out.w.clamp(MIN_SIZE, 1.0 - out.x);
-    out.h = out.h.clamp(MIN_SIZE, 1.0 - out.y);
+    // Upper bounds use `.max(MIN_SIZE)` so f32::clamp can never see min > max.
+    out.w = out.w.clamp(MIN_SIZE, (1.0 - out.x).max(MIN_SIZE));
+    out.h = out.h.clamp(MIN_SIZE, (1.0 - out.y).max(MIN_SIZE));
     out
 }
 
 pub fn move_body(c: CropRect, delta: (f32, f32)) -> CropRect {
-    let x = (c.x + delta.0).clamp(0.0, 1.0 - c.w);
-    let y = (c.y + delta.1).clamp(0.0, 1.0 - c.h);
+    let x = (c.x + delta.0).clamp(0.0, (1.0 - c.w).max(0.0));
+    let y = (c.y + delta.1).clamp(0.0, (1.0 - c.h).max(0.0));
     CropRect { x, y, w: c.w, h: c.h }
 }
 
@@ -135,7 +157,9 @@ mod tests {
     #[test]
     fn resize_clamps_into_unit_square() {
         let r = resize(full(), Handle::TopLeft, (-0.3, -0.3), None);
-        assert!(r.x >= 0.0 && r.y >= 0.0, "clamped to image bounds");
+        assert!(r.x >= 0.0 && r.y >= 0.0, "origin in bounds");
+        assert!(r.x + r.w <= 1.0 + 1e-6 && r.y + r.h <= 1.0 + 1e-6, "extent in bounds");
+        assert!(r.w >= MIN_SIZE - 1e-6 && r.h >= MIN_SIZE - 1e-6, "min size enforced");
     }
 
     #[test]
@@ -164,5 +188,40 @@ mod tests {
         assert_eq!(aspect_ratio(Aspect::ThreeTwo, 6000, 4000), Some(1.5));
         assert_eq!(aspect_ratio(Aspect::Free, 6000, 4000), None);
         assert_eq!(aspect_ratio(Aspect::Original, 6000, 4000), Some(1.5));
+    }
+
+    #[test]
+    fn resize_aspect_top_handle_changes_crop_and_holds_ratio() {
+        // Drag the Top handle up; with a 2:1 lock the crop must actually change
+        // (the old code left it inert) and hold the ratio.
+        let c = CropRect { x: 0.1, y: 0.1, w: 0.4, h: 0.4 };
+        let r = resize(c, Handle::Top, (0.5, 0.0), Some(2.0));
+        assert!(r.h > c.h, "top-handle drag changed the crop (not inert); h={}", r.h);
+        assert!((r.w / r.h - 2.0).abs() < 1e-2, "2:1 held; got {}", r.w / r.h);
+    }
+
+    #[test]
+    fn resize_aspect_left_handle_holds_ratio() {
+        let c = CropRect { x: 0.3, y: 0.3, w: 0.4, h: 0.4 };
+        let r = resize(c, Handle::Left, (0.0, 0.5), Some(2.0));
+        assert!((r.w / r.h - 2.0).abs() < 1e-2, "2:1 held; got {}", r.w / r.h);
+    }
+
+    #[test]
+    fn resize_adversarial_does_not_panic() {
+        // Near-full rect + tall aspect + every handle: must not panic on the clamps.
+        for h in [Handle::Top, Handle::Bottom, Handle::Left, Handle::Right,
+                  Handle::TopLeft, Handle::TopRight, Handle::BottomLeft, Handle::BottomRight] {
+            let c = CropRect { x: 0.0, y: 0.0, w: 0.98, h: 0.98 };
+            let _ = resize(c, h, (0.99, 0.99), Some(0.1));
+            let _ = resize(c, h, (-0.5, -0.5), Some(50.0));
+        }
+    }
+
+    #[test]
+    fn move_body_oversized_crop_does_not_panic() {
+        let c = CropRect { x: 0.0, y: 0.0, w: 1.5, h: 1.5 }; // invalid but must not panic
+        let m = move_body(c, (0.2, 0.2));
+        assert_eq!((m.x, m.y), (0.0, 0.0), "pinned to 0 when oversize");
     }
 }

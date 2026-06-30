@@ -1,6 +1,5 @@
 //! Bounded undo/redo ring of `OpStack` snapshots with same-kind coalescing.
 //! Per-open-image; not persisted (only the resulting `OpStack` persists).
-#![allow(dead_code)] // history fields read via ViewerState (Task 9+)
 
 use ferrolite_pipeline::{OpKind, OpStack};
 
@@ -21,14 +20,23 @@ impl History {
         }
     }
 
+    /// Returns the current op-stack at the cursor position.
+    // public API: reading the live stack; not yet wired to callers outside tests
+    #[allow(dead_code)]
     pub fn current(&self) -> &OpStack {
         &self.entries[self.cursor]
     }
 
+    /// Returns `true` if there is at least one undo step available.
+    // public API: undo button enable-state; not yet wired to UI
+    #[allow(dead_code)]
     pub fn can_undo(&self) -> bool {
         self.cursor > 0
     }
 
+    /// Returns `true` if there is at least one redo step available.
+    // public API: redo button enable-state; not yet wired to UI
+    #[allow(dead_code)]
     pub fn can_redo(&self) -> bool {
         self.cursor + 1 < self.entries.len()
     }

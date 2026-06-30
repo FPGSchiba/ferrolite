@@ -80,7 +80,6 @@ pub struct ViewerState {
     /// When `true`, the crop overlay is active.
     pub crop_active: bool,
     /// Index of the currently-selected HSL band in the HSL panel (0–7).
-    #[allow(dead_code)] // read by the HSL panel (Task 12)
     pub hsl_band: usize,
     /// `true` once the `OpsLoaded` event for this image has been received (the
     /// op-stack read job finished and the stack has been applied).

@@ -138,9 +138,17 @@ impl TileEditPipeline {
         self.halo
     }
 
-    /// Re-point op params from a new stack. Plan 4 calls this when edits change;
-    /// here it is exercised once at construction. Updates all param cells and
-    /// dirties the head to force full re-evaluation on the next `produce_tile`.
+    /// Re-derive the color-op param cells (exposure, white balance, contrast,
+    /// tone curve, HSL, sharpen amount) from `stack` and dirty the chain so the
+    /// next `produce_tile` re-renders.
+    ///
+    /// LIMITATION: the geometry transform (crop/rotate) and the sharpen **halo**
+    /// are fixed at construction (baked into the `GeometryHeadNode` and the haloed
+    /// extent). `set_stack` does NOT update them. If `stack.geometry()` changes or
+    /// `sharpen_halo(stack.sharpen())` differs from the current `halo()`, this
+    /// pipeline must be DISCARDED and rebuilt with `TileEditPipeline::new` — calling
+    /// `set_stack` alone will silently keep the old geometry/halo. (A later plan that
+    /// wires interactive edits is responsible for that rebuild decision.)
     pub fn set_stack(&mut self, stack: OpStack) {
         self.exposure.set(exposure_uniform(stack.exposure()));
         self.wb.set(crate::uniforms::wb_uniform(stack.white_balance()));

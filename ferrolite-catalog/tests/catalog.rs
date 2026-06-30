@@ -218,7 +218,7 @@ fn second_ingest_skips_unchanged_files() {
 fn kind_round_trips_and_schema_is_v2() {
     use ferrolite_catalog::FileKind;
     let cat = ferrolite_catalog::Catalog::open_in_memory().unwrap();
-    assert_eq!(cat.schema_version().unwrap(), 2);
+    assert_eq!(cat.schema_version().unwrap(), 3);
     let folder = cat
         .upsert_folder(std::path::Path::new("/photos/a"), None)
         .unwrap();

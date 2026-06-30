@@ -19,12 +19,14 @@ impl Catalog {
         // (In-memory DBs ignore journal_mode; harmless there.)
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { conn })
     }
 
     pub fn open_in_memory() -> Result<Self, CatalogError> {
         let conn = Connection::open_in_memory()?;
         schema::migrate(&conn)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { conn })
     }
 

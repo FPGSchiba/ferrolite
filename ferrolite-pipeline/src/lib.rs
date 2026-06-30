@@ -11,11 +11,15 @@ mod uniforms;
 pub use image::PipelineImage;
 pub use nodes::upload_source;
 pub use op::{
-    Contrast, Exposure, Hsl, HslBand, Op, OpKind, OpStack, ToneCurve, WhiteBalance, STACK_VERSION,
+    Contrast, Exposure, Hsl, HslBand, Op, OpKind, OpStack, Sharpen, ToneCurve, WhiteBalance,
+    STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, EditPipeline};
 pub use serialize::{deserialize, serialize};
 // The uniform structs are exported as the documented GPU memory layout the
 // edit passes consume; the param→uniform helper fns + math are crate-internal
 // (used by `pipeline`/`uniforms`), so they are not part of the public surface.
-pub use uniforms::{ContrastUniform, ExposureUniform, HslUniform, WbUniform};
+// Exception: `sharpen_halo` is part of the public API for Plan 3's tile producer.
+pub use uniforms::{
+    sharpen_halo, ContrastUniform, ExposureUniform, HslUniform, SharpenUniform, WbUniform,
+};

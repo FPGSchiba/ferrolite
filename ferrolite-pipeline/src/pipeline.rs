@@ -11,8 +11,8 @@ use crate::image::PipelineImage;
 use crate::nodes::{CurveNode, PointOpNode, SourceNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, wb_uniform, ContrastUniform,
-    ExposureUniform, HslUniform, WbUniform,
+    contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_uniform, wb_uniform,
+    ContrastUniform, ExposureUniform, HslUniform, SharpenUniform, WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -32,6 +32,8 @@ pub struct EditPipeline {
     tone_curve: Rc<Cell<[f32; 256]>>,
     hsl_id: NodeId,
     hsl: Rc<Cell<HslUniform>>,
+    sharpen_id: NodeId,
+    sharpen: Rc<Cell<SharpenUniform>>,
     node_count: usize,
     stack: OpStack,
 }
@@ -83,10 +85,19 @@ impl EditPipeline {
         );
         let hsl_id = graph.add_node(Box::new(hsl_node), vec![tone_curve_id]);
 
+        let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
+        let sharpen_node = PointOpNode::new(
+            ctx.clone(),
+            include_str!("shaders/sharpen.wgsl"),
+            "sharpen",
+            sharpen.clone(),
+        );
+        let sharpen_id = graph.add_node(Box::new(sharpen_node), vec![hsl_id]);
+
         Self {
             ctx,
             graph,
-            output_id: hsl_id,
+            output_id: sharpen_id,
             exposure_id,
             exposure,
             wb_id,
@@ -97,7 +108,9 @@ impl EditPipeline {
             tone_curve,
             hsl_id,
             hsl,
-            node_count: 6,
+            sharpen_id,
+            sharpen,
+            node_count: 7,
             stack,
         }
     }
@@ -128,6 +141,11 @@ impl EditPipeline {
         if h != self.hsl.get() {
             self.hsl.set(h);
             self.graph.mark_dirty(self.hsl_id);
+        }
+        let sh = sharpen_uniform(stack.sharpen());
+        if sh != self.sharpen.get() {
+            self.sharpen.set(sh);
+            self.graph.mark_dirty(self.sharpen_id);
         }
         self.stack = stack;
     }

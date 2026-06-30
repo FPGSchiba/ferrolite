@@ -3,7 +3,7 @@ mod common;
 use ferrolite_gpu::GpuContext;
 use ferrolite_pipeline::{
     blit_to_rgba8, upload_source, Contrast, EditPipeline, Exposure, Hsl, HslBand, Op, OpStack,
-    ToneCurve, WhiteBalance,
+    Sharpen, ToneCurve, WhiteBalance,
 };
 use std::sync::Arc;
 
@@ -146,6 +146,21 @@ fn tone_curve_darken_midtones_matches_golden() {
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "tone_curve.png");
+}
+
+#[test]
+fn sharpen_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default().set_op(Op::Sharpen(Sharpen {
+        amount: 0.8,
+        radius: 2,
+    }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "sharpen.png");
 }
 
 #[test]

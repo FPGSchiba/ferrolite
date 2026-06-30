@@ -3,7 +3,7 @@
 //! shader). Display-linear space; the sRGB OETF lives only in the display/blit
 //! shader. No GPU here — fully unit-tested.
 
-use crate::op::{Contrast, Exposure, Hsl, WhiteBalance};
+use crate::op::{Contrast, Exposure, Hsl, Sharpen, WhiteBalance};
 
 /// Mid-grey pivot (display-linear) about which contrast scales. Placeholder
 /// constant; Spec 3 may refine once the working space is fixed.
@@ -135,6 +135,32 @@ pub fn wb_uniform(op: Option<WhiteBalance>) -> WbUniform {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SharpenUniform {
+    pub amount: f32,
+    pub radius: i32,
+    pub pad: [f32; 2],
+}
+
+pub fn sharpen_uniform(op: Option<Sharpen>) -> SharpenUniform {
+    let (amount, radius) = op.map(|s| (s.amount, s.radius)).unwrap_or((0.0, 0));
+    SharpenUniform {
+        amount,
+        radius: radius as i32,
+        pad: [0.0; 2],
+    }
+}
+
+/// Halo (pixels) a tiled full-res sharpen pass must over-fetch. Zero when the
+/// op is absent or a no-op (amount 0). Consumed by Plan 3's tile producer.
+pub fn sharpen_halo(op: Option<Sharpen>) -> u32 {
+    match op {
+        Some(s) if s.amount != 0.0 => s.radius,
+        _ => 0,
+    }
+}
+
 pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
     let a = op.map(|c| c.amount).unwrap_or(0.0);
     let (gain, pivot) = contrast_gain_pivot(a);
@@ -238,5 +264,44 @@ mod tests {
         let u = hsl_uniform(Some(Hsl { bands }));
         assert_eq!(u.bands[3], [0.2, -0.3, 0.1, 0.0]);
         assert_eq!(u.bands[0], [0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn sharpen_uniform_identity_when_absent() {
+        let u = sharpen_uniform(None);
+        assert_eq!(u.amount, 0.0);
+        assert_eq!(u.radius, 0);
+    }
+
+    #[test]
+    fn sharpen_uniform_carries_amount_and_radius() {
+        use crate::op::Sharpen;
+        let u = sharpen_uniform(Some(Sharpen {
+            amount: 0.75,
+            radius: 3,
+        }));
+        assert_eq!(u.amount, 0.75);
+        assert_eq!(u.radius, 3);
+    }
+
+    #[test]
+    fn sharpen_halo_is_radius_or_zero() {
+        use crate::op::Sharpen;
+        assert_eq!(sharpen_halo(None), 0);
+        // amount 0 contributes no halo even with radius set.
+        assert_eq!(
+            sharpen_halo(Some(Sharpen {
+                amount: 0.0,
+                radius: 4
+            })),
+            0
+        );
+        assert_eq!(
+            sharpen_halo(Some(Sharpen {
+                amount: 0.5,
+                radius: 4
+            })),
+            4
+        );
     }
 }

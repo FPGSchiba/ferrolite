@@ -90,6 +90,9 @@ impl ReadPool {
     ) -> Result<std::collections::HashMap<i64, Vec<ferrolite_image::TagId>>, CatalogError> {
         self.with_conn(|c| crate::queries::tags_for_images(c, image_ids))
     }
+    pub fn list_collections(&self) -> Result<Vec<crate::CollectionRecord>, CatalogError> {
+        self.with_conn(crate::queries::list_collections)
+    }
 }
 
 #[cfg(test)]

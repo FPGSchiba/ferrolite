@@ -180,6 +180,26 @@ pub(crate) fn tags_for_images(
     Ok(map)
 }
 
+pub(crate) fn list_collections(
+    conn: &Connection,
+) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, color, sort_order FROM collections ORDER BY sort_order, name")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::model::CollectionRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            color: Color::from_packed(row.get::<_, i64>(2)? as u32),
+            sort_order: row.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>, CatalogError> {
     let mut stmt = conn.prepare(
         "SELECT f.id, f.path, f.parent_id, COUNT(i.id)

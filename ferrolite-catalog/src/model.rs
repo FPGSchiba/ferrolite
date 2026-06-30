@@ -70,6 +70,15 @@ pub struct TagRecord {
     pub color: Color,
 }
 
+/// A collection row read back from the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionRecord {
+    pub id: i64,
+    pub name: String,
+    pub color: Color,
+    pub sort_order: i64,
+}
+
 /// Result of an ingest pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IngestSummary {

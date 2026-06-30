@@ -313,6 +313,114 @@ impl Catalog {
     ) -> Result<HashMap<i64, Vec<TagId>>, CatalogError> {
         crate::queries::tags_for_images(self.conn(), image_ids)
     }
+
+    /// Create a new collection. Returns `CatalogError::Conflict` if a collection
+    /// with that name already exists (enforced by the UNIQUE constraint on `collections.name`).
+    pub fn create_collection(&self, name: &str, color: Color) -> Result<i64, CatalogError> {
+        let res = self.conn().execute(
+            "INSERT INTO collections (name, color) VALUES (?1, ?2)",
+            rusqlite::params![name, color.to_packed() as i64],
+        );
+        match res {
+            Ok(_) => Ok(self.conn().last_insert_rowid()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(CatalogError::Conflict(format!(
+                    "collection '{name}' already exists"
+                )))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Rename an existing collection.
+    pub fn rename_collection(&self, id: i64, name: &str) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "UPDATE collections SET name=?1 WHERE id=?2",
+            rusqlite::params![name, id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the colour of an existing collection.
+    pub fn set_collection_color(&self, id: i64, color: Color) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "UPDATE collections SET color=?1 WHERE id=?2",
+            rusqlite::params![color.to_packed() as i64, id],
+        )?;
+        Ok(())
+    }
+
+    /// Delete a collection and cascade-remove all its image memberships.
+    pub fn delete_collection(&self, id: i64) -> Result<(), CatalogError> {
+        self.conn()
+            .execute("DELETE FROM collections WHERE id=?1", rusqlite::params![id])?;
+        Ok(())
+    }
+
+    /// Add an image to a collection. Idempotent (INSERT OR IGNORE).
+    pub fn add_image_to_collection(&self, coll_id: i64, image_id: i64) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "INSERT OR IGNORE INTO collection_images (collection_id, image_id) VALUES (?1, ?2)",
+            rusqlite::params![coll_id, image_id],
+        )?;
+        Ok(())
+    }
+
+    /// Remove an image from a collection.
+    pub fn remove_image_from_collection(
+        &self,
+        coll_id: i64,
+        image_id: i64,
+    ) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "DELETE FROM collection_images WHERE collection_id=?1 AND image_id=?2",
+            rusqlite::params![coll_id, image_id],
+        )?;
+        Ok(())
+    }
+
+    /// Return all collections ordered by sort_order then name.
+    pub fn list_collections(&self) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {
+        crate::queries::list_collections(self.conn())
+    }
+}
+
+#[cfg(test)]
+mod collection_tests {
+    use super::*;
+    use crate::model::NewImage;
+    use ferrolite_image::{Color, FileKind};
+
+    #[test]
+    fn create_and_populate_collection() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let c = cat
+            .create_collection("Best of 2026", Color::from_packed(0x30A46C))
+            .unwrap();
+        assert!(cat
+            .create_collection("Best of 2026", Color::default())
+            .is_err());
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let a = cat
+            .upsert_image(&NewImage::failed(f, "a.nef".into(), 1, 1, FileKind::Raw, 0))
+            .unwrap();
+        cat.add_image_to_collection(c, a).unwrap();
+        cat.add_image_to_collection(c, a).unwrap(); // idempotent
+        let n: i64 = cat
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM collection_images WHERE collection_id=?1",
+                [c],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(cat.list_collections().unwrap().len(), 1);
+        cat.delete_collection(c).unwrap();
+        assert!(cat.list_collections().unwrap().is_empty());
+    }
 }
 
 #[cfg(test)]

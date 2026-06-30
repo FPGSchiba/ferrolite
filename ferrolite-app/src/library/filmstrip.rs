@@ -15,15 +15,18 @@ const GAP: f32 = 6.0;
 /// Render the strip; return the image id clicked this frame, if any.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) -> Option<i64> {
     let mut clicked: Option<i64> = None;
-    // Snapshot the ids/decode-status up front so we don't hold an immutable
-    // borrow of `state.images` while mutably borrowing `state` for thumbnails.
-    let ids: Vec<(i64, bool)> = state
+    // Snapshot the ids/decode-status/rating/flag up front so we don't hold an
+    // immutable borrow of `state.images` while mutably borrowing `state` for
+    // thumbnails.
+    let cells: Vec<(i64, bool, u8, ferrolite_image::Flag)> = state
         .images
         .iter()
         .map(|r| {
             (
                 r.id,
                 r.decode_status != ferrolite_catalog::DecodeStatus::Failed,
+                r.rating.get(),
+                r.flag,
             )
         })
         .collect();
@@ -33,7 +36,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
-                for (id, decodable) in ids {
+                for (id, decodable, rating, flag) in cells {
                     // Always reserve the cell's space so the scroll extent and
                     // `scroll_to_rect` stay correct, but only do the expensive
                     // thumbnail work (DB read + JPEG decode + GPU upload + paint)
@@ -61,6 +64,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                                 rect,
                                 2.0,
                                 egui::Stroke::new(2.0, theme::ACCENT),
+                            );
+                        }
+                        if rating > 0 {
+                            crate::library::icons::rating_stars(
+                                ui.painter(),
+                                rect.left_bottom() + egui::vec2(3.0, -6.0),
+                                3.0,
+                                1.5,
+                                rating,
+                                rating,
+                                theme::ACCENT,
+                            );
+                        }
+                        let flag_color = match flag {
+                            ferrolite_image::Flag::Pick => Some(theme::SEMANTIC_GREEN),
+                            ferrolite_image::Flag::Reject => Some(theme::SEMANTIC_RED),
+                            ferrolite_image::Flag::None => None,
+                        };
+                        if let Some(c) = flag_color {
+                            crate::library::icons::flag(
+                                ui.painter(),
+                                rect.left_top() + egui::vec2(7.0, 4.0),
+                                10.0,
+                                true,
+                                c,
                             );
                         }
                     }

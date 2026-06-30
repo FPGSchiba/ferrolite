@@ -51,7 +51,10 @@ pub fn move_point(points: &[(f32, f32)], idx: usize, p: (f32, f32)) -> Vec<(f32,
         // Keep strictly between neighbors so x stays ascending.
         let lo = out[idx - 1].0 + 1e-4;
         let hi = out[idx + 1].0 - 1e-4;
-        clamp01(p.0).clamp(lo, hi)
+        let x = clamp01(p.0);
+        // Guard degenerate case: when neighbors are within 2e-4 of each other,
+        // lo > hi and f32::clamp would panic. Pin to lo in that case.
+        if lo <= hi { x.clamp(lo, hi) } else { lo }
     };
     out[idx] = (x, y);
     out
@@ -121,5 +124,27 @@ mod tests {
         assert_eq!(delete_point(&pts, 1).len(), 2, "interior deletable");
         assert_eq!(delete_point(&pts, 0).len(), 3, "left endpoint not deletable");
         assert_eq!(delete_point(&pts, 2).len(), 3, "right endpoint not deletable");
+    }
+
+    #[test]
+    fn move_interior_with_near_neighbors_does_not_panic() {
+        // Two interior points whose x values are only 1e-4 apart (< 2e-4),
+        // so lo > hi in the interior branch — exercises the degenerate guard.
+        let pts = vec![(0.0, 0.0), (0.50000_f32, 0.5), (0.50005_f32, 0.5), (1.0, 1.0)];
+        // Dragging index 1 far to the right would yield lo > hi without the guard.
+        let moved = move_point(&pts, 1, (0.9, 0.3));
+        // Result must lie between the outer neighbors, not outside them.
+        assert!(
+            moved[1].0 >= pts[0].0 && moved[1].0 <= pts[2].0,
+            "x must stay between outer neighbors; got {}",
+            moved[1].0
+        );
+    }
+
+    #[test]
+    fn delete_two_point_curve_keeps_both_endpoints() {
+        let two = identity_points();
+        assert_eq!(delete_point(&two, 0).len(), 2, "left endpoint of 2-point curve not deletable");
+        assert_eq!(delete_point(&two, 1).len(), 2, "right endpoint of 2-point curve not deletable");
     }
 }

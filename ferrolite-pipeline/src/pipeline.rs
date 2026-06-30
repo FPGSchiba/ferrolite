@@ -1,8 +1,79 @@
-//! `EditPipeline` (later task) + the `blit_to_rgba8` display/readback helper.
+//! `EditPipeline` + the `blit_to_rgba8` display/readback helper.
 
-use ferrolite_gpu::GpuContext;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+use ferrolite_gpu::{Graph, GpuContext, NodeId};
+use ferrolite_image::LinearRgbaF32;
 
 use crate::image::PipelineImage;
+use crate::nodes::{PointOpNode, SourceNode};
+use crate::op::OpStack;
+use crate::uniforms::{exposure_uniform, ExposureUniform};
+
+/// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
+/// feeding the fixed canonical op chain. Editing updates a shared param cell and
+/// marks that op's node dirty, so only it + downstream re-evaluate.
+pub struct EditPipeline {
+    ctx: Arc<GpuContext>,
+    graph: Graph<PipelineImage>,
+    output_id: NodeId,
+    exposure_id: NodeId,
+    exposure: Rc<Cell<ExposureUniform>>,
+    stack: OpStack,
+}
+
+impl EditPipeline {
+    pub fn new(ctx: Arc<GpuContext>, source: &LinearRgbaF32, stack: OpStack) -> Self {
+        let mut graph = Graph::new();
+        let source_id = graph.add_node(Box::new(SourceNode::new(&ctx, source)), vec![]);
+
+        let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
+        let exposure_node = PointOpNode::new(
+            ctx.clone(),
+            include_str!("shaders/exposure.wgsl"),
+            "exposure",
+            exposure.clone(),
+        );
+        let exposure_id = graph.add_node(Box::new(exposure_node), vec![source_id]);
+
+        Self {
+            ctx,
+            graph,
+            output_id: exposure_id,
+            exposure_id,
+            exposure,
+            stack,
+        }
+    }
+
+    /// Apply a new op stack, dirtying only the nodes whose params changed.
+    pub fn set_stack(&mut self, stack: OpStack) {
+        let e = exposure_uniform(stack.exposure());
+        if e != self.exposure.get() {
+            self.exposure.set(e);
+            self.graph.mark_dirty(self.exposure_id);
+        }
+        self.stack = stack;
+    }
+
+    /// Evaluate the pipeline output (re-running only dirty nodes).
+    pub fn evaluate(&mut self) -> PipelineImage {
+        self.graph.evaluate(self.output_id).clone()
+    }
+
+    /// Total node evaluations so far (for per-op invalidation tests).
+    pub fn eval_count(&self) -> usize {
+        self.graph.eval_count()
+    }
+
+    /// Evaluate and read back to an sRGB Rgba8 buffer (golden tests).
+    pub fn render_to_image(&mut self) -> Vec<u8> {
+        let out = self.evaluate();
+        blit_to_rgba8(&self.ctx, &out)
+    }
+}
 
 /// Render a display-linear `PipelineImage` to an sRGB `Rgba8Unorm` buffer at 1:1
 /// (its own dims), returning `width*height*4` row-unpadded bytes. Used by golden

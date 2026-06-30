@@ -89,6 +89,8 @@ pub struct AppState {
     pub visible_tags: HashMap<i64, Vec<TagId>>,
     /// Selected image ids (multi-selection for batch ops).
     pub selection: HashSet<i64>,
+    /// The anchor image id for shift-click range selection.
+    pub selection_anchor: Option<i64>,
     /// Non-critical warning surfaced in the UI (e.g. query error).
     pub warning: Option<String>,
 
@@ -148,6 +150,7 @@ impl AppState {
             collections: Vec::new(),
             visible_tags: HashMap::new(),
             selection: HashSet::new(),
+            selection_anchor: None,
             warning: None,
             camera_options: Vec::new(),
             iso_range: None,
@@ -388,11 +391,33 @@ impl AppState {
             collections: Vec::new(),
             visible_tags: HashMap::new(),
             selection: HashSet::new(),
+            selection_anchor: None,
             warning: None,
             camera_options: Vec::new(),
             iso_range: None,
             date_range: None,
             renaming: None,
+        }
+    }
+
+    /// Add all selected images (or the single `selected` fallback) to a collection.
+    pub fn add_selection_to_collection(&mut self, coll_id: i64) {
+        let mut targets: Vec<i64> = self.selection.iter().copied().collect();
+        if targets.is_empty() {
+            if let Some(id) = self.selected {
+                targets.push(id);
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        let w = self.writer.lock().expect("writer");
+        for id in &targets {
+            let _ = w.add_image_to_collection(coll_id, *id);
+        }
+        drop(w);
+        if matches!(self.source, ViewSource::Collection(id) if id == coll_id) {
+            self.dirty = true;
         }
     }
 }
@@ -726,5 +751,76 @@ mod tests {
             s.visible_tags.get(&2).map(|v| v.is_empty()).unwrap_or(true),
             "image 2 unchanged when not selected"
         );
+    }
+
+    /// `add_selection_to_collection` adds each selected image to the collection and
+    /// sets `dirty` only when the current source is that collection.
+    #[test]
+    fn add_selection_to_collection_adds_images_and_sets_dirty_when_viewing() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+
+        // Create a folder, two images, and a collection.
+        let (coll_id, img_a, img_b) = {
+            let w = s.writer.lock().unwrap();
+            let folder = w.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            let a = w
+                .upsert_image(&NewImage::failed(
+                    folder,
+                    "a.jpg".into(),
+                    1,
+                    1,
+                    FileKind::Standard,
+                    0,
+                ))
+                .unwrap();
+            let b = w
+                .upsert_image(&NewImage::failed(
+                    folder,
+                    "b.jpg".into(),
+                    1,
+                    1,
+                    FileKind::Standard,
+                    0,
+                ))
+                .unwrap();
+            let c = w
+                .create_collection("test-col", ferrolite_image::Color::default())
+                .unwrap();
+            (c, a, b)
+        };
+
+        // Select both images.
+        s.selection = [img_a, img_b].into_iter().collect();
+        s.dirty = false;
+        // Not currently viewing the collection — dirty must stay false.
+        s.source = ViewSource::All;
+        s.add_selection_to_collection(coll_id);
+        assert!(
+            !s.dirty,
+            "dirty stays false when not viewing the collection"
+        );
+
+        // Verify images are in the collection via the read pool.
+        s.reload_vocab();
+        s.source = ViewSource::Collection(coll_id);
+        s.refresh_images();
+        assert_eq!(s.images.len(), 2, "both images should be in the collection");
+
+        // Re-run while viewing the collection: dirty must be set.
+        s.dirty = false;
+        s.source = ViewSource::Collection(coll_id);
+        s.add_selection_to_collection(coll_id);
+        assert!(
+            s.dirty,
+            "dirty set when currently viewing the target collection"
+        );
+    }
+
+    /// `selection_anchor` is initialised to `None` in both constructors.
+    #[test]
+    fn selection_anchor_initialised_none() {
+        let s = AppState::for_test();
+        assert!(s.selection_anchor.is_none());
     }
 }

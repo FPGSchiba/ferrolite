@@ -57,8 +57,7 @@ pub fn star(painter: &Painter, center: Pos2, r: f32, filled: bool, color: Color3
 /// at the end) so callers can size their allocated rect.
 ///
 /// Not yet called in the toolbar (individual star calls handle per-star click
-/// targets), but will be used by the grid cell pass.
-#[allow(dead_code)]
+/// targets), but called by the grid cell pass.
 pub fn rating_stars(
     painter: &Painter,
     origin: Pos2,

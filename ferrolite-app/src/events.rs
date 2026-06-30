@@ -37,6 +37,11 @@ pub enum AppEvent {
     /// The tier-2 full decode failed; the viewer keeps showing the preview and
     /// goes idle. Folded by `apply` (no GPU work) but matched in `app.rs`.
     FullFailed { image_id: i64 },
+    /// Result of an off-thread metadata persist. `ok==false` → reload truth;
+    /// `warning` → surface in the status bar.
+    // Constructed by `metadata::spawn_metadata_write` (off-thread job).
+    #[allow(dead_code)]
+    MetadataResult { ok: bool, warning: Option<String> },
 }
 
 impl AppState {
@@ -73,6 +78,15 @@ impl AppState {
             AppEvent::FullDecoded { .. } => None,
             // Terminal-state handling happens in `app.rs`; nothing to fold here.
             AppEvent::FullFailed { .. } => None,
+            AppEvent::MetadataResult { ok, warning } => {
+                if !ok {
+                    self.dirty = true;
+                }
+                if warning.is_some() {
+                    self.warning = warning;
+                }
+                None
+            }
         }
     }
 }

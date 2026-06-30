@@ -1,4 +1,4 @@
-//! Application state: catalog handles, the job system, the event channel, and
+﻿//! Application state: catalog handles, the job system, the event channel, and
 //! the currently-browsed folder's rows + selection + progress counters.
 
 use crate::events::AppEvent;
@@ -36,7 +36,7 @@ pub struct AppState {
     pub thumb_total: usize,
     pub thumb_done: usize,
 
-    /// image_id → its pending/running thumbnail job (for reprioritization/cancel).
+    /// image_id â†’ its pending/running thumbnail job (for reprioritization/cancel).
     pub thumb_jobs: HashMap<i64, JobId>,
     pub ingest_handle: Option<JobHandle>,
 
@@ -88,8 +88,6 @@ pub struct AppState {
     #[allow(dead_code)]
     pub selection: HashSet<i64>,
     /// Non-critical warning surfaced in the UI (e.g. query error).
-    // consumed by future H tasks (status bar)
-    #[allow(dead_code)]
     pub warning: Option<String>,
 }
 

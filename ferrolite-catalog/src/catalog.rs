@@ -224,6 +224,46 @@ impl Catalog {
         crate::queries::needs_reingest(self.conn(), folder_id, filename, mtime, size)
     }
 
+    /// Update the rating of an image row.
+    pub fn set_rating(
+        &self,
+        image_id: i64,
+        rating: ferrolite_image::Rating,
+    ) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "UPDATE images SET rating=?1 WHERE id=?2",
+            rusqlite::params![rating.as_i64(), image_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the flag of an image row.
+    pub fn set_flag(&self, image_id: i64, flag: ferrolite_image::Flag) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "UPDATE images SET flag=?1 WHERE id=?2",
+            rusqlite::params![flag.as_i64(), image_id],
+        )?;
+        Ok(())
+    }
+
+    /// Add the tag if absent, else remove it (mirrors the UI toggle).
+    pub fn toggle_tag(
+        &self,
+        image_id: i64,
+        tag: ferrolite_image::TagId,
+    ) -> Result<(), CatalogError> {
+        let present: bool = self.conn().query_row(
+            "SELECT EXISTS(SELECT 1 FROM image_tags WHERE image_id=?1 AND tag_id=?2)",
+            rusqlite::params![image_id, tag.0],
+            |r| r.get(0),
+        )?;
+        if present {
+            self.remove_tag_from_image(image_id, tag)
+        } else {
+            self.add_tag_to_image(image_id, tag)
+        }
+    }
+
     /// Set a row's decode status (used to mark a file `Failed` from a thumbnail job).
     pub fn set_decode_status(
         &self,

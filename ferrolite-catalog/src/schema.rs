@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 /// Bump this and add a `if version < N { ... }` block when the schema changes.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Apply migrations using the SQLite `user_version` pragma. Idempotent.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -87,6 +87,13 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         version = 3;
     }
 
+    if version < 4 {
+        conn.execute_batch(
+            "ALTER TABLE images ADD COLUMN has_edits INTEGER NOT NULL DEFAULT 0;",
+        )?;
+        version = 4;
+    }
+
     debug_assert_eq!(
         version, SCHEMA_VERSION,
         "every migration block must advance `version` to SCHEMA_VERSION"
@@ -119,11 +126,12 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, super::SCHEMA_VERSION);
-        assert_eq!(super::SCHEMA_VERSION, 3);
+        assert_eq!(super::SCHEMA_VERSION, 4);
 
         let img = table_columns(&conn, "images");
         assert!(img.contains(&"flag".to_string()));
         assert!(img.contains(&"added_at".to_string()));
+        assert!(img.contains(&"has_edits".to_string()), "has_edits column added");
 
         for t in ["tags", "image_tags", "collections", "collection_images"] {
             let n: i64 = conn

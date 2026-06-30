@@ -60,6 +60,8 @@ pub struct ImageRecord {
     pub kind: FileKind,
     pub rating: Rating,
     pub flag: Flag,
+    /// Cache of "has a non-identity frl:ops stack" (rebuildable from the sidecar).
+    pub has_edits: bool,
 }
 
 /// A tag row read back from the catalog.

@@ -13,6 +13,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
     let kind: i64 = row.get(9)?;
     let rating: i64 = row.get(10)?;
     let flag: i64 = row.get(11)?;
+    let has_edits: i64 = row.get(12)?;
     Ok(ImageRecord {
         id: row.get(0)?,
         folder_id: row.get(1)?,
@@ -26,11 +27,12 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
         kind: FileKind::from_i64(kind),
         rating: Rating::from_i64(rating),
         flag: Flag::from_i64(flag),
+        has_edits: has_edits != 0,
     })
 }
 
 pub(crate) const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
-                          capture_time, iso, decode_status, kind, rating, flag";
+                          capture_time, iso, decode_status, kind, rating, flag, has_edits";
 
 pub(crate) fn list_images(
     conn: &Connection,

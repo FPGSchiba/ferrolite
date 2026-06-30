@@ -21,6 +21,6 @@ pub use serialize::{deserialize, serialize};
 // (used by `pipeline`/`uniforms`), so they are not part of the public surface.
 // Exception: `sharpen_halo` is part of the public API for Plan 3's tile producer.
 pub use uniforms::{
-    sharpen_halo, ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, SharpenUniform,
-    WbUniform, MAX_SHARPEN_RADIUS,
+    geometry_tile_uniform, sharpen_halo, ContrastUniform, ExposureUniform, GeometryUniform,
+    HslUniform, SharpenUniform, WbUniform, MAX_SHARPEN_RADIUS,
 };

@@ -174,7 +174,9 @@ pub struct GeometryUniform {
     pub off: [f32; 2],
     pub src_dims: [f32; 2],
     pub out_dims: [f32; 2],
-    pub pad: [f32; 2],
+    /// Output-pixel origin added to `gid` before the transform, so a tile pass can
+    /// render a sub-region of the output image. Whole-image path uses `[0,0]`.
+    pub out_origin: [f32; 2],
 }
 
 /// Crop + rotate as a sampling transform. Returns the uniform plus the output
@@ -220,11 +222,31 @@ pub fn geometry_uniform(
             off,
             src_dims: [sw, sh],
             out_dims: [out_w as f32, out_h as f32],
-            pad: [0.0; 2],
+            out_origin: [0.0, 0.0],
         },
         out_w,
         out_h,
     )
+}
+
+/// A per-tile geometry-head uniform: identical `m`/`off`/`src_dims` to
+/// `geometry_uniform` at the given source dims, but with the output origin set to
+/// the haloed tile's top-left (may be negative) and `out_dims` set to the haloed
+/// extent. Used by `TileEditPipeline`'s geometry head to resample the source for
+/// one output tile (geometry applied at the head; spec §8.4).
+pub fn geometry_tile_uniform(
+    op: Option<Geometry>,
+    src_w: u32,
+    src_h: u32,
+    out_origin: (f32, f32),
+    ext: u32,
+) -> GeometryUniform {
+    let (base, _, _) = geometry_uniform(op, src_w, src_h);
+    GeometryUniform {
+        out_dims: [ext as f32, ext as f32],
+        out_origin: [out_origin.0, out_origin.1],
+        ..base
+    }
 }
 
 pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
@@ -434,5 +456,22 @@ mod tests {
         assert!((u.m[1] - -1.0).abs() < 1e-5);
         assert!((u.m[2] - 1.0).abs() < 1e-5);
         assert!(u.m[3].abs() < 1e-5);
+    }
+
+    #[test]
+    fn geometry_uniform_default_out_origin_is_zero() {
+        let (u, _, _) = geometry_uniform(None, 64, 48);
+        assert_eq!(u.out_origin, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn geometry_tile_uniform_sets_origin_and_extent() {
+        // Identity geometry, source 600x500, tile origin (254, -2), extent 260.
+        let u = geometry_tile_uniform(None, 600, 500, (254.0, -2.0), 260);
+        assert_eq!(u.out_origin, [254.0, -2.0]);
+        assert_eq!(u.out_dims, [260.0, 260.0]);
+        // Identity transform + source dims preserved.
+        assert_eq!(u.m, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(u.src_dims, [600.0, 500.0]);
     }
 }

@@ -11,8 +11,8 @@ use crate::image::PipelineImage;
 use crate::nodes::{CurveNode, PointOpNode, SourceNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    contrast_uniform, curve_lut, exposure_uniform, wb_uniform, ContrastUniform, ExposureUniform,
-    WbUniform,
+    contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, wb_uniform, ContrastUniform,
+    ExposureUniform, HslUniform, WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -30,6 +30,8 @@ pub struct EditPipeline {
     contrast: Rc<Cell<ContrastUniform>>,
     tone_curve_id: NodeId,
     tone_curve: Rc<Cell<[f32; 256]>>,
+    hsl_id: NodeId,
+    hsl: Rc<Cell<HslUniform>>,
     node_count: usize,
     stack: OpStack,
 }
@@ -72,10 +74,19 @@ impl EditPipeline {
         let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
         let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![contrast_id]);
 
+        let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
+        let hsl_node = PointOpNode::new(
+            ctx.clone(),
+            include_str!("shaders/hsl.wgsl"),
+            "hsl",
+            hsl.clone(),
+        );
+        let hsl_id = graph.add_node(Box::new(hsl_node), vec![tone_curve_id]);
+
         Self {
             ctx,
             graph,
-            output_id: tone_curve_id,
+            output_id: hsl_id,
             exposure_id,
             exposure,
             wb_id,
@@ -84,7 +95,9 @@ impl EditPipeline {
             contrast,
             tone_curve_id,
             tone_curve,
-            node_count: 5,
+            hsl_id,
+            hsl,
+            node_count: 6,
             stack,
         }
     }
@@ -110,6 +123,11 @@ impl EditPipeline {
         if lut != self.tone_curve.get() {
             self.tone_curve.set(lut);
             self.graph.mark_dirty(self.tone_curve_id);
+        }
+        let h = hsl_uniform(stack.hsl());
+        if h != self.hsl.get() {
+            self.hsl.set(h);
+            self.graph.mark_dirty(self.hsl_id);
         }
         self.stack = stack;
     }

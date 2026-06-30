@@ -3,7 +3,7 @@
 //! shader). Display-linear space; the sRGB OETF lives only in the display/blit
 //! shader. No GPU here — fully unit-tested.
 
-use crate::op::{Contrast, Exposure, WhiteBalance};
+use crate::op::{Contrast, Exposure, Hsl, WhiteBalance};
 
 /// Mid-grey pivot (display-linear) about which contrast scales. Placeholder
 /// constant; Spec 3 may refine once the working space is fixed.
@@ -102,6 +102,23 @@ pub struct ContrastUniform {
     pub pad: [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HslUniform {
+    /// 8 bands × (hue, sat, lum, pad). Mirrors WGSL `array<vec4<f32>, 8>`.
+    pub bands: [[f32; 4]; 8],
+}
+
+pub fn hsl_uniform(op: Option<Hsl>) -> HslUniform {
+    let mut bands = [[0.0f32; 4]; 8];
+    if let Some(h) = op {
+        for (i, b) in h.bands.iter().enumerate() {
+            bands[i] = [b.hue, b.sat, b.lum, 0.0];
+        }
+    }
+    HslUniform { bands }
+}
+
 pub fn exposure_uniform(op: Option<Exposure>) -> ExposureUniform {
     let ev = op.map(|e| e.ev).unwrap_or(0.0);
     ExposureUniform {
@@ -197,5 +214,29 @@ mod tests {
         for i in 1..256 {
             assert!(lut[i] >= lut[i - 1], "lut dipped at {i}");
         }
+    }
+
+    #[test]
+    fn hsl_uniform_identity_is_all_zero() {
+        let u = hsl_uniform(None);
+        assert_eq!(u.bands, [[0.0; 4]; 8]);
+    }
+
+    #[test]
+    fn hsl_uniform_packs_bands_in_order() {
+        use crate::op::{Hsl, HslBand};
+        let mut bands = [HslBand {
+            hue: 0.0,
+            sat: 0.0,
+            lum: 0.0,
+        }; 8];
+        bands[3] = HslBand {
+            hue: 0.2,
+            sat: -0.3,
+            lum: 0.1,
+        };
+        let u = hsl_uniform(Some(Hsl { bands }));
+        assert_eq!(u.bands[3], [0.2, -0.3, 0.1, 0.0]);
+        assert_eq!(u.bands[0], [0.0, 0.0, 0.0, 0.0]);
     }
 }

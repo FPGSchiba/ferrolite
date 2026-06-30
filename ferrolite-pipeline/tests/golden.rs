@@ -2,8 +2,8 @@ mod common;
 
 use ferrolite_gpu::GpuContext;
 use ferrolite_pipeline::{
-    blit_to_rgba8, upload_source, Contrast, EditPipeline, Exposure, Op, OpStack, ToneCurve,
-    WhiteBalance,
+    blit_to_rgba8, upload_source, Contrast, EditPipeline, Exposure, Hsl, HslBand, Op, OpStack,
+    ToneCurve, WhiteBalance,
 };
 use std::sync::Arc;
 
@@ -146,4 +146,23 @@ fn tone_curve_darken_midtones_matches_golden() {
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "tone_curve.png");
+}
+
+#[test]
+fn hsl_shift_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    // Boost saturation + nudge hue across all bands.
+    let stack = OpStack::default().set_op(Op::Hsl(Hsl {
+        bands: [HslBand {
+            hue: 0.2,
+            sat: 0.4,
+            lum: 0.0,
+        }; 8],
+    }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "hsl.png");
 }

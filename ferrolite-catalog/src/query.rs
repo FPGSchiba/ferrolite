@@ -1,9 +1,11 @@
 //! A declarative, parameterised catalog query (filter + sort + search), compiled
 //! to one `SELECT`. Pure: `compile()` is unit-tested without a database.
 
+use crate::error::CatalogError;
+use crate::model::ImageRecord;
 use crate::queries::IMAGE_COLS;
 use ferrolite_image::{Flag, TagId};
-use rusqlite::types::Value;
+use rusqlite::{types::Value, Connection};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -215,6 +217,21 @@ impl LibraryQuery {
         sql.push_str(if self.sort.desc { " DESC" } else { " ASC" });
         (sql, params)
     }
+}
+
+/// Execute a `LibraryQuery` against an open connection and return the matching rows.
+pub(crate) fn run(conn: &Connection, q: &LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {
+    let (sql, params) = q.compile();
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(params),
+        crate::queries::row_to_record,
+    )?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

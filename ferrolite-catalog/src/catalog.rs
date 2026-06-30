@@ -385,6 +385,11 @@ impl Catalog {
     pub fn list_collections(&self) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {
         crate::queries::list_collections(self.conn())
     }
+
+    /// Execute a `LibraryQuery` and return matching image records.
+    pub fn query_images(&self, q: &crate::LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {
+        crate::query::run(self.conn(), q)
+    }
 }
 
 #[cfg(test)]

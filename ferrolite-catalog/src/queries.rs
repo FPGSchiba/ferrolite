@@ -220,3 +220,39 @@ pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>
     }
     Ok(out)
 }
+
+pub(crate) fn distinct_cameras(conn: &Connection) -> Result<Vec<String>, CatalogError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT camera_model FROM images WHERE camera_model IS NOT NULL ORDER BY camera_model",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub(crate) fn iso_bounds(conn: &Connection) -> Result<Option<(u32, u32)>, CatalogError> {
+    let row: (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT MIN(iso), MAX(iso) FROM images WHERE iso IS NOT NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(match row {
+        (Some(lo), Some(hi)) => Some((lo as u32, hi as u32)),
+        _ => None,
+    })
+}
+
+pub(crate) fn date_bounds(conn: &Connection) -> Result<Option<(String, String)>, CatalogError> {
+    let row: (Option<String>, Option<String>) = conn.query_row(
+        "SELECT MIN(capture_time), MAX(capture_time) FROM images WHERE capture_time IS NOT NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(match row {
+        (Some(lo), Some(hi)) => Some((lo, hi)),
+        _ => None,
+    })
+}

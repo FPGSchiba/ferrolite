@@ -93,6 +93,26 @@ impl ReadPool {
     pub fn list_collections(&self) -> Result<Vec<crate::CollectionRecord>, CatalogError> {
         self.with_conn(crate::queries::list_collections)
     }
+
+    /// Execute a `LibraryQuery` and return matching image records.
+    pub fn query_images(&self, q: &crate::LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {
+        self.with_conn(|c| crate::query::run(c, q))
+    }
+
+    /// Sorted list of distinct non-null camera models for the filter toolbar.
+    pub fn distinct_cameras(&self) -> Result<Vec<String>, CatalogError> {
+        self.with_conn(crate::queries::distinct_cameras)
+    }
+
+    /// Min/max ISO values across all images, or `None` if no ISO data is present.
+    pub fn iso_bounds(&self) -> Result<Option<(u32, u32)>, CatalogError> {
+        self.with_conn(crate::queries::iso_bounds)
+    }
+
+    /// Min/max capture-time strings across all images, or `None` if no timestamps.
+    pub fn date_bounds(&self) -> Result<Option<(String, String)>, CatalogError> {
+        self.with_conn(crate::queries::date_bounds)
+    }
 }
 
 #[cfg(test)]

@@ -13,6 +13,9 @@ use std::sync::{Arc, Mutex};
 pub enum MetaEdit {
     SetRating(Rating),
     SetFlag(Flag),
+    // Per-image tag assignment will move to the grid right-click menu in a later
+    // pass. The variant is kept so tests and apply_metadata_edit remain intact.
+    #[allow(dead_code)]
     ToggleTag(TagId),
 }
 

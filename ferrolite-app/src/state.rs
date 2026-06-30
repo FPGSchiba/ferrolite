@@ -22,6 +22,13 @@ pub struct PendingRemove {
     pub subtree_count: u64,
 }
 
+/// Which kind of item is being renamed inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameKind {
+    Tag,
+    Collection,
+}
+
 pub struct AppState {
     pub jobs: Arc<JobSystem>,
     pub writer: Arc<Mutex<Catalog>>,
@@ -85,6 +92,10 @@ pub struct AppState {
     /// Non-critical warning surfaced in the UI (e.g. query error).
     pub warning: Option<String>,
 
+    /// Inline rename in progress: (kind, id, edit buffer).
+    /// Set on double-click or "Rename" context-menu; cleared on Enter/blur.
+    pub renaming: Option<(RenameKind, i64, String)>,
+
     // ── Cached toolbar metadata-filter aggregates (populated by reload_vocab) ──
     /// Distinct camera-model strings from the catalog.
     pub camera_options: Vec<String>,
@@ -141,6 +152,7 @@ impl AppState {
             camera_options: Vec::new(),
             iso_range: None,
             date_range: None,
+            renaming: None,
         })
     }
 
@@ -380,6 +392,7 @@ impl AppState {
             camera_options: Vec::new(),
             iso_range: None,
             date_range: None,
+            renaming: None,
         }
     }
 }

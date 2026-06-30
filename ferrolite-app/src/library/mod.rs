@@ -10,6 +10,7 @@ pub mod folder_tree;
 pub mod grid;
 pub mod grid_layout;
 pub mod icons;
+pub mod image_context_menu;
 pub mod panel;
 pub mod texture_cache;
 pub mod toolbar;

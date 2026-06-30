@@ -628,6 +628,14 @@ impl eframe::App for FerroliteApp {
                         crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else if self.state.viewer.is_some() {
                     self.drive_viewer(ui, frame);
+                    if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                        let rect = ui.min_rect();
+                        let resp =
+                            ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());
+                        resp.context_menu(|ui| {
+                            crate::library::image_context_menu::show(ui, &mut self.state, image_id);
+                        });
+                    }
                 } else {
                     let rect = ui.available_rect_before_wrap();
                     canvas::paint(ui, rect); // Develop with no image open: stub canvas

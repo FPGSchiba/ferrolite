@@ -5,10 +5,9 @@
 use crate::library::cell_state::{cell_state, CellState};
 use crate::library::grid_layout::{metrics, visible_items};
 use crate::library::icons;
-use crate::metadata::MetaEdit;
 use crate::state::AppState;
 use crate::theme;
-use ferrolite_image::{Flag, Rating};
+use ferrolite_image::Flag;
 use ferrolite_jobs::Priority;
 use std::collections::HashSet;
 
@@ -214,73 +213,10 @@ fn paint_cell(
         );
     }
 
-    // #5 — Right-click context menu.
-    // Clone small vecs before the closure to avoid simultaneous borrow of `state`.
-    let tags_snapshot = state.tags.clone();
-    let collections_snapshot = state.collections.clone();
-    let image_tags = state.visible_tags.get(&rec.id).cloned().unwrap_or_default();
+    // #5 — Right-click context menu (shared helper).
     let rec_id = rec.id;
-
     resp.context_menu(|ui| {
-        // Scope: if the right-clicked image is not in the selection, restrict
-        // the operation to just this image so apply_metadata_edit targets correctly.
-        if !state.selection.contains(&rec_id) {
-            state.selection.clear();
-            state.selection.insert(rec_id);
-            state.selected = Some(rec_id);
-        }
-
-        ui.menu_button("Rating", |ui| {
-            if ui.button("No rating").clicked() {
-                state.apply_metadata_edit(ui.ctx(), MetaEdit::SetRating(Rating::new(0)));
-                ui.close_menu();
-            }
-            for n in 1u8..=5 {
-                let label = format!("{n} star{}", if n == 1 { "" } else { "s" });
-                if ui.button(label).clicked() {
-                    state.apply_metadata_edit(ui.ctx(), MetaEdit::SetRating(Rating::new(n)));
-                    ui.close_menu();
-                }
-            }
-        });
-
-        ui.menu_button("Flag", |ui| {
-            if ui.button("Pick").clicked() {
-                state.apply_metadata_edit(ui.ctx(), MetaEdit::SetFlag(Flag::Pick));
-                ui.close_menu();
-            }
-            if ui.button("Reject").clicked() {
-                state.apply_metadata_edit(ui.ctx(), MetaEdit::SetFlag(Flag::Reject));
-                ui.close_menu();
-            }
-            if ui.button("Unflag").clicked() {
-                state.apply_metadata_edit(ui.ctx(), MetaEdit::SetFlag(Flag::None));
-                ui.close_menu();
-            }
-        });
-
-        if !tags_snapshot.is_empty() {
-            ui.menu_button("Tags", |ui| {
-                for t in &tags_snapshot {
-                    let has = image_tags.contains(&t.id);
-                    if ui.selectable_label(has, &t.name).clicked() {
-                        state.apply_metadata_edit(ui.ctx(), MetaEdit::ToggleTag(t.id));
-                        ui.close_menu();
-                    }
-                }
-            });
-        }
-
-        if !collections_snapshot.is_empty() {
-            ui.menu_button("Add to collection", |ui| {
-                for c in &collections_snapshot {
-                    if ui.button(&c.name).clicked() {
-                        state.add_selection_to_collection(c.id);
-                        ui.close_menu();
-                    }
-                }
-            });
-        }
+        crate::library::image_context_menu::show(ui, state, rec_id);
     });
 
     opened

@@ -203,15 +203,15 @@ fn paint_cell(
         opened = Some(rec.id);
     }
 
-    // #7 — Stronger selection highlight: translucent fill + thicker bright stroke.
+    // #7 — Selection highlight: a clean blue outline (Lightroom feel), no fill.
+    // Inset by 1px so the full stroke sits inside the cell rather than being
+    // clipped at the thumbnail edge.
     if state.selection.contains(&rec.id) || state.selected == Some(rec.id) {
-        let accent = theme::ACCENT;
-        painter.rect_filled(
-            rect,
-            0.0,
-            egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 48),
+        painter.rect_stroke(
+            rect.shrink(1.0),
+            2.0,
+            egui::Stroke::new(2.0, theme::ACCENT_BRIGHT),
         );
-        painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.5, theme::ACCENT_BRIGHT));
     }
 
     // #5 — Right-click context menu.

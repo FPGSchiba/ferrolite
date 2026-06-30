@@ -33,6 +33,7 @@ pub struct Sort {
 pub enum RatingFilter {
     AtLeast(u8),
     Exactly(u8),
+    AtMost(u8),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +145,10 @@ impl LibraryQuery {
                 }
                 RatingFilter::Exactly(n) => {
                     where_clauses.push("rating = ?".into());
+                    params.push(Value::Integer(n as i64));
+                }
+                RatingFilter::AtMost(n) => {
+                    where_clauses.push("rating <= ?".into());
                     params.push(Value::Integer(n as i64));
                 }
             }
@@ -325,6 +330,32 @@ mod tests {
             params,
             vec![Value::Text("%port%".into()), Value::Text("%port%".into())]
         );
+    }
+
+    #[test]
+    fn rating_exactly_compiles_to_eq() {
+        let q = LibraryQuery {
+            rating: Some(RatingFilter::Exactly(3)),
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("rating = ?"), "sql: {sql}");
+        assert!(!sql.contains("rating >= ?"), "sql: {sql}");
+        assert!(!sql.contains("rating <= ?"), "sql: {sql}");
+        assert_eq!(params, vec![Value::Integer(3)]);
+    }
+
+    #[test]
+    fn rating_at_most_compiles_to_lte() {
+        let q = LibraryQuery {
+            rating: Some(RatingFilter::AtMost(3)),
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("rating <= ?"), "sql: {sql}");
+        assert!(!sql.contains("rating >= ?"), "sql: {sql}");
+        assert!(!sql.contains("rating = ?"), "sql: {sql}");
+        assert_eq!(params, vec![Value::Integer(3)]);
     }
 
     #[test]

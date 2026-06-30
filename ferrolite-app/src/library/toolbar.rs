@@ -40,8 +40,12 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             changed = true;
         }
 
-        // Rating threshold: 5 clickable stars; clicking active star clears to 0.
-        if fw::rating_threshold(ui, &mut state.filter.min_rating) {
+        // Rating threshold: operator toggle (>= / = / <=) + 5 clickable stars.
+        if fw::rating_threshold(
+            ui,
+            &mut state.filter.min_rating,
+            &mut state.filter.rating_cmp,
+        ) {
             changed = true;
         }
 

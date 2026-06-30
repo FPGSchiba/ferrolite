@@ -11,7 +11,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         changed |= fw::sort_controls(ui, &mut state.filter.sort_key, &mut state.filter.sort_desc);
-        changed |= fw::rating_threshold(ui, &mut state.filter.min_rating);
+        changed |= fw::rating_threshold(
+            ui,
+            &mut state.filter.min_rating,
+            &mut state.filter.rating_cmp,
+        );
         changed |= fw::flag_filters(ui, &mut state.filter.flags);
         changed |= fw::tag_filter_dropdown(
             ui,

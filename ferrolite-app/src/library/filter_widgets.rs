@@ -47,14 +47,29 @@ pub fn clickable_stars(ui: &mut egui::Ui, current: u8, max: u8) -> Option<u8> {
     result
 }
 
-/// Rating-threshold control bound to `FilterState.min_rating`.
-pub fn rating_threshold(ui: &mut egui::Ui, min_rating: &mut u8) -> bool {
+/// Rating-threshold control bound to `FilterState.min_rating` and `FilterState.rating_cmp`.
+/// A small operator button cycles through `>=`, `=`, `<=`; then five clickable stars set the value.
+pub fn rating_threshold(
+    ui: &mut egui::Ui,
+    min_rating: &mut u8,
+    cmp: &mut crate::library::filter::RatingCmp,
+) -> bool {
+    let mut changed = false;
+    if ui
+        .small_button(cmp.label())
+        .on_hover_text("Rating comparison: >= / = / <=")
+        .clicked()
+    {
+        *cmp = cmp.next();
+        if *min_rating > 0 {
+            changed = true;
+        }
+    }
     if let Some(v) = clickable_stars(ui, *min_rating, 5) {
         *min_rating = v;
-        true
-    } else {
-        false
+        changed = true;
     }
+    changed
 }
 
 /// Flag-filter toggles (Pick green, Reject red); filled when active.

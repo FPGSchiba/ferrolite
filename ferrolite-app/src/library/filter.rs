@@ -6,6 +6,35 @@ use ferrolite_image::{Flag, TagId};
 /// How many images "Recently Added" shows.
 const RECENT_LIMIT: i64 = 200;
 
+/// Which comparison operator to apply to the rating filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RatingCmp {
+    #[default]
+    AtLeast,
+    Exactly,
+    AtMost,
+}
+
+impl RatingCmp {
+    /// Cycle through AtLeast → Exactly → AtMost → AtLeast.
+    pub fn next(self) -> Self {
+        match self {
+            RatingCmp::AtLeast => RatingCmp::Exactly,
+            RatingCmp::Exactly => RatingCmp::AtMost,
+            RatingCmp::AtMost => RatingCmp::AtLeast,
+        }
+    }
+
+    /// Short ASCII label for the toggle button (no ≥/≤ glyphs — IBM Plex lacks them).
+    pub fn label(self) -> &'static str {
+        match self {
+            RatingCmp::AtLeast => ">=",
+            RatingCmp::Exactly => "=",
+            RatingCmp::AtMost => "<=",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewSource {
     Folder(i64),
@@ -20,6 +49,7 @@ pub struct FilterState {
     pub sort_key: SortKey,
     pub sort_desc: bool,
     pub min_rating: u8,
+    pub rating_cmp: RatingCmp,
     pub flags: Vec<Flag>,
     pub tag_ids: Vec<TagId>,
     pub tag_mode: TagMode,
@@ -35,6 +65,7 @@ impl Default for FilterState {
             sort_key: SortKey::CaptureTime,
             sort_desc: false,
             min_rating: 0,
+            rating_cmp: RatingCmp::default(),
             flags: Vec::new(),
             tag_ids: Vec::new(),
             tag_mode: TagMode::Any,
@@ -69,7 +100,11 @@ impl FilterState {
         let rating = if self.min_rating == 0 {
             None
         } else {
-            Some(RatingFilter::AtLeast(self.min_rating))
+            Some(match self.rating_cmp {
+                RatingCmp::AtLeast => RatingFilter::AtLeast(self.min_rating),
+                RatingCmp::Exactly => RatingFilter::Exactly(self.min_rating),
+                RatingCmp::AtMost => RatingFilter::AtMost(self.min_rating),
+            })
         };
         LibraryQuery {
             scope,
@@ -131,6 +166,57 @@ mod tests {
             fs.to_query(ViewSource::All, true).rating,
             Some(RatingFilter::AtLeast(3))
         ));
+    }
+
+    #[test]
+    fn rating_cmp_modes_map_to_correct_filter_variants() {
+        // AtLeast (default)
+        let fs = FilterState {
+            min_rating: 4,
+            rating_cmp: RatingCmp::AtLeast,
+            ..Default::default()
+        };
+        assert!(matches!(
+            fs.to_query(ViewSource::All, false).rating,
+            Some(RatingFilter::AtLeast(4))
+        ));
+
+        // Exactly
+        let fs = FilterState {
+            min_rating: 4,
+            rating_cmp: RatingCmp::Exactly,
+            ..Default::default()
+        };
+        assert!(matches!(
+            fs.to_query(ViewSource::All, false).rating,
+            Some(RatingFilter::Exactly(4))
+        ));
+
+        // AtMost
+        let fs = FilterState {
+            min_rating: 4,
+            rating_cmp: RatingCmp::AtMost,
+            ..Default::default()
+        };
+        assert!(matches!(
+            fs.to_query(ViewSource::All, false).rating,
+            Some(RatingFilter::AtMost(4))
+        ));
+    }
+
+    #[test]
+    fn min_rating_zero_disables_filter_for_all_cmp_modes() {
+        for cmp in [RatingCmp::AtLeast, RatingCmp::Exactly, RatingCmp::AtMost] {
+            let fs = FilterState {
+                min_rating: 0,
+                rating_cmp: cmp,
+                ..Default::default()
+            };
+            assert!(
+                fs.to_query(ViewSource::All, false).rating.is_none(),
+                "expected None for cmp={cmp:?} when min_rating=0"
+            );
+        }
     }
 
     #[test]

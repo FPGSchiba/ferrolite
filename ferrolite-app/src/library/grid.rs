@@ -12,6 +12,8 @@ use ferrolite_jobs::Priority;
 use std::collections::HashSet;
 
 const GAP: f32 = 8.0;
+const SEL_PAD: f32 = 5.0;
+const SEL_ROUND: f32 = 6.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = ui.available_width();
@@ -82,6 +84,9 @@ fn paint_cell(
     rec: &ferrolite_catalog::ImageRecord,
     rect: egui::Rect,
 ) -> Option<i64> {
+    // Determine selection state early so we can adjust the thumbnail rect.
+    let selected = state.selection.contains(&rec.id) || state.selected == Some(rec.id);
+
     // Pull a ready thumbnail from the pool on demand if not yet cached.
     if !state.textures.contains(rec.id)
         && rec.decode_status != ferrolite_catalog::DecodeStatus::Failed
@@ -93,20 +98,30 @@ fn paint_cell(
     }
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
+
+    // Selected cells: fill the whole cell with a black rounded background first,
+    // so the inset thumbnail sits on black padding.
+    if selected {
+        painter.rect_filled(rect, SEL_ROUND, egui::Color32::BLACK);
+    }
+
+    // img_rect: inset for selected cells (thumbnail floats on black pad), full rect otherwise.
+    let img_rect = if selected { rect.shrink(SEL_PAD) } else { rect };
+
     match cell_state(rec, has_tex) {
         CellState::Ready => {
             if let Some(tex) = state.textures.get(rec.id) {
-                let img = egui::Image::new(tex).fit_to_exact_size(rect.size());
-                img.paint_at(ui, rect);
+                let img = egui::Image::new(tex).fit_to_exact_size(img_rect.size());
+                img.paint_at(ui, img_rect);
             }
         }
         CellState::Placeholder => {
-            painter.rect_filled(rect, 2.0, theme::BG_PANEL);
+            painter.rect_filled(img_rect, 2.0, theme::BG_PANEL);
         }
         CellState::Failed => {
-            painter.rect_filled(rect, 2.0, theme::BG_PANEL);
+            painter.rect_filled(img_rect, 2.0, theme::BG_PANEL);
             painter.text(
-                rect.center(),
+                img_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "broken",
                 egui::FontId::proportional(11.0),
@@ -116,12 +131,13 @@ fn paint_cell(
     }
 
     // #8 — Rating stars (bottom-left): drawn shapes instead of glyphs.
+    // Overlays are anchored to img_rect so they hug the thumbnail in both states.
     if rec.rating.get() > 0 {
         // origin = left-centre of the star row, sitting 8px above the bottom edge.
         let r = 4.0_f32;
         let gap = 2.0_f32;
-        let row_y = rect.bottom() - 8.0;
-        let origin = egui::pos2(rect.left() + 4.0 + r, row_y);
+        let row_y = img_rect.bottom() - 8.0;
+        let origin = egui::pos2(img_rect.left() + 4.0 + r, row_y);
         icons::rating_stars(&painter, origin, r, gap, rec.rating.get(), 5, theme::ACCENT);
     }
 
@@ -130,7 +146,7 @@ fn paint_cell(
         Flag::Pick => {
             icons::flag(
                 &painter,
-                egui::pos2(rect.left() + 6.0, rect.top() + 12.0),
+                egui::pos2(img_rect.left() + 6.0, img_rect.top() + 12.0),
                 10.0,
                 true,
                 theme::SEMANTIC_GREEN,
@@ -139,7 +155,7 @@ fn paint_cell(
         Flag::Reject => {
             icons::flag(
                 &painter,
-                egui::pos2(rect.left() + 6.0, rect.top() + 12.0),
+                egui::pos2(img_rect.left() + 6.0, img_rect.top() + 12.0),
                 10.0,
                 true,
                 theme::SEMANTIC_RED,
@@ -150,11 +166,11 @@ fn paint_cell(
 
     // Tag colour dots (bottom-right), looked up from the loaded vocabulary.
     if let Some(tag_ids) = state.visible_tags.get(&rec.id) {
-        let mut x = rect.right() - 8.0;
+        let mut x = img_rect.right() - 8.0;
         for tid in tag_ids.iter().take(5) {
             if let Some(t) = state.tags.iter().find(|t| t.id == *tid) {
                 let c = egui::Color32::from_rgb(t.color.r, t.color.g, t.color.b);
-                painter.circle_filled(egui::pos2(x, rect.bottom() - 8.0), 4.0, c);
+                painter.circle_filled(egui::pos2(x, img_rect.bottom() - 8.0), 4.0, c);
                 x -= 11.0;
             }
         }
@@ -162,6 +178,7 @@ fn paint_cell(
 
     // Selection: ctrl/cmd-click toggles; shift-click range-select; plain click replaces.
     // Context menu on right-click.
+    // Hit area remains the full rect (unchanged).
     let resp = ui.interact(rect, ui.id().with(("cell", rec.id)), egui::Sense::click());
     if resp.clicked() {
         let (shift, multi) =
@@ -202,15 +219,10 @@ fn paint_cell(
         opened = Some(rec.id);
     }
 
-    // #7 — Selection highlight: a clean blue outline (Lightroom feel), no fill.
-    // Inset by 1px so the full stroke sits inside the cell rather than being
-    // clipped at the thumbnail edge.
-    if state.selection.contains(&rec.id) || state.selected == Some(rec.id) {
-        painter.rect_stroke(
-            rect.shrink(1.0),
-            2.0,
-            egui::Stroke::new(2.0, theme::ACCENT_BRIGHT),
-        );
+    // Lightroom-style selection highlight: rounded dark-blue border around the full cell.
+    // Replaces the old thin inset ACCENT_BRIGHT outline.
+    if selected {
+        painter.rect_stroke(rect, SEL_ROUND, egui::Stroke::new(2.0, theme::ACCENT));
     }
 
     // #5 — Right-click context menu (shared helper).

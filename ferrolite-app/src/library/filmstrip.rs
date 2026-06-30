@@ -64,10 +64,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                             );
                         }
                     }
-                    // Scroll regardless of visibility so an off-screen current image
-                    // is brought into view (then loads next frame as a visible cell).
+                    // Keep the current image centered in the strip. egui clamps
+                    // scrolling to the content bounds, so near the ends the cell
+                    // naturally sits toward the left/right edge instead of forcing
+                    // an over-scroll. (Runs even when off-screen so an off-screen
+                    // current is pulled to center, then loads next frame.)
                     if Some(id) == current_id {
-                        ui.scroll_to_rect(rect, None);
+                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
                     }
                     if resp.clicked() {
                         clicked = Some(id);

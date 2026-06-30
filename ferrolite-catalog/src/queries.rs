@@ -4,7 +4,7 @@
 use crate::error::CatalogError;
 use crate::model::{DecodeStatus, ImageRecord};
 use crate::thumbnail::Thumbnail;
-use ferrolite_image::{FileKind, Flag, Orientation, Rating};
+use ferrolite_image::{Color, FileKind, Flag, Orientation, Rating, TagId};
 use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
@@ -139,6 +139,45 @@ pub(crate) fn list_images_recursive(
         out.push(r?);
     }
     Ok(out)
+}
+
+pub(crate) fn list_tags(conn: &Connection) -> Result<Vec<crate::model::TagRecord>, CatalogError> {
+    let mut stmt = conn.prepare("SELECT id, name, color FROM tags ORDER BY name")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::model::TagRecord {
+            id: TagId(row.get(0)?),
+            name: row.get(1)?,
+            color: Color::from_packed(row.get::<_, i64>(2)? as u32),
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub(crate) fn tags_for_images(
+    conn: &Connection,
+    image_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<TagId>>, CatalogError> {
+    let mut map: std::collections::HashMap<i64, Vec<TagId>> = std::collections::HashMap::new();
+    if image_ids.is_empty() {
+        return Ok(map);
+    }
+    let placeholders = vec!["?"; image_ids.len()].join(",");
+    let sql = format!(
+        "SELECT image_id, tag_id FROM image_tags WHERE image_id IN ({placeholders}) ORDER BY tag_id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(image_ids.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, TagId(row.get::<_, i64>(1)?)))
+    })?;
+    for r in rows {
+        let (img, tag) = r?;
+        map.entry(img).or_default().push(tag);
+    }
+    Ok(map)
 }
 
 pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>, CatalogError> {

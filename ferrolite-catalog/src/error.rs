@@ -8,4 +8,6 @@ pub enum CatalogError {
     Encode(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("conflict: {0}")]
+    Conflict(String),
 }

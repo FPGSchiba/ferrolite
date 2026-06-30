@@ -1,4 +1,4 @@
-use ferrolite_image::{FileKind, Flag, Orientation, Rating};
+use ferrolite_image::{Color, FileKind, Flag, Orientation, Rating, TagId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeStatus {
@@ -60,6 +60,14 @@ pub struct ImageRecord {
     pub kind: FileKind,
     pub rating: Rating,
     pub flag: Flag,
+}
+
+/// A tag row read back from the catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagRecord {
+    pub id: TagId,
+    pub name: String,
+    pub color: Color,
 }
 
 /// Result of an ingest pass.

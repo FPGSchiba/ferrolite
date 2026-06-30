@@ -8,10 +8,11 @@ use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::LinearRgbaF32;
 
 use crate::image::PipelineImage;
-use crate::nodes::{PointOpNode, SourceNode};
+use crate::nodes::{CurveNode, PointOpNode, SourceNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    contrast_uniform, exposure_uniform, wb_uniform, ContrastUniform, ExposureUniform, WbUniform,
+    contrast_uniform, curve_lut, exposure_uniform, wb_uniform, ContrastUniform, ExposureUniform,
+    WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -27,6 +28,9 @@ pub struct EditPipeline {
     wb: Rc<Cell<WbUniform>>,
     contrast_id: NodeId,
     contrast: Rc<Cell<ContrastUniform>>,
+    tone_curve_id: NodeId,
+    tone_curve: Rc<Cell<[f32; 256]>>,
+    node_count: usize,
     stack: OpStack,
 }
 
@@ -62,16 +66,25 @@ impl EditPipeline {
         );
         let contrast_id = graph.add_node(Box::new(contrast_node), vec![wb_id]);
 
+        let tone_curve = Rc::new(Cell::new(curve_lut(
+            &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
+        )));
+        let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
+        let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![contrast_id]);
+
         Self {
             ctx,
             graph,
-            output_id: contrast_id,
+            output_id: tone_curve_id,
             exposure_id,
             exposure,
             wb_id,
             wb,
             contrast_id,
             contrast,
+            tone_curve_id,
+            tone_curve,
+            node_count: 5,
             stack,
         }
     }
@@ -93,6 +106,11 @@ impl EditPipeline {
             self.contrast.set(c);
             self.graph.mark_dirty(self.contrast_id);
         }
+        let lut = curve_lut(&stack.tone_curve().map(|t| t.points).unwrap_or_default());
+        if lut != self.tone_curve.get() {
+            self.tone_curve.set(lut);
+            self.graph.mark_dirty(self.tone_curve_id);
+        }
         self.stack = stack;
     }
 
@@ -104,6 +122,11 @@ impl EditPipeline {
     /// Total node evaluations so far (for per-op invalidation tests).
     pub fn eval_count(&self) -> usize {
         self.graph.eval_count()
+    }
+
+    /// Total nodes in the graph (source + one per op). Used by invalidation tests.
+    pub fn node_count(&self) -> usize {
+        self.node_count
     }
 
     /// Evaluate and read back to an sRGB Rgba8 buffer (golden tests).

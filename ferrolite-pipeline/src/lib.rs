@@ -10,7 +10,7 @@ mod uniforms;
 
 pub use image::PipelineImage;
 pub use nodes::upload_source;
-pub use op::{Contrast, Exposure, Op, OpKind, OpStack, WhiteBalance, STACK_VERSION};
+pub use op::{Contrast, Exposure, Op, OpKind, OpStack, ToneCurve, WhiteBalance, STACK_VERSION};
 pub use pipeline::{blit_to_rgba8, EditPipeline};
 pub use serialize::{deserialize, serialize};
 // The uniform structs are exported as the documented GPU memory layout the

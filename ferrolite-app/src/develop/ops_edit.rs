@@ -5,7 +5,6 @@ use ferrolite_pipeline::{
     sharpen_halo, Contrast, Exposure, Op, OpStack, Sharpen, WhiteBalance,
 };
 
-#[allow(dead_code)] // called by the adjustment panel (Task 10)
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
     if ev == 0.0 {
         s.reset(ferrolite_pipeline::OpKind::Exposure)
@@ -14,7 +13,6 @@ pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
     }
 }
 
-#[allow(dead_code)] // called by the adjustment panel (Task 10)
 pub fn set_white_balance(s: &OpStack, temp: f32, tint: f32) -> OpStack {
     if temp == 0.0 && tint == 0.0 {
         s.reset(ferrolite_pipeline::OpKind::WhiteBalance)
@@ -23,7 +21,6 @@ pub fn set_white_balance(s: &OpStack, temp: f32, tint: f32) -> OpStack {
     }
 }
 
-#[allow(dead_code)] // called by the adjustment panel (Task 10)
 pub fn set_contrast(s: &OpStack, amount: f32) -> OpStack {
     if amount == 0.0 {
         s.reset(ferrolite_pipeline::OpKind::Contrast)
@@ -32,7 +29,6 @@ pub fn set_contrast(s: &OpStack, amount: f32) -> OpStack {
     }
 }
 
-#[allow(dead_code)] // called by the adjustment panel (Task 10)
 pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
     if amount == 0.0 {
         s.reset(ferrolite_pipeline::OpKind::Sharpen)

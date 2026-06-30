@@ -289,7 +289,6 @@ impl FerroliteApp {
 
     /// Apply a panel/widget edit: update both tiers immediately; on commit (drag
     /// release / discrete change) push undo history + persist off-thread.
-    #[allow(dead_code)] // called by the adjustment panels (Task 10)
     fn apply_edit(
         &mut self,
         ctx: &egui::Context,
@@ -854,6 +853,22 @@ impl eframe::App for FerroliteApp {
                     v.path.clone(),
                 );
                 v.ops_read_handle = Some(h);
+            }
+        }
+
+        if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
+            if let Some(v) = self.state.viewer.as_mut() {
+                v.crop_active = false; // re-armed by the open Geometry section
+            }
+            let mut outcome = None;
+            egui::SidePanel::right("develop_adjust")
+                .exact_width(296.0)
+                .frame(egui::Frame::none().fill(theme::BG_APP).inner_margin(egui::Margin::symmetric(12.0, 8.0)))
+                .show(ctx, |ui| {
+                    outcome = crate::develop::adjustment_panel::show(ui, &mut self.state);
+                });
+            if let Some(o) = outcome {
+                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
             }
         }
 

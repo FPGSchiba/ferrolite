@@ -130,6 +130,23 @@ mod tests {
         while h.undo().is_some() {
             steps += 1;
         }
-        assert!(steps <= 1, "bounded history: at most cap-1 undos, got {steps}");
+        assert_eq!(steps, 1, "cap=2: exactly one undo step survives after eviction");
+    }
+
+    #[test]
+    fn no_coalesce_after_undo() {
+        let ev = |v: f32| OpStack::default().set_op(Op::Exposure(Exposure { ev: v }));
+        let mut h = History::new(OpStack::default(), 50);
+        h.push(OpKind::Exposure, ev(0.1));
+        h.push(OpKind::Exposure, ev(0.2)); // coalesces -> one step at tip
+        assert_eq!(h.undo(), Some(OpStack::default()), "back to pre-drag state");
+        // After undo, last_kind is reset, so this same-kind push must NOT coalesce
+        // into the pre-undo step — it starts a fresh step.
+        h.push(OpKind::Exposure, ev(0.5));
+        // Now exactly one undo step should be reachable (back to identity), and the
+        // push must have truncated any redo tail.
+        assert!(!h.can_redo(), "push after undo dropped the redo tail");
+        assert_eq!(h.undo(), Some(OpStack::default()), "fresh step undoes to identity");
+        assert!(!h.can_undo(), "only one step existed after the undo+push");
     }
 }

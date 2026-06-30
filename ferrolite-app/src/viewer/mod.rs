@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use ferrolite_image::FileKind;
 use ferrolite_jobs::JobHandle;
-use ferrolite_pipeline::OpStack;
+use ferrolite_pipeline::{EditPipeline, GpuPyramidSource, OpStack};
 use ferrolite_vt::ViewTransform;
 
 /// Preview→full crossfade duration (seconds). Short enough to read as instant,
@@ -59,6 +59,44 @@ pub struct ViewerState {
     /// superseded image's decode does not race the newly-opened one.
     pub preview_handle: Option<JobHandle>,
     pub full_handle: Option<JobHandle>,
+
+    // ── Edit state (Task 8 / Plan 4) — read by Tasks 9+ ────────────────────
+
+    /// The full-res linear source retained for re-evaluation when the op stack
+    /// changes (built from the tier-2 full decode).
+    #[allow(dead_code)]
+    pub preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+    /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
+    /// `edit_producer`). Rebuilt when geometry / halo radius changes.
+    #[allow(dead_code)]
+    pub preview_edit: Option<EditPipeline>,
+    /// The GPU pyramid retained so the full-res producer can be rebuilt on
+    /// geometry or halo-radius changes.
+    #[allow(dead_code)]
+    pub pyramid: Option<std::sync::Arc<GpuPyramidSource>>,
+    /// Monotonically-increasing counter; bumped on every op-stack mutation so
+    /// GPU evaluation knows to re-run.
+    #[allow(dead_code)]
+    pub opstack_version: u64,
+    /// Bounded undo/redo ring for the current image's op stack.
+    #[allow(dead_code)]
+    pub history: crate::develop::history::History,
+    /// When `true`, the viewer renders the before/after split view.
+    #[allow(dead_code)]
+    pub before_after: bool,
+    /// When `true`, the crop overlay is active.
+    #[allow(dead_code)]
+    pub crop_active: bool,
+    /// Index of the currently-selected HSL band in the HSL panel (0–7).
+    #[allow(dead_code)]
+    pub hsl_band: usize,
+    /// `true` once the `OpsLoaded` event for this image has been received (the
+    /// op-stack read job finished and the stack has been applied).
+    #[allow(dead_code)]
+    pub ops_loaded: bool,
+    /// Handle for the in-flight op-stack read job; cancelled on navigation.
+    #[allow(dead_code)]
+    pub ops_read_handle: Option<JobHandle>,
 }
 
 impl ViewerState {
@@ -86,6 +124,16 @@ impl ViewerState {
             image_dims: None,
             preview_handle: None,
             full_handle: None,
+            preview_source: None,
+            preview_edit: None,
+            pyramid: None,
+            opstack_version: 0,
+            history: crate::develop::history::History::new(OpStack::default(), 100),
+            before_after: false,
+            crop_active: false,
+            hsl_band: 0,
+            ops_loaded: false,
+            ops_read_handle: None,
         }
     }
 
@@ -119,6 +167,9 @@ impl ViewerState {
             h.cancel();
         }
         if let Some(h) = self.full_handle.as_ref() {
+            h.cancel();
+        }
+        if let Some(h) = self.ops_read_handle.as_ref() {
             h.cancel();
         }
     }

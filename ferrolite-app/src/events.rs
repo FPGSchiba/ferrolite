@@ -40,6 +40,13 @@ pub enum AppEvent {
     /// Result of an off-thread metadata persist. `ok==false` → reload truth;
     /// `warning` → surface in the status bar.
     MetadataResult { ok: bool, warning: Option<String> },
+    /// An off-thread frl:ops sidecar read finished. Carries the hydrated stack
+    /// (default = unedited). Handled in `app.rs` (needs GPU state), not folded.
+    #[allow(dead_code)] // constructed in ops_persist; handled in app.rs (Task 9)
+    OpsLoaded {
+        image_id: i64,
+        stack: ferrolite_pipeline::OpStack,
+    },
 }
 
 impl AppState {
@@ -87,6 +94,8 @@ impl AppState {
                 }
                 None
             }
+            // Handled in `app.rs` (needs GPU state); nothing to fold here.
+            AppEvent::OpsLoaded { .. } => None,
         }
     }
 }

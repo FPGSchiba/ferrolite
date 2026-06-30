@@ -1,5 +1,6 @@
 //! Pure crop-overlay geometry in image-normalized [0,1] space. egui-free; the
 //! overlay widget converts screen↔image coords and routes pointer events here.
+#![allow(dead_code)] // crop widget not yet wired (Tasks 12–13)
 
 use ferrolite_pipeline::{Aspect, CropRect};
 

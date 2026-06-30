@@ -1,5 +1,6 @@
 //! Pure helpers: map a UI value to a new immutable `OpStack`. A value at its
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
+#![allow(dead_code)] // adjustment panel not yet wired (Task 10)
 
 use ferrolite_pipeline::{
     sharpen_halo, Contrast, Exposure, Op, OpStack, Sharpen, WhiteBalance,

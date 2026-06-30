@@ -1,5 +1,6 @@
 //! Bounded undo/redo ring of `OpStack` snapshots with same-kind coalescing.
 //! Per-open-image; not persisted (only the resulting `OpStack` persists).
+#![allow(dead_code)] // history fields read via ViewerState (Task 9+)
 
 use ferrolite_pipeline::{OpKind, OpStack};
 

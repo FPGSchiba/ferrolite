@@ -1,6 +1,7 @@
 mod app;
 mod canvas;
 mod chrome;
+mod develop;
 mod events;
 mod ingest;
 mod library;

@@ -5,11 +5,17 @@ use crate::metadata::MetaEdit;
 use crate::state::AppState;
 use ferrolite_image::{Flag, Rating};
 
-/// Render the menu for `image_id` inside a `context_menu` closure. Scopes edits
-/// to this image when it is not part of the current multi-selection.
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64) {
+/// Render the menu for `image_id` inside a `context_menu` closure.
+///
+/// `single_image` controls scoping:
+/// - `true` — always edit `image_id` only (Develop loupe and filmstrip).
+/// - `false` — if `image_id` is in the current multi-selection, edit all selected
+///   images; otherwise edit `image_id` only (grid).
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image: bool) {
     let ctx = ui.ctx().clone();
-    let in_selection = state.selection.contains(&image_id);
+    // When single_image is true we always route through the single-image path,
+    // ignoring whatever selection the grid may have left in state.
+    let use_selection = !single_image && state.selection.contains(&image_id);
     let tags = state.tags.clone();
     let collections = state.collections.clone();
     let image_tags = state
@@ -18,9 +24,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64) {
         .cloned()
         .unwrap_or_default();
 
-    // Helper: apply to the multi-selection if this image is in it, else just this image.
+    // Helper: apply to the multi-selection or just this image depending on scope.
     let apply = |state: &mut AppState, edit: MetaEdit| {
-        if in_selection {
+        if use_selection {
             state.apply_metadata_edit(&ctx, edit);
         } else {
             state.apply_metadata_edit_to_image(&ctx, image_id, edit);
@@ -69,7 +75,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64) {
         ui.menu_button("Add to collection", |ui| {
             for c in &collections {
                 if ui.button(&c.name).clicked() {
-                    if in_selection {
+                    if use_selection {
                         state.add_selection_to_collection(c.id);
                     } else {
                         state.add_image_to_collection_now(image_id, c.id);
@@ -78,5 +84,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64) {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// `single_image = true` must never activate the multi-select path, even when
+    /// `image_id` is present in a stale grid multi-selection.  Mirrors the
+    /// `use_selection` computation inside `show`.
+    #[test]
+    fn single_image_ignores_selection() {
+        let image_id: i64 = 42;
+        let mut selection = std::collections::HashSet::new();
+        selection.insert(image_id); // stale multi-select
+
+        // Mirrors the formula in `show`: use_selection = !single_image && selection.contains(&id)
+        let compute_use_selection =
+            |single_image: bool| -> bool { !single_image && selection.contains(&image_id) };
+
+        assert!(
+            !compute_use_selection(true),
+            "single_image=true must not use the selection even when image_id is selected"
+        );
+        assert!(
+            compute_use_selection(false),
+            "single_image=false with image_id in selection should use multi-select path"
+        );
     }
 }

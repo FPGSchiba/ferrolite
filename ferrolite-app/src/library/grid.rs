@@ -216,7 +216,7 @@ fn paint_cell(
     // #5 — Right-click context menu (shared helper).
     let rec_id = rec.id;
     resp.context_menu(|ui| {
-        crate::library::image_context_menu::show(ui, state, rec_id);
+        crate::library::image_context_menu::show(ui, state, rec_id, false);
     });
 
     opened

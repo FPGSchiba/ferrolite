@@ -633,7 +633,12 @@ impl eframe::App for FerroliteApp {
                         let resp =
                             ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());
                         resp.context_menu(|ui| {
-                            crate::library::image_context_menu::show(ui, &mut self.state, image_id);
+                            crate::library::image_context_menu::show(
+                                ui,
+                                &mut self.state,
+                                image_id,
+                                true,
+                            );
                         });
                     }
                 } else {

@@ -105,7 +105,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                     }
                     let menu_id = id;
                     resp.context_menu(|ui| {
-                        crate::library::image_context_menu::show(ui, state, menu_id);
+                        crate::library::image_context_menu::show(ui, state, menu_id, true);
                     });
                 }
             });

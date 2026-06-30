@@ -813,6 +813,55 @@ impl eframe::App for FerroliteApp {
                     }
                 }
             }
+
+            // Before/After: `\` toggles showing the empty stack vs the live stack.
+            if ctx.input(|i| i.key_pressed(egui::Key::Backslash)) {
+                if let Some(v) = self.state.viewer.as_mut() {
+                    v.before_after = !v.before_after;
+                }
+                let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
+                self.set_preview_and_full(frame, stack); // re-evaluates with before_after
+            }
+
+            // Undo / Redo.
+            let (undo, redo) = ctx.input(|i| {
+                let z = i.key_pressed(egui::Key::Z);
+                let y = i.key_pressed(egui::Key::Y);
+                let cmd = i.modifiers.command;
+                let shift = i.modifiers.shift;
+                ((cmd && z && !shift), (cmd && y) || (cmd && z && shift))
+            });
+            if undo || redo {
+                let result = self.state.viewer.as_mut().and_then(|v| {
+                    if undo {
+                        v.history.undo()
+                    } else {
+                        v.history.redo()
+                    }
+                });
+                if let Some(stack) = result {
+                    self.set_preview_and_full(frame, stack.clone());
+                    // Persist the resulting stack (undo/redo changes the on-disk state).
+                    // Gather viewer scalars into locals before the iter_mut borrow.
+                    if let Some(v) = self.state.viewer.as_ref() {
+                        let (image_id, path) = (v.image_id, v.path.clone());
+                        if let Some(rec) =
+                            self.state.images.iter_mut().find(|r| r.id == image_id)
+                        {
+                            rec.has_edits = !stack.is_identity();
+                        }
+                        crate::develop::ops_persist::spawn_ops_write(
+                            &self.state.jobs,
+                            &self.state.writer,
+                            &self.state.tx,
+                            ctx,
+                            image_id,
+                            path,
+                            stack,
+                        );
+                    }
+                }
+            }
         }
 
         // Submit the tier-1 preview decode once when a viewer opens, and (for RAW)

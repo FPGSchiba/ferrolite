@@ -57,6 +57,9 @@ impl FerroliteApp {
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
         let linear = viewer::load::preview_to_linear(image);
         let dims = (linear.width, linear.height);
+        // Keep the display-linear source so the preview EditPipeline can be built
+        // lazily on the first edit (built once, reused via set_stack thereafter).
+        v.preview_source = Some(std::sync::Arc::new(linear.clone()));
         // Fetch the pre-warmed pipelines, build the VT while borrowing them,
         // then release the lock before inserting ViewerGpu (separate write scope).
         let vt = {
@@ -162,13 +165,17 @@ impl FerroliteApp {
                 if v.image_id == image_id {
                     v.full_ready = true;
                     v.begin_crossfade();
+                    // Build the GPU-resident pyramid UNCONDITIONALLY so the
+                    // full-res edit producer can be created on the first edit even
+                    // for an image that opened unedited (identity stack).
+                    let pyramid = std::sync::Arc::new(
+                        ferrolite_pipeline::GpuPyramidSource::new(&gpu, image),
+                    );
+                    v.pyramid = Some(std::sync::Arc::clone(&pyramid));
                     if !v.op_stack.is_identity() {
-                        // Build the GPU-resident pyramid + per-tile edit pipeline.
+                        // Build the per-tile edit pipeline + attach the producer.
                         let ctx_arc =
                             std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                        let pyramid = std::sync::Arc::new(
-                            ferrolite_pipeline::GpuPyramidSource::new(&gpu, image),
-                        );
                         let tep = ferrolite_pipeline::TileEditPipeline::new(
                             ctx_arc,
                             pyramid,
@@ -177,18 +184,143 @@ impl FerroliteApp {
                         v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                         // Mark the VT producer-driven + bump its version so the
                         // producer fills tiles instead of the CPU path.
+                        let version = v.opstack_version.max(1);
                         let mut renderer = rs.renderer.write();
                         if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>()
                         {
-                            if let Some(full) = g.full.as_mut() {
-                                full.set_producing(true);
-                                full.set_opstack_version(&g.ctx, 1);
+                            if g.image_id == image_id {
+                                if let Some(full) = g.full.as_mut() {
+                                    full.set_producing(true);
+                                    full.set_opstack_version(&g.ctx, version);
+                                }
                             }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Apply `stack` to both render tiers (GPU + memory only; no history/persist).
+    /// Preview tier: build the EditPipeline once, reuse via set_stack; evaluate
+    /// and swap the displayed single texture. Full-res tier: set_stack (color) or
+    /// rebuild (geometry/halo), bump the opstack version to invalidate cached tiles.
+    fn set_preview_and_full(&mut self, frame: &eframe::Frame, stack: ferrolite_pipeline::OpStack) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        let old = v.op_stack.clone();
+        v.op_stack = stack.clone();
+        v.opstack_version = v.opstack_version.wrapping_add(1);
+
+        // What the preview should show: the live stack, or the empty stack in
+        // before/after mode. While the crop tool is active, show the image
+        // uncropped (crop forced full) so the overlay handles remain reachable.
+        let mut shown = if v.before_after {
+            ferrolite_pipeline::OpStack::default()
+        } else {
+            stack.clone()
+        };
+        if v.crop_active {
+            shown = shown.reset(ferrolite_pipeline::OpKind::Geometry);
+        }
+
+        // Preview tier (built once per image, reused).
+        if v.preview_edit.is_none() {
+            if let Some(src) = v.preview_source.clone() {
+                let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                v.preview_edit = Some(ferrolite_pipeline::EditPipeline::new(
+                    ctx_arc,
+                    &src,
+                    shown.clone(),
+                ));
+            }
+        }
+        if let Some(ep) = v.preview_edit.as_mut() {
+            ep.set_stack(shown);
+            // Evaluate BEFORE taking the renderer lock; pass the resulting texture
+            // (cheap Arc clone) into the write scope. (`ep` borrows `self.state`,
+            // `renderer` borrows `frame` — disjoint, so they may coexist, but we
+            // keep the evaluate out of the lock scope to stay close to the
+            // apply_full_decoded discipline.)
+            let img = ep.evaluate();
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == v.image_id {
+                    g.preview
+                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
+                }
+            }
+        }
+
+        // Full-res tier (only meaningful once the full decode + pyramid exist).
+        if v.full_ready {
+            let rebuild = v.edit_producer.is_none()
+                || crate::develop::ops_edit::needs_full_rebuild(&old, &stack);
+            if rebuild {
+                if let Some(pyr) = v.pyramid.clone() {
+                    let ctx_arc =
+                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let tep = ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, stack.clone());
+                    v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                }
+            } else if let Some(producer) = v.edit_producer.as_mut() {
+                // Color-only change: update params in place.
+                producer.set_stack(stack.clone());
+            }
+            let version = v.opstack_version;
+            let identity = stack.is_identity();
+            let image_id = v.image_id;
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == image_id {
+                    if let Some(full) = g.full.as_mut() {
+                        full.set_producing(!identity);
+                        full.set_opstack_version(&g.ctx, version);
+                    }
+                }
+            }
+        }
+        v.idle = false; // wake the drive loop so producer tiles re-render
+    }
+
+    /// Apply a panel/widget edit: update both tiers immediately; on commit (drag
+    /// release / discrete change) push undo history + persist off-thread.
+    #[allow(dead_code)] // called by the adjustment panels (Task 10)
+    fn apply_edit(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        kind: ferrolite_pipeline::OpKind,
+        stack: ferrolite_pipeline::OpStack,
+        commit: bool,
+    ) {
+        self.set_preview_and_full(frame, stack.clone());
+        if !commit {
+            return;
+        }
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        v.history.push(kind, stack.clone());
+        let image_id = v.image_id;
+        let path = v.path.clone();
+        let has_edits = !stack.is_identity();
+        if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
+            rec.has_edits = has_edits; // optimistic cache update (filmstrip badge)
+        }
+        crate::develop::ops_persist::spawn_ops_write(
+            &self.state.jobs,
+            &self.state.writer,
+            &self.state.tx,
+            ctx,
+            image_id,
+            path,
+            stack,
+        );
     }
 }
 
@@ -399,6 +531,20 @@ impl eframe::App for FerroliteApp {
                     if let Some(v) = self.state.viewer.as_mut() {
                         if v.image_id == *image_id {
                             v.idle = true;
+                        }
+                    }
+                    self.state.dirty = true;
+                    continue;
+                }
+                crate::events::AppEvent::OpsLoaded { image_id, stack } => {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == *image_id && !v.ops_loaded {
+                            v.ops_loaded = true;
+                            if !stack.is_identity() {
+                                v.history =
+                                    crate::develop::history::History::new(stack.clone(), 100);
+                                self.set_preview_and_full(frame, stack.clone());
+                            }
                         }
                     }
                     self.state.dirty = true;
@@ -696,6 +842,18 @@ impl eframe::App for FerroliteApp {
                 );
                 v.full_handle = Some(h);
                 v.full_requested = true;
+            }
+            // Read the persisted frl:ops sidecar once per open; the OpsLoaded
+            // event hydrates the stack + both tiers without re-persisting.
+            if !v.ops_loaded && v.ops_read_handle.is_none() {
+                let h = crate::develop::ops_persist::spawn_ops_read(
+                    &self.state.jobs,
+                    &self.state.tx,
+                    ctx,
+                    v.image_id,
+                    v.path.clone(),
+                );
+                v.ops_read_handle = Some(h);
             }
         }
 

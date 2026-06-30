@@ -64,38 +64,29 @@ pub struct ViewerState {
 
     /// The full-res linear source retained for re-evaluation when the op stack
     /// changes (built from the tier-2 full decode).
-    #[allow(dead_code)]
     pub preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
     /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
     /// `edit_producer`). Rebuilt when geometry / halo radius changes.
-    #[allow(dead_code)]
     pub preview_edit: Option<EditPipeline>,
     /// The GPU pyramid retained so the full-res producer can be rebuilt on
     /// geometry or halo-radius changes.
-    #[allow(dead_code)]
     pub pyramid: Option<std::sync::Arc<GpuPyramidSource>>,
     /// Monotonically-increasing counter; bumped on every op-stack mutation so
     /// GPU evaluation knows to re-run.
-    #[allow(dead_code)]
     pub opstack_version: u64,
     /// Bounded undo/redo ring for the current image's op stack.
-    #[allow(dead_code)]
     pub history: crate::develop::history::History,
     /// When `true`, the viewer renders the before/after split view.
-    #[allow(dead_code)]
     pub before_after: bool,
     /// When `true`, the crop overlay is active.
-    #[allow(dead_code)]
     pub crop_active: bool,
     /// Index of the currently-selected HSL band in the HSL panel (0–7).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // read by the HSL panel (Task 12)
     pub hsl_band: usize,
     /// `true` once the `OpsLoaded` event for this image has been received (the
     /// op-stack read job finished and the stack has been applied).
-    #[allow(dead_code)]
     pub ops_loaded: bool,
     /// Handle for the in-flight op-stack read job; cancelled on navigation.
-    #[allow(dead_code)]
     pub ops_read_handle: Option<JobHandle>,
 }
 

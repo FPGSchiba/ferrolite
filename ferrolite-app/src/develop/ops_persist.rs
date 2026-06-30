@@ -1,6 +1,5 @@
 //! Off-thread frl:ops sidecar persistence (mirrors `metadata.rs`): the in-memory
 //! OpStack edit is immediate; this job follows and reports a MetadataResult.
-#![allow(dead_code)] // called from app.rs in Task 9
 
 use crate::events::AppEvent;
 use ferrolite_catalog::Catalog;

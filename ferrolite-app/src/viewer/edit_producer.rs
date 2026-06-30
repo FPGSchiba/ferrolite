@@ -17,6 +17,13 @@ impl EditTileProducer {
     pub fn new(pipeline: TileEditPipeline) -> Self {
         Self { pipeline }
     }
+
+    /// Update the producer's op stack in place (color-only changes). Geometry /
+    /// halo-radius changes are baked at construction and require rebuilding the
+    /// whole producer, not this passthrough.
+    pub fn set_stack(&mut self, stack: ferrolite_pipeline::OpStack) {
+        self.pipeline.set_stack(stack);
+    }
 }
 
 impl TileProducer for EditTileProducer {

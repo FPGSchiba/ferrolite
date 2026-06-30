@@ -199,19 +199,24 @@ impl AppState {
     /// `selected`): optimistic in-memory update of every affected grid row
     /// + `visible_tags`, then an off-thread persist (DB + xmp:Rating sidecar).
     pub fn apply_metadata_edit(&mut self, ctx: &egui::Context, edit: MetaEdit) {
-        // Resolve the target id set (multi-selection, else the single selected).
         let mut targets: Vec<i64> = self.selection.iter().copied().collect();
         if targets.is_empty() {
             if let Some(id) = self.selected {
                 targets.push(id);
             }
         }
-        if targets.is_empty() {
+        self.apply_metadata_edit_to_ids(ctx, &targets, edit);
+    }
+
+    /// Shared core: optimistically update each id's in-memory row + tag cache,
+    /// then persist all of them in ONE off-thread job (DB + xmp:Rating).
+    pub fn apply_metadata_edit_to_ids(&mut self, ctx: &egui::Context, ids: &[i64], edit: MetaEdit) {
+        if ids.is_empty() {
             return;
         }
         // Collect (id, path) pairs for the persist job while borrowing reads.
         let mut image_paths: Vec<(i64, std::path::PathBuf)> = Vec::new();
-        for id in &targets {
+        for id in ids {
             if let Some(rec) = self.images.iter().find(|r| r.id == *id).cloned() {
                 if let Ok(Some(fp)) = self.reads.folder_path(rec.folder_id) {
                     image_paths.push((*id, std::path::PathBuf::from(fp).join(&rec.filename)));
@@ -219,13 +224,14 @@ impl AppState {
             }
         }
         // Optimistic in-memory update of grid rows + visible_tags cache.
-        for id in &targets {
+        for id in ids {
             let mut tags = self.visible_tags.get(id).cloned().unwrap_or_default();
             if let Some(rec) = self.images.iter_mut().find(|r| r.id == *id) {
                 crate::metadata::apply_edit_in_memory(rec, &mut tags, edit);
             }
             self.visible_tags.insert(*id, tags);
         }
+        // ONE spawn for all images — batching is preserved.
         crate::metadata::spawn_metadata_write(
             &self.jobs,
             &self.writer,
@@ -234,6 +240,18 @@ impl AppState {
             edit,
             image_paths,
         );
+    }
+
+    /// Apply an edit to a single explicit image (used by Develop: the open viewer image).
+    /// Targets ONLY the given id — ignores grid selection.
+    #[allow(dead_code)]
+    pub fn apply_metadata_edit_to_image(
+        &mut self,
+        ctx: &egui::Context,
+        image_id: i64,
+        edit: MetaEdit,
+    ) {
+        self.apply_metadata_edit_to_ids(ctx, &[image_id], edit);
     }
 
     /// Fetch tag associations for any visible image ids not yet cached (virtualised).
@@ -408,17 +426,30 @@ impl AppState {
                 targets.push(id);
             }
         }
-        if targets.is_empty() {
+        self.add_images_to_collection(&targets, coll_id);
+    }
+
+    /// Shared core: write every id into the collection, then mark dirty if the
+    /// current source is that collection.
+    pub fn add_images_to_collection(&mut self, ids: &[i64], coll_id: i64) {
+        if ids.is_empty() {
             return;
         }
-        let w = self.writer.lock().expect("writer");
-        for id in &targets {
-            let _ = w.add_image_to_collection(coll_id, *id);
+        {
+            let w = self.writer.lock().expect("writer");
+            for id in ids {
+                let _ = w.add_image_to_collection(coll_id, *id);
+            }
         }
-        drop(w);
         if matches!(self.source, ViewSource::Collection(id) if id == coll_id) {
             self.dirty = true;
         }
+    }
+
+    /// Add a single explicit image to a collection (used by Develop/viewer).
+    #[allow(dead_code)]
+    pub fn add_image_to_collection_now(&mut self, image_id: i64, coll_id: i64) {
+        self.add_images_to_collection(&[image_id], coll_id);
     }
 }
 
@@ -822,5 +853,42 @@ mod tests {
     fn selection_anchor_initialised_none() {
         let s = AppState::for_test();
         assert!(s.selection_anchor.is_none());
+    }
+
+    #[test]
+    fn apply_metadata_edit_to_image_targets_only_that_image() {
+        use ferrolite_catalog::{DecodeStatus, FileKind};
+        use ferrolite_image::{Flag, Orientation, Rating};
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+        let mk = |id: i64| ferrolite_catalog::ImageRecord {
+            id,
+            folder_id: 99,
+            filename: format!("img{id}.nef"),
+            width: None,
+            height: None,
+            orientation: Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: DecodeStatus::Done,
+            kind: FileKind::Raw,
+            rating: Rating::default(),
+            flag: Flag::None,
+        };
+        s.images = vec![mk(1), mk(2)];
+        // Selection is image 2, but we edit image 1 explicitly.
+        s.selection = [2].into_iter().collect();
+        s.selected = Some(2);
+
+        s.apply_metadata_edit_to_image(
+            &ctx,
+            1,
+            crate::metadata::MetaEdit::SetRating(Rating::new(4)),
+        );
+
+        let r1 = s.images.iter().find(|r| r.id == 1).unwrap().rating;
+        let r2 = s.images.iter().find(|r| r.id == 2).unwrap().rating;
+        assert_eq!(r1, Rating::new(4), "explicit target updated");
+        assert_eq!(r2, Rating::default(), "selection NOT touched");
     }
 }

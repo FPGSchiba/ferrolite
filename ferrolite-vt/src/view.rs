@@ -12,6 +12,7 @@ use half::f16;
 use wgpu::util::DeviceExt;
 
 use crate::page_table::{FeedbackBuffer, LevelLayout as FlatLayout, PageTable};
+use crate::pipelines::{DisplayPipelines, DisplayVariant};
 use crate::pool::{SlotAllocator, TilePool, NOT_RESIDENT};
 use crate::residency::{needed_tiles, ResidencySet};
 use crate::{TileSource, ViewTransform};
@@ -48,9 +49,9 @@ pub struct TiledResources {
     array_view: wgpu::TextureView,
     slots_buf: wgpu::Buffer,
     meta_buf: wgpu::Buffer,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: Arc<wgpu::BindGroupLayout>,
+    sampler: Arc<wgpu::Sampler>,
+    pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     // keep the texture alive (the view borrows from it conceptually)
     _array_tex: wgpu::Texture,
@@ -60,9 +61,9 @@ pub struct TiledResources {
 struct SingleResources {
     texture: wgpu::Texture,
     texture_view: wgpu::TextureView,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: Arc<wgpu::BindGroupLayout>,
+    sampler: Arc<wgpu::Sampler>,
+    pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     /// Per-frame uniform buffer (transform), reused and rewritten via `prepare_single`.
     uniform_buf: wgpu::Buffer,
@@ -102,9 +103,9 @@ struct StreamingResources {
     array_view: wgpu::TextureView,
     slots_buf: wgpu::Buffer,
     meta_buf: wgpu::Buffer,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: Arc<wgpu::BindGroupLayout>,
+    sampler: Arc<wgpu::Sampler>,
+    pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     /// Per-frame transform uniform, rewritten by `prepare_streaming` (so the
     /// egui-callback paint split has no allocation in the render pass).
@@ -136,9 +137,9 @@ struct SparseResources {
     feedback: FeedbackBuffer,
     array_view: wgpu::TextureView,
     meta_buf: wgpu::Buffer,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: Arc<wgpu::BindGroupLayout>,
+    sampler: Arc<wgpu::Sampler>,
+    pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     /// Per-frame transform uniform, rewritten by `prepare_sparse` (so the
     /// egui-callback paint split has no allocation in the render pass).
@@ -158,7 +159,7 @@ impl VirtualTexture {
     pub fn single_texture(
         ctx: &GpuContext,
         image: &LinearRgbaF32,
-        target_format: wgpu::TextureFormat,
+        pipelines: &DisplayPipelines,
     ) -> Self {
         let device = &ctx.device;
         // f32 -> f16 RGBA.
@@ -183,75 +184,9 @@ impl VirtualTexture {
             bytemuck::cast_slice(&texels),
         );
 
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vt-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vt-display"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/display.wgsl").into()),
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vt-pl"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vt-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(target_format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("vt-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        let bgl = pipelines.layout(DisplayVariant::Single).clone();
+        let pipeline = pipelines.pipeline(DisplayVariant::Single).clone();
+        let sampler = pipelines.sampler().clone();
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -400,8 +335,10 @@ impl VirtualTexture {
         viewport: (f32, f32),
         out_w: u32,
         out_h: u32,
+        pipelines: &DisplayPipelines,
     ) -> Vec<u8> {
-        let vt = Self::single_texture(ctx, image, wgpu::TextureFormat::Rgba8Unorm);
+        debug_assert_eq!(pipelines.target_format(), wgpu::TextureFormat::Rgba8Unorm);
+        let vt = Self::single_texture(ctx, image, pipelines);
         let target = ctx.render_target(out_w, out_h, wgpu::TextureFormat::Rgba8Unorm);
         let tview = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut enc = ctx
@@ -434,7 +371,7 @@ impl VirtualTexture {
     pub fn tiled_resident(
         ctx: &GpuContext,
         source: &dyn TileSource,
-        target_format: wgpu::TextureFormat,
+        pipelines: &DisplayPipelines,
     ) -> Self {
         let device = &ctx.device;
         let (img_w, img_h) = source.level_size(0);
@@ -543,98 +480,11 @@ impl VirtualTexture {
             usage: wgpu::BufferUsages::STORAGE,
         });
 
-        // Bind-group layout: 0-2 as rung 1, plus 3=array tex, 4=slots, 5=meta.
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("vt-tiled-bgl"),
-            entries: &[
-                // binding 0 (`img_tex`) is declared in the shared module but not used
-                // by `fs_tiled`, so it is intentionally omitted from this layout.
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("vt-display"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/display.wgsl").into()),
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("vt-tiled-pl"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("vt-tiled-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_tiled",
-                targets: &[Some(target_format.into())],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("vt-tiled-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        // Bind-group layout + `fs_tiled` pipeline + sampler are cached in
+        // DisplayPipelines (rung 2 and rung 3 share the Tiled bgl + `fs_tiled`).
+        let bgl = pipelines.layout(DisplayVariant::Tiled).clone();
+        let pipeline = pipelines.pipeline(DisplayVariant::Tiled).clone();
+        let sampler = pipelines.sampler().clone();
 
         let tiled = TiledResources {
             array_view,
@@ -720,8 +570,10 @@ impl VirtualTexture {
         viewport: (f32, f32),
         out_w: u32,
         out_h: u32,
+        pipelines: &DisplayPipelines,
     ) -> Vec<u8> {
-        let vt = Self::tiled_resident(ctx, source, wgpu::TextureFormat::Rgba8Unorm);
+        debug_assert_eq!(pipelines.target_format(), wgpu::TextureFormat::Rgba8Unorm);
+        let vt = Self::tiled_resident(ctx, source, pipelines);
         let target = ctx.render_target(out_w, out_h, wgpu::TextureFormat::Rgba8Unorm);
         let tview = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut enc = ctx
@@ -757,7 +609,7 @@ impl VirtualTexture {
         source: Arc<dyn TileSource + Send + Sync>,
         jobs: Arc<JobSystem>,
         budget_tiles: u32,
-        target_format: wgpu::TextureFormat,
+        pipelines: &DisplayPipelines,
     ) -> Self {
         let device = &ctx.device;
         let (img_w, img_h) = source.level_size(0);
@@ -816,8 +668,9 @@ impl VirtualTexture {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
-        let (bind_group_layout, sampler, pipeline) =
-            build_tiled_pipeline(device, target_format, "vt-stream");
+        let bind_group_layout = pipelines.layout(DisplayVariant::Streaming).clone();
+        let sampler = pipelines.sampler().clone();
+        let pipeline = pipelines.pipeline(DisplayVariant::Streaming).clone();
 
         // Persistent transform uniform, rewritten each frame by `prepare_streaming`.
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1127,7 +980,7 @@ impl VirtualTexture {
         source: Arc<dyn TileSource + Send + Sync>,
         jobs: Arc<JobSystem>,
         budget_tiles: u32,
-        target_format: wgpu::TextureFormat,
+        pipelines: &DisplayPipelines,
     ) -> Self {
         let device = &ctx.device;
         let (img_w, img_h) = source.level_size(0);
@@ -1174,8 +1027,9 @@ impl VirtualTexture {
         let feedback = FeedbackBuffer::new(ctx, total_tiles);
         feedback.clear(ctx);
 
-        let (bind_group_layout, sampler, pipeline) =
-            build_sparse_pipeline(device, target_format, "vt-sparse");
+        let bind_group_layout = pipelines.layout(DisplayVariant::Sparse).clone();
+        let sampler = pipelines.sampler().clone();
+        let pipeline = pipelines.pipeline(DisplayVariant::Sparse).clone();
 
         // Persistent transform uniform, rewritten each frame by `prepare_sparse`.
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1530,217 +1384,4 @@ fn slot_index(layout: &LevelLayout, t: TileCoord) -> Option<usize> {
         return None;
     }
     Some(idx as usize)
-}
-
-/// Build the shared `fs_tiled` bind-group layout + sampler + render pipeline used
-/// by both the rung-2 (resident) and rung-3 (streaming) paths.
-fn build_tiled_pipeline(
-    device: &wgpu::Device,
-    target_format: wgpu::TextureFormat,
-    label_prefix: &str,
-) -> (wgpu::BindGroupLayout, wgpu::Sampler, wgpu::RenderPipeline) {
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("vt-tiled-bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 4,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("vt-display"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/display.wgsl").into()),
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(&format!("{label_prefix}-pl")),
-        bind_group_layouts: &[&bgl],
-        push_constant_ranges: &[],
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(&format!("{label_prefix}-pipeline")),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_main",
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_tiled",
-            targets: &[Some(target_format.into())],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
-
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some(&format!("{label_prefix}-sampler")),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-
-    (bgl, sampler, pipeline)
-}
-
-/// Build the rung-4 `fs_sparse` bind-group layout + sampler + render pipeline:
-/// like `fs_tiled` but the slot storage buffer (binding 4) is replaced by a page
-/// table texture (binding 6) and a read-write feedback storage buffer (binding 7).
-fn build_sparse_pipeline(
-    device: &wgpu::Device,
-    target_format: wgpu::TextureFormat,
-    label_prefix: &str,
-) -> (wgpu::BindGroupLayout, wgpu::Sampler, wgpu::RenderPipeline) {
-    let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("vt-sparse-bgl"),
-        entries: &[
-            wgpu::BindGroupLayoutEntry {
-                binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 2,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 3,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            wgpu::BindGroupLayoutEntry {
-                binding: 5,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-            // Page table: Rg32Uint texture, sampled via textureLoad (non-filterable).
-            wgpu::BindGroupLayoutEntry {
-                binding: 6,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Uint,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                    multisampled: false,
-                },
-                count: None,
-            },
-            // Feedback: read-write storage buffer of atomic<u32>.
-            wgpu::BindGroupLayoutEntry {
-                binding: 7,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            },
-        ],
-    });
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("vt-display"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/display.wgsl").into()),
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(&format!("{label_prefix}-pl")),
-        bind_group_layouts: &[&bgl],
-        push_constant_ranges: &[],
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some(&format!("{label_prefix}-pipeline")),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs_main",
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs_sparse",
-            targets: &[Some(target_format.into())],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
-
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some(&format!("{label_prefix}-sampler")),
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        ..Default::default()
-    });
-
-    (bgl, sampler, pipeline)
 }

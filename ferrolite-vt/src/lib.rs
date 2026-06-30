@@ -1,6 +1,7 @@
 //! ferrolite-vt — source-agnostic sparse virtual texture. Engine-transferable.
 
 mod page_table;
+mod pipelines;
 mod pool;
 mod residency;
 mod source;
@@ -8,6 +9,7 @@ mod transform;
 mod view;
 
 pub use page_table::{FeedbackBuffer, LevelLayout, PageTable};
+pub use pipelines::{DisplayPipelines, DisplayVariant};
 pub use pool::{SlotAllocator, TilePool, NOT_RESIDENT};
 pub use residency::{needed_tiles, ResidencySet};
 pub use source::{PyramidTileSource, TileSource};

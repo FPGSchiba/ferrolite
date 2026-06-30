@@ -15,10 +15,12 @@ fn rung1_fit_view_matches_golden() {
         eprintln!("no GPU adapter; skipping golden (expected in headless CI)");
         return;
     };
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
     let img = common::split_image();
     let (w, h) = (64u32, 64u32);
     let view = ViewTransform::fit((img.width, img.height), (w as f32, h as f32));
-    let pixels = VirtualTexture::render_to_image(&ctx, &img, &view, (w as f32, h as f32), w, h);
+    let pixels =
+        VirtualTexture::render_to_image(&ctx, &img, &view, (w as f32, h as f32), w, h, &pipelines);
 
     let golden_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rung1_fit.png");
     if std::env::var("UPDATE_GOLDEN").is_ok() || !std::path::Path::new(golden_path).exists() {
@@ -52,10 +54,19 @@ fn rung2_tiled_matches_single_texture() {
     let (w, h) = (128u32, 128u32);
     let view = ViewTransform::fit((iw, ih), (w as f32, h as f32));
 
-    let single = VirtualTexture::render_to_image(&ctx, &img, &view, (w as f32, h as f32), w, h);
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let single =
+        VirtualTexture::render_to_image(&ctx, &img, &view, (w as f32, h as f32), w, h, &pipelines);
     let src = ferrolite_vt::PyramidTileSource::new(img);
-    let tiled =
-        VirtualTexture::render_tiled_to_image(&ctx, &src, &view, (w as f32, h as f32), w, h);
+    let tiled = VirtualTexture::render_tiled_to_image(
+        &ctx,
+        &src,
+        &view,
+        (w as f32, h as f32),
+        w,
+        h,
+        &pipelines,
+    );
 
     // At fit zoom the tiled path samples a coarse LOD; allow a generous tolerance
     // vs the single-texture reference (different filtering), but they must broadly agree.
@@ -85,10 +96,18 @@ fn rung3_streaming_matches_resident_after_loads() {
     let (w, h) = (128u32, 128u32);
     let view = ViewTransform::fit((iw, ih), (w as f32, h as f32));
 
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
     // Reference: rung-2 fully-resident render.
     let src_ref = PyramidTileSource::new(img.clone());
-    let resident =
-        VirtualTexture::render_tiled_to_image(&ctx, &src_ref, &view, (w as f32, h as f32), w, h);
+    let resident = VirtualTexture::render_tiled_to_image(
+        &ctx,
+        &src_ref,
+        &view,
+        (w as f32, h as f32),
+        w,
+        h,
+        &pipelines,
+    );
 
     // Streaming: budget covers all tiles of all levels (generous).
     let src: Arc<dyn TileSource + Send + Sync> = Arc::new(PyramidTileSource::new(img));
@@ -99,13 +118,8 @@ fn rung3_streaming_matches_resident_after_loads() {
         })
         .sum();
     let jobs = Arc::new(JobSystem::new(2));
-    let mut vt = VirtualTexture::streaming(
-        &ctx,
-        Arc::clone(&src),
-        Arc::clone(&jobs),
-        total,
-        wgpu::TextureFormat::Rgba8Unorm,
-    );
+    let mut vt =
+        VirtualTexture::streaming(&ctx, Arc::clone(&src), Arc::clone(&jobs), total, &pipelines);
 
     // Drive request_view + drain until tiles load (jobs run on worker threads).
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -248,13 +262,9 @@ fn rung4_feedback_makes_center_tile_resident() {
         })
         .sum();
     let jobs = Arc::new(JobSystem::new(2));
-    let mut vt = VirtualTexture::sparse(
-        &ctx,
-        Arc::clone(&src),
-        Arc::clone(&jobs),
-        total,
-        wgpu::TextureFormat::Rgba8Unorm,
-    );
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let mut vt =
+        VirtualTexture::sparse(&ctx, Arc::clone(&src), Arc::clone(&jobs), total, &pipelines);
 
     // Feedback is one frame latent: render (marks feedback) -> process (reads it
     // back, submits loads, updates the page table) -> repeat until the worker jobs

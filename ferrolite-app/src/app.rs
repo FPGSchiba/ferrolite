@@ -535,11 +535,18 @@ impl eframe::App for FerroliteApp {
             }
         }
 
-        // Keyboard metadata commands: rating 0–5, flag P/X/U. In Library they apply
-        // to the grid selection; in Develop they apply to the open viewer image.
+        // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
+        // toggles. In Library (no viewer) they apply to the grid selection; in
+        // Develop or Library+viewer they apply to the open viewer image.
         if self.state.pending_remove.is_none() && !ctx.wants_keyboard_input() {
             use ferrolite_image::{Flag, Rating};
-            let edit = ctx.input(|i| {
+
+            // --- 1. Read key intent ---
+            enum KeyIntent {
+                Rating(u8),
+                Flag(Flag),
+            }
+            let intent = ctx.input(|i| {
                 for n in 0..=5u8 {
                     let key = match n {
                         0 => egui::Key::Num0,
@@ -550,24 +557,49 @@ impl eframe::App for FerroliteApp {
                         _ => egui::Key::Num5,
                     };
                     if i.key_pressed(key) {
-                        return Some(crate::metadata::MetaEdit::SetRating(Rating::new(n)));
+                        return Some(KeyIntent::Rating(n));
                     }
                 }
-                if i.key_pressed(egui::Key::P) {
-                    Some(crate::metadata::MetaEdit::SetFlag(Flag::Pick))
-                } else if i.key_pressed(egui::Key::X) {
-                    Some(crate::metadata::MetaEdit::SetFlag(Flag::Reject))
-                } else if i.key_pressed(egui::Key::U) {
-                    Some(crate::metadata::MetaEdit::SetFlag(Flag::None))
+                if i.key_pressed(egui::Key::I) {
+                    Some(KeyIntent::Flag(Flag::Pick))
+                } else if i.key_pressed(egui::Key::O) {
+                    Some(KeyIntent::Flag(Flag::Reject))
                 } else {
                     None
                 }
             });
-            if let Some(edit) = edit {
-                if self.module.is_library() && self.state.viewer.is_none() {
-                    self.state.apply_metadata_edit(ctx, edit);
-                } else if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
-                    self.state.apply_metadata_edit_to_image(ctx, image_id, edit);
+
+            if let Some(intent) = intent {
+                // --- 2. Resolve target image id ---
+                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                    self.state.selected
+                } else {
+                    self.state.viewer.as_ref().map(|v| v.image_id)
+                };
+
+                if let Some(target_id) = target_id {
+                    // --- 3. Look up current value ---
+                    let rec = self.state.images.iter().find(|r| r.id == target_id);
+                    let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
+                    let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
+
+                    // --- 4. Build toggled edit ---
+                    let edit = match intent {
+                        KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(Rating::new(
+                            crate::metadata::toggle_rating(cur_rating, n),
+                        )),
+                        KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
+                            crate::metadata::toggle_flag(cur_flag, f),
+                        ),
+                    };
+
+                    // --- 5. Apply ---
+                    if self.module.is_library() && self.state.viewer.is_none() {
+                        self.state.apply_metadata_edit(ctx, edit);
+                    } else {
+                        self.state
+                            .apply_metadata_edit_to_image(ctx, target_id, edit);
+                    }
                 }
             }
         }

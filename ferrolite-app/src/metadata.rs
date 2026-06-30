@@ -73,6 +73,24 @@ pub fn spawn_metadata_write(
     });
 }
 
+/// Returns `0` if `current == pressed` (toggle off), otherwise `pressed`.
+pub fn toggle_rating(current: u8, pressed: u8) -> u8 {
+    if current == pressed {
+        0
+    } else {
+        pressed
+    }
+}
+
+/// Returns `Flag::None` if `current == pressed` (toggle off), otherwise `pressed`.
+pub fn toggle_flag(current: Flag, pressed: Flag) -> Flag {
+    if current == pressed {
+        Flag::None
+    } else {
+        pressed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +132,44 @@ mod tests {
         assert_eq!(tags, vec![TagId(5)]);
         apply_edit_in_memory(&mut r, &mut tags, MetaEdit::ToggleTag(TagId(5)));
         assert!(tags.is_empty());
+    }
+
+    // --- toggle_rating ---
+
+    #[test]
+    fn toggle_rating_sets_when_different() {
+        assert_eq!(toggle_rating(0, 3), 3);
+    }
+
+    #[test]
+    fn toggle_rating_clears_when_same() {
+        assert_eq!(toggle_rating(3, 3), 0);
+    }
+
+    #[test]
+    fn toggle_rating_changes_value() {
+        assert_eq!(toggle_rating(2, 5), 5);
+    }
+
+    // --- toggle_flag ---
+
+    #[test]
+    fn toggle_flag_sets_pick_from_none() {
+        assert_eq!(toggle_flag(Flag::None, Flag::Pick), Flag::Pick);
+    }
+
+    #[test]
+    fn toggle_flag_clears_pick_when_already_pick() {
+        assert_eq!(toggle_flag(Flag::Pick, Flag::Pick), Flag::None);
+    }
+
+    #[test]
+    fn toggle_flag_changes_reject_to_pick() {
+        assert_eq!(toggle_flag(Flag::Reject, Flag::Pick), Flag::Pick);
+    }
+
+    #[test]
+    fn toggle_flag_clears_reject_when_already_reject() {
+        assert_eq!(toggle_flag(Flag::Reject, Flag::Reject), Flag::None);
     }
 }

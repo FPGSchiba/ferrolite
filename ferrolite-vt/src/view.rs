@@ -1380,7 +1380,9 @@ impl VirtualTexture {
     /// entries, AND flush the GPU page table so the shader never samples a
     /// freed/aliased slot for a frame. No-op if unchanged or non-sparse.
     pub fn set_opstack_version(&mut self, ctx: &GpuContext, version: u64) {
-        let Some(s) = self.sparse.as_mut() else { return };
+        let Some(s) = self.sparse.as_mut() else {
+            return;
+        };
         let stale = s.versions.set_version(version);
         for t in &stale {
             s.allocator.free(*t);
@@ -1408,7 +1410,9 @@ impl VirtualTexture {
         needed: &[TileCoord],
         budget: usize,
     ) -> usize {
-        let Some(s) = self.sparse.as_mut() else { return 0 };
+        let Some(s) = self.sparse.as_mut() else {
+            return 0;
+        };
 
         let to_produce = s.versions.to_produce(needed);
         let mut produced = 0;

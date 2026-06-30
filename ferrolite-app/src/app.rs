@@ -164,9 +164,8 @@ impl FerroliteApp {
                     v.begin_crossfade();
                     if !v.op_stack.is_identity() {
                         // Build the GPU-resident pyramid + per-tile edit pipeline.
-                        let ctx_arc = std::sync::Arc::new(
-                            ferrolite_gpu::GpuContext::from_render_state(rs),
-                        );
+                        let ctx_arc =
+                            std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
                         let pyramid = std::sync::Arc::new(
                             ferrolite_pipeline::GpuPyramidSource::new(&gpu, image),
                         );
@@ -179,8 +178,7 @@ impl FerroliteApp {
                         // Mark the VT producer-driven + bump its version so the
                         // producer fills tiles instead of the CPU path.
                         let mut renderer = rs.renderer.write();
-                        if let Some(g) =
-                            renderer.callback_resources.get_mut::<viewer::ViewerGpu>()
+                        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>()
                         {
                             if let Some(full) = g.full.as_mut() {
                                 full.set_producing(true);

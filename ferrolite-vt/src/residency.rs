@@ -153,7 +153,11 @@ impl VersionedResidency {
     /// Of `needed`, those not resident at the current version (must (re)produce),
     /// preserving the needed order (visibility priority).
     pub fn to_produce(&self, needed: &[TileCoord]) -> Vec<TileCoord> {
-        needed.iter().copied().filter(|t| !self.is_current(*t)).collect()
+        needed
+            .iter()
+            .copied()
+            .filter(|t| !self.is_current(*t))
+            .collect()
     }
 }
 

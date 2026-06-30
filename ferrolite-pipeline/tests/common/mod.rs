@@ -113,7 +113,11 @@ pub fn read_image_linear(ctx: &GpuContext, img: &ferrolite_pipeline::PipelineIma
                 rows_per_image: Some(h),
             },
         },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
     );
     ctx.queue.submit([enc.finish()]);
     let slice = buf.slice(..);

@@ -18,8 +18,8 @@ pub use op::{
     ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, EditPipeline};
-pub use tile_edit::TileEditPipeline;
 pub use serialize::{deserialize, serialize};
+pub use tile_edit::TileEditPipeline;
 // The uniform structs are exported as the documented GPU memory layout the
 // edit passes consume; the param→uniform helper fns + math are crate-internal
 // (used by `pipeline`/`uniforms`), so they are not part of the public surface.

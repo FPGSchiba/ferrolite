@@ -279,7 +279,11 @@ fn sharpen_tiles_match_whole_image_at_seam() {
     use ferrolite_image::{TileCoord, TILE_SIZE};
     let mut max_diff = 0.0f32;
     for tx in 0..2u32 {
-        let tile = tep.produce_tile(TileCoord { lod: 0, x: tx, y: 0 });
+        let tile = tep.produce_tile(TileCoord {
+            lod: 0,
+            x: tx,
+            y: 0,
+        });
         let tile_lin = common::read_tile_linear(&ctx, &tile);
         for ly in 0..TILE_SIZE {
             for lx in 0..TILE_SIZE {

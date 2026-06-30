@@ -114,7 +114,10 @@ mod tests {
         };
         let full = LinearRgbaF32::black(1024, 512);
         let p = GpuPyramidSource::new(&ctx, &full);
-        assert_eq!(p.level_count(), ferrolite_image::pyramid_level_count(1024, 512));
+        assert_eq!(
+            p.level_count(),
+            ferrolite_image::pyramid_level_count(1024, 512)
+        );
         assert_eq!(p.level_size(0), (1024, 512));
         assert_eq!(p.level_size(1), (512, 256));
         // Each level wraps a same-size texture.

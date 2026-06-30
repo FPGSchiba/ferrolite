@@ -70,7 +70,9 @@ impl TileEditPipeline {
             )),
             vec![head_id],
         );
-        let wb = Rc::new(Cell::new(crate::uniforms::wb_uniform(stack.white_balance())));
+        let wb = Rc::new(Cell::new(crate::uniforms::wb_uniform(
+            stack.white_balance(),
+        )));
         let wb_id = graph.add_node(
             Box::new(PointOpNode::new(
                 ctx.clone(),
@@ -151,7 +153,8 @@ impl TileEditPipeline {
     /// wires interactive edits is responsible for that rebuild decision.)
     pub fn set_stack(&mut self, stack: OpStack) {
         self.exposure.set(exposure_uniform(stack.exposure()));
-        self.wb.set(crate::uniforms::wb_uniform(stack.white_balance()));
+        self.wb
+            .set(crate::uniforms::wb_uniform(stack.white_balance()));
         self.contrast.set(contrast_uniform(stack.contrast()));
         self.tone_curve.set(curve_lut(
             &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
@@ -165,7 +168,10 @@ impl TileEditPipeline {
     /// `COPY_SRC` texture. Re-runs the whole per-tile chain (the geometry head is
     /// dirtied each call because the tile coord changed).
     pub fn produce_tile(&mut self, coord: TileCoord) -> wgpu::Texture {
-        self.request.set(TileRequest { coord, halo: self.halo });
+        self.request.set(TileRequest {
+            coord,
+            halo: self.halo,
+        });
         self.graph.mark_dirty(self.head_id);
         let haloed = self.graph.evaluate(self.output_id).clone();
         self.extract_interior(&haloed)

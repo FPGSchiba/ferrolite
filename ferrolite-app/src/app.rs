@@ -415,7 +415,11 @@ impl eframe::App for FerroliteApp {
                 crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1");
             });
 
-        let top_h = if self.module.is_library() { 40.0 } else { 72.0 };
+        let top_h = if self.module.is_library() {
+            40.0
+        } else {
+            108.0
+        };
         let mut film_clicked: Option<i64> = None;
         egui::TopBottomPanel::top("toolbar")
             .exact_height(top_h)
@@ -432,6 +436,10 @@ impl eframe::App for FerroliteApp {
                         self.state.dirty = true;
                     }
                 } else {
+                    if crate::library::develop_filter_bar::show(ui, &mut self.state) {
+                        self.state.dirty = true;
+                    }
+                    ui.separator();
                     let current = self.state.viewer.as_ref().map(|v| v.image_id);
                     film_clicked = crate::library::filmstrip::show(ui, &mut self.state, current);
                 }

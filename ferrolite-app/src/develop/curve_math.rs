@@ -1,6 +1,5 @@
 //! Pure tone-curve control-point editing (normalized [0,1] space, x-ascending,
 //! endpoints pinned at x=0 and x=1). Routed by `curve_widget`.
-#![allow(dead_code)] // curve widget not yet wired (Task 11)
 
 fn clamp01(v: f32) -> f32 {
     v.clamp(0.0, 1.0)

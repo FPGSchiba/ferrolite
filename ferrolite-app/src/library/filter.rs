@@ -4,20 +4,19 @@ use ferrolite_catalog::{LibraryQuery, RatingFilter, Scope, Sort, SortKey, TagFil
 use ferrolite_image::{Flag, TagId};
 
 /// How many images "Recently Added" shows.
-#[allow(dead_code)]
 const RECENT_LIMIT: i64 = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum ViewSource {
     Folder(i64),
     All,
+    #[allow(dead_code)]
     Collection(i64),
+    #[allow(dead_code)]
     RecentlyAdded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct FilterState {
     pub search: String,
     pub sort_key: SortKey,
@@ -49,7 +48,6 @@ impl Default for FilterState {
 }
 
 impl FilterState {
-    #[allow(dead_code)]
     pub fn to_query(&self, source: ViewSource, include_subfolders: bool) -> LibraryQuery {
         let scope = match source {
             ViewSource::Folder(id) => Scope::Folder {

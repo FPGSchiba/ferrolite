@@ -1,14 +1,17 @@
 //! Application state: catalog handles, the job system, the event channel, and
 //! the currently-browsed folder's rows + selection + progress counters.
 
-use ferrolite_catalog::{Catalog, ImageRecord, ReadPool};
+use crate::events::AppEvent;
+use crate::library::filter::{FilterState, ViewSource};
+use ferrolite_catalog::{
+    Catalog, CollectionRecord, ImageRecord, LibraryQuery, ReadPool, TagRecord,
+};
+use ferrolite_image::TagId;
 use ferrolite_jobs::{JobHandle, JobId, JobSystem};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-
-use crate::events::AppEvent;
 
 /// A folder awaiting remove confirmation (shown in a modal).
 #[derive(Debug, Clone)]
@@ -65,6 +68,29 @@ pub struct AppState {
 
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
+
+    /// Active filter state (search text, rating, flags, tags, etc.).
+    pub filter: FilterState,
+    /// Which set of images is shown (folder, all, collection, recently added).
+    pub source: ViewSource,
+    /// Full tag vocabulary loaded from the catalog.
+    // consumed by future H tasks (tag panel, filter bar)
+    #[allow(dead_code)]
+    pub tags: Vec<TagRecord>,
+    /// Full collection vocabulary loaded from the catalog.
+    // consumed by future H tasks
+    #[allow(dead_code)]
+    pub collections: Vec<CollectionRecord>,
+    /// Per-image tag associations cached for the currently visible grid cells.
+    pub visible_tags: HashMap<i64, Vec<TagId>>,
+    /// Selected image ids (multi-selection for batch ops).
+    // consumed by future H tasks (batch ops)
+    #[allow(dead_code)]
+    pub selection: HashSet<i64>,
+    /// Non-critical warning surfaced in the UI (e.g. query error).
+    // consumed by future H tasks (status bar)
+    #[allow(dead_code)]
+    pub warning: Option<String>,
 }
 
 impl AppState {
@@ -104,6 +130,13 @@ impl AppState {
             expanded_folders: HashSet::new(),
             pending_remove: None,
             viewer: None,
+            filter: FilterState::default(),
+            source: ViewSource::All,
+            tags: Vec::new(),
+            collections: Vec::new(),
+            visible_tags: HashMap::new(),
+            selection: HashSet::new(),
+            warning: None,
         })
     }
 
@@ -123,19 +156,53 @@ impl AppState {
         self.textures.insert(image_id, tex);
     }
 
-    /// Reload the visible folder's rows from the read pool (called after ingest
-    /// progress / folder switch). Cheap: indexed query, no filesystem walk.
-    pub fn refresh_images(&mut self) {
-        if let Some(folder_id) = self.current_folder {
-            let rows = if self.include_subfolders {
-                self.reads.list_images_recursive(folder_id)
-            } else {
-                self.reads.list_images(folder_id)
-            };
-            if let Ok(rows) = rows {
-                self.images = rows;
+    /// Build a `LibraryQuery` from the current source + filter state.
+    pub fn build_query(&self) -> LibraryQuery {
+        self.filter.to_query(self.source, self.include_subfolders)
+    }
+
+    /// Load the full tag and collection vocabularies from the catalog.
+    // called by future H tasks (tag panel)
+    #[allow(dead_code)]
+    pub fn reload_vocab(&mut self) {
+        if let Ok(t) = self.reads.list_tags() {
+            self.tags = t;
+        }
+        if let Ok(c) = self.reads.list_collections() {
+            self.collections = c;
+        }
+    }
+
+    /// Fetch tag associations for any visible image ids not yet cached (virtualised).
+    // called by future H tasks (grid tag rendering)
+    #[allow(dead_code)]
+    pub fn ensure_tags_for(&mut self, ids: &HashSet<i64>) {
+        let missing: Vec<i64> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.visible_tags.contains_key(id))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        if let Ok(map) = self.reads.tags_for_images(&missing) {
+            for id in missing {
+                self.visible_tags
+                    .insert(id, map.get(&id).cloned().unwrap_or_default());
             }
         }
+    }
+
+    /// Reload the visible set of images from the read pool (called after ingest
+    /// progress / folder switch / filter change). Cheap: indexed query, no
+    /// filesystem walk.
+    pub fn refresh_images(&mut self) {
+        let q = self.build_query();
+        if let Ok(rows) = self.reads.query_images(&q) {
+            self.images = rows;
+        }
+        // Invalidate the per-cell tag cache so the grid re-fetches for the new set.
+        self.visible_tags.clear();
     }
 
     /// Open `rec` in the viewer, cancelling any currently-open viewer first.
@@ -182,6 +249,7 @@ impl AppState {
     pub fn select_folder(&mut self, folder_id: i64) {
         self.reset_for_new_folder();
         self.current_folder = Some(folder_id);
+        self.source = ViewSource::Folder(folder_id);
     }
 
     /// Remove a folder subtree from the catalog (cache only). If the current
@@ -256,6 +324,13 @@ impl AppState {
             expanded_folders: HashSet::new(),
             pending_remove: None,
             viewer: None,
+            filter: FilterState::default(),
+            source: ViewSource::All,
+            tags: Vec::new(),
+            collections: Vec::new(),
+            visible_tags: HashMap::new(),
+            selection: HashSet::new(),
+            warning: None,
         }
     }
 }
@@ -353,6 +428,7 @@ mod tests {
         };
         let _ = child;
         s.current_folder = Some(root);
+        s.source = ViewSource::Folder(root);
 
         s.include_subfolders = false;
         s.refresh_images();
@@ -449,6 +525,41 @@ mod tests {
         assert!(s.ingest_handle.is_none(), "ingest_handle cleared");
         assert_eq!(s.current_folder, Some(7), "view preserved");
         assert_eq!(s.selected, Some(3), "selection preserved");
+    }
+
+    #[test]
+    fn refresh_images_uses_filter_query_across_source() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+        let (f1, f2) = {
+            let w = s.writer.lock().unwrap();
+            let f1 = w.upsert_folder(std::path::Path::new("/a"), None).unwrap();
+            let f2 = w.upsert_folder(std::path::Path::new("/b"), None).unwrap();
+            w.upsert_image(&NewImage::failed(
+                f1,
+                "a.nef".into(),
+                1,
+                1,
+                FileKind::Raw,
+                0,
+            ))
+            .unwrap();
+            w.upsert_image(&NewImage::failed(
+                f2,
+                "b.nef".into(),
+                1,
+                1,
+                FileKind::Raw,
+                0,
+            ))
+            .unwrap();
+            (f1, f2)
+        };
+        let _ = (f1, f2);
+        // AllPhotographs source returns images from both folders.
+        s.source = ViewSource::All;
+        s.refresh_images();
+        assert_eq!(s.images.len(), 2);
     }
 
     #[test]

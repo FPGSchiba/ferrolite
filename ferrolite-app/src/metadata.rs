@@ -13,8 +13,6 @@ use std::sync::{Arc, Mutex};
 pub enum MetaEdit {
     SetRating(Rating),
     SetFlag(Flag),
-    // Reserved for future tag-panel H tasks; not yet wired to a key command.
-    #[allow(dead_code)]
     ToggleTag(TagId),
 }
 
@@ -36,7 +34,6 @@ pub fn apply_edit_in_memory(rec: &mut ImageRecord, visible_tags: &mut Vec<TagId>
 /// Persist an edit to all `image_paths` off the UI thread. Writes SQLite for
 /// every axis; writes the xmp:Rating sidecar for `SetRating`. Emits a
 /// `MetadataResult` (a sidecar failure is a warning, not a revert).
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_metadata_write(
     jobs: &Arc<JobSystem>,
     writer: &Arc<Mutex<Catalog>>,

@@ -115,8 +115,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             egui::PopupCloseBehavior::CloseOnClickOutside,
             |ui| {
                 ui.set_min_width(240.0);
-                // Camera model.
-                let cameras = state.reads.distinct_cameras().unwrap_or_default();
+                // Camera model (rendered from cached state — no DB call per frame).
                 egui::ComboBox::from_label("Camera")
                     .selected_text(state.filter.camera.clone().unwrap_or_else(|| "Any".into()))
                     .show_ui(ui, |ui| {
@@ -127,7 +126,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                             state.filter.camera = None;
                             changed = true;
                         }
-                        for c in &cameras {
+                        for c in &state.camera_options {
                             if ui
                                 .selectable_label(state.filter.camera.as_deref() == Some(c), c)
                                 .clicked()
@@ -137,8 +136,8 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                             }
                         }
                     });
-                // ISO range.
-                if let Ok(Some((lo, hi))) = state.reads.iso_bounds() {
+                // ISO range (cached).
+                if let Some((lo, hi)) = state.iso_range {
                     let (mut a, mut b) = state.filter.iso.unwrap_or((lo, hi));
                     let mut af = a as f32;
                     let mut bf = b as f32;
@@ -157,8 +156,8 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                         changed = true;
                     }
                 }
-                // Date range (ISO-8601 text inputs; lexical compare).
-                if let Ok(Some((lo, hi))) = state.reads.date_bounds() {
+                // Date range (cached; ISO-8601 text inputs for lexical compare).
+                if let Some((lo, hi)) = state.date_range.clone() {
                     let (mut from, mut to) = state
                         .filter
                         .date

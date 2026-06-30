@@ -7,6 +7,12 @@ use crate::state::AppState;
 use ferrolite_catalog::{
     collect_dirs, scan_tree, Catalog, DecodeStatus, FileKind, NewImage, ReadPool, Thumbnail,
 };
+use ferrolite_jobs::{CancelToken, JobHandle, JobSystem, Priority};
+use rayon::prelude::*;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 pub(crate) fn now_epoch_secs() -> i64 {
     std::time::SystemTime::now()
@@ -14,12 +20,6 @@ pub(crate) fn now_epoch_secs() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
-use ferrolite_jobs::{CancelToken, JobHandle, JobSystem, Priority};
-use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
 
 /// How often the background watcher polls the selected folder for new files.
 pub const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);

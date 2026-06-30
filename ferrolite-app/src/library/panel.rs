@@ -235,6 +235,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
                 state.reload_vocab();
             }
             ui.label(&t.name);
+            // ＋sel — toggle this tag on/off the current selection (mirrors the
+            // Collections "＋sel" pattern).
+            if ui.small_button("＋sel").clicked() {
+                state.apply_metadata_edit(ctx, crate::metadata::MetaEdit::ToggleTag(t.id));
+            }
             if ui.small_button("🗑").clicked() {
                 let _ = state.writer.lock().expect("writer").delete_tag(t.id);
                 state.filter.tag_ids.retain(|x| *x != t.id);

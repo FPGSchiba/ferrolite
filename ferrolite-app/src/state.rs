@@ -3,6 +3,7 @@
 
 use crate::events::AppEvent;
 use crate::library::filter::{FilterState, ViewSource};
+use crate::metadata::MetaEdit;
 use ferrolite_catalog::{
     Catalog, CollectionRecord, ImageRecord, LibraryQuery, ReadPool, TagRecord,
 };
@@ -83,6 +84,14 @@ pub struct AppState {
     pub selection: HashSet<i64>,
     /// Non-critical warning surfaced in the UI (e.g. query error).
     pub warning: Option<String>,
+
+    // ── Cached toolbar metadata-filter aggregates (populated by reload_vocab) ──
+    /// Distinct camera-model strings from the catalog.
+    pub camera_options: Vec<String>,
+    /// (min, max) ISO across the catalog, or None if no EXIF ISO is indexed.
+    pub iso_range: Option<(u32, u32)>,
+    /// (earliest, latest) capture-date strings from the catalog, or None.
+    pub date_range: Option<(String, String)>,
 }
 
 impl AppState {
@@ -129,6 +138,9 @@ impl AppState {
             visible_tags: HashMap::new(),
             selection: HashSet::new(),
             warning: None,
+            camera_options: Vec::new(),
+            iso_range: None,
+            date_range: None,
         })
     }
 
@@ -153,7 +165,9 @@ impl AppState {
         self.filter.to_query(self.source, self.include_subfolders)
     }
 
-    /// Load the full tag and collection vocabularies from the catalog.
+    /// Load the full tag and collection vocabularies, and refresh cached
+    /// toolbar metadata-filter aggregates (camera list, ISO range, date range).
+    /// Called at startup and after ingest completes.
     pub fn reload_vocab(&mut self) {
         if let Ok(t) = self.reads.list_tags() {
             self.tags = t;
@@ -161,6 +175,50 @@ impl AppState {
         if let Ok(c) = self.reads.list_collections() {
             self.collections = c;
         }
+        self.camera_options = self.reads.distinct_cameras().unwrap_or_default();
+        self.iso_range = self.reads.iso_bounds().unwrap_or_default();
+        self.date_range = self.reads.date_bounds().unwrap_or_default();
+    }
+
+    /// Apply a metadata edit to the current selection (fallback to single
+    /// `selected`): optimistic in-memory update of every affected grid row
+    /// + `visible_tags`, then an off-thread persist (DB + xmp:Rating sidecar).
+    pub fn apply_metadata_edit(&mut self, ctx: &egui::Context, edit: MetaEdit) {
+        // Resolve the target id set (multi-selection, else the single selected).
+        let mut targets: Vec<i64> = self.selection.iter().copied().collect();
+        if targets.is_empty() {
+            if let Some(id) = self.selected {
+                targets.push(id);
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+        // Collect (id, path) pairs for the persist job while borrowing reads.
+        let mut image_paths: Vec<(i64, std::path::PathBuf)> = Vec::new();
+        for id in &targets {
+            if let Some(rec) = self.images.iter().find(|r| r.id == *id).cloned() {
+                if let Ok(Some(fp)) = self.reads.folder_path(rec.folder_id) {
+                    image_paths.push((*id, std::path::PathBuf::from(fp).join(&rec.filename)));
+                }
+            }
+        }
+        // Optimistic in-memory update of grid rows + visible_tags cache.
+        for id in &targets {
+            let mut tags = self.visible_tags.get(id).cloned().unwrap_or_default();
+            if let Some(rec) = self.images.iter_mut().find(|r| r.id == *id) {
+                crate::metadata::apply_edit_in_memory(rec, &mut tags, edit);
+            }
+            self.visible_tags.insert(*id, tags);
+        }
+        crate::metadata::spawn_metadata_write(
+            &self.jobs,
+            &self.writer,
+            &self.tx,
+            ctx,
+            edit,
+            image_paths,
+        );
     }
 
     /// Fetch tag associations for any visible image ids not yet cached (virtualised).
@@ -319,6 +377,9 @@ impl AppState {
             visible_tags: HashMap::new(),
             selection: HashSet::new(),
             warning: None,
+            camera_options: Vec::new(),
+            iso_range: None,
+            date_range: None,
         }
     }
 }
@@ -578,5 +639,79 @@ mod tests {
             "current cleared when in removed subtree"
         );
         assert!(s.reads.list_folders().unwrap().is_empty());
+    }
+
+    /// `apply_metadata_edit` with `ToggleTag` must optimistically update
+    /// `visible_tags` for every image in `selection` (or the single `selected`).
+    /// The in-memory update is unconditional; the persist job fires off-thread
+    /// with an empty path list (no folder row in the test DB, so folder_path
+    /// returns None) and completes without error.
+    #[test]
+    fn apply_metadata_edit_toggle_tag_updates_visible_tags() {
+        use ferrolite_catalog::{DecodeStatus, FileKind};
+        use ferrolite_image::{Flag, Orientation, Rating, TagId};
+
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+
+        // Seed two in-memory image rows (no DB folder row — folder_path returns
+        // None so image_paths will be empty, but the optimistic update still runs).
+        let mk_rec = |id: i64| ferrolite_catalog::ImageRecord {
+            id,
+            folder_id: 99,
+            filename: format!("img{id}.nef"),
+            width: None,
+            height: None,
+            orientation: Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: DecodeStatus::Done,
+            kind: FileKind::Raw,
+            rating: Rating::default(),
+            flag: Flag::None,
+        };
+
+        s.images = vec![mk_rec(1), mk_rec(2)];
+        s.selection = [1, 2].into_iter().collect();
+
+        let tag = TagId(42);
+
+        // First toggle: tag should be added to both images.
+        s.apply_metadata_edit(&ctx, crate::metadata::MetaEdit::ToggleTag(tag));
+        assert_eq!(
+            s.visible_tags.get(&1).cloned().unwrap_or_default(),
+            vec![tag],
+            "image 1: tag added"
+        );
+        assert_eq!(
+            s.visible_tags.get(&2).cloned().unwrap_or_default(),
+            vec![tag],
+            "image 2: tag added"
+        );
+
+        // Second toggle: tag should be removed from both images.
+        s.apply_metadata_edit(&ctx, crate::metadata::MetaEdit::ToggleTag(tag));
+        assert!(
+            s.visible_tags.get(&1).map(|v| v.is_empty()).unwrap_or(true),
+            "image 1: tag removed"
+        );
+        assert!(
+            s.visible_tags.get(&2).map(|v| v.is_empty()).unwrap_or(true),
+            "image 2: tag removed"
+        );
+
+        // Fallback path: no selection, single selected.
+        s.selection.clear();
+        s.selected = Some(1);
+        s.apply_metadata_edit(&ctx, crate::metadata::MetaEdit::ToggleTag(tag));
+        assert_eq!(
+            s.visible_tags.get(&1).cloned().unwrap_or_default(),
+            vec![tag],
+            "single-selected fallback: tag added to image 1"
+        );
+        assert!(
+            s.visible_tags.get(&2).map(|v| v.is_empty()).unwrap_or(true),
+            "image 2 unchanged when not selected"
+        );
     }
 }

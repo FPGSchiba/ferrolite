@@ -276,45 +276,6 @@ impl FerroliteApp {
         ctx.request_repaint();
     }
 
-    /// Apply a metadata edit to the current selection: optimistic in-memory update
-    /// of every affected grid row, then an off-thread persist (DB + xmp:Rating).
-    fn apply_metadata_edit(&mut self, ctx: &egui::Context, edit: crate::metadata::MetaEdit) {
-        // Resolve the target id set (multi-selection, else the single selected).
-        let mut targets: Vec<i64> = self.state.selection.iter().copied().collect();
-        if targets.is_empty() {
-            if let Some(id) = self.state.selected {
-                targets.push(id);
-            }
-        }
-        if targets.is_empty() {
-            return;
-        }
-        // Optimistic in-memory update + collect (id, path) for the persist job.
-        let mut image_paths: Vec<(i64, std::path::PathBuf)> = Vec::new();
-        for id in &targets {
-            if let Some(rec) = self.state.images.iter().find(|r| r.id == *id).cloned() {
-                if let Ok(Some(fp)) = self.state.reads.folder_path(rec.folder_id) {
-                    image_paths.push((*id, std::path::PathBuf::from(fp).join(&rec.filename)));
-                }
-            }
-        }
-        for id in &targets {
-            let mut tags = self.state.visible_tags.get(id).cloned().unwrap_or_default();
-            if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == *id) {
-                crate::metadata::apply_edit_in_memory(rec, &mut tags, edit);
-            }
-            self.state.visible_tags.insert(*id, tags);
-        }
-        crate::metadata::spawn_metadata_write(
-            &self.state.jobs,
-            &self.state.writer,
-            &self.state.tx,
-            ctx,
-            edit,
-            image_paths,
-        );
-    }
-
     /// Cancel the sparse VT's in-flight tile-load jobs for the named viewer.
     /// The VT lives in `callback_resources`; the decode jobs are cancelled
     /// separately via `ViewerState::cancel_loads`. Guarded on `image_id` so we
@@ -382,6 +343,7 @@ impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Drain job results into state; upload textures for ThumbReady events and
         // build the viewer's rung-1 VirtualTexture for PreviewReady events.
+        let mut ingest_done = false;
         while let Ok(event) = self.state.rx.try_recv() {
             match &event {
                 crate::events::AppEvent::PreviewReady { image_id, image } => {
@@ -405,12 +367,19 @@ impl eframe::App for FerroliteApp {
                     self.state.dirty = true;
                     continue;
                 }
+                crate::events::AppEvent::IngestDone => {
+                    ingest_done = true;
+                }
                 _ => {}
             }
             if let Some((id, jpeg)) = self.state.apply(event) {
                 self.state.upload_thumbnail(ctx, id, jpeg);
             }
             self.state.dirty = true;
+        }
+        // Refresh toolbar metadata-filter caches once per completed ingest (bounded).
+        if ingest_done {
+            self.state.reload_vocab();
         }
         if self.state.dirty {
             self.state.refresh_images();
@@ -559,7 +528,7 @@ impl eframe::App for FerroliteApp {
                 }
             });
             if let Some(edit) = edit {
-                self.apply_metadata_edit(ctx, edit);
+                self.state.apply_metadata_edit(ctx, edit);
             }
         }
 

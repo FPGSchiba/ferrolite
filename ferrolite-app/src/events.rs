@@ -80,8 +80,10 @@ impl AppState {
                 if !ok {
                     self.dirty = true;
                 }
-                if warning.is_some() {
-                    self.warning = warning;
+                match warning {
+                    Some(w) => self.warning = Some(w),
+                    None if ok => self.warning = None,
+                    None => {}
                 }
                 None
             }
@@ -132,5 +134,51 @@ mod tests {
         assert_eq!(out, None);
         assert_eq!(s.thumb_total, 1);
         assert_eq!(s.thumb_jobs.get(&5), Some(&job_id));
+    }
+
+    #[test]
+    fn metadata_result_clears_warning_on_clean_success() {
+        let mut s = AppState::for_test();
+        s.warning = Some("stale warning".into());
+
+        // ok=true, no warning → warning should be cleared.
+        s.apply(AppEvent::MetadataResult {
+            ok: true,
+            warning: None,
+        });
+        assert_eq!(s.warning, None, "warning must be cleared on clean success");
+    }
+
+    #[test]
+    fn metadata_result_preserves_warning_on_failure() {
+        let mut s = AppState::for_test();
+        s.warning = Some("prior warning".into());
+
+        // ok=false, no warning → warning must NOT be cleared (keep the prior).
+        s.apply(AppEvent::MetadataResult {
+            ok: false,
+            warning: None,
+        });
+        assert_eq!(
+            s.warning,
+            Some("prior warning".into()),
+            "warning must be preserved when ok=false and no new warning"
+        );
+    }
+
+    #[test]
+    fn metadata_result_sets_warning_when_provided() {
+        let mut s = AppState::for_test();
+        s.warning = None;
+
+        s.apply(AppEvent::MetadataResult {
+            ok: true,
+            warning: Some("sidecar write failed".into()),
+        });
+        assert_eq!(
+            s.warning,
+            Some("sidecar write failed".into()),
+            "warning must be set when provided"
+        );
     }
 }

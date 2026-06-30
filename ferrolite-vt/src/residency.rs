@@ -1,6 +1,8 @@
 //! Pure CPU residency bookkeeping: which tiles a view needs, and an LRU set with
 //! a tile-count budget. No GPU — the streaming brain, fully testable headless.
 
+use std::collections::HashMap;
+
 use ferrolite_image::{tiles_per_level, TileCoord, TILE_SIZE};
 
 use crate::transform::ViewTransform;
@@ -93,6 +95,74 @@ impl ResidencySet {
     }
 }
 
+/// Tracks the opstack version each *produced* (edited) tile was rendered at.
+/// Pure bookkeeping — no GPU. An edit bumps the version; tiles produced at an
+/// older version are stale and must be re-produced lazily for the current view.
+pub struct VersionedResidency {
+    current: u64,
+    /// coord -> the version it was last produced at.
+    at: HashMap<TileCoord, u64>,
+}
+
+impl VersionedResidency {
+    pub fn new() -> Self {
+        Self {
+            current: 0,
+            at: HashMap::new(),
+        }
+    }
+
+    pub fn current(&self) -> u64 {
+        self.current
+    }
+
+    /// Set the active version. If it changed, returns every coord whose produced
+    /// version is now stale (≠ the new version) so the caller can free those slots.
+    pub fn set_version(&mut self, v: u64) -> Vec<TileCoord> {
+        if v == self.current {
+            return Vec::new();
+        }
+        self.current = v;
+        let stale: Vec<TileCoord> = self
+            .at
+            .iter()
+            .filter(|&(_, &ver)| ver != v)
+            .map(|(&c, _)| c)
+            .collect();
+        for c in &stale {
+            self.at.remove(c);
+        }
+        stale
+    }
+
+    /// Record that `t` was produced at the current version (resident + fresh).
+    pub fn mark(&mut self, t: TileCoord) {
+        self.at.insert(t, self.current);
+    }
+
+    /// Is `t` resident AND produced at the current version?
+    pub fn is_current(&self, t: TileCoord) -> bool {
+        self.at.get(&t) == Some(&self.current)
+    }
+
+    /// Drop `t` entirely (slot freed).
+    pub fn forget(&mut self, t: TileCoord) {
+        self.at.remove(&t);
+    }
+
+    /// Of `needed`, those not resident at the current version (must (re)produce),
+    /// preserving the needed order (visibility priority).
+    pub fn to_produce(&self, needed: &[TileCoord]) -> Vec<TileCoord> {
+        needed.iter().copied().filter(|t| !self.is_current(*t)).collect()
+    }
+}
+
+impl Default for VersionedResidency {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +225,40 @@ mod tests {
         for t in &to_load {
             assert!(alloc.alloc(*t).is_some(), "freed slots make room");
         }
+    }
+
+    #[test]
+    fn version_bump_invalidates_stale_tiles_only() {
+        let mut vr = VersionedResidency::new();
+        vr.mark(tc(0, 0, 0));
+        vr.mark(tc(0, 1, 0));
+        assert!(vr.is_current(tc(0, 0, 0)));
+        // Bump: every previously-marked tile is now stale and returned to invalidate.
+        let stale = vr.set_version(1);
+        assert_eq!(stale.len(), 2);
+        assert!(!vr.is_current(tc(0, 0, 0)));
+        // A no-op bump to the same version invalidates nothing.
+        vr.mark(tc(0, 0, 0));
+        assert!(vr.set_version(1).is_empty());
+    }
+
+    #[test]
+    fn to_produce_is_needed_minus_current_resident() {
+        let mut vr = VersionedResidency::new();
+        vr.mark(tc(0, 0, 0)); // resident at current version
+        let needed = vec![tc(0, 0, 0), tc(0, 1, 0)];
+        // (0,0) is current; only (1,0) must be produced.
+        assert_eq!(vr.to_produce(&needed), vec![tc(0, 1, 0)]);
+        // After a version bump, (0,0) is stale -> both must be (re)produced.
+        vr.set_version(2);
+        assert_eq!(vr.to_produce(&needed), vec![tc(0, 0, 0), tc(0, 1, 0)]);
+    }
+
+    #[test]
+    fn forget_drops_a_tile() {
+        let mut vr = VersionedResidency::new();
+        vr.mark(tc(0, 0, 0));
+        vr.forget(tc(0, 0, 0));
+        assert!(!vr.is_current(tc(0, 0, 0)));
     }
 }

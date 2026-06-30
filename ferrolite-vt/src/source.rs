@@ -3,15 +3,22 @@
 //! builds an in-memory LOD pyramid (box-downsample) from one full image.
 
 use ferrolite_image::{
-    level_size as img_level_size, pyramid_level_count, tile_pixel_origin, LinearRgbaF32, TileCoord,
-    TILE_SIZE,
+    haloed_tile_extent, haloed_tile_origin, level_size as img_level_size, pyramid_level_count,
+    LinearRgbaF32, TileCoord,
 };
 
 pub trait TileSource {
     fn level_count(&self) -> u32;
     fn level_size(&self, lod: u32) -> (u32, u32);
-    /// A `TILE_SIZE`² tile, edge-clamped where the tile overhangs the level.
-    fn tile(&self, coord: TileCoord) -> LinearRgbaF32;
+    /// A `haloed_tile_extent(halo)`² tile centered on `coord`'s interior, edge-
+    /// clamped where it overhangs the level. `halo = 0` yields the plain
+    /// `TILE_SIZE`² interior tile.
+    fn tile_with_halo(&self, coord: TileCoord, halo: u32) -> LinearRgbaF32;
+    /// A `TILE_SIZE`² tile, edge-clamped where it overhangs the level. Defined as
+    /// the no-halo haloed tile so Spec-1 display paths are unchanged.
+    fn tile(&self, coord: TileCoord) -> LinearRgbaF32 {
+        self.tile_with_halo(coord, 0)
+    }
 }
 
 pub struct PyramidTileSource {
@@ -39,19 +46,21 @@ impl TileSource for PyramidTileSource {
         let l = &self.levels[lod as usize];
         (l.width, l.height)
     }
-    fn tile(&self, coord: TileCoord) -> LinearRgbaF32 {
+    fn tile_with_halo(&self, coord: TileCoord, halo: u32) -> LinearRgbaF32 {
         let level = &self.levels[coord.lod as usize];
-        let (ox, oy) = tile_pixel_origin(coord);
-        let mut px = Vec::with_capacity((TILE_SIZE * TILE_SIZE * 4) as usize);
-        for ty in 0..TILE_SIZE {
-            for tx in 0..TILE_SIZE {
-                let sx = (ox + tx).min(level.width - 1);
-                let sy = (oy + ty).min(level.height - 1);
+        let (ox, oy) = haloed_tile_origin(coord, halo);
+        let ext = haloed_tile_extent(halo);
+        let mut px = Vec::with_capacity((ext * ext * 4) as usize);
+        for ty in 0..ext {
+            for tx in 0..ext {
+                // Signed source coordinate, edge-clamped into [0, dim-1].
+                let sx = (ox + tx as i64).clamp(0, level.width as i64 - 1) as u32;
+                let sy = (oy + ty as i64).clamp(0, level.height as i64 - 1) as u32;
                 let i = ((sy * level.width + sx) * 4) as usize;
                 px.extend_from_slice(&level.pixels[i..i + 4]);
             }
         }
-        LinearRgbaF32::new(TILE_SIZE, TILE_SIZE, px).expect("tile length")
+        LinearRgbaF32::new(ext, ext, px).expect("haloed tile length")
     }
 }
 
@@ -121,5 +130,44 @@ mod tests {
         assert_eq!((t.width, t.height), (TILE_SIZE, TILE_SIZE));
         // First pixel should be the color from (256, 256) in the level
         assert_eq!(&t.pixels[0..4], &[0.2, 0.4, 0.6, 1.0]);
+    }
+
+    #[test]
+    fn tile_with_halo_zero_equals_tile() {
+        let src = PyramidTileSource::new(solid(512, 512, [0.2, 0.4, 0.6]));
+        let c = TileCoord { lod: 0, x: 1, y: 1 };
+        assert_eq!(src.tile_with_halo(c, 0).pixels, src.tile(c).pixels);
+    }
+
+    #[test]
+    fn tile_with_halo_is_haloed_extent_squared() {
+        let src = PyramidTileSource::new(solid(512, 512, [0.2, 0.4, 0.6]));
+        let t = src.tile_with_halo(TileCoord { lod: 0, x: 0, y: 0 }, 4);
+        let ext = ferrolite_image::haloed_tile_extent(4);
+        assert_eq!((t.width, t.height), (ext, ext));
+    }
+
+    #[test]
+    fn tile_with_halo_edge_clamps_overhang() {
+        // Tile (0,0) with halo 2 overhangs top-left by 2px; those clamp to (0,0).
+        let mut px = Vec::new();
+        for y in 0..8u32 {
+            for x in 0..8u32 {
+                // distinct per-pixel so clamping is observable: r = x/8, g = y/8.
+                px.extend_from_slice(&[x as f32 / 8.0, y as f32 / 8.0, 0.0, 1.0]);
+            }
+        }
+        let src = PyramidTileSource::new(LinearRgbaF32::new(8, 8, px).unwrap());
+        let t = src.tile_with_halo(TileCoord { lod: 0, x: 0, y: 0 }, 2);
+        // Top-left haloed pixel maps to source (-2,-2) -> clamps to (0,0) = (0,0).
+        assert_eq!(&t.pixels[0..2], &[0.0, 0.0]);
+        // The pixel at haloed (2,2) is source (0,0) too (origin); (3,3) is source (1,1).
+        let ext = ferrolite_image::haloed_tile_extent(2) as usize;
+        let at = |x: usize, y: usize| {
+            let i = (y * ext + x) * 4;
+            (t.pixels[i], t.pixels[i + 1])
+        };
+        assert_eq!(at(2, 2), (0.0, 0.0));
+        assert_eq!(at(3, 3), (1.0 / 8.0, 1.0 / 8.0));
     }
 }

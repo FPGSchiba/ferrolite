@@ -2,14 +2,17 @@
 //! and the generic `PointOpNode<U>` compute pass.
 
 use ferrolite_gpu::{GpuContext, Node};
-use ferrolite_image::LinearRgbaF32;
+use ferrolite_image::{haloed_tile_extent, tile_pixel_origin, LinearRgbaF32, TileCoord};
 use half::f16;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
+use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
+use crate::op::Geometry;
+use crate::uniforms::{geometry_tile_uniform, GeometryUniform};
 
 /// Upload a display-linear `f32` image as an `Rgba16Float` GPU texture (the
 /// pipeline source). Mirrors the VT's single-texture upload (f32 -> f16).
@@ -612,6 +615,182 @@ impl Node<PipelineImage> for CurveNode {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(src.width.div_ceil(8), src.height.div_ceil(8), 1);
+        }
+        self.ctx.queue.submit([enc.finish()]);
+        dst
+    }
+}
+
+/// The current tile request driving the geometry head (coord + active halo).
+#[derive(Clone, Copy)]
+pub(crate) struct TileRequest {
+    pub coord: TileCoord,
+    pub halo: u32,
+}
+
+/// Root node for the per-tile edit pipeline: samples the `GpuPyramidSource` LOD
+/// for the current `TileRequest` through the geometry transform (geometry at the
+/// head), producing a `(ext×ext)` haloed, geometrically-resampled tile in output
+/// space. The color chain runs downstream of it.
+pub(crate) struct GeometryHeadNode {
+    ctx: Arc<GpuContext>,
+    pipeline: wgpu::ComputePipeline,
+    bgl: wgpu::BindGroupLayout,
+    uniform_buf: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+    source: Arc<GpuPyramidSource>,
+    geometry: Geometry,
+    request: Rc<Cell<TileRequest>>,
+    out: RefCell<Option<PipelineImage>>,
+}
+
+impl GeometryHeadNode {
+    pub(crate) fn new(
+        ctx: Arc<GpuContext>,
+        source: Arc<GpuPyramidSource>,
+        geometry: Geometry,
+        request: Rc<Cell<TileRequest>>,
+    ) -> Self {
+        let bgl = geometry_bgl(&ctx.device); // reuse the geometry pass bind layout
+        let module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("geometry-head"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/geometry.wgsl").into()),
+            });
+        let layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("geometry-head"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+        let pipeline = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("geometry-head"),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: "main",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let uniform_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("geometry-head-uniform"),
+            size: std::mem::size_of::<GeometryUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("geometry-head-samp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            ctx,
+            pipeline,
+            bgl,
+            uniform_buf,
+            sampler,
+            source,
+            geometry,
+            request,
+            out: RefCell::new(None),
+        }
+    }
+
+    fn ensure_out(&self, ext: u32) -> PipelineImage {
+        let mut out = self.out.borrow_mut();
+        if out.as_ref().map(|o| (o.width, o.height)) != Some((ext, ext)) {
+            let tex = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("geometry-head-out"),
+                size: wgpu::Extent3d {
+                    width: ext,
+                    height: ext,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: PIPELINE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            *out = Some(PipelineImage {
+                texture: Arc::new(tex),
+                width: ext,
+                height: ext,
+            });
+        }
+        out.as_ref().unwrap().clone()
+    }
+}
+
+impl Node<PipelineImage> for GeometryHeadNode {
+    fn evaluate(&self, _inputs: &[&PipelineImage]) -> PipelineImage {
+        let req = self.request.get();
+        let lod = req.coord.lod;
+        let src = self.source.level(lod);
+        let (sw, sh) = self.source.level_size(lod);
+        let ext = haloed_tile_extent(req.halo);
+        let dst = self.ensure_out(ext);
+
+        // Haloed output-tile origin at this LOD (interior origin minus halo).
+        let (ox, oy) = tile_pixel_origin(req.coord);
+        let out_origin = (ox as f32 - req.halo as f32, oy as f32 - req.halo as f32);
+        let u = geometry_tile_uniform(Some(self.geometry), sw, sh, out_origin, ext);
+        self.ctx
+            .queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+
+        let src_view = src
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let dst_view = dst
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("geometry-head-bind"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dst_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("geometry-head-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(ext.div_ceil(8), ext.div_ceil(8), 1);
         }
         self.ctx.queue.submit([enc.finish()]);
         dst

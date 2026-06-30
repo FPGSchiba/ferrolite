@@ -7,6 +7,7 @@ mod nodes;
 mod op;
 mod pipeline;
 mod serialize;
+mod tile_edit;
 mod uniforms;
 
 pub use gpu_pyramid::GpuPyramidSource;
@@ -17,6 +18,7 @@ pub use op::{
     ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, EditPipeline};
+pub use tile_edit::TileEditPipeline;
 pub use serialize::{deserialize, serialize};
 // The uniform structs are exported as the documented GPU memory layout the
 // edit passes consume; the param→uniform helper fns + math are crate-internal

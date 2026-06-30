@@ -81,4 +81,31 @@ impl ReadPool {
     pub fn folder_path(&self, folder_id: i64) -> Result<Option<String>, CatalogError> {
         self.with_conn(|c| crate::queries::folder_path(c, folder_id))
     }
+    pub fn list_tags(&self) -> Result<Vec<crate::TagRecord>, CatalogError> {
+        self.with_conn(crate::queries::list_tags)
+    }
+    pub fn tags_for_images(
+        &self,
+        image_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<ferrolite_image::TagId>>, CatalogError> {
+        self.with_conn(|c| crate::queries::tags_for_images(c, image_ids))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Catalog;
+    use ferrolite_image::Color;
+
+    #[test]
+    fn read_pool_lists_tags() {
+        let dir = std::env::temp_dir().join(format!("frl-rp-tags-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("c.db");
+        let _ = std::fs::remove_file(&path);
+        let cat = Catalog::open(&path).unwrap();
+        cat.create_tag("x", Color::default()).unwrap();
+        let rp = super::ReadPool::open(&path, 1).unwrap();
+        assert_eq!(rp.list_tags().unwrap().len(), 1);
+    }
 }

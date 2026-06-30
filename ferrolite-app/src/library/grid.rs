@@ -34,6 +34,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
             now_visible.insert(state.images[idx].id);
         }
         reprioritize(state, &now_visible);
+        // Fetch tag associations for the visible window (only missing ids queried).
+        state.ensure_tags_for(&now_visible);
         state.last_visible = now_visible;
 
         for idx in range {
@@ -105,16 +107,63 @@ fn paint_cell(
         }
     }
 
-    // Selection: single click selects; double-click bubbles the id up to app.rs.
+    // Rating stars (bottom-left).
+    if rec.rating.get() > 0 {
+        let stars: String = "★".repeat(rec.rating.get() as usize);
+        painter.text(
+            rect.left_bottom() + egui::vec2(4.0, -4.0),
+            egui::Align2::LEFT_BOTTOM,
+            stars,
+            egui::FontId::proportional(11.0),
+            theme::ACCENT,
+        );
+    }
+    // Flag glyph (top-left).
+    let flag_glyph = match rec.flag {
+        ferrolite_image::Flag::Pick => Some(("⚑", theme::SEMANTIC_GREEN)),
+        ferrolite_image::Flag::Reject => Some(("⚐", theme::SEMANTIC_RED)),
+        ferrolite_image::Flag::None => None,
+    };
+    if let Some((g, col)) = flag_glyph {
+        painter.text(
+            rect.left_top() + egui::vec2(4.0, 4.0),
+            egui::Align2::LEFT_TOP,
+            g,
+            egui::FontId::proportional(12.0),
+            col,
+        );
+    }
+    // Tag colour dots (bottom-right), looked up from the loaded vocabulary.
+    if let Some(tag_ids) = state.visible_tags.get(&rec.id) {
+        let mut x = rect.right() - 8.0;
+        for tid in tag_ids.iter().take(5) {
+            if let Some(t) = state.tags.iter().find(|t| t.id == *tid) {
+                let c = egui::Color32::from_rgb(t.color.r, t.color.g, t.color.b);
+                painter.circle_filled(egui::pos2(x, rect.bottom() - 8.0), 4.0, c);
+                x -= 11.0;
+            }
+        }
+    }
+
+    // Selection: ctrl/cmd-click toggles; plain click replaces; double-click opens.
     let resp = ui.interact(rect, ui.id().with(("cell", rec.id)), egui::Sense::click());
     if resp.clicked() {
+        let multi = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+        if multi {
+            if !state.selection.remove(&rec.id) {
+                state.selection.insert(rec.id);
+            }
+        } else {
+            state.selection.clear();
+            state.selection.insert(rec.id);
+        }
         state.selected = Some(rec.id);
     }
     let mut opened = None;
     if resp.double_clicked() {
         opened = Some(rec.id);
     }
-    if state.selected == Some(rec.id) {
+    if state.selection.contains(&rec.id) || state.selected == Some(rec.id) {
         painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::ACCENT));
     }
     opened

@@ -82,8 +82,6 @@ pub struct AppState {
     /// Per-image tag associations cached for the currently visible grid cells.
     pub visible_tags: HashMap<i64, Vec<TagId>>,
     /// Selected image ids (multi-selection for batch ops).
-    // consumed by future H tasks (batch ops)
-    #[allow(dead_code)]
     pub selection: HashSet<i64>,
     /// Non-critical warning surfaced in the UI (e.g. query error).
     pub warning: Option<String>,
@@ -170,8 +168,6 @@ impl AppState {
     }
 
     /// Fetch tag associations for any visible image ids not yet cached (virtualised).
-    // called by future H tasks (grid tag rendering)
-    #[allow(dead_code)]
     pub fn ensure_tags_for(&mut self, ids: &HashSet<i64>) {
         let missing: Vec<i64> = ids
             .iter()

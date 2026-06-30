@@ -1,7 +1,7 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_pipeline::{blit_to_rgba8, upload_source, EditPipeline, Exposure, Op, OpStack};
+use ferrolite_pipeline::{blit_to_rgba8, upload_source, EditPipeline, Exposure, Op, OpStack, WhiteBalance};
 use std::sync::Arc;
 
 const W: u32 = 64;
@@ -29,6 +29,18 @@ fn exposure_plus_one_ev_matches_golden() {
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "exposure_plus1.png");
+}
+
+#[test]
+fn white_balance_warm_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default().set_op(Op::WhiteBalance(WhiteBalance { temp: 0.5, tint: -0.2 }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "wb_warm.png");
 }
 
 #[test]

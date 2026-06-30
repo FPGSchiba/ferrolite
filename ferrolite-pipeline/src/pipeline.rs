@@ -10,7 +10,7 @@ use ferrolite_image::LinearRgbaF32;
 use crate::image::PipelineImage;
 use crate::nodes::{PointOpNode, SourceNode};
 use crate::op::OpStack;
-use crate::uniforms::{exposure_uniform, ExposureUniform};
+use crate::uniforms::{exposure_uniform, wb_uniform, ExposureUniform, WbUniform};
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
 /// feeding the fixed canonical op chain. Editing updates a shared param cell and
@@ -21,6 +21,8 @@ pub struct EditPipeline {
     output_id: NodeId,
     exposure_id: NodeId,
     exposure: Rc<Cell<ExposureUniform>>,
+    wb_id: NodeId,
+    wb: Rc<Cell<WbUniform>>,
     stack: OpStack,
 }
 
@@ -38,12 +40,23 @@ impl EditPipeline {
         );
         let exposure_id = graph.add_node(Box::new(exposure_node), vec![source_id]);
 
+        let wb = Rc::new(Cell::new(wb_uniform(stack.white_balance())));
+        let wb_node = PointOpNode::new(
+            ctx.clone(),
+            include_str!("shaders/white_balance.wgsl"),
+            "white-balance",
+            wb.clone(),
+        );
+        let wb_id = graph.add_node(Box::new(wb_node), vec![exposure_id]);
+
         Self {
             ctx,
             graph,
-            output_id: exposure_id,
+            output_id: wb_id,
             exposure_id,
             exposure,
+            wb_id,
+            wb,
             stack,
         }
     }
@@ -54,6 +67,11 @@ impl EditPipeline {
         if e != self.exposure.get() {
             self.exposure.set(e);
             self.graph.mark_dirty(self.exposure_id);
+        }
+        let w = wb_uniform(stack.white_balance());
+        if w != self.wb.get() {
+            self.wb.set(w);
+            self.graph.mark_dirty(self.wb_id);
         }
         self.stack = stack;
     }

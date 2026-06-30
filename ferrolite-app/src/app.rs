@@ -523,13 +523,9 @@ impl eframe::App for FerroliteApp {
             }
         }
 
-        // Keyboard metadata commands: rating 0–5, flag P/X/U (Library only, no
-        // viewer, no pending modal, no text-field focus).
-        if self.module.is_library()
-            && self.state.viewer.is_none()
-            && self.state.pending_remove.is_none()
-            && !ctx.wants_keyboard_input()
-        {
+        // Keyboard metadata commands: rating 0–5, flag P/X/U. In Library they apply
+        // to the grid selection; in Develop they apply to the open viewer image.
+        if self.state.pending_remove.is_none() && !ctx.wants_keyboard_input() {
             use ferrolite_image::{Flag, Rating};
             let edit = ctx.input(|i| {
                 for n in 0..=5u8 {
@@ -556,7 +552,11 @@ impl eframe::App for FerroliteApp {
                 }
             });
             if let Some(edit) = edit {
-                self.state.apply_metadata_edit(ctx, edit);
+                if self.module.is_library() && self.state.viewer.is_none() {
+                    self.state.apply_metadata_edit(ctx, edit);
+                } else if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                    self.state.apply_metadata_edit_to_image(ctx, image_id, edit);
+                }
             }
         }
 

@@ -417,11 +417,8 @@ impl eframe::App for FerroliteApp {
             )
             .show(ctx, |ui| {
                 if self.module.is_library() {
-                    let changed = crate::library::toolbar::show(
-                        ui,
-                        &mut self.thumb_size,
-                        &mut self.state.include_subfolders,
-                    );
+                    let changed =
+                        crate::library::toolbar::show(ui, &mut self.thumb_size, &mut self.state);
                     if changed {
                         self.state.dirty = true;
                     }

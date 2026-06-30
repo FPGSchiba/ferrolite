@@ -74,8 +74,6 @@ pub struct AppState {
     /// Which set of images is shown (folder, all, collection, recently added).
     pub source: ViewSource,
     /// Full tag vocabulary loaded from the catalog.
-    // consumed by future H tasks (tag panel, filter bar)
-    #[allow(dead_code)]
     pub tags: Vec<TagRecord>,
     /// Full collection vocabulary loaded from the catalog.
     // consumed by future H tasks

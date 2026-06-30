@@ -2,6 +2,7 @@
 
 pub mod cell_state;
 pub mod filmstrip;
+pub mod filter;
 pub mod folder_tree;
 pub mod grid;
 pub mod grid_layout;

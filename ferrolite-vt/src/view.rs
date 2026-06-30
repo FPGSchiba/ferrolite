@@ -1112,6 +1112,7 @@ impl VirtualTexture {
         for t in &to_evict {
             s.allocator.free(*t);
             s.residency.forget(*t);
+            s.versions.forget(*t);
             if let Some(idx) = flat_index(&s.layout, *t) {
                 s.slots[idx] = NOT_RESIDENT;
             }
@@ -1179,6 +1180,7 @@ impl VirtualTexture {
                     if let Some(victim) = s.residency.lru() {
                         s.allocator.free(victim);
                         s.residency.forget(victim);
+                        s.versions.forget(victim);
                         if let Some(idx) = flat_index(&s.layout, victim) {
                             s.slots[idx] = NOT_RESIDENT;
                         }

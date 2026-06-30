@@ -1,7 +1,7 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_pipeline::{blit_to_rgba8, upload_source, EditPipeline, Exposure, Op, OpStack, WhiteBalance};
+use ferrolite_pipeline::{blit_to_rgba8, upload_source, Contrast, EditPipeline, Exposure, Op, OpStack, WhiteBalance};
 use std::sync::Arc;
 
 const W: u32 = 64;
@@ -58,4 +58,16 @@ fn identity_stack_matches_source_render() {
     let edited = pipe.render_to_image();
     let diff = common::max_abs_diff(&source_render, &edited);
     assert!(diff <= 4, "identity stack diverged from source (diff {diff})");
+}
+
+#[test]
+fn contrast_boost_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default().set_op(Op::Contrast(Contrast { amount: 0.5 }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "contrast_boost.png");
 }

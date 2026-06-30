@@ -415,35 +415,47 @@ impl eframe::App for FerroliteApp {
                 crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1");
             });
 
-        let top_h = if self.module.is_library() {
-            40.0
-        } else {
-            108.0
-        };
         let mut film_clicked: Option<i64> = None;
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(top_h)
-            .frame(
-                egui::Frame::none()
-                    .fill(theme::BG_TOOLBAR)
-                    .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
-            )
-            .show(ctx, |ui| {
-                if self.module.is_library() {
+        if self.module.is_library() {
+            egui::TopBottomPanel::top("toolbar")
+                .exact_height(40.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                )
+                .show(ctx, |ui| {
                     let changed =
                         crate::library::toolbar::show(ui, &mut self.thumb_size, &mut self.state);
                     if changed {
                         self.state.dirty = true;
                     }
-                } else {
+                });
+        } else {
+            egui::TopBottomPanel::top("develop_filter")
+                .exact_height(36.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                )
+                .show(ctx, |ui| {
                     if crate::library::develop_filter_bar::show(ui, &mut self.state) {
                         self.state.dirty = true;
                     }
-                    ui.separator();
+                });
+            egui::TopBottomPanel::top("develop_filmstrip")
+                .exact_height(72.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                )
+                .show(ctx, |ui| {
                     let current = self.state.viewer.as_ref().map(|v| v.image_id);
                     film_clicked = crate::library::filmstrip::show(ui, &mut self.state, current);
-                }
-            });
+                });
+        }
         if let Some(id) = film_clicked {
             if let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() {
                 self.open_record(ctx, frame, &rec);

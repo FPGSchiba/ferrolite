@@ -3,4 +3,5 @@
 
 pub mod crop_math;
 pub mod curve_math;
+pub mod history;
 pub mod ops_edit;

@@ -102,18 +102,23 @@ fn paint_cell(
     // drawn on top at the end of the function.
     let img_rect = rect;
 
+    // Round the thumbnail corners to match the selection border so a square
+    // corner never pokes outside the rounded border. Unselected cells stay square.
+    let img_round = if selected { SEL_ROUND } else { 0.0 };
     match cell_state(rec, has_tex) {
         CellState::Ready => {
             if let Some(tex) = state.textures.get(rec.id) {
-                let img = egui::Image::new(tex).fit_to_exact_size(img_rect.size());
+                let img = egui::Image::new(tex)
+                    .fit_to_exact_size(img_rect.size())
+                    .rounding(img_round);
                 img.paint_at(ui, img_rect);
             }
         }
         CellState::Placeholder => {
-            painter.rect_filled(img_rect, 2.0, theme::BG_PANEL);
+            painter.rect_filled(img_rect, img_round.max(2.0), theme::BG_PANEL);
         }
         CellState::Failed => {
-            painter.rect_filled(img_rect, 2.0, theme::BG_PANEL);
+            painter.rect_filled(img_rect, img_round.max(2.0), theme::BG_PANEL);
             painter.text(
                 img_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -213,13 +218,20 @@ fn paint_cell(
         opened = Some(rec.id);
     }
 
-    // Selection: a clean solid blue rounded border, inset 1px so it sits fully
-    // inside the cell (no bleed into the inter-cell gap).
+    // Selection border: a bright-blue rounded ring over a thin dark halo, so it
+    // stays distinct on both dark and light/bluish thumbnails. Inset 1px to sit
+    // fully inside the cell.
     if selected {
+        let path = rect.shrink(1.0);
         painter.rect_stroke(
-            rect.shrink(1.0),
+            path,
             SEL_ROUND,
-            egui::Stroke::new(2.0, theme::ACCENT),
+            egui::Stroke::new(3.5, egui::Color32::from_black_alpha(160)),
+        );
+        painter.rect_stroke(
+            path,
+            SEL_ROUND,
+            egui::Stroke::new(2.0, theme::ACCENT_BRIGHT),
         );
     }
 

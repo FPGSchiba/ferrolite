@@ -7,24 +7,16 @@
 //! IBM Plex Sans lacks symbol glyphs (★ ⚑ ▾ etc.) so all icons are painted via
 //! `egui::Painter` using the helpers in `library::icons`.
 
+use crate::library::filter_widgets as fw;
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
 use crate::widgets::EguiSlider;
-use ferrolite_catalog::{SortKey, TagMode};
-use ferrolite_image::Flag;
 
 /// Width of the thumbnail-size slider's box on the right.
 const SIZE_SLIDER_W: f32 = 208.0;
 
-/// Star circumradius (px) and gap between stars.
-const STAR_R: f32 = 5.5;
-const STAR_GAP: f32 = 2.0;
-
-/// Flag icon height (px).
-const FLAG_H: f32 = 12.0;
-
-/// Caret half-width (px).
+/// Caret half-width (px) used in the Metadata button.
 const CARET_HW: f32 = 4.5;
 
 /// Returns `true` if any filter/sort/source field changed this frame.
@@ -43,149 +35,30 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             changed = true;
         }
 
-        // Sort key + direction.
-        egui::ComboBox::from_id_salt("sort")
-            .selected_text(sort_label(state.filter.sort_key))
-            .show_ui(ui, |ui| {
-                for (k, lbl) in [
-                    (SortKey::CaptureTime, "Capture Time"),
-                    (SortKey::Filename, "Filename"),
-                    (SortKey::Rating, "Rating"),
-                    (SortKey::AddedAt, "Date Added"),
-                ] {
-                    if ui
-                        .selectable_value(&mut state.filter.sort_key, k, lbl)
-                        .clicked()
-                    {
-                        changed = true;
-                    }
-                }
-            });
-
-        // Sort-direction button: caret drawn as a shape — no ▼/▲ font glyph.
-        {
-            let size = egui::vec2(16.0, 16.0);
-            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-            let color = if resp.hovered() {
-                theme::TEXT_PRIMARY
-            } else {
-                theme::TEXT_DIM
-            };
-            icons::caret(
-                &ui.painter().with_clip_rect(rect),
-                rect.center(),
-                CARET_HW,
-                color,
-                state.filter.sort_desc, // down when descending
-            );
-            if resp.clicked() {
-                state.filter.sort_desc = !state.filter.sort_desc;
-                changed = true;
-            }
+        // Sort key + direction (combo + caret toggle).
+        if fw::sort_controls(ui, &mut state.filter.sort_key, &mut state.filter.sort_desc) {
+            changed = true;
         }
 
-        // Rating threshold: draw 5 star shapes; first `min_rating` filled.
-        // Clicking star N sets min_rating=N, or clears if already active.
-        {
-            let star_cell = STAR_R * 2.0 + STAR_GAP;
-            let total_w = icons::advance_width(STAR_R, STAR_GAP, 5);
-            let size = egui::vec2(total_w, STAR_R * 2.0 + 4.0);
-            let (rect, overall) = ui.allocate_exact_size(size, egui::Sense::hover());
-
-            // Check individual star clicks via pointer position.
-            let pointer_pos = ui.input(|i| i.pointer.interact_pos());
-            for n in 1..=5u8 {
-                let cx = rect.left() + STAR_R + (n as f32 - 1.0) * star_cell;
-                let star_rect = egui::Rect::from_center_size(
-                    egui::Pos2::new(cx, rect.center().y),
-                    egui::vec2(star_cell, size.y),
-                );
-                let hovered = pointer_pos.map(|p| star_rect.contains(p)).unwrap_or(false);
-                let clicked = hovered && overall.ctx.input(|i| i.pointer.primary_clicked());
-                if clicked {
-                    state.filter.min_rating = if state.filter.min_rating == n { 0 } else { n };
-                    changed = true;
-                }
-
-                let filled = state.filter.min_rating >= n;
-                let color = if filled {
-                    theme::ACCENT
-                } else if hovered {
-                    theme::TEXT_DIM
-                } else {
-                    theme::TEXT_FAINT
-                };
-                icons::star(
-                    ui.painter(),
-                    egui::Pos2::new(cx, rect.center().y),
-                    STAR_R,
-                    filled,
-                    color,
-                );
-            }
+        // Rating threshold: 5 clickable stars; clicking active star clears to 0.
+        if fw::rating_threshold(ui, &mut state.filter.min_rating) {
+            changed = true;
         }
 
-        // Flag filter toggles: draw pennant shapes (no ⚑/⚐ font glyphs).
-        for (f, is_pick) in [(Flag::Pick, true), (Flag::Reject, false)] {
-            let on = state.filter.flags.contains(&f);
-            let base_color = if is_pick {
-                theme::SEMANTIC_GREEN
-            } else {
-                theme::SEMANTIC_RED
-            };
-
-            let size = egui::vec2(14.0, FLAG_H + 4.0);
-            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-
-            // Subtle background rect when active (toggle affordance).
-            if on {
-                ui.painter()
-                    .rect_filled(rect.expand(1.0), 2.0, base_color.gamma_multiply(0.18));
-            } else if resp.hovered() {
-                ui.painter().rect_filled(
-                    rect.expand(1.0),
-                    2.0,
-                    theme::TEXT_FAINT.gamma_multiply(0.12),
-                );
-            }
-
-            let color = if on || resp.hovered() {
-                base_color
-            } else {
-                theme::TEXT_FAINT
-            };
-            // Place pole bottom near the bottom of the rect, centered.
-            let base = egui::Pos2::new(rect.center().x - 2.0, rect.bottom() - 2.0);
-            icons::flag(ui.painter(), base, FLAG_H, on, color);
-
-            if resp.clicked() {
-                toggle_flag(&mut state.filter.flags, f);
-                changed = true;
-            }
+        // Flag filter toggles (Pick green, Reject red).
+        if fw::flag_filters(ui, &mut state.filter.flags) {
+            changed = true;
         }
 
         // Tag filter dropdown (multi-select over the global vocabulary) + Any/All.
-        egui::ComboBox::from_id_salt("tagfilter")
-            .selected_text(format!("Tags ({})", state.filter.tag_ids.len()))
-            .show_ui(ui, |ui| {
-                let mode_all = matches!(state.filter.tag_mode, TagMode::All);
-                if ui.selectable_label(!mode_all, "Any").clicked() {
-                    state.filter.tag_mode = TagMode::Any;
-                    changed = true;
-                }
-                if ui.selectable_label(mode_all, "All").clicked() {
-                    state.filter.tag_mode = TagMode::All;
-                    changed = true;
-                }
-                ui.separator();
-                for t in &state.tags {
-                    let mut on = state.filter.tag_ids.contains(&t.id);
-                    if ui.checkbox(&mut on, &t.name).changed() {
-                        toggle_tag(&mut state.filter.tag_ids, t.id);
-                        changed = true;
-                    }
-                }
-            });
+        if fw::tag_filter_dropdown(
+            ui,
+            &mut state.filter.tag_ids,
+            &mut state.filter.tag_mode,
+            &state.tags,
+        ) {
+            changed = true;
+        }
 
         if ui
             .checkbox(&mut state.include_subfolders, "Subfolders")
@@ -324,29 +197,4 @@ fn show_metadata_button(ui: &mut egui::Ui, _popup_id: egui::Id) -> egui::Respons
         btn
     })
     .inner
-}
-
-fn sort_label(k: SortKey) -> &'static str {
-    match k {
-        SortKey::CaptureTime => "Capture Time",
-        SortKey::Filename => "Filename",
-        SortKey::Rating => "Rating",
-        SortKey::AddedAt => "Date Added",
-    }
-}
-
-fn toggle_flag(flags: &mut Vec<Flag>, f: Flag) {
-    if let Some(p) = flags.iter().position(|x| *x == f) {
-        flags.remove(p);
-    } else {
-        flags.push(f);
-    }
-}
-
-fn toggle_tag(ids: &mut Vec<ferrolite_image::TagId>, id: ferrolite_image::TagId) {
-    if let Some(p) = ids.iter().position(|x| *x == id) {
-        ids.remove(p);
-    } else {
-        ids.push(id);
-    }
 }

@@ -64,11 +64,15 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
             match curve_math::nearest_point(&points, norm, HIT_R) {
                 Some(idx) => ui.memory_mut(|m| m.data.insert_temp(resp.id, idx)),
                 None => {
+                    // Insert at the clamped coordinate, then grab THAT point by its
+                    // exact (bit-identical) value — nearest_point can resolve to a
+                    // neighbor on a crowded curve.
+                    let inserted = (norm.0.clamp(0.0, 1.0), norm.1.clamp(0.0, 1.0));
                     points = curve_math::insert_point(&points, norm);
-                    let idx =
-                        curve_math::nearest_point(&points, norm, HIT_R).unwrap_or(0);
+                    let idx = points.iter().position(|&q| q == inserted).unwrap_or(0);
                     ui.memory_mut(|m| m.data.insert_temp(resp.id, idx));
                     changed = true;
+                    commit = true;
                 }
             }
         }

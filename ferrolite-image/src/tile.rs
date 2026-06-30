@@ -42,6 +42,20 @@ pub fn tile_pixel_origin(coord: TileCoord) -> (u32, u32) {
     (coord.x * TILE_SIZE, coord.y * TILE_SIZE)
 }
 
+/// Edge length of the haloed tile region: `TILE_SIZE + 2*halo`. A producer that
+/// over-fetches `halo` pixels on every side reads/writes a buffer this wide.
+pub fn haloed_tile_extent(halo: u32) -> u32 {
+    TILE_SIZE + 2 * halo
+}
+
+/// Top-left pixel of the haloed region for `coord` within its LOD level. The
+/// interior tile origin minus `halo` on each axis; can be negative where the
+/// halo overhangs the level's top/left edge (the consumer edge-clamps on read).
+pub fn haloed_tile_origin(coord: TileCoord, halo: u32) -> (i64, i64) {
+    let (ox, oy) = tile_pixel_origin(coord);
+    (ox as i64 - halo as i64, oy as i64 - halo as i64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +92,32 @@ mod tests {
         assert_eq!(
             tile_pixel_origin(TileCoord { lod: 3, x: 2, y: 1 }),
             (512, 256)
+        );
+    }
+
+    #[test]
+    fn haloed_extent_is_tile_plus_two_halos() {
+        assert_eq!(haloed_tile_extent(0), TILE_SIZE);
+        assert_eq!(haloed_tile_extent(3), TILE_SIZE + 6);
+    }
+
+    #[test]
+    fn haloed_origin_subtracts_halo_and_can_go_negative() {
+        // Tile (0,0) with halo 4 starts at (-4, -4).
+        assert_eq!(
+            haloed_tile_origin(TileCoord { lod: 0, x: 0, y: 0 }, 4),
+            (-4, -4)
+        );
+        // Tile (1,2) at lod 0 starts at (256, 512); halo 2 -> (254, 510).
+        assert_eq!(
+            haloed_tile_origin(TileCoord { lod: 0, x: 1, y: 2 }, 2),
+            (254, 510)
+        );
+        // halo 0 == tile_pixel_origin.
+        let o = tile_pixel_origin(TileCoord { lod: 0, x: 3, y: 1 });
+        assert_eq!(
+            haloed_tile_origin(TileCoord { lod: 0, x: 3, y: 1 }, 0),
+            (o.0 as i64, o.1 as i64)
         );
     }
 }

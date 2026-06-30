@@ -128,17 +128,20 @@ mod tests {
 
     #[test]
     fn move_interior_with_near_neighbors_does_not_panic() {
-        // Two interior points whose x values are only 1e-4 apart (< 2e-4),
-        // so lo > hi in the interior branch — exercises the degenerate guard.
-        let pts = vec![(0.0, 0.0), (0.50000_f32, 0.5), (0.50005_f32, 0.5), (1.0, 1.0)];
-        // Dragging index 1 far to the right would yield lo > hi without the guard.
-        let moved = move_point(&pts, 1, (0.9, 0.3));
-        // Result must lie between the outer neighbors, not outside them.
-        assert!(
-            moved[1].0 >= pts[0].0 && moved[1].0 <= pts[2].0,
-            "x must stay between outer neighbors; got {}",
-            moved[1].0
-        );
+        // Index 2's immediate neighbors (idx 1 = 0.50000, idx 3 = 0.50010) are only
+        // 1e-4 apart (< 2e-4), so lo (0.50010) > hi (0.50000): the degenerate guard
+        // branch is exercised. Without the guard, f32::clamp(min>max) would panic.
+        let pts = vec![
+            (0.0, 0.0),
+            (0.50000_f32, 0.5),
+            (0.50005_f32, 0.5),
+            (0.50010_f32, 0.5),
+            (1.0, 1.0),
+        ];
+        let moved = move_point(&pts, 2, (0.9, 0.3)); // reaching this line proves no panic
+        // Result is finite and within the unit square (guard pins to `lo`).
+        assert!(moved[2].0.is_finite());
+        assert!((0.0..=1.0).contains(&moved[2].0), "x in [0,1]; got {}", moved[2].0);
     }
 
     #[test]

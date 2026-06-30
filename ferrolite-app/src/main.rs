@@ -8,6 +8,7 @@ mod module;
 mod state;
 mod status_bar;
 mod theme;
+mod viewer;
 mod widgets;
 
 fn main() -> eframe::Result<()> {

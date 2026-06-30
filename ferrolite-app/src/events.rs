@@ -19,6 +19,24 @@ pub enum AppEvent {
     },
     /// The ingest walk + row upserts completed.
     IngestDone,
+    /// A viewer tier-1 embedded preview finished decoding off-thread. Carries the
+    /// upright RGB8/RGBA8 buffer for upload as a rung-1 `VirtualTexture`. Handled
+    /// directly in `app.rs` (needs the GPU render state), not folded by `apply`.
+    PreviewReady {
+        image_id: i64,
+        image: ferrolite_image::ImageBuffer,
+    },
+    /// A viewer tier-2 full RAW decode + quad-bin finished off-thread. Carries the
+    /// display-linear RGBA f32 image for upload as a sparse `VirtualTexture`.
+    /// Handled directly in `app.rs` (needs the GPU render state), not folded by
+    /// `apply`.
+    FullDecoded {
+        image_id: i64,
+        image: ferrolite_image::LinearRgbaF32,
+    },
+    /// The tier-2 full decode failed; the viewer keeps showing the preview and
+    /// goes idle. Folded by `apply` (no GPU work) but matched in `app.rs`.
+    FullFailed { image_id: i64 },
 }
 
 impl AppState {
@@ -50,6 +68,11 @@ impl AppState {
                 self.active_ingests = self.active_ingests.saturating_sub(1);
                 None
             }
+            // Handled in `app.rs` (needs GPU state) before reaching `apply`.
+            AppEvent::PreviewReady { .. } => None,
+            AppEvent::FullDecoded { .. } => None,
+            // Terminal-state handling happens in `app.rs`; nothing to fold here.
+            AppEvent::FullFailed { .. } => None,
         }
     }
 }

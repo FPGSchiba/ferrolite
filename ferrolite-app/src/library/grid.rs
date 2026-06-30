@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 const GAP: f32 = 8.0;
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) {
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = ui.available_width();
     let m = metrics(avail_w, cell, GAP);
     let item_count = state.images.len();
@@ -19,6 +19,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) {
     let total_height = total_rows as f32 * m.row_height;
 
     let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
+    let mut opened: Option<i64> = None;
     let out = scroll.show_viewport(ui, |ui, viewport| {
         ui.set_height(total_height);
         let scroll_top = viewport.min.y.max(0.0);
@@ -43,10 +44,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) {
             let x = ui.min_rect().left() + col as f32 * m.row_height;
             let y = ui.min_rect().top() + row as f32 * m.row_height;
             let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell, cell));
-            paint_cell(ui, state, &rec, rect);
+            if let Some(id) = paint_cell(ui, state, &rec, rect) {
+                opened = Some(id);
+            }
         }
     });
     let _ = out;
+    opened
 }
 
 fn reprioritize(state: &AppState, now_visible: &HashSet<i64>) {
@@ -67,7 +71,7 @@ fn paint_cell(
     state: &mut AppState,
     rec: &ferrolite_catalog::ImageRecord,
     rect: egui::Rect,
-) {
+) -> Option<i64> {
     // Pull a ready thumbnail from the pool on demand if not yet cached.
     if !state.textures.contains(rec.id)
         && rec.decode_status != ferrolite_catalog::DecodeStatus::Failed
@@ -101,12 +105,17 @@ fn paint_cell(
         }
     }
 
-    // Selection: click toggles the selected id.
+    // Selection: single click selects; double-click bubbles the id up to app.rs.
     let resp = ui.interact(rect, ui.id().with(("cell", rec.id)), egui::Sense::click());
     if resp.clicked() {
         state.selected = Some(rec.id);
     }
+    let mut opened = None;
+    if resp.double_clicked() {
+        opened = Some(rec.id);
+    }
     if state.selected == Some(rec.id) {
         painter.rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::ACCENT));
     }
+    opened
 }

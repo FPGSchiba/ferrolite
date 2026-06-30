@@ -62,6 +62,9 @@ pub struct AppState {
     pub expanded_folders: HashSet<i64>,
     /// A folder pending a remove-confirmation (set when it has subfolders).
     pub pending_remove: Option<PendingRemove>,
+
+    /// Non-None while the single-image viewer is open.
+    pub viewer: Option<crate::viewer::ViewerState>,
 }
 
 impl AppState {
@@ -100,6 +103,7 @@ impl AppState {
             include_subfolders: true,
             expanded_folders: HashSet::new(),
             pending_remove: None,
+            viewer: None,
         })
     }
 
@@ -131,6 +135,19 @@ impl AppState {
             if let Ok(rows) = rows {
                 self.images = rows;
             }
+        }
+    }
+
+    /// Open `rec` in the viewer, cancelling any currently-open viewer first.
+    /// Shared by the grid double-click (in `grid.rs`) and the Enter-key handler
+    /// (in `app.rs`) so the two code paths stay in sync.
+    pub fn open_image_in_viewer(&mut self, rec: &ferrolite_catalog::ImageRecord) {
+        if let Ok(Some(folder_path)) = self.reads.folder_path(rec.folder_id) {
+            let path = std::path::PathBuf::from(folder_path).join(&rec.filename);
+            if let Some(old) = self.viewer.as_ref() {
+                old.cancel_loads();
+            }
+            self.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
         }
     }
 
@@ -238,6 +255,7 @@ impl AppState {
             include_subfolders: true,
             expanded_folders: HashSet::new(),
             pending_remove: None,
+            viewer: None,
         }
     }
 }

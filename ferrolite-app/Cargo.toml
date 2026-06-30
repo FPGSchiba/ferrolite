@@ -24,7 +24,10 @@ wgpu = "22"
 ferrolite-jobs = { workspace = true }
 ferrolite-catalog = { workspace = true }
 ferrolite-decode = { workspace = true }
+ferrolite-gpu = { workspace = true }
 ferrolite-image = { workspace = true }
+ferrolite-vt = { workspace = true }
+half = { workspace = true }
 image = { workspace = true, features = ["jpeg"] }
 rayon = { workspace = true }
 rfd = { workspace = true }

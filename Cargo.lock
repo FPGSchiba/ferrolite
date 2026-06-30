@@ -1061,8 +1061,11 @@ dependencies = [
  "egui-wgpu",
  "ferrolite-catalog",
  "ferrolite-decode",
+ "ferrolite-gpu",
  "ferrolite-image",
  "ferrolite-jobs",
+ "ferrolite-vt",
+ "half",
  "image",
  "rayon",
  "rfd",
@@ -1095,12 +1098,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrolite-gpu"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "egui-wgpu",
+ "half",
+ "pollster 0.4.0",
+ "wgpu",
+]
+
+[[package]]
 name = "ferrolite-image"
 version = "0.0.1"
 
 [[package]]
 name = "ferrolite-jobs"
 version = "0.0.1"
+
+[[package]]
+name = "ferrolite-vt"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "ferrolite-gpu",
+ "ferrolite-image",
+ "ferrolite-jobs",
+ "half",
+ "image",
+ "pollster 0.4.0",
+ "wgpu",
+]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1377,6 +1405,7 @@ version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "crunchy",
  "zerocopy",

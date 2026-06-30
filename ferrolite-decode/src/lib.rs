@@ -2,6 +2,7 @@
 //! `FileKind` — RAW files via `rawler` 0.7.x, standard rasters via `image` +
 //! `kamadak-exif` — returning the same three separable products in both cases.
 
+mod demosaic;
 mod error;
 mod metadata;
 mod orient;
@@ -9,6 +10,7 @@ mod preview;
 mod raw;
 mod standard;
 
+pub use demosaic::{DemosaicParams, DemosaicToRgb16f, QuadBin};
 pub use error::DecodeError;
 pub use metadata::Metadata;
 pub use raw::{decode_full, RawDecoded};

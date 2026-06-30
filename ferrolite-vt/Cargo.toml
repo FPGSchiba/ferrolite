@@ -1,0 +1,21 @@
+[package]
+name = "ferrolite-vt"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrolite-image = { workspace = true }
+ferrolite-gpu = { workspace = true }
+ferrolite-jobs = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
+image = { workspace = true, features = ["png"] }

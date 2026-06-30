@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog", "ferrolite-jobs"]
+members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog", "ferrolite-jobs", "ferrolite-gpu", "ferrolite-vt"]
 
 [workspace.package]
 edition = "2021"
@@ -12,6 +12,12 @@ ferrolite-image = { path = "ferrolite-image" }
 ferrolite-decode = { path = "ferrolite-decode" }
 ferrolite-catalog = { path = "ferrolite-catalog" }
 ferrolite-jobs = { path = "ferrolite-jobs" }
+ferrolite-gpu = { path = "ferrolite-gpu" }
+ferrolite-vt = { path = "ferrolite-vt" }
+wgpu = "22"
+bytemuck = { version = "1", features = ["derive"] }
+half = { version = "2", features = ["bytemuck"] }
+pollster = "0.4"
 rawler = "0.7.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 image = { version = "0.25", default-features = false }

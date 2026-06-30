@@ -194,26 +194,33 @@ impl<U: bytemuck::Pod> Node<PipelineImage> for PointOpNode<U> {
             .queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&self.params.get()));
 
-        let src_view = src.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let dst_view = dst.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind = self.ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("point-op-bind"),
-            layout: &self.bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&src_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&dst_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.uniform_buf.as_entire_binding(),
-                },
-            ],
-        });
+        let src_view = src
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let dst_view = dst
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("point-op-bind"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dst_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                ],
+            });
 
         let mut enc = self
             .ctx

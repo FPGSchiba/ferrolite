@@ -4,13 +4,15 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use ferrolite_gpu::{Graph, GpuContext, NodeId};
+use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::LinearRgbaF32;
 
 use crate::image::PipelineImage;
 use crate::nodes::{PointOpNode, SourceNode};
 use crate::op::OpStack;
-use crate::uniforms::{contrast_uniform, exposure_uniform, wb_uniform, ContrastUniform, ExposureUniform, WbUniform};
+use crate::uniforms::{
+    contrast_uniform, exposure_uniform, wb_uniform, ContrastUniform, ExposureUniform, WbUniform,
+};
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
 /// feeding the fixed canonical op chain. Editing updates a shared param cell and
@@ -177,7 +179,9 @@ pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
         cache: None,
     });
 
-    let src_view = img.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let src_view = img
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("pipeline-blit-bind"),
         layout: &bgl,

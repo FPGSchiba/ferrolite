@@ -9,12 +9,7 @@ pub fn gradient(w: u32, h: u32) -> LinearRgbaF32 {
     let mut px = Vec::with_capacity((w * h * 4) as usize);
     for y in 0..h {
         for x in 0..w {
-            px.extend_from_slice(&[
-                x as f32 / w as f32,
-                y as f32 / h as f32,
-                0.25,
-                1.0,
-            ]);
+            px.extend_from_slice(&[x as f32 / w as f32, y as f32 / h as f32, 0.25, 1.0]);
         }
     }
     LinearRgbaF32::new(w, h, px).expect("gradient length")

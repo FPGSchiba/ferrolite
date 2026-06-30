@@ -26,7 +26,10 @@ mod tests {
     fn round_trips_a_full_stack() {
         let s = OpStack::default()
             .set_op(Op::Exposure(Exposure { ev: 0.75 }))
-            .set_op(Op::WhiteBalance(WhiteBalance { temp: 0.2, tint: -0.1 }))
+            .set_op(Op::WhiteBalance(WhiteBalance {
+                temp: 0.2,
+                tint: -0.1,
+            }))
             .set_op(Op::Contrast(Contrast { amount: 0.3 }));
         let text = serialize(&s);
         assert_eq!(deserialize(&text), Some(s));

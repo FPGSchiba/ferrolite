@@ -85,7 +85,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                         if let Some(c) = flag_color {
                             crate::library::icons::flag(
                                 ui.painter(),
-                                rect.left_top() + egui::vec2(7.0, 4.0),
+                                rect.left_top() + egui::vec2(7.0, 12.0),
                                 10.0,
                                 true,
                                 c,

@@ -99,13 +99,13 @@ fn paint_cell(
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
 
-    // Selected cells: fill the whole cell with a black rounded background first,
-    // so the inset thumbnail sits on black padding.
+    // Selected cells: fill the cell with a rounded blue frame first, so the inset
+    // thumbnail sits inside a clean blue border.
     if selected {
-        painter.rect_filled(rect, SEL_ROUND, egui::Color32::BLACK);
+        painter.rect_filled(rect, SEL_ROUND, theme::ACCENT);
     }
 
-    // img_rect: inset for selected cells (thumbnail floats on black pad), full rect otherwise.
+    // img_rect: inset for selected cells (thumbnail floats inside the blue frame), full rect otherwise.
     let img_rect = if selected { rect.shrink(SEL_PAD) } else { rect };
 
     match cell_state(rec, has_tex) {

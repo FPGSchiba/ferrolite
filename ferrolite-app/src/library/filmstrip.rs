@@ -13,8 +13,6 @@ const THUMB_H: f32 = 64.0;
 const GAP: f32 = 6.0;
 
 /// Render the strip; return the image id clicked this frame, if any.
-// wired in Task 3
-#[allow(dead_code)]
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) -> Option<i64> {
     let mut clicked: Option<i64> = None;
     // Snapshot the ids/decode-status up front so we don't hold an immutable

@@ -2,7 +2,6 @@
 //! viewer. Left arrow = `Prev`, Right arrow = `Next`; no wraparound.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Step {
     Prev,
     Next,
@@ -10,7 +9,6 @@ pub enum Step {
 
 /// The index of the neighbour of `current` within a list of `len` items, or
 /// `None` at the ends / when `current` is out of range / the list is empty.
-#[allow(dead_code)]
 pub fn neighbor_index(current: usize, len: usize, dir: Step) -> Option<usize> {
     if len == 0 || current >= len {
         return None;

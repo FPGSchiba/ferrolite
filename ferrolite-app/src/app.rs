@@ -230,6 +230,18 @@ impl FerroliteApp {
         }
     }
 
+    /// The single image-open path: cancel the previously-open viewer's in-flight
+    /// tile jobs, open the new image's two-tier load, and switch to Develop.
+    fn open_record(&mut self, frame: &mut eframe::Frame, rec: &ferrolite_catalog::ImageRecord) {
+        if let Some(old) = self.state.viewer.as_ref() {
+            let old_id = old.image_id;
+            old.cancel_loads();
+            self.cancel_viewer_tiles(frame, old_id);
+        }
+        self.state.open_image_in_viewer(rec);
+        self.module = crate::module::Module::Develop;
+    }
+
     /// Cancel the sparse VT's in-flight tile-load jobs for the named viewer.
     /// The VT lives in `callback_resources`; the decode jobs are cancelled
     /// separately via `ViewerState::cancel_loads`. Guarded on `image_id` so we
@@ -360,8 +372,10 @@ impl eframe::App for FerroliteApp {
                 crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1");
             });
 
+        let top_h = if self.module.is_library() { 40.0 } else { 72.0 };
+        let mut film_clicked: Option<i64> = None;
         egui::TopBottomPanel::top("toolbar")
-            .exact_height(40.0)
+            .exact_height(top_h)
             .frame(
                 egui::Frame::none()
                     .fill(theme::BG_TOOLBAR)
@@ -377,8 +391,16 @@ impl eframe::App for FerroliteApp {
                     if changed {
                         self.state.dirty = true;
                     }
+                } else {
+                    let current = self.state.viewer.as_ref().map(|v| v.image_id);
+                    film_clicked = crate::library::filmstrip::show(ui, &mut self.state, current);
                 }
             });
+        if let Some(id) = film_clicked {
+            if let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() {
+                self.open_record(frame, &rec);
+            }
+        }
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(24.0)
@@ -387,22 +409,24 @@ impl eframe::App for FerroliteApp {
                 crate::status_bar::show(ui, &self.state);
             });
 
-        egui::SidePanel::left("left")
-            .exact_width(236.0)
-            .frame(
-                egui::Frame::none()
-                    .fill(theme::BG_PANEL)
-                    // Clear left/right padding so content doesn't hug the window edge.
-                    .inner_margin(egui::Margin {
-                        left: 14.0,
-                        right: 12.0,
-                        top: 4.0,
-                        bottom: 8.0,
-                    }),
-            )
-            .show(ctx, |ui| {
-                crate::library::panel::show(ui, &mut self.state, ctx);
-            });
+        if self.module.is_library() {
+            egui::SidePanel::left("left")
+                .exact_width(236.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_PANEL)
+                        // Clear left/right padding so content doesn't hug the window edge.
+                        .inner_margin(egui::Margin {
+                            left: 14.0,
+                            right: 12.0,
+                            top: 4.0,
+                            bottom: 8.0,
+                        }),
+                )
+                .show(ctx, |ui| {
+                    crate::library::panel::show(ui, &mut self.state, ctx);
+                });
+        }
 
         // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
         // closed image's work stops competing with whatever is opened next.
@@ -410,6 +434,7 @@ impl eframe::App for FerroliteApp {
             if let Some(v) = self.state.viewer.take() {
                 v.cancel_loads();
                 self.cancel_viewer_tiles(frame, v.image_id);
+                self.module = crate::module::Module::Library;
             }
         }
 
@@ -425,7 +450,36 @@ impl eframe::App for FerroliteApp {
         {
             if let Some(sel_id) = self.state.selected {
                 if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
-                    self.state.open_image_in_viewer(&rec);
+                    self.open_record(frame, &rec);
+                }
+            }
+        }
+
+        // Left/Right move between images while viewing (Develop), non-cyclic.
+        if self.module == crate::module::Module::Develop
+            && self.state.viewer.is_some()
+            && !ctx.wants_keyboard_input()
+        {
+            let dir = ctx.input(|i| {
+                if i.key_pressed(egui::Key::ArrowRight) {
+                    Some(crate::viewer::nav::Step::Next)
+                } else if i.key_pressed(egui::Key::ArrowLeft) {
+                    Some(crate::viewer::nav::Step::Prev)
+                } else {
+                    None
+                }
+            });
+            if let Some(dir) = dir {
+                let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
+                if let Some(cur_id) = cur_id {
+                    if let Some(pos) = self.state.images.iter().position(|r| r.id == cur_id) {
+                        if let Some(n) =
+                            crate::viewer::nav::neighbor_index(pos, self.state.images.len(), dir)
+                        {
+                            let rec = self.state.images[n].clone();
+                            self.open_record(frame, &rec);
+                        }
+                    }
                 }
             }
         }
@@ -459,18 +513,26 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        let mut opened: Option<i64> = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG_CANVAS))
             .show(ctx, |ui| {
-                if self.state.viewer.is_some() {
+                if self.module.is_library() {
+                    // Grid; capture a double-clicked id to open after the panel closes.
+                    opened =
+                        crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
+                } else if self.state.viewer.is_some() {
                     self.drive_viewer(ui, frame);
-                } else if self.module.is_library() {
-                    crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else {
                     let rect = ui.available_rect_before_wrap();
-                    canvas::paint(ui, rect); // Develop stub keeps the wgpu canvas
+                    canvas::paint(ui, rect); // Develop with no image open: stub canvas
                 }
             });
+        if let Some(id) = opened {
+            if let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() {
+                self.open_record(frame, &rec);
+            }
+        }
 
         // Remove-folder confirmation (subtrees only; leaves remove immediately).
         if let Some(pending) = self.state.pending_remove.clone() {

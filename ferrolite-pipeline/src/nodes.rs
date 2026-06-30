@@ -240,6 +240,207 @@ impl<U: bytemuck::Pod> Node<PipelineImage> for PointOpNode<U> {
     }
 }
 
+/// Bind-group layout for the geometry pass: 0 = input texture (filterable),
+/// 1 = output storage texture, 2 = transform uniform, 3 = filtering sampler.
+fn geometry_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("geometry-bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: PIPELINE_FORMAT,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
+/// Geometry compute pass (crop + rotate). Output texture dims come from the
+/// uniform's `out_dims`, so it reallocates when the crop changes.
+pub(crate) struct GeometryNode {
+    ctx: Arc<GpuContext>,
+    pipeline: wgpu::ComputePipeline,
+    bgl: wgpu::BindGroupLayout,
+    uniform_buf: wgpu::Buffer,
+    sampler: wgpu::Sampler,
+    params: Rc<Cell<crate::uniforms::GeometryUniform>>,
+    out: RefCell<Option<PipelineImage>>,
+}
+
+impl GeometryNode {
+    pub(crate) fn new(
+        ctx: Arc<GpuContext>,
+        params: Rc<Cell<crate::uniforms::GeometryUniform>>,
+    ) -> Self {
+        let bgl = geometry_bgl(&ctx.device);
+        let module = ctx
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("geometry"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/geometry.wgsl").into()),
+            });
+        let layout = ctx
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("geometry"),
+                bind_group_layouts: &[&bgl],
+                push_constant_ranges: &[],
+            });
+        let pipeline = ctx
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("geometry"),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: "main",
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let uniform_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("geometry-uniform"),
+            size: std::mem::size_of::<crate::uniforms::GeometryUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("geometry-samp"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        Self {
+            ctx,
+            pipeline,
+            bgl,
+            uniform_buf,
+            sampler,
+            params,
+            out: RefCell::new(None),
+        }
+    }
+
+    fn ensure_out(&self, w: u32, h: u32) -> PipelineImage {
+        let mut out = self.out.borrow_mut();
+        if out.as_ref().map(|o| (o.width, o.height)) != Some((w, h)) {
+            let tex = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("geometry-out"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: PIPELINE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
+            *out = Some(PipelineImage {
+                texture: Arc::new(tex),
+                width: w,
+                height: h,
+            });
+        }
+        out.as_ref().unwrap().clone()
+    }
+}
+
+impl Node<PipelineImage> for GeometryNode {
+    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
+        let src = inputs[0];
+        let u = self.params.get();
+        let out_w = (u.out_dims[0] as u32).max(1);
+        let out_h = (u.out_dims[1] as u32).max(1);
+        let dst = self.ensure_out(out_w, out_h);
+
+        self.ctx
+            .queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
+
+        let src_view = src
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let dst_view = dst
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("geometry-bind"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dst_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("geometry-pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(out_w.div_ceil(8), out_h.div_ceil(8), 1);
+        }
+        self.ctx.queue.submit([enc.finish()]);
+        dst
+    }
+}
+
 /// Bind-group layout for the tone-curve pass: 0 = input texture,
 /// 1 = output storage texture, 2 = 256-entry LUT (read-only storage buffer).
 fn curve_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {

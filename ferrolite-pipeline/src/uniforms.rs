@@ -3,7 +3,7 @@
 //! shader). Display-linear space; the sRGB OETF lives only in the display/blit
 //! shader. No GPU here — fully unit-tested.
 
-use crate::op::{Contrast, Exposure, Hsl, Sharpen, WhiteBalance};
+use crate::op::{Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, Sharpen, WhiteBalance};
 
 /// Mid-grey pivot (display-linear) about which contrast scales. Placeholder
 /// constant; Spec 3 may refine once the working space is fixed.
@@ -165,6 +165,68 @@ pub fn sharpen_halo(op: Option<Sharpen>) -> u32 {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GeometryUniform {
+    /// Row-major 2×2 mapping output-pixel → source-pixel: [m00, m01, m10, m11].
+    pub m: [f32; 4],
+    /// Source-pixel translation: src = m·out + off.
+    pub off: [f32; 2],
+    pub src_dims: [f32; 2],
+    pub out_dims: [f32; 2],
+    pub pad: [f32; 2],
+}
+
+/// Crop + rotate as a sampling transform. Returns the uniform plus the output
+/// (width, height) in pixels. Maps each output pixel center to a source pixel:
+/// `src = R(angle)·(out − out_center) + crop_center`, sampled bilinearly.
+pub fn geometry_uniform(
+    op: Option<Geometry>,
+    src_w: u32,
+    src_h: u32,
+) -> (GeometryUniform, u32, u32) {
+    let sw = src_w as f32;
+    let sh = src_h as f32;
+    let geo = op.unwrap_or(Geometry {
+        crop: CropRect::full(),
+        angle_deg: 0.0,
+        aspect: Aspect::Original,
+    });
+
+    let cx = geo.crop.x.clamp(0.0, 1.0);
+    let cy = geo.crop.y.clamp(0.0, 1.0);
+    let cw = geo.crop.w.clamp(1e-4, (1.0 - cx).max(1e-4));
+    let ch = geo.crop.h.clamp(1e-4, (1.0 - cy).max(1e-4));
+
+    let crop_w_px = cw * sw;
+    let crop_h_px = ch * sh;
+    let out_w = (crop_w_px.round() as u32).max(1);
+    let out_h = (crop_h_px.round() as u32).max(1);
+
+    let theta = geo.angle_deg.to_radians();
+    let (s, c) = theta.sin_cos();
+    let m = [c, -s, s, c];
+
+    let out_center = [out_w as f32 * 0.5, out_h as f32 * 0.5];
+    let crop_center = [cx * sw + crop_w_px * 0.5, cy * sh + crop_h_px * 0.5];
+    let off = [
+        crop_center[0] - (m[0] * out_center[0] + m[1] * out_center[1]),
+        crop_center[1] - (m[2] * out_center[0] + m[3] * out_center[1]),
+    ];
+
+    (
+        GeometryUniform {
+            m,
+            off,
+            src_dims: [sw, sh],
+            out_dims: [out_w as f32, out_h as f32],
+            pad: [0.0; 2],
+        },
+        out_w,
+        out_h,
+    )
+}
+
 pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
     let a = op.map(|c| c.amount).unwrap_or(0.0);
     let (gain, pivot) = contrast_gain_pivot(a);
@@ -323,5 +385,54 @@ mod tests {
         assert_eq!(sharpen_halo(Some(huge)), MAX_SHARPEN_RADIUS);
         // No wrap to negative.
         assert!(sharpen_uniform(Some(huge)).radius > 0);
+    }
+
+    #[test]
+    fn geometry_uniform_identity_when_absent() {
+        let (u, w, h) = geometry_uniform(None, 64, 48);
+        assert_eq!((w, h), (64, 48));
+        assert_eq!(u.m, [1.0, 0.0, 0.0, 1.0]);
+        assert!(u.off[0].abs() < 1e-4 && u.off[1].abs() < 1e-4);
+        assert_eq!(u.src_dims, [64.0, 48.0]);
+        assert_eq!(u.out_dims, [64.0, 48.0]);
+    }
+
+    #[test]
+    fn geometry_uniform_crop_halves_output_dims() {
+        use crate::op::{Aspect, CropRect, Geometry};
+        let (_, w, h) = geometry_uniform(
+            Some(Geometry {
+                crop: CropRect {
+                    x: 0.25,
+                    y: 0.25,
+                    w: 0.5,
+                    h: 0.5,
+                },
+                angle_deg: 0.0,
+                aspect: Aspect::Free,
+            }),
+            64,
+            48,
+        );
+        assert_eq!((w, h), (32, 24));
+    }
+
+    #[test]
+    fn geometry_uniform_rotation_sets_rotation_matrix() {
+        use crate::op::{Aspect, CropRect, Geometry};
+        let (u, _, _) = geometry_uniform(
+            Some(Geometry {
+                crop: CropRect::full(),
+                angle_deg: 90.0,
+                aspect: Aspect::Original,
+            }),
+            64,
+            48,
+        );
+        // 90°: cos=0, sin=1 -> m = [0,-1,1,0] (row-major).
+        assert!(u.m[0].abs() < 1e-5);
+        assert!((u.m[1] - -1.0).abs() < 1e-5);
+        assert!((u.m[2] - 1.0).abs() < 1e-5);
+        assert!(u.m[3].abs() < 1e-5);
     }
 }

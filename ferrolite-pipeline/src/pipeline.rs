@@ -8,11 +8,12 @@ use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::LinearRgbaF32;
 
 use crate::image::PipelineImage;
-use crate::nodes::{CurveNode, PointOpNode, SourceNode};
+use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_uniform, wb_uniform,
-    ContrastUniform, ExposureUniform, HslUniform, SharpenUniform, WbUniform,
+    contrast_uniform, curve_lut, exposure_uniform, geometry_uniform, hsl_uniform, sharpen_uniform,
+    wb_uniform, ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, SharpenUniform,
+    WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -34,6 +35,10 @@ pub struct EditPipeline {
     hsl: Rc<Cell<HslUniform>>,
     sharpen_id: NodeId,
     sharpen: Rc<Cell<SharpenUniform>>,
+    geometry_id: NodeId,
+    geometry: Rc<Cell<GeometryUniform>>,
+    src_w: u32,
+    src_h: u32,
     node_count: usize,
     stack: OpStack,
 }
@@ -41,6 +46,7 @@ pub struct EditPipeline {
 impl EditPipeline {
     pub fn new(ctx: Arc<GpuContext>, source: &LinearRgbaF32, stack: OpStack) -> Self {
         let mut graph = Graph::new();
+        let (src_w, src_h) = (source.width, source.height);
         let source_id = graph.add_node(Box::new(SourceNode::new(&ctx, source)), vec![]);
 
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
@@ -94,10 +100,15 @@ impl EditPipeline {
         );
         let sharpen_id = graph.add_node(Box::new(sharpen_node), vec![hsl_id]);
 
+        let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
+        let geometry = Rc::new(Cell::new(geo_uniform));
+        let geometry_node = GeometryNode::new(ctx.clone(), geometry.clone());
+        let geometry_id = graph.add_node(Box::new(geometry_node), vec![sharpen_id]);
+
         Self {
             ctx,
             graph,
-            output_id: sharpen_id,
+            output_id: geometry_id,
             exposure_id,
             exposure,
             wb_id,
@@ -110,7 +121,11 @@ impl EditPipeline {
             hsl,
             sharpen_id,
             sharpen,
-            node_count: 7,
+            geometry_id,
+            geometry,
+            src_w,
+            src_h,
+            node_count: 8,
             stack,
         }
     }
@@ -146,6 +161,11 @@ impl EditPipeline {
         if sh != self.sharpen.get() {
             self.sharpen.set(sh);
             self.graph.mark_dirty(self.sharpen_id);
+        }
+        let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), self.src_w, self.src_h);
+        if geo_uniform != self.geometry.get() {
+            self.geometry.set(geo_uniform);
+            self.graph.mark_dirty(self.geometry_id);
         }
         self.stack = stack;
     }

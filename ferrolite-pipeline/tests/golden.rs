@@ -2,8 +2,8 @@ mod common;
 
 use ferrolite_gpu::GpuContext;
 use ferrolite_pipeline::{
-    blit_to_rgba8, upload_source, Contrast, EditPipeline, Exposure, Hsl, HslBand, Op, OpStack,
-    Sharpen, ToneCurve, WhiteBalance,
+    blit_to_rgba8, upload_source, Aspect, Contrast, CropRect, EditPipeline, Exposure, Geometry,
+    Hsl, HslBand, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
 };
 use std::sync::Arc;
 
@@ -180,4 +180,26 @@ fn hsl_shift_matches_golden() {
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "hsl.png");
+}
+
+#[test]
+fn geometry_crop_rotate_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default().set_op(Op::Geometry(Geometry {
+        crop: CropRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.8,
+            h: 0.8,
+        },
+        angle_deg: 10.0,
+        aspect: Aspect::Free,
+    }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let pixels = pipe.render_to_image();
+    // out dims = round(0.8 * 64) x round(0.8 * 48) = 51 x 38.
+    common::assert_golden(&pixels, 51, 38, "geometry_crop_rotate.png");
 }

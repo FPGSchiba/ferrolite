@@ -11,8 +11,8 @@ mod uniforms;
 pub use image::PipelineImage;
 pub use nodes::upload_source;
 pub use op::{
-    Contrast, Exposure, Hsl, HslBand, Op, OpKind, OpStack, Sharpen, ToneCurve, WhiteBalance,
-    STACK_VERSION,
+    Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, HslBand, Op, OpKind, OpStack, Sharpen,
+    ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, EditPipeline};
 pub use serialize::{deserialize, serialize};
@@ -21,6 +21,6 @@ pub use serialize::{deserialize, serialize};
 // (used by `pipeline`/`uniforms`), so they are not part of the public surface.
 // Exception: `sharpen_halo` is part of the public API for Plan 3's tile producer.
 pub use uniforms::{
-    sharpen_halo, ContrastUniform, ExposureUniform, HslUniform, SharpenUniform, WbUniform,
-    MAX_SHARPEN_RADIUS,
+    sharpen_halo, ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, SharpenUniform,
+    WbUniform, MAX_SHARPEN_RADIUS,
 };

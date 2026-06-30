@@ -5,7 +5,7 @@ pub mod callback;
 pub mod load;
 pub mod nav;
 
-pub use callback::{ViewerCallback, ViewerGpu};
+pub use callback::{ViewerCallback, ViewerGpu, ViewerPipelines};
 
 use std::path::PathBuf;
 

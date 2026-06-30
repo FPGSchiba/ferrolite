@@ -15,6 +15,14 @@ impl FerroliteApp {
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
             let res = CanvasResources::new(rs);
             rs.renderer.write().callback_resources.insert(res);
+            // Pre-warm all four display pipelines once at startup. Every image
+            // open will borrow from this holder instead of compiling a new pipeline.
+            let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+            let pipelines = ferrolite_vt::DisplayPipelines::new(&gpu, rs.target_format);
+            rs.renderer
+                .write()
+                .callback_resources
+                .insert(viewer::ViewerPipelines { pipelines });
         }
         let state = crate::state::AppState::new().expect("open catalog");
         Self {
@@ -49,7 +57,16 @@ impl FerroliteApp {
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
         let linear = viewer::load::preview_to_linear(image);
         let dims = (linear.width, linear.height);
-        let vt = ferrolite_vt::VirtualTexture::single_texture(&gpu, &linear, rs.target_format);
+        // Fetch the pre-warmed pipelines, build the VT while borrowing them,
+        // then release the lock before inserting ViewerGpu (separate write scope).
+        let vt = {
+            let renderer = rs.renderer.read();
+            let vp = renderer
+                .callback_resources
+                .get::<viewer::ViewerPipelines>()
+                .expect("ViewerPipelines pre-warmed at startup");
+            ferrolite_vt::VirtualTexture::single_texture(&gpu, &linear, &vp.pipelines)
+        };
 
         // Fit to the last-known viewport; fall back to the image's own size when
         // the canvas has not painted yet (zoom is normalized away by fit anyway).
@@ -107,13 +124,22 @@ impl FerroliteApp {
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
         let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
             std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
-        let full = ferrolite_vt::VirtualTexture::sparse(
-            &gpu,
-            source,
-            std::sync::Arc::clone(&self.state.jobs),
-            VIEWER_TILE_BUDGET,
-            rs.target_format,
-        );
+        // Fetch the pre-warmed pipelines, build the sparse VT while borrowing them,
+        // then release the read lock before the write scope that installs it.
+        let full = {
+            let renderer = rs.renderer.read();
+            let vp = renderer
+                .callback_resources
+                .get::<viewer::ViewerPipelines>()
+                .expect("ViewerPipelines pre-warmed at startup");
+            ferrolite_vt::VirtualTexture::sparse(
+                &gpu,
+                source,
+                std::sync::Arc::clone(&self.state.jobs),
+                VIEWER_TILE_BUDGET,
+                &vp.pipelines,
+            )
+        };
 
         // Store the full VT into the existing holder (keep the preview around so
         // the crossfade can keep showing it until the full tiles are resident).

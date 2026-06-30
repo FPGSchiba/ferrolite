@@ -10,7 +10,14 @@
 
 use egui_wgpu::CallbackTrait;
 use ferrolite_gpu::GpuContext;
-use ferrolite_vt::{ViewTransform, VirtualTexture};
+use ferrolite_vt::{DisplayPipelines, ViewTransform, VirtualTexture};
+
+/// Holder stashed in `callback_resources` at startup: the pre-warmed display
+/// pipelines (compiled once for the surface's `target_format`). Every image
+/// open borrows from this so no per-open pipeline compilation occurs.
+pub struct ViewerPipelines {
+    pub pipelines: DisplayPipelines,
+}
 
 /// Holder stashed in `callback_resources`: the viewer's GPU context plus the
 /// rung-1 preview texture and (once tier-2 finishes) the sparse full-res VT.

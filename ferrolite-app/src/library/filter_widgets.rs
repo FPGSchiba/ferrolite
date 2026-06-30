@@ -34,7 +34,7 @@ pub fn clickable_stars(ui: &mut egui::Ui, current: u8, max: u8) -> Option<u8> {
         let center = egui::pos2(cx, rect.center().y);
         let filled = n <= current;
         let color = if filled {
-            crate::theme::ACCENT
+            crate::theme::STAR
         } else {
             crate::theme::TEXT_FAINT
         };

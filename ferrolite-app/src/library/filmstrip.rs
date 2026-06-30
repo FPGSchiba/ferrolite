@@ -74,7 +74,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                                 1.5,
                                 rating,
                                 rating,
-                                theme::ACCENT,
+                                theme::STAR,
                                 true,
                             );
                         }

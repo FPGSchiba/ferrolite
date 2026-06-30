@@ -144,7 +144,7 @@ fn paint_cell(
             gap,
             rec.rating.get(),
             5,
-            theme::ACCENT,
+            theme::STAR,
             true,
         );
     }

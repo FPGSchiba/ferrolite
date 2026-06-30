@@ -29,7 +29,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
     })
 }
 
-const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
+pub(crate) const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
                           capture_time, iso, decode_status, kind, rating, flag";
 
 pub(crate) fn list_images(

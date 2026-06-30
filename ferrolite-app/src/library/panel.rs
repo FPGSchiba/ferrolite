@@ -1,16 +1,39 @@
-//! Library left panel: Catalog header, Open-folder action, and the folder tree
-//! (indented, expandable, roll-up counts) read from the catalog. A ✕ on hover
-//! and a right-click "Remove" trigger folder removal (subtree-confirm via state).
+//! Library left panel: Catalog sources, Open-folder action, folder tree,
+//! Collections list, and Tag manager. A ✕ on hover and a right-click "Remove"
+//! trigger folder removal (subtree-confirm via state).
 
 use crate::ingest::spawn_ingest;
+use crate::library::filter::ViewSource;
 use crate::library::folder_tree::{flatten, subtree_count};
-use crate::state::{AppState, PendingRemove};
+use crate::state::{AppState, PendingRemove, RenameKind};
 use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
     ui.add_space(8.0);
-    ui.colored_label(theme::TEXT_FAINT, "CATALOG");
-    ui.label("All Photographs");
+    ui.label(
+        egui::RichText::new("CATALOG")
+            .color(theme::TEXT_DIM)
+            .size(10.0),
+    );
+    if ui
+        .selectable_label(matches!(state.source, ViewSource::All), "All Photographs")
+        .clicked()
+    {
+        state.source = ViewSource::All;
+        state.current_folder = None;
+        state.dirty = true;
+    }
+    if ui
+        .selectable_label(
+            matches!(state.source, ViewSource::RecentlyAdded),
+            "Recently Added",
+        )
+        .clicked()
+    {
+        state.source = ViewSource::RecentlyAdded;
+        state.current_folder = None;
+        state.dirty = true;
+    }
     ui.add_space(8.0);
 
     if ui.button("Open folder…").clicked() {
@@ -120,6 +143,236 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             }
         });
     }
+
+    // ── Collections ──────────────────────────────────────────────────────────
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("COLLECTIONS")
+                .color(theme::TEXT_DIM)
+                .size(10.0),
+        );
+        if ui.small_button("+").clicked() {
+            let name = format!("Collection {}", state.collections.len() + 1);
+            if state
+                .writer
+                .lock()
+                .expect("writer")
+                .create_collection(&name, ferrolite_image::Color::default())
+                .is_ok()
+            {
+                state.reload_vocab();
+            }
+        }
+    });
+    let collections = state.collections.clone();
+    for c in &collections {
+        // Snapshot whether this collection is actively being renamed.
+        let is_renaming = matches!(
+            &state.renaming,
+            Some((RenameKind::Collection, id, _)) if *id == c.id
+        );
+
+        ui.horizontal(|ui| {
+            let col = egui::Color32::from_rgb(c.color.r, c.color.g, c.color.b);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, col);
+
+            if is_renaming {
+                // Inline rename TextEdit for collection.
+                let buf = match &mut state.renaming {
+                    Some((RenameKind::Collection, id, buf)) if *id == c.id => buf,
+                    _ => unreachable!(),
+                };
+                let edit_resp = ui.add(
+                    egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 20.0),
+                );
+                edit_resp.request_focus();
+                let commit =
+                    edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if commit {
+                    if let Some((RenameKind::Collection, id, buf)) = state.renaming.take() {
+                        if !buf.is_empty() {
+                            let _ = state
+                                .writer
+                                .lock()
+                                .expect("writer")
+                                .rename_collection(id, &buf);
+                            state.reload_vocab();
+                        }
+                    }
+                }
+            } else {
+                // Normal clickable label + context menu.
+                let name_resp = ui.selectable_label(
+                    matches!(state.source, ViewSource::Collection(id) if id == c.id),
+                    &c.name,
+                );
+                if name_resp.clicked() {
+                    state.source = ViewSource::Collection(c.id);
+                    state.current_folder = None;
+                    state.dirty = true;
+                }
+                if name_resp.double_clicked() {
+                    state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
+                }
+                name_resp.context_menu(|ui| {
+                    if ui.button("Rename").clicked() {
+                        state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Delete").clicked() {
+                        delete_collection(state, c.id);
+                        ui.close_menu();
+                    }
+                });
+
+                // Delete ✕ affordance (mirrors folder rows).
+                let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                if name_resp.hovered() || x_slot.hovered() {
+                    let r = x_slot.rect.shrink(4.0);
+                    let color = if x_slot.hovered() {
+                        theme::TEXT_PRIMARY
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    let stroke = egui::Stroke::new(1.2, color);
+                    let p = ui.painter();
+                    p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                    p.line_segment([r.left_bottom(), r.right_top()], stroke);
+                }
+                if x_slot.clicked() {
+                    delete_collection(state, c.id);
+                }
+            }
+        });
+    }
+
+    // ── Tags ─────────────────────────────────────────────────────────────────
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("TAGS")
+                .color(theme::TEXT_DIM)
+                .size(10.0),
+        );
+        if ui.small_button("+").clicked() {
+            let name = format!("tag{}", state.tags.len() + 1);
+            if state
+                .writer
+                .lock()
+                .expect("writer")
+                .create_tag(&name, ferrolite_image::Color::default())
+                .is_ok()
+            {
+                state.reload_vocab();
+            }
+        }
+    });
+    let tags = state.tags.clone();
+    for t in &tags {
+        // Snapshot whether this tag is actively being renamed.
+        let is_renaming = matches!(
+            &state.renaming,
+            Some((RenameKind::Tag, id, _)) if *id == t.id.0
+        );
+
+        ui.horizontal(|ui| {
+            let mut col = [
+                t.color.r as f32 / 255.0,
+                t.color.g as f32 / 255.0,
+                t.color.b as f32 / 255.0,
+            ];
+            if ui.color_edit_button_rgb(&mut col).changed() {
+                let c = ferrolite_image::Color {
+                    r: (col[0] * 255.0) as u8,
+                    g: (col[1] * 255.0) as u8,
+                    b: (col[2] * 255.0) as u8,
+                };
+                let _ = state.writer.lock().expect("writer").set_tag_color(t.id, c);
+                state.reload_vocab();
+            }
+
+            if is_renaming {
+                // Inline rename TextEdit for tag.
+                let buf = match &mut state.renaming {
+                    Some((RenameKind::Tag, id, buf)) if *id == t.id.0 => buf,
+                    _ => unreachable!(),
+                };
+                let edit_resp = ui.add(
+                    egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 20.0),
+                );
+                edit_resp.request_focus();
+                let commit =
+                    edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if commit {
+                    if let Some((RenameKind::Tag, _, buf)) = state.renaming.take() {
+                        if !buf.is_empty() {
+                            let _ = state.writer.lock().expect("writer").rename_tag(t.id, &buf);
+                            state.reload_vocab();
+                        }
+                    }
+                }
+            } else {
+                // Normal label + context menu + painted delete ✕.
+                let name_resp = ui.label(&t.name);
+                if name_resp.double_clicked() {
+                    state.renaming = Some((RenameKind::Tag, t.id.0, t.name.clone()));
+                }
+                name_resp.context_menu(|ui| {
+                    if ui.button("Rename").clicked() {
+                        state.renaming = Some((RenameKind::Tag, t.id.0, t.name.clone()));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Delete").clicked() {
+                        let _ = state.writer.lock().expect("writer").delete_tag(t.id);
+                        state.filter.tag_ids.retain(|x| *x != t.id);
+                        state.reload_vocab();
+                        state.dirty = true;
+                        ui.close_menu();
+                    }
+                });
+
+                // Delete ✕ affordance — two line segments, consistent with folder rows.
+                let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                if name_resp.hovered() || x_slot.hovered() {
+                    let r = x_slot.rect.shrink(4.0);
+                    let color = if x_slot.hovered() {
+                        theme::TEXT_PRIMARY
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    let stroke = egui::Stroke::new(1.2, color);
+                    let p = ui.painter();
+                    p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                    p.line_segment([r.left_bottom(), r.right_top()], stroke);
+                }
+                if x_slot.clicked() {
+                    let _ = state.writer.lock().expect("writer").delete_tag(t.id);
+                    state.filter.tag_ids.retain(|x| *x != t.id);
+                    state.reload_vocab();
+                    state.dirty = true;
+                }
+            }
+        });
+    }
+}
+
+/// Delete a collection and clean up source / dirty state accordingly.
+fn delete_collection(state: &mut AppState, collection_id: i64) {
+    let _ = state
+        .writer
+        .lock()
+        .expect("writer")
+        .delete_collection(collection_id);
+    if matches!(state.source, ViewSource::Collection(id) if id == collection_id) {
+        state.source = ViewSource::All;
+        state.current_folder = None;
+        state.dirty = true;
+    }
+    state.reload_vocab();
 }
 
 /// A leaf folder removes immediately; one with subfolders stages a confirm.

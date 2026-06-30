@@ -19,6 +19,7 @@ bytemuck = { version = "1", features = ["derive"] }
 half = { version = "2", features = ["bytemuck"] }
 pollster = "0.4"
 rawler = "0.7.2"
+quick-xml = "0.37"
 rusqlite = { version = "0.32", features = ["bundled"] }
 image = { version = "0.25", default-features = false }
 exif = { package = "kamadak-exif", version = "0.6" }

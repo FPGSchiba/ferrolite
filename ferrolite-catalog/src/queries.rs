@@ -4,13 +4,15 @@
 use crate::error::CatalogError;
 use crate::model::{DecodeStatus, ImageRecord};
 use crate::thumbnail::Thumbnail;
-use ferrolite_image::{FileKind, Orientation};
+use ferrolite_image::{Color, FileKind, Flag, Orientation, Rating, TagId};
 use rusqlite::{Connection, OptionalExtension};
 
 pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     let orientation_exif: Option<i64> = row.get(5)?;
     let status: i64 = row.get(8)?;
     let kind: i64 = row.get(9)?;
+    let rating: i64 = row.get(10)?;
+    let flag: i64 = row.get(11)?;
     Ok(ImageRecord {
         id: row.get(0)?,
         folder_id: row.get(1)?,
@@ -22,11 +24,13 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
         iso: row.get::<_, Option<i64>>(7)?.map(|v| v as u32),
         decode_status: DecodeStatus::from_i64(status),
         kind: FileKind::from_i64(kind),
+        rating: Rating::from_i64(rating),
+        flag: Flag::from_i64(flag),
     })
 }
 
-const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
-                          capture_time, iso, decode_status, kind";
+pub(crate) const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
+                          capture_time, iso, decode_status, kind, rating, flag";
 
 pub(crate) fn list_images(
     conn: &Connection,
@@ -137,6 +141,65 @@ pub(crate) fn list_images_recursive(
     Ok(out)
 }
 
+pub(crate) fn list_tags(conn: &Connection) -> Result<Vec<crate::model::TagRecord>, CatalogError> {
+    let mut stmt = conn.prepare("SELECT id, name, color FROM tags ORDER BY name")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::model::TagRecord {
+            id: TagId(row.get(0)?),
+            name: row.get(1)?,
+            color: Color::from_packed(row.get::<_, i64>(2)? as u32),
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub(crate) fn tags_for_images(
+    conn: &Connection,
+    image_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<TagId>>, CatalogError> {
+    let mut map: std::collections::HashMap<i64, Vec<TagId>> = std::collections::HashMap::new();
+    if image_ids.is_empty() {
+        return Ok(map);
+    }
+    let placeholders = vec!["?"; image_ids.len()].join(",");
+    let sql = format!(
+        "SELECT image_id, tag_id FROM image_tags WHERE image_id IN ({placeholders}) ORDER BY tag_id"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(image_ids.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, TagId(row.get::<_, i64>(1)?)))
+    })?;
+    for r in rows {
+        let (img, tag) = r?;
+        map.entry(img).or_default().push(tag);
+    }
+    Ok(map)
+}
+
+pub(crate) fn list_collections(
+    conn: &Connection,
+) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {
+    let mut stmt = conn
+        .prepare("SELECT id, name, color, sort_order FROM collections ORDER BY sort_order, name")?;
+    let rows = stmt.query_map([], |row| {
+        Ok(crate::model::CollectionRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            color: Color::from_packed(row.get::<_, i64>(2)? as u32),
+            sort_order: row.get(3)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>, CatalogError> {
     let mut stmt = conn.prepare(
         "SELECT f.id, f.path, f.parent_id, COUNT(i.id)
@@ -156,4 +219,40 @@ pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>
         out.push(r?);
     }
     Ok(out)
+}
+
+pub(crate) fn distinct_cameras(conn: &Connection) -> Result<Vec<String>, CatalogError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT camera_model FROM images WHERE camera_model IS NOT NULL ORDER BY camera_model",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub(crate) fn iso_bounds(conn: &Connection) -> Result<Option<(u32, u32)>, CatalogError> {
+    let row: (Option<i64>, Option<i64>) = conn.query_row(
+        "SELECT MIN(iso), MAX(iso) FROM images WHERE iso IS NOT NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(match row {
+        (Some(lo), Some(hi)) => Some((lo as u32, hi as u32)),
+        _ => None,
+    })
+}
+
+pub(crate) fn date_bounds(conn: &Connection) -> Result<Option<(String, String)>, CatalogError> {
+    let row: (Option<String>, Option<String>) = conn.query_row(
+        "SELECT MIN(capture_time), MAX(capture_time) FROM images WHERE capture_time IS NOT NULL",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(match row {
+        (Some(lo), Some(hi)) => Some((lo, hi)),
+        _ => None,
+    })
 }

@@ -343,6 +343,7 @@ impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Drain job results into state; upload textures for ThumbReady events and
         // build the viewer's rung-1 VirtualTexture for PreviewReady events.
+        let mut ingest_done = false;
         while let Ok(event) = self.state.rx.try_recv() {
             match &event {
                 crate::events::AppEvent::PreviewReady { image_id, image } => {
@@ -366,12 +367,19 @@ impl eframe::App for FerroliteApp {
                     self.state.dirty = true;
                     continue;
                 }
+                crate::events::AppEvent::IngestDone => {
+                    ingest_done = true;
+                }
                 _ => {}
             }
             if let Some((id, jpeg)) = self.state.apply(event) {
                 self.state.upload_thumbnail(ctx, id, jpeg);
             }
             self.state.dirty = true;
+        }
+        // Refresh toolbar metadata-filter caches once per completed ingest (bounded).
+        if ingest_done {
+            self.state.reload_vocab();
         }
         if self.state.dirty {
             self.state.refresh_images();
@@ -381,6 +389,7 @@ impl eframe::App for FerroliteApp {
         // One-time startup rescan of all roots (first frame, ctx available here).
         if !self.state.startup_rescan_done {
             crate::ingest::spawn_startup_rescan(&mut self.state, ctx);
+            self.state.reload_vocab();
             self.state.startup_rescan_done = true;
         }
 
@@ -406,30 +415,47 @@ impl eframe::App for FerroliteApp {
                 crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1");
             });
 
-        let top_h = if self.module.is_library() { 40.0 } else { 72.0 };
         let mut film_clicked: Option<i64> = None;
-        egui::TopBottomPanel::top("toolbar")
-            .exact_height(top_h)
-            .frame(
-                egui::Frame::none()
-                    .fill(theme::BG_TOOLBAR)
-                    .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
-            )
-            .show(ctx, |ui| {
-                if self.module.is_library() {
-                    let changed = crate::library::toolbar::show(
-                        ui,
-                        &mut self.thumb_size,
-                        &mut self.state.include_subfolders,
-                    );
+        if self.module.is_library() {
+            egui::TopBottomPanel::top("toolbar")
+                .exact_height(40.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                )
+                .show(ctx, |ui| {
+                    let changed =
+                        crate::library::toolbar::show(ui, &mut self.thumb_size, &mut self.state);
                     if changed {
                         self.state.dirty = true;
                     }
-                } else {
+                });
+        } else {
+            egui::TopBottomPanel::top("develop_filter")
+                .exact_height(36.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                )
+                .show(ctx, |ui| {
+                    if crate::library::develop_filter_bar::show(ui, &mut self.state) {
+                        self.state.dirty = true;
+                    }
+                });
+            egui::TopBottomPanel::top("develop_filmstrip")
+                .exact_height(72.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                )
+                .show(ctx, |ui| {
                     let current = self.state.viewer.as_ref().map(|v| v.image_id);
                     film_clicked = crate::library::filmstrip::show(ui, &mut self.state, current);
-                }
-            });
+                });
+        }
         if let Some(id) = film_clicked {
             if let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() {
                 self.open_record(ctx, frame, &rec);
@@ -442,6 +468,26 @@ impl eframe::App for FerroliteApp {
             .show(ctx, |ui| {
                 crate::status_bar::show(ui, &self.state);
             });
+
+        if self.module == crate::module::Module::Develop {
+            if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                egui::TopBottomPanel::bottom("develop_meta")
+                    .exact_height(34.0)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::BG_TOOLBAR)
+                            .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                    )
+                    .show(ctx, |ui| {
+                        crate::library::develop_metadata_bar::show(
+                            ui,
+                            &mut self.state,
+                            ctx,
+                            image_id,
+                        );
+                    });
+            }
+        }
 
         if self.module.is_library() {
             egui::SidePanel::left("left")
@@ -489,6 +535,75 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
+        // toggles. In Library (no viewer) they apply to the grid selection; in
+        // Develop or Library+viewer they apply to the open viewer image.
+        if self.state.pending_remove.is_none() && !ctx.wants_keyboard_input() {
+            use ferrolite_image::{Flag, Rating};
+
+            // --- 1. Read key intent ---
+            enum KeyIntent {
+                Rating(u8),
+                Flag(Flag),
+            }
+            let intent = ctx.input(|i| {
+                for n in 0..=5u8 {
+                    let key = match n {
+                        0 => egui::Key::Num0,
+                        1 => egui::Key::Num1,
+                        2 => egui::Key::Num2,
+                        3 => egui::Key::Num3,
+                        4 => egui::Key::Num4,
+                        _ => egui::Key::Num5,
+                    };
+                    if i.key_pressed(key) {
+                        return Some(KeyIntent::Rating(n));
+                    }
+                }
+                if i.key_pressed(egui::Key::I) {
+                    Some(KeyIntent::Flag(Flag::Pick))
+                } else if i.key_pressed(egui::Key::O) {
+                    Some(KeyIntent::Flag(Flag::Reject))
+                } else {
+                    None
+                }
+            });
+
+            if let Some(intent) = intent {
+                // --- 2. Resolve target image id ---
+                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                    self.state.selected
+                } else {
+                    self.state.viewer.as_ref().map(|v| v.image_id)
+                };
+
+                if let Some(target_id) = target_id {
+                    // --- 3. Look up current value ---
+                    let rec = self.state.images.iter().find(|r| r.id == target_id);
+                    let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
+                    let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
+
+                    // --- 4. Build toggled edit ---
+                    let edit = match intent {
+                        KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(Rating::new(
+                            crate::metadata::toggle_rating(cur_rating, n),
+                        )),
+                        KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
+                            crate::metadata::toggle_flag(cur_flag, f),
+                        ),
+                    };
+
+                    // --- 5. Apply ---
+                    if self.module.is_library() && self.state.viewer.is_none() {
+                        self.state.apply_metadata_edit(ctx, edit);
+                    } else {
+                        self.state
+                            .apply_metadata_edit_to_image(ctx, target_id, edit);
+                    }
+                }
+            }
+        }
+
         // Left/Right move between images while viewing (Develop), non-cyclic.
         if self.module == crate::module::Module::Develop
             && self.state.viewer.is_some()
@@ -506,11 +621,11 @@ impl eframe::App for FerroliteApp {
             if let Some(dir) = dir {
                 let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
                 if let Some(cur_id) = cur_id {
-                    if let Some(pos) = self.state.images.iter().position(|r| r.id == cur_id) {
-                        if let Some(n) =
-                            crate::viewer::nav::neighbor_index(pos, self.state.images.len(), dir)
+                    let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
+                    if let Some(next_id) = crate::viewer::nav::neighbor_in_set(&ids, cur_id, dir) {
+                        if let Some(rec) =
+                            self.state.images.iter().find(|r| r.id == next_id).cloned()
                         {
-                            let rec = self.state.images[n].clone();
                             self.open_record(ctx, frame, &rec);
                         }
                     }
@@ -557,6 +672,19 @@ impl eframe::App for FerroliteApp {
                         crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else if self.state.viewer.is_some() {
                     self.drive_viewer(ui, frame);
+                    if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                        let rect = ui.min_rect();
+                        let resp =
+                            ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());
+                        resp.context_menu(|ui| {
+                            crate::library::image_context_menu::show(
+                                ui,
+                                &mut self.state,
+                                image_id,
+                                true,
+                            );
+                        });
+                    }
                 } else {
                     let rect = ui.available_rect_before_wrap();
                     canvas::paint(ui, rect); // Develop with no image open: stub canvas

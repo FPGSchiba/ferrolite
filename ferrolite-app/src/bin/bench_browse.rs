@@ -80,10 +80,17 @@ fn main() {
     for f in &files {
         let kind = f.kind;
         let new_image = match ferrolite_decode::read_metadata(&f.path, kind) {
-            Ok(meta) => {
-                NewImage::from_metadata(folder_id, f.filename.clone(), f.mtime, f.size, &meta, kind)
-            }
-            Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, kind),
+            Ok(meta) => NewImage::from_metadata(
+                folder_id,
+                f.filename.clone(),
+                f.mtime,
+                f.size,
+                &meta,
+                kind,
+                ferrolite_catalog::Rating::default(),
+                0,
+            ),
+            Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, kind, 0),
         };
         match writer.lock().expect("writer lock").upsert_image(&new_image) {
             Ok(id) => {

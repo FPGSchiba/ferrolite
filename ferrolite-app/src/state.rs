@@ -1,14 +1,18 @@
 //! Application state: catalog handles, the job system, the event channel, and
 //! the currently-browsed folder's rows + selection + progress counters.
 
-use ferrolite_catalog::{Catalog, ImageRecord, ReadPool};
+use crate::events::AppEvent;
+use crate::library::filter::{FilterState, ViewSource};
+use crate::metadata::MetaEdit;
+use ferrolite_catalog::{
+    Catalog, CollectionRecord, ImageRecord, LibraryQuery, ReadPool, TagRecord,
+};
+use ferrolite_image::TagId;
 use ferrolite_jobs::{JobHandle, JobId, JobSystem};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-
-use crate::events::AppEvent;
 
 /// A folder awaiting remove confirmation (shown in a modal).
 #[derive(Debug, Clone)]
@@ -16,6 +20,13 @@ pub struct PendingRemove {
     pub id: i64,
     pub name: String,
     pub subtree_count: u64,
+}
+
+/// Which kind of item is being renamed inline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameKind {
+    Tag,
+    Collection,
 }
 
 pub struct AppState {
@@ -65,6 +76,35 @@ pub struct AppState {
 
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
+
+    /// Active filter state (search text, rating, flags, tags, etc.).
+    pub filter: FilterState,
+    /// Which set of images is shown (folder, all, collection, recently added).
+    pub source: ViewSource,
+    /// Full tag vocabulary loaded from the catalog.
+    pub tags: Vec<TagRecord>,
+    /// Full collection vocabulary loaded from the catalog.
+    pub collections: Vec<CollectionRecord>,
+    /// Per-image tag associations cached for the currently visible grid cells.
+    pub visible_tags: HashMap<i64, Vec<TagId>>,
+    /// Selected image ids (multi-selection for batch ops).
+    pub selection: HashSet<i64>,
+    /// The anchor image id for shift-click range selection.
+    pub selection_anchor: Option<i64>,
+    /// Non-critical warning surfaced in the UI (e.g. query error).
+    pub warning: Option<String>,
+
+    /// Inline rename in progress: (kind, id, edit buffer).
+    /// Set on double-click or "Rename" context-menu; cleared on Enter/blur.
+    pub renaming: Option<(RenameKind, i64, String)>,
+
+    // ── Cached toolbar metadata-filter aggregates (populated by reload_vocab) ──
+    /// Distinct camera-model strings from the catalog.
+    pub camera_options: Vec<String>,
+    /// (min, max) ISO across the catalog, or None if no EXIF ISO is indexed.
+    pub iso_range: Option<(u32, u32)>,
+    /// (earliest, latest) capture-date strings from the catalog, or None.
+    pub date_range: Option<(String, String)>,
 }
 
 impl AppState {
@@ -104,6 +144,18 @@ impl AppState {
             expanded_folders: HashSet::new(),
             pending_remove: None,
             viewer: None,
+            filter: FilterState::default(),
+            source: ViewSource::All,
+            tags: Vec::new(),
+            collections: Vec::new(),
+            visible_tags: HashMap::new(),
+            selection: HashSet::new(),
+            selection_anchor: None,
+            warning: None,
+            camera_options: Vec::new(),
+            iso_range: None,
+            date_range: None,
+            renaming: None,
         })
     }
 
@@ -123,19 +175,112 @@ impl AppState {
         self.textures.insert(image_id, tex);
     }
 
-    /// Reload the visible folder's rows from the read pool (called after ingest
-    /// progress / folder switch). Cheap: indexed query, no filesystem walk.
-    pub fn refresh_images(&mut self) {
-        if let Some(folder_id) = self.current_folder {
-            let rows = if self.include_subfolders {
-                self.reads.list_images_recursive(folder_id)
-            } else {
-                self.reads.list_images(folder_id)
-            };
-            if let Ok(rows) = rows {
-                self.images = rows;
+    /// Build a `LibraryQuery` from the current source + filter state.
+    pub fn build_query(&self) -> LibraryQuery {
+        self.filter.to_query(self.source, self.include_subfolders)
+    }
+
+    /// Load the full tag and collection vocabularies, and refresh cached
+    /// toolbar metadata-filter aggregates (camera list, ISO range, date range).
+    /// Called at startup and after ingest completes.
+    pub fn reload_vocab(&mut self) {
+        if let Ok(t) = self.reads.list_tags() {
+            self.tags = t;
+        }
+        if let Ok(c) = self.reads.list_collections() {
+            self.collections = c;
+        }
+        self.camera_options = self.reads.distinct_cameras().unwrap_or_default();
+        self.iso_range = self.reads.iso_bounds().unwrap_or_default();
+        self.date_range = self.reads.date_bounds().unwrap_or_default();
+    }
+
+    /// Apply a metadata edit to the current selection (fallback to single
+    /// `selected`): optimistic in-memory update of every affected grid row
+    /// + `visible_tags`, then an off-thread persist (DB + xmp:Rating sidecar).
+    pub fn apply_metadata_edit(&mut self, ctx: &egui::Context, edit: MetaEdit) {
+        let mut targets: Vec<i64> = self.selection.iter().copied().collect();
+        if targets.is_empty() {
+            if let Some(id) = self.selected {
+                targets.push(id);
             }
         }
+        self.apply_metadata_edit_to_ids(ctx, &targets, edit);
+    }
+
+    /// Shared core: optimistically update each id's in-memory row + tag cache,
+    /// then persist all of them in ONE off-thread job (DB + xmp:Rating).
+    pub fn apply_metadata_edit_to_ids(&mut self, ctx: &egui::Context, ids: &[i64], edit: MetaEdit) {
+        if ids.is_empty() {
+            return;
+        }
+        // Collect (id, path) pairs for the persist job while borrowing reads.
+        let mut image_paths: Vec<(i64, std::path::PathBuf)> = Vec::new();
+        for id in ids {
+            if let Some(rec) = self.images.iter().find(|r| r.id == *id).cloned() {
+                if let Ok(Some(fp)) = self.reads.folder_path(rec.folder_id) {
+                    image_paths.push((*id, std::path::PathBuf::from(fp).join(&rec.filename)));
+                }
+            }
+        }
+        // Optimistic in-memory update of grid rows + visible_tags cache.
+        for id in ids {
+            let mut tags = self.visible_tags.get(id).cloned().unwrap_or_default();
+            if let Some(rec) = self.images.iter_mut().find(|r| r.id == *id) {
+                crate::metadata::apply_edit_in_memory(rec, &mut tags, edit);
+            }
+            self.visible_tags.insert(*id, tags);
+        }
+        // ONE spawn for all images — batching is preserved.
+        crate::metadata::spawn_metadata_write(
+            &self.jobs,
+            &self.writer,
+            &self.tx,
+            ctx,
+            edit,
+            image_paths,
+        );
+    }
+
+    /// Apply an edit to a single explicit image (used by Develop: the open viewer image).
+    /// Targets ONLY the given id — ignores grid selection.
+    pub fn apply_metadata_edit_to_image(
+        &mut self,
+        ctx: &egui::Context,
+        image_id: i64,
+        edit: MetaEdit,
+    ) {
+        self.apply_metadata_edit_to_ids(ctx, &[image_id], edit);
+    }
+
+    /// Fetch tag associations for any visible image ids not yet cached (virtualised).
+    pub fn ensure_tags_for(&mut self, ids: &HashSet<i64>) {
+        let missing: Vec<i64> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.visible_tags.contains_key(id))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        if let Ok(map) = self.reads.tags_for_images(&missing) {
+            for id in missing {
+                self.visible_tags
+                    .insert(id, map.get(&id).cloned().unwrap_or_default());
+            }
+        }
+    }
+
+    /// Reload the visible set of images from the read pool (called after ingest
+    /// progress / folder switch / filter change). Cheap: indexed query, no
+    /// filesystem walk.
+    pub fn refresh_images(&mut self) {
+        let q = self.build_query();
+        if let Ok(rows) = self.reads.query_images(&q) {
+            self.images = rows;
+        }
+        // Invalidate the per-cell tag cache so the grid re-fetches for the new set.
+        self.visible_tags.clear();
     }
 
     /// Open `rec` in the viewer, cancelling any currently-open viewer first.
@@ -182,6 +327,7 @@ impl AppState {
     pub fn select_folder(&mut self, folder_id: i64) {
         self.reset_for_new_folder();
         self.current_folder = Some(folder_id);
+        self.source = ViewSource::Folder(folder_id);
     }
 
     /// Remove a folder subtree from the catalog (cache only). If the current
@@ -256,7 +402,52 @@ impl AppState {
             expanded_folders: HashSet::new(),
             pending_remove: None,
             viewer: None,
+            filter: FilterState::default(),
+            source: ViewSource::All,
+            tags: Vec::new(),
+            collections: Vec::new(),
+            visible_tags: HashMap::new(),
+            selection: HashSet::new(),
+            selection_anchor: None,
+            warning: None,
+            camera_options: Vec::new(),
+            iso_range: None,
+            date_range: None,
+            renaming: None,
         }
+    }
+
+    /// Add all selected images (or the single `selected` fallback) to a collection.
+    pub fn add_selection_to_collection(&mut self, coll_id: i64) {
+        let mut targets: Vec<i64> = self.selection.iter().copied().collect();
+        if targets.is_empty() {
+            if let Some(id) = self.selected {
+                targets.push(id);
+            }
+        }
+        self.add_images_to_collection(&targets, coll_id);
+    }
+
+    /// Shared core: write every id into the collection, then mark dirty if the
+    /// current source is that collection.
+    pub fn add_images_to_collection(&mut self, ids: &[i64], coll_id: i64) {
+        if ids.is_empty() {
+            return;
+        }
+        {
+            let w = self.writer.lock().expect("writer");
+            for id in ids {
+                let _ = w.add_image_to_collection(coll_id, *id);
+            }
+        }
+        if matches!(self.source, ViewSource::Collection(id) if id == coll_id) {
+            self.dirty = true;
+        }
+    }
+
+    /// Add a single explicit image to a collection (used by Develop/viewer).
+    pub fn add_image_to_collection_now(&mut self, image_id: i64, coll_id: i64) {
+        self.add_images_to_collection(&[image_id], coll_id);
     }
 }
 
@@ -331,20 +522,29 @@ mod tests {
             let child = w
                 .upsert_folder(std::path::Path::new("/p/sub"), Some(root))
                 .unwrap();
-            w.upsert_image(&NewImage::failed(root, "a.nef".into(), 1, 1, FileKind::Raw))
-                .unwrap();
+            w.upsert_image(&NewImage::failed(
+                root,
+                "a.nef".into(),
+                1,
+                1,
+                FileKind::Raw,
+                0,
+            ))
+            .unwrap();
             w.upsert_image(&NewImage::failed(
                 child,
                 "b.jpg".into(),
                 1,
                 1,
                 FileKind::Standard,
+                0,
             ))
             .unwrap();
             (root, child)
         };
         let _ = child;
         s.current_folder = Some(root);
+        s.source = ViewSource::Folder(root);
 
         s.include_subfolders = false;
         s.refresh_images();
@@ -374,6 +574,7 @@ mod tests {
                 1,
                 1,
                 FileKind::Standard,
+                0,
             ))
             .unwrap();
             (root, sibling, other)
@@ -443,6 +644,41 @@ mod tests {
     }
 
     #[test]
+    fn refresh_images_uses_filter_query_across_source() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+        let (f1, f2) = {
+            let w = s.writer.lock().unwrap();
+            let f1 = w.upsert_folder(std::path::Path::new("/a"), None).unwrap();
+            let f2 = w.upsert_folder(std::path::Path::new("/b"), None).unwrap();
+            w.upsert_image(&NewImage::failed(
+                f1,
+                "a.nef".into(),
+                1,
+                1,
+                FileKind::Raw,
+                0,
+            ))
+            .unwrap();
+            w.upsert_image(&NewImage::failed(
+                f2,
+                "b.nef".into(),
+                1,
+                1,
+                FileKind::Raw,
+                0,
+            ))
+            .unwrap();
+            (f1, f2)
+        };
+        let _ = (f1, f2);
+        // AllPhotographs source returns images from both folders.
+        s.source = ViewSource::All;
+        s.refresh_images();
+        assert_eq!(s.images.len(), 2);
+    }
+
+    #[test]
     fn remove_folder_cascade_clears_current_when_inside_subtree() {
         use ferrolite_catalog::{FileKind, NewImage};
         let mut s = AppState::for_test();
@@ -458,6 +694,7 @@ mod tests {
                 1,
                 1,
                 FileKind::Standard,
+                0,
             ))
             .unwrap();
             (root, child)
@@ -469,5 +706,187 @@ mod tests {
             "current cleared when in removed subtree"
         );
         assert!(s.reads.list_folders().unwrap().is_empty());
+    }
+
+    /// `apply_metadata_edit` with `ToggleTag` must optimistically update
+    /// `visible_tags` for every image in `selection` (or the single `selected`).
+    /// The in-memory update is unconditional; the persist job fires off-thread
+    /// with an empty path list (no folder row in the test DB, so folder_path
+    /// returns None) and completes without error.
+    #[test]
+    fn apply_metadata_edit_toggle_tag_updates_visible_tags() {
+        use ferrolite_catalog::{DecodeStatus, FileKind};
+        use ferrolite_image::{Flag, Orientation, Rating, TagId};
+
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+
+        // Seed two in-memory image rows (no DB folder row — folder_path returns
+        // None so image_paths will be empty, but the optimistic update still runs).
+        let mk_rec = |id: i64| ferrolite_catalog::ImageRecord {
+            id,
+            folder_id: 99,
+            filename: format!("img{id}.nef"),
+            width: None,
+            height: None,
+            orientation: Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: DecodeStatus::Done,
+            kind: FileKind::Raw,
+            rating: Rating::default(),
+            flag: Flag::None,
+        };
+
+        s.images = vec![mk_rec(1), mk_rec(2)];
+        s.selection = [1, 2].into_iter().collect();
+
+        let tag = TagId(42);
+
+        // First toggle: tag should be added to both images.
+        s.apply_metadata_edit(&ctx, crate::metadata::MetaEdit::ToggleTag(tag));
+        assert_eq!(
+            s.visible_tags.get(&1).cloned().unwrap_or_default(),
+            vec![tag],
+            "image 1: tag added"
+        );
+        assert_eq!(
+            s.visible_tags.get(&2).cloned().unwrap_or_default(),
+            vec![tag],
+            "image 2: tag added"
+        );
+
+        // Second toggle: tag should be removed from both images.
+        s.apply_metadata_edit(&ctx, crate::metadata::MetaEdit::ToggleTag(tag));
+        assert!(
+            s.visible_tags.get(&1).map(|v| v.is_empty()).unwrap_or(true),
+            "image 1: tag removed"
+        );
+        assert!(
+            s.visible_tags.get(&2).map(|v| v.is_empty()).unwrap_or(true),
+            "image 2: tag removed"
+        );
+
+        // Fallback path: no selection, single selected.
+        s.selection.clear();
+        s.selected = Some(1);
+        s.apply_metadata_edit(&ctx, crate::metadata::MetaEdit::ToggleTag(tag));
+        assert_eq!(
+            s.visible_tags.get(&1).cloned().unwrap_or_default(),
+            vec![tag],
+            "single-selected fallback: tag added to image 1"
+        );
+        assert!(
+            s.visible_tags.get(&2).map(|v| v.is_empty()).unwrap_or(true),
+            "image 2 unchanged when not selected"
+        );
+    }
+
+    /// `add_selection_to_collection` adds each selected image to the collection and
+    /// sets `dirty` only when the current source is that collection.
+    #[test]
+    fn add_selection_to_collection_adds_images_and_sets_dirty_when_viewing() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+
+        // Create a folder, two images, and a collection.
+        let (coll_id, img_a, img_b) = {
+            let w = s.writer.lock().unwrap();
+            let folder = w.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            let a = w
+                .upsert_image(&NewImage::failed(
+                    folder,
+                    "a.jpg".into(),
+                    1,
+                    1,
+                    FileKind::Standard,
+                    0,
+                ))
+                .unwrap();
+            let b = w
+                .upsert_image(&NewImage::failed(
+                    folder,
+                    "b.jpg".into(),
+                    1,
+                    1,
+                    FileKind::Standard,
+                    0,
+                ))
+                .unwrap();
+            let c = w
+                .create_collection("test-col", ferrolite_image::Color::default())
+                .unwrap();
+            (c, a, b)
+        };
+
+        // Select both images.
+        s.selection = [img_a, img_b].into_iter().collect();
+        s.dirty = false;
+        // Not currently viewing the collection — dirty must stay false.
+        s.source = ViewSource::All;
+        s.add_selection_to_collection(coll_id);
+        assert!(
+            !s.dirty,
+            "dirty stays false when not viewing the collection"
+        );
+
+        // Verify images are in the collection via the read pool.
+        s.reload_vocab();
+        s.source = ViewSource::Collection(coll_id);
+        s.refresh_images();
+        assert_eq!(s.images.len(), 2, "both images should be in the collection");
+
+        // Re-run while viewing the collection: dirty must be set.
+        s.dirty = false;
+        s.source = ViewSource::Collection(coll_id);
+        s.add_selection_to_collection(coll_id);
+        assert!(
+            s.dirty,
+            "dirty set when currently viewing the target collection"
+        );
+    }
+
+    /// `selection_anchor` is initialised to `None` in both constructors.
+    #[test]
+    fn selection_anchor_initialised_none() {
+        let s = AppState::for_test();
+        assert!(s.selection_anchor.is_none());
+    }
+
+    #[test]
+    fn apply_metadata_edit_to_image_targets_only_that_image() {
+        use ferrolite_catalog::{DecodeStatus, FileKind};
+        use ferrolite_image::{Flag, Orientation, Rating};
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+        let mk = |id: i64| ferrolite_catalog::ImageRecord {
+            id,
+            folder_id: 99,
+            filename: format!("img{id}.nef"),
+            width: None,
+            height: None,
+            orientation: Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: DecodeStatus::Done,
+            kind: FileKind::Raw,
+            rating: Rating::default(),
+            flag: Flag::None,
+        };
+        s.images = vec![mk(1), mk(2)];
+        // Selection is image 2, but we edit image 1 explicitly.
+        s.selection = [2].into_iter().collect();
+        s.selected = Some(2);
+
+        s.apply_metadata_edit_to_image(
+            &ctx,
+            1,
+            crate::metadata::MetaEdit::SetRating(Rating::new(4)),
+        );
+
+        let r1 = s.images.iter().find(|r| r.id == 1).unwrap().rating;
+        let r2 = s.images.iter().find(|r| r.id == 2).unwrap().rating;
+        assert_eq!(r1, Rating::new(4), "explicit target updated");
+        assert_eq!(r2, Rating::default(), "selection NOT touched");
     }
 }

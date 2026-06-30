@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+pub(crate) fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// How often the background watcher polls the selected folder for new files.
 pub const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -218,6 +225,9 @@ fn ingest_job(
                     _ => return None,
                 }
             }
+            let added_at = now_epoch_secs();
+            let rating = ferrolite_catalog::read_rating(&ferrolite_catalog::sidecar_path(&f.path))
+                .unwrap_or_default();
             let new_image = match ferrolite_decode::read_metadata(&f.path, f.kind) {
                 Ok(meta) => NewImage::from_metadata(
                     folder_id,
@@ -226,8 +236,17 @@ fn ingest_job(
                     f.size,
                     &meta,
                     f.kind,
+                    rating,
+                    added_at,
                 ),
-                Err(_) => NewImage::failed(folder_id, f.filename.clone(), f.mtime, f.size, f.kind),
+                Err(_) => NewImage::failed(
+                    folder_id,
+                    f.filename.clone(),
+                    f.mtime,
+                    f.size,
+                    f.kind,
+                    added_at,
+                ),
             };
             Some((new_image, f.path.clone(), f.kind))
         })
@@ -342,6 +361,11 @@ pub fn spawn_thumbnail(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn now_epoch_secs_is_positive() {
+        assert!(super::now_epoch_secs() > 1_000_000_000);
+    }
 
     #[test]
     fn should_watch_fires_only_when_idle_selected_and_elapsed() {

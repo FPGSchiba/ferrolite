@@ -37,6 +37,9 @@ pub enum AppEvent {
     /// The tier-2 full decode failed; the viewer keeps showing the preview and
     /// goes idle. Folded by `apply` (no GPU work) but matched in `app.rs`.
     FullFailed { image_id: i64 },
+    /// Result of an off-thread metadata persist. `ok==false` → reload truth;
+    /// `warning` → surface in the status bar.
+    MetadataResult { ok: bool, warning: Option<String> },
 }
 
 impl AppState {
@@ -73,6 +76,17 @@ impl AppState {
             AppEvent::FullDecoded { .. } => None,
             // Terminal-state handling happens in `app.rs`; nothing to fold here.
             AppEvent::FullFailed { .. } => None,
+            AppEvent::MetadataResult { ok, warning } => {
+                if !ok {
+                    self.dirty = true;
+                }
+                match warning {
+                    Some(w) => self.warning = Some(w),
+                    None if ok => self.warning = None,
+                    None => {}
+                }
+                None
+            }
         }
     }
 }
@@ -120,5 +134,51 @@ mod tests {
         assert_eq!(out, None);
         assert_eq!(s.thumb_total, 1);
         assert_eq!(s.thumb_jobs.get(&5), Some(&job_id));
+    }
+
+    #[test]
+    fn metadata_result_clears_warning_on_clean_success() {
+        let mut s = AppState::for_test();
+        s.warning = Some("stale warning".into());
+
+        // ok=true, no warning → warning should be cleared.
+        s.apply(AppEvent::MetadataResult {
+            ok: true,
+            warning: None,
+        });
+        assert_eq!(s.warning, None, "warning must be cleared on clean success");
+    }
+
+    #[test]
+    fn metadata_result_preserves_warning_on_failure() {
+        let mut s = AppState::for_test();
+        s.warning = Some("prior warning".into());
+
+        // ok=false, no warning → warning must NOT be cleared (keep the prior).
+        s.apply(AppEvent::MetadataResult {
+            ok: false,
+            warning: None,
+        });
+        assert_eq!(
+            s.warning,
+            Some("prior warning".into()),
+            "warning must be preserved when ok=false and no new warning"
+        );
+    }
+
+    #[test]
+    fn metadata_result_sets_warning_when_provided() {
+        let mut s = AppState::for_test();
+        s.warning = None;
+
+        s.apply(AppEvent::MetadataResult {
+            ok: true,
+            warning: Some("sidecar write failed".into()),
+        });
+        assert_eq!(
+            s.warning,
+            Some("sidecar write failed".into()),
+            "warning must be set when provided"
+        );
     }
 }

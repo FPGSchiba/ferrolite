@@ -1,4 +1,4 @@
-use ferrolite_catalog::{Catalog, DecodeStatus, FileKind, NewImage, ReadPool};
+use ferrolite_catalog::{Catalog, DecodeStatus, FileKind, NewImage, Rating, ReadPool};
 use ferrolite_image::Orientation;
 
 fn temp_db() -> std::path::PathBuf {
@@ -28,6 +28,8 @@ fn new_image(folder_id: i64, filename: &str) -> NewImage {
         iso: Some(100),
         decode_status: DecodeStatus::Done,
         kind: FileKind::Raw,
+        rating: Rating::default(),
+        added_at: 0,
     }
 }
 

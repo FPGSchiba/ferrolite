@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 ferrolite-image = { workspace = true }
 ferrolite-decode = { workspace = true }
+quick-xml = { workspace = true }
 rusqlite = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png"] }
 fast_image_resize = { workspace = true }

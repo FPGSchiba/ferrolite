@@ -21,3 +21,14 @@ freezes on image open — eager per-frame thumbnail decode in the Develop filmst
 (fixed by virtualizing it), and a render-pipeline rebuild on every open (fixed by
 caching pipelines in `ferrolite_vt::DisplayPipelines` and pre-warming at startup).
 Keep them honored.
+
+## Finishing a branch — wait for the author's visual test (load-bearing)
+
+Automated checks (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+warnings`, `cargo test --workspace`) being green is **necessary but not sufficient** to
+finish a development branch. Much of this app is egui UI whose correctness can only be
+confirmed by running the real app and looking at it. Therefore: after the workspace gate
+is green, **STOP and wait for the author (Jann) to visually test the running app and give
+explicit feedback** before merging, pushing/PR-ing, or otherwise finishing the branch.
+Do not present finish options as the final step — present them, then hold for the
+author's hands-on test results, and address any issues found before completing.

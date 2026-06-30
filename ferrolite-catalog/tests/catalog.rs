@@ -1,4 +1,4 @@
-use ferrolite_catalog::{Catalog, DecodeStatus, FileKind, NewImage};
+use ferrolite_catalog::{Catalog, DecodeStatus, FileKind, NewImage, Rating};
 use ferrolite_image::Orientation;
 
 #[test]
@@ -40,6 +40,8 @@ fn sample_image(folder_id: i64, filename: &str) -> NewImage {
         iso: Some(100),
         decode_status: DecodeStatus::Done,
         kind: FileKind::Raw,
+        rating: Rating::default(),
+        added_at: 0,
     }
 }
 
@@ -218,13 +220,13 @@ fn second_ingest_skips_unchanged_files() {
 fn kind_round_trips_and_schema_is_v2() {
     use ferrolite_catalog::FileKind;
     let cat = ferrolite_catalog::Catalog::open_in_memory().unwrap();
-    assert_eq!(cat.schema_version().unwrap(), 2);
+    assert_eq!(cat.schema_version().unwrap(), 3);
     let folder = cat
         .upsert_folder(std::path::Path::new("/photos/a"), None)
         .unwrap();
-    let raw = ferrolite_catalog::NewImage::failed(folder, "r.nef".into(), 1, 1, FileKind::Raw);
+    let raw = ferrolite_catalog::NewImage::failed(folder, "r.nef".into(), 1, 1, FileKind::Raw, 0);
     let std_ =
-        ferrolite_catalog::NewImage::failed(folder, "s.jpg".into(), 1, 1, FileKind::Standard);
+        ferrolite_catalog::NewImage::failed(folder, "s.jpg".into(), 1, 1, FileKind::Standard, 0);
     cat.upsert_image(&raw).unwrap();
     cat.upsert_image(&std_).unwrap();
     let mut rows = cat.list_images(folder).unwrap();

@@ -4,6 +4,7 @@ mod chrome;
 mod events;
 mod ingest;
 mod library;
+mod metadata;
 mod module;
 mod state;
 mod status_bar;

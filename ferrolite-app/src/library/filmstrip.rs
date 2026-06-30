@@ -34,25 +34,36 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
                 for (id, decodable) in ids {
-                    // Lazy-load the thumbnail (same path as the grid).
-                    if !state.textures.contains(id) && decodable {
-                        if let Ok(Some(thumb)) = state.reads.get_thumbnail(id) {
-                            state.upload_thumbnail(ui.ctx(), id, thumb.bytes);
-                        }
-                    }
+                    // Always reserve the cell's space so the scroll extent and
+                    // `scroll_to_rect` stay correct, but only do the expensive
+                    // thumbnail work (DB read + JPEG decode + GPU upload + paint)
+                    // for cells actually on screen. Without this, opening the
+                    // viewer would synchronously decode EVERY image's thumbnail on
+                    // the first Develop frame, blocking the UI thread for seconds.
                     let (rect, resp) =
                         ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::click());
-                    if let Some(tex) = state.textures.get(id) {
-                        egui::Image::new(tex)
-                            .fit_to_exact_size(rect.size())
-                            .paint_at(ui, rect);
-                    } else {
-                        ui.painter().rect_filled(rect, 2.0, theme::BG_PANEL);
+                    if ui.is_rect_visible(rect) {
+                        // Lazy-load the thumbnail (same path as the grid), visible-only.
+                        if !state.textures.contains(id) && decodable {
+                            if let Ok(Some(thumb)) = state.reads.get_thumbnail(id) {
+                                state.upload_thumbnail(ui.ctx(), id, thumb.bytes);
+                            }
+                        }
+                        if let Some(tex) = state.textures.get(id) {
+                            egui::Image::new(tex)
+                                .fit_to_exact_size(rect.size())
+                                .paint_at(ui, rect);
+                        } else {
+                            ui.painter().rect_filled(rect, 2.0, theme::BG_PANEL);
+                        }
+                        if Some(id) == current_id {
+                            ui.painter()
+                                .rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::ACCENT));
+                        }
                     }
+                    // Scroll regardless of visibility so an off-screen current image
+                    // is brought into view (then loads next frame as a visible cell).
                     if Some(id) == current_id {
-                        ui.painter()
-                            .rect_stroke(rect, 2.0, egui::Stroke::new(2.0, theme::ACCENT));
-                        // Keep the open image in view as navigation moves it.
                         ui.scroll_to_rect(rect, None);
                     }
                     if resp.clicked() {

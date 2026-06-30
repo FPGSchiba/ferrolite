@@ -2,12 +2,14 @@
 
 mod file_kind;
 mod linear;
+mod meta;
 mod orientation;
 mod pixel;
 mod tile;
 
 pub use file_kind::FileKind;
 pub use linear::LinearRgbaF32;
+pub use meta::{Color, Flag, Rating, TagId};
 pub use orientation::Orientation;
 pub use pixel::{ImageBuffer, ImageBufferError, PixelFormat};
 pub use tile::{

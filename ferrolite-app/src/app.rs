@@ -420,6 +420,7 @@ impl eframe::App for FerroliteApp {
         // One-time startup rescan of all roots (first frame, ctx available here).
         if !self.state.startup_rescan_done {
             crate::ingest::spawn_startup_rescan(&mut self.state, ctx);
+            self.state.reload_vocab();
             self.state.startup_rescan_done = true;
         }
 

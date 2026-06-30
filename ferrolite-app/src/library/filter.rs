@@ -10,9 +10,7 @@ const RECENT_LIMIT: i64 = 200;
 pub enum ViewSource {
     Folder(i64),
     All,
-    #[allow(dead_code)]
     Collection(i64),
-    #[allow(dead_code)]
     RecentlyAdded,
 }
 

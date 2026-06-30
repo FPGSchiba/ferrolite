@@ -1,16 +1,39 @@
-//! Library left panel: Catalog header, Open-folder action, and the folder tree
-//! (indented, expandable, roll-up counts) read from the catalog. A ✕ on hover
-//! and a right-click "Remove" trigger folder removal (subtree-confirm via state).
+//! Library left panel: Catalog sources, Open-folder action, folder tree,
+//! Collections list, and Tag manager. A ✕ on hover and a right-click "Remove"
+//! trigger folder removal (subtree-confirm via state).
 
 use crate::ingest::spawn_ingest;
+use crate::library::filter::ViewSource;
 use crate::library::folder_tree::{flatten, subtree_count};
 use crate::state::{AppState, PendingRemove};
 use crate::theme;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
     ui.add_space(8.0);
-    ui.colored_label(theme::TEXT_FAINT, "CATALOG");
-    ui.label("All Photographs");
+    ui.label(
+        egui::RichText::new("CATALOG")
+            .color(theme::TEXT_DIM)
+            .size(10.0),
+    );
+    if ui
+        .selectable_label(matches!(state.source, ViewSource::All), "All Photographs")
+        .clicked()
+    {
+        state.source = ViewSource::All;
+        state.current_folder = None;
+        state.dirty = true;
+    }
+    if ui
+        .selectable_label(
+            matches!(state.source, ViewSource::RecentlyAdded),
+            "Recently Added",
+        )
+        .clicked()
+    {
+        state.source = ViewSource::RecentlyAdded;
+        state.current_folder = None;
+        state.dirty = true;
+    }
     ui.add_space(8.0);
 
     if ui.button("Open folder…").clicked() {
@@ -117,6 +140,106 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             }
             if x_slot.clicked() {
                 request_remove(state, &folders, node.id, &node.name);
+            }
+        });
+    }
+
+    // ── Collections ──────────────────────────────────────────────────────────
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("COLLECTIONS")
+                .color(theme::TEXT_DIM)
+                .size(10.0),
+        );
+        if ui.small_button("+").clicked() {
+            let name = format!("Collection {}", state.collections.len() + 1);
+            if state
+                .writer
+                .lock()
+                .expect("writer")
+                .create_collection(&name, ferrolite_image::Color::default())
+                .is_ok()
+            {
+                state.reload_vocab();
+            }
+        }
+    });
+    let collections = state.collections.clone();
+    for c in &collections {
+        ui.horizontal(|ui| {
+            let col = egui::Color32::from_rgb(c.color.r, c.color.g, c.color.b);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, col);
+            if ui
+                .selectable_label(
+                    matches!(state.source, ViewSource::Collection(id) if id == c.id),
+                    &c.name,
+                )
+                .clicked()
+            {
+                state.source = ViewSource::Collection(c.id);
+                state.current_folder = None;
+                state.dirty = true;
+            }
+            if ui.small_button("＋sel").clicked() {
+                let ids: Vec<i64> = state.selection.iter().copied().collect();
+                let w = state.writer.lock().expect("writer");
+                for id in ids {
+                    let _ = w.add_image_to_collection(c.id, id);
+                }
+                drop(w);
+                if matches!(state.source, ViewSource::Collection(id) if id == c.id) {
+                    state.dirty = true;
+                }
+            }
+        });
+    }
+
+    // ── Tags ─────────────────────────────────────────────────────────────────
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("TAGS")
+                .color(theme::TEXT_DIM)
+                .size(10.0),
+        );
+        if ui.small_button("+").clicked() {
+            let name = format!("tag{}", state.tags.len() + 1);
+            if state
+                .writer
+                .lock()
+                .expect("writer")
+                .create_tag(&name, ferrolite_image::Color::default())
+                .is_ok()
+            {
+                state.reload_vocab();
+            }
+        }
+    });
+    let tags = state.tags.clone();
+    for t in &tags {
+        ui.horizontal(|ui| {
+            let mut col = [
+                t.color.r as f32 / 255.0,
+                t.color.g as f32 / 255.0,
+                t.color.b as f32 / 255.0,
+            ];
+            if ui.color_edit_button_rgb(&mut col).changed() {
+                let c = ferrolite_image::Color {
+                    r: (col[0] * 255.0) as u8,
+                    g: (col[1] * 255.0) as u8,
+                    b: (col[2] * 255.0) as u8,
+                };
+                let _ = state.writer.lock().expect("writer").set_tag_color(t.id, c);
+                state.reload_vocab();
+            }
+            ui.label(&t.name);
+            if ui.small_button("🗑").clicked() {
+                let _ = state.writer.lock().expect("writer").delete_tag(t.id);
+                state.filter.tag_ids.retain(|x| *x != t.id);
+                state.reload_vocab();
+                state.dirty = true;
             }
         });
     }

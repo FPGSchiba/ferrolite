@@ -76,8 +76,6 @@ pub struct AppState {
     /// Full tag vocabulary loaded from the catalog.
     pub tags: Vec<TagRecord>,
     /// Full collection vocabulary loaded from the catalog.
-    // consumed by future H tasks
-    #[allow(dead_code)]
     pub collections: Vec<CollectionRecord>,
     /// Per-image tag associations cached for the currently visible grid cells.
     pub visible_tags: HashMap<i64, Vec<TagId>>,
@@ -156,8 +154,6 @@ impl AppState {
     }
 
     /// Load the full tag and collection vocabularies from the catalog.
-    // called by future H tasks (tag panel)
-    #[allow(dead_code)]
     pub fn reload_vocab(&mut self) {
         if let Ok(t) = self.reads.list_tags() {
             self.tags = t;

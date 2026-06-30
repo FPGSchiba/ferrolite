@@ -1,7 +1,9 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_pipeline::{blit_to_rgba8, upload_source, Contrast, EditPipeline, Exposure, Op, OpStack, WhiteBalance};
+use ferrolite_pipeline::{
+    blit_to_rgba8, upload_source, Contrast, EditPipeline, Exposure, Op, OpStack, WhiteBalance,
+};
 use std::sync::Arc;
 
 const W: u32 = 64;
@@ -37,7 +39,10 @@ fn white_balance_warm_matches_golden() {
         eprintln!("no GPU adapter; skipping (headless CI)");
         return;
     };
-    let stack = OpStack::default().set_op(Op::WhiteBalance(WhiteBalance { temp: 0.5, tint: -0.2 }));
+    let stack = OpStack::default().set_op(Op::WhiteBalance(WhiteBalance {
+        temp: 0.5,
+        tint: -0.2,
+    }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "wb_warm.png");
@@ -57,7 +62,10 @@ fn identity_stack_matches_source_render() {
     let mut pipe = EditPipeline::new(ctx.clone(), &src, OpStack::default());
     let edited = pipe.render_to_image();
     let diff = common::max_abs_diff(&source_render, &edited);
-    assert!(diff <= 4, "identity stack diverged from source (diff {diff})");
+    assert!(
+        diff <= 4,
+        "identity stack diverged from source (diff {diff})"
+    );
 }
 
 #[test]
@@ -70,4 +78,69 @@ fn contrast_boost_matches_golden() {
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "contrast_boost.png");
+}
+
+#[test]
+fn full_stack_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default()
+        .set_op(Op::Exposure(Exposure { ev: 0.5 }))
+        .set_op(Op::WhiteBalance(WhiteBalance {
+            temp: 0.3,
+            tint: 0.0,
+        }))
+        .set_op(Op::Contrast(Contrast { amount: 0.4 }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "full_stack.png");
+}
+
+#[test]
+fn editing_one_op_reevaluates_minimally() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let base = OpStack::default()
+        .set_op(Op::Exposure(Exposure { ev: 0.2 }))
+        .set_op(Op::WhiteBalance(WhiteBalance {
+            temp: 0.1,
+            tint: 0.0,
+        }))
+        .set_op(Op::Contrast(Contrast { amount: 0.1 }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), base.clone());
+
+    let _ = pipe.evaluate();
+    let after_first = pipe.eval_count();
+    assert_eq!(after_first, 4, "source + 3 ops each evaluated once");
+
+    // Change only contrast -> only contrast re-runs.
+    pipe.set_stack(base.set_op(Op::Contrast(Contrast { amount: 0.9 })));
+    let _ = pipe.evaluate();
+    assert_eq!(
+        pipe.eval_count(),
+        after_first + 1,
+        "only the contrast node re-evaluated"
+    );
+
+    // Change exposure -> exposure + WB + contrast re-run (downstream), source cached.
+    let prev = pipe.eval_count();
+    pipe.set_stack(
+        OpStack::default()
+            .set_op(Op::Exposure(Exposure { ev: 1.5 }))
+            .set_op(Op::WhiteBalance(WhiteBalance {
+                temp: 0.1,
+                tint: 0.0,
+            }))
+            .set_op(Op::Contrast(Contrast { amount: 0.9 })),
+    );
+    let _ = pipe.evaluate();
+    assert_eq!(
+        pipe.eval_count(),
+        prev + 3,
+        "exposure + downstream re-evaluated"
+    );
 }

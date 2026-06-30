@@ -2,6 +2,7 @@
 //! are authored on the dev GPU (set UPDATE_GOLDEN=1 or delete the fixture) and
 //! committed; in headless CI the GPU tests skip before reaching these.
 
+use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 
 /// A deterministic RGB gradient used as the edit source.
@@ -21,6 +22,116 @@ pub fn max_abs_diff(a: &[u8], b: &[u8]) -> u8 {
         .map(|(x, y)| x.abs_diff(*y))
         .max()
         .unwrap_or(0)
+}
+
+/// Read a `TILE_SIZE`² `Rgba16Float` GPU texture back to display-linear f32 RGBA
+/// on the CPU (test-only; the production produce path never reads back).
+pub fn read_tile_linear(ctx: &GpuContext, tex: &wgpu::Texture) -> Vec<f32> {
+    use ferrolite_image::TILE_SIZE;
+    let bpp = 8u32; // RGBA16F
+    let bpr_unpadded = TILE_SIZE * bpp;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let bpr_padded = bpr_unpadded.div_ceil(align) * align;
+    let buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("tile-readback"),
+        size: (bpr_padded * TILE_SIZE) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: tex,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &buf,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(bpr_padded),
+                rows_per_image: Some(TILE_SIZE),
+            },
+        },
+        wgpu::Extent3d {
+            width: TILE_SIZE,
+            height: TILE_SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+    ctx.queue.submit([enc.finish()]);
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    ctx.device.poll(wgpu::Maintain::Wait);
+    let data = slice.get_mapped_range();
+    let mut out = vec![0.0f32; (TILE_SIZE * TILE_SIZE * 4) as usize];
+    for row in 0..TILE_SIZE {
+        let start = (row * bpr_padded) as usize;
+        for px in 0..(TILE_SIZE * 4) {
+            let o = start + px as usize * 2;
+            let h = half::f16::from_le_bytes([data[o], data[o + 1]]);
+            out[(row * TILE_SIZE * 4 + px) as usize] = h.to_f32();
+        }
+    }
+    drop(data);
+    buf.unmap();
+    out
+}
+
+/// Read an arbitrary-size `Rgba16Float` GPU texture back to display-linear f32
+/// RGBA (test-only).
+pub fn read_image_linear(ctx: &GpuContext, img: &ferrolite_pipeline::PipelineImage) -> Vec<f32> {
+    let (w, h) = (img.width, img.height);
+    let bpp = 8u32;
+    let bpr_unpadded = w * bpp;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let bpr_padded = bpr_unpadded.div_ceil(align) * align;
+    let buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("img-readback"),
+        size: (bpr_padded * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_texture_to_buffer(
+        wgpu::ImageCopyTexture {
+            texture: &img.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::ImageCopyBuffer {
+            buffer: &buf,
+            layout: wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(bpr_padded),
+                rows_per_image: Some(h),
+            },
+        },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    ctx.queue.submit([enc.finish()]);
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    ctx.device.poll(wgpu::Maintain::Wait);
+    let data = slice.get_mapped_range();
+    let mut out = vec![0.0f32; (w * h * 4) as usize];
+    for row in 0..h {
+        let start = (row * bpr_padded) as usize;
+        for px in 0..(w * 4) {
+            let o = start + px as usize * 2;
+            let hf = half::f16::from_le_bytes([data[o], data[o + 1]]);
+            out[(row * w * 4 + px) as usize] = hf.to_f32();
+        }
+    }
+    drop(data);
+    buf.unmap();
+    out
 }
 
 const TOL: u8 = 4; // absorbs driver float differences

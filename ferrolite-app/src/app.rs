@@ -457,6 +457,26 @@ impl eframe::App for FerroliteApp {
                 crate::status_bar::show(ui, &self.state);
             });
 
+        if self.module == crate::module::Module::Develop {
+            if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                egui::TopBottomPanel::bottom("develop_meta")
+                    .exact_height(34.0)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::BG_TOOLBAR)
+                            .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                    )
+                    .show(ctx, |ui| {
+                        crate::library::develop_metadata_bar::show(
+                            ui,
+                            &mut self.state,
+                            ctx,
+                            image_id,
+                        );
+                    });
+            }
+        }
+
         if self.module.is_library() {
             egui::SidePanel::left("left")
                 .exact_width(236.0)

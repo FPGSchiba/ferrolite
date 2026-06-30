@@ -244,7 +244,6 @@ impl AppState {
 
     /// Apply an edit to a single explicit image (used by Develop: the open viewer image).
     /// Targets ONLY the given id — ignores grid selection.
-    #[allow(dead_code)]
     pub fn apply_metadata_edit_to_image(
         &mut self,
         ctx: &egui::Context,
@@ -447,7 +446,6 @@ impl AppState {
     }
 
     /// Add a single explicit image to a collection (used by Develop/viewer).
-    #[allow(dead_code)]
     pub fn add_image_to_collection_now(&mut self, image_id: i64, coll_id: i64) {
         self.add_images_to_collection(&[image_id], coll_id);
     }

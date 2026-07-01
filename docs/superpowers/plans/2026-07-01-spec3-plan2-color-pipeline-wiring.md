@@ -1142,6 +1142,365 @@ Launch the app, drag the Develop right panel wider, close and reopen — confirm
 
 ---
 
+## Task 8: Close the unedited-display color gap (whole-branch review Issue 1)
+
+The whole-branch review found that the display tail now applies `working→display` (non-identity by default at Rec.2020), but the **unedited** display paths never pass through a `camera→working` transform, so camera-native / sRGB-linear texels are rendered as if they were working-space linear. Deeper investigation showed the source color space **differs by tier**, so a single matrix is wrong:
+
+- **Preview tier** — `preview_source` (set in `apply_preview_ready`) is the **sRGB embedded thumbnail** (`preview_to_linear` → sRGB-linear); for a Standard (non-RAW) image this is the *permanent* display. Correct transform: **sRGB→working**. (Task 5 mistakenly wired `camera→working` here — a latent bug this task also fixes.)
+- **Full-res tier** — the sparse VT source is **camera-native** (`QuadBin` demosaic). Correct transform: **camera→working** (already correct via Tasks 1–2/5 *when the producer is attached*).
+
+`camera_to_working(ColorProfile::srgb_fallback(), ws)` is exactly **sRGB→working** (the fallback's `xyz_to_cam` is XYZ→sRGB), so both matrices come from the existing `ferrolite_color::camera_to_working` — no new color math.
+
+**Fix strategy:** every texture handed to the display tail must be working-space linear. Achieve it by (a) always driving the preview single-texture through the preview `EditPipeline` with the **sRGB→working** matrix (built eagerly on preview-ready), and (b) always driving the full-res tier through the `TileEditPipeline` producer with the **camera→working** matrix (drop the `is_identity` gate; always `set_producing(true)`). The raw CPU-upload tile path (camera-native) is never shown through the tail again.
+
+**Files:** `ferrolite-app/src/app.rs` only (helpers + `apply_preview_ready` + `set_preview_and_full` + `apply_full_decoded` + `apply_working_space`).
+
+**Interfaces produced:** `FerroliteApp::source_to_working(&self, profile: &ferrolite_decode::ColorProfile) -> [[f32;3];3]`; `FerroliteApp::camera_to_working(&self) -> [[f32;3];3]` (real profile, full-res); `FerroliteApp::preview_to_working(&self) -> [[f32;3];3]` (sRGB fallback, preview tier).
+
+- [ ] **Step 1: Refactor the matrix helpers** (`app.rs` ~116–133)
+
+Replace the current `camera_to_working` with three helpers:
+
+```rust
+    /// Compose a source→working 3×3 for `profile` under the current working space.
+    fn source_to_working(&self, profile: &ferrolite_decode::ColorProfile) -> [[f32; 3]; 3] {
+        ferrolite_color::camera_to_working(
+            profile.xyz_to_cam,
+            ferrolite_color::Xy {
+                x: profile.white_xy[0],
+                y: profile.white_xy[1],
+            },
+            self.state.working_space,
+        )
+    }
+
+    /// camera→working for the open viewer's RAW profile (full-res tier).
+    fn camera_to_working(&self) -> [[f32; 3]; 3] {
+        match self.state.viewer.as_ref() {
+            Some(v) => self.source_to_working(&v.color_profile),
+            None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
+    }
+
+    /// sRGB→working for the preview tier: the embedded preview and Standard images
+    /// are sRGB-primaries, so they convert via the sRGB fallback profile.
+    fn preview_to_working(&self) -> [[f32; 3]; 3] {
+        self.source_to_working(&ferrolite_decode::ColorProfile::srgb_fallback())
+    }
+```
+
+- [ ] **Step 2: Route the preview single-texture through sRGB→working** (`app.rs` `apply_preview_ready`, ~55–114)
+
+Build the preview `EditPipeline` eagerly (identity op-stack, sRGB→working matrix) and display *its* output, so the single texture is working-space. Compute the two matrices BEFORE the `&mut self.state.viewer` borrow. Concretely:
+
+- At the very top of `apply_preview_ready` (before `let Some(v) = self.state.viewer.as_mut()`), add:
+  ```rust
+        let pw = self.preview_to_working();
+        let w2d = ferrolite_color::working_to_display(self.state.working_space);
+  ```
+- After `let linear = viewer::load::preview_to_linear(image);` and `v.preview_source = Some(...)`, build the pipeline and use its output. Replace the `let vt = { ... single_texture ... };` block with:
+  ```rust
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let mut ep = ferrolite_pipeline::EditPipeline::new(
+            ctx_arc,
+            &linear,
+            ferrolite_pipeline::OpStack::default(),
+            pw,
+        );
+        let edited = ep.evaluate();
+        let mut vt = {
+            let renderer = rs.renderer.read();
+            let vp = renderer
+                .callback_resources
+                .get::<viewer::ViewerPipelines>()
+                .expect("ViewerPipelines pre-warmed at startup");
+            // Push the working→display tail now: a Standard image never reaches
+            // apply_full_decoded, so this is the only place its tail gets set.
+            vp.pipelines.set_display_matrix(&gpu.queue, w2d);
+            ferrolite_vt::VirtualTexture::single_texture(&gpu, &linear, &vp.pipelines)
+        };
+        vt.update_single_from_texture(edited.texture.clone(), (edited.width, edited.height));
+        v.preview_edit = Some(ep);
+  ```
+- Leave the `fit`/`image_dims`/`loaded`/`idle` logic and the `ViewerGpu { preview: vt, .. }` insertion exactly as they are (the `insert` already moves `vt`).
+
+- [ ] **Step 3: Preview tier uses sRGB→working; full-res always produces** (`app.rs` `set_preview_and_full`, ~250–352)
+
+- After `let cam = self.camera_to_working();` (kept for the full-res tier), add `let pw = self.preview_to_working();` (both computed before the `&mut` borrow).
+- In the preview-tier block, change the lazy `EditPipeline::new(..., cam)` (the `if v.preview_edit.is_none()` branch, ~291–296) to pass `pw` instead of `cam`. (preview_edit is normally built in Step 2, so this is a safety net; it must still use the preview matrix.)
+- In the full-res block, change `full.set_producing(!identity);` (~345) to `full.set_producing(true);` and delete the now-unused `let identity = shown.is_identity();` line (~339). Update the stale comment above the block (~316–322): the sparse VT is now **always** producer-driven; the "before" (identity `shown`) is rendered by the producer with an identity op-stack + camera→working, i.e. the correct unedited image in working space — never the raw camera-native CPU path.
+
+- [ ] **Step 4: Always attach the full-res producer on open** (`app.rs` `apply_full_decoded`, ~206–242)
+
+Remove the `if !v.op_stack.is_identity()` gate so the producer is built for every RAW open (identity stack included). Replace the `if !v.op_stack.is_identity() { ... }` block with an unconditional build:
+
+```rust
+                    // Always attach the full-res producer so the sparse VT tiles
+                    // pass through camera→working (the raw camera-native CPU path
+                    // must never reach the working→display tail). Identity stack =
+                    // unedited-but-color-managed.
+                    let ctx_arc =
+                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let tep = ferrolite_pipeline::TileEditPipeline::new(
+                        ctx_arc,
+                        pyramid,
+                        v.op_stack.clone(),
+                        cam,
+                    );
+                    v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                    let version = v.opstack_version.max(1);
+                    let mut renderer = rs.renderer.write();
+                    if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                        if g.image_id == image_id {
+                            if let Some(full) = g.full.as_mut() {
+                                full.set_producing(true);
+                                full.set_opstack_version(&g.ctx, version);
+                            }
+                        }
+                    }
+```
+
+(`pyramid` is already the `Arc<GpuPyramidSource>` built just above; it is moved into `TileEditPipeline::new`, so keep the existing `v.pyramid = Some(Arc::clone(&pyramid));` line before this block.)
+
+- [ ] **Step 5: `apply_working_space` uses the right matrix per tier** (`app.rs` ~410–431)
+
+- Before the `&mut` borrow, compute both: keep `let cam = self.camera_to_working();` and add `let pw = self.preview_to_working();`.
+- In the preview-tier update, change `ep.set_color_matrix(cam);` to `ep.set_color_matrix(pw);`.
+- Leave the full-res `producer.set_color_matrix(cam);` as-is (camera→working is correct there).
+
+- [ ] **Step 6: Build + verify**
+
+Run:
+- `cargo build -p ferrolite-app`
+- `cargo fmt --all` then `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings` (confirm no unused-variable warning from the removed `identity` binding)
+- `cargo test --workspace`
+
+This is display-path wiring — correctness is confirmed by Jann's visual test (unedited RAW colors at Rec.2020; sRGB working space matches the old look; Standard/JPEG colors correct; crossfade has no color jump beyond the inherent camera-JPEG-vs-raw difference). The automated bar is a clean gate.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ferrolite-app/src/app.rs
+git commit -m "fix(app): route unedited preview (sRGB→working) and full-res (camera→working) through the color pipeline"
+```
+
+---
+
+## Task 9: Shader-module cache on `GpuContext` (fix the Task-8 open-latency regression)
+
+The whole-branch re-review found that after Task 8 the app compiles ~8 uncached compute shaders synchronously on the UI thread on every image open (`apply_preview_ready` builds the preview `EditPipeline`) and every full-decode settle (`apply_full_decoded` builds the `TileEditPipeline` unconditionally — required, since the unedited full-res producer applies `camera→working`). Each edit node compiles its WGSL fresh per pipeline instance (no reuse) — a pre-existing Spec 2 pattern Task 8 moved onto the open/navigation path. This violates CLAUDE.md rule #1 (no multi-ms UI-thread work; the rule exists because "multi-second UI freezes on image open" already happened here).
+
+**Fix (Jann-approved):** a process-global `ShaderModule` cache on `ferrolite-gpu::GpuContext` (engine tier — a generic memoization, no photo concepts) so each unique WGSL source is compiled **once per device** and reused across all `EditPipeline`/`TileEditPipeline`/node instances (CLAUDE.md "build shaders once and reuse"). Plus a startup pre-warm so even the first open reuses.
+
+**Key design facts (verified):**
+- `GpuContext::from_render_state` builds a *new* `GpuContext` per call but `.clone()`s the shared `rs.device` Arc, so `Arc::as_ptr(&device)` is **stable** across every open. Keying the cache by `(device-ptr, source)` therefore shares entries across opens.
+- Headless tests each create a distinct device (distinct Arc). To keep the ptr key from being reused after a test device drops, the cache **pins** the device `Arc` in its entry (the one app device is already process-lived; test devices pin for the process — modest, acceptable).
+- All edit shaders are `include_str!` `&'static str`; a `&'static str` HashMap key compares by content, so the same WGSL `include_str!`'d from both `pipeline.rs` and `tile_edit.rs` dedups to one module.
+- `wgpu::{Device, Queue, ShaderModule}` are `Send + Sync`, so a `static Mutex<HashMap<..>>` holding `Arc`s is sound.
+
+**Files:**
+- Modify: `ferrolite-gpu/src/context.rs` (add cache + `GpuContext::shader_module`, + a cache test)
+- Modify: `ferrolite-pipeline/src/nodes.rs` (route every node's module creation through `ctx.shader_module`)
+- Create/modify: `ferrolite-pipeline/src/lib.rs` (add `pub fn prewarm_shaders(ctx: &GpuContext)`)
+- Modify: `ferrolite-app/src/app.rs` (call `prewarm_shaders` at the startup pre-warm)
+
+**Interfaces produced:** `GpuContext::shader_module(&self, label: &str, wgsl: &'static str) -> Arc<wgpu::ShaderModule>`; `ferrolite_pipeline::prewarm_shaders(ctx: &ferrolite_gpu::GpuContext)`.
+
+- [ ] **Step 1: Write the failing cache test**
+
+In `ferrolite-gpu/src/context.rs` `#[cfg(test)] mod tests`, add:
+
+```rust
+    #[test]
+    fn shader_module_is_compiled_once_and_reused() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        const SRC: &str = "@compute @workgroup_size(1,1,1) fn main() {}";
+        let a = ctx.shader_module("cache-test", SRC);
+        let b = ctx.shader_module("cache-test", SRC);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "same (device, source) must return the cached module"
+        );
+    }
+```
+
+- [ ] **Step 2: Run it to verify failure**
+
+Run: `cargo test -p ferrolite-gpu shader_module_is_compiled_once -- --nocapture`
+Expected: FAIL — no method `shader_module`.
+
+- [ ] **Step 3: Implement the cache + method**
+
+In `ferrolite-gpu/src/context.rs`, extend the imports and add the cache above `impl GpuContext`:
+
+```rust
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// One device's compiled shader modules, keyed by WGSL source (content-compared
+/// via `&'static str`). `_device` pins the `Arc` so the device-pointer cache key
+/// cannot be reused by a later device allocated at the same address.
+struct DeviceShaders {
+    _device: Arc<wgpu::Device>,
+    modules: HashMap<&'static str, Arc<wgpu::ShaderModule>>,
+}
+
+/// Process-global shader cache: `device-ptr -> that device's compiled modules`.
+fn shader_cache() -> &'static Mutex<HashMap<usize, DeviceShaders>> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, DeviceShaders>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+```
+
+(Replace the existing `use std::sync::Arc;` line with the combined `use` above.)
+
+Add the method inside `impl GpuContext`:
+
+```rust
+    /// Compile `wgsl` into a `ShaderModule` at most once per (device, source) and
+    /// reuse it across every pipeline instance. Compiling WGSL (naga front-end) is
+    /// the expensive part of pipeline creation; caching it keeps per-image
+    /// EditPipeline/TileEditPipeline builds off the "recompile on every open" path
+    /// (CLAUDE.md: build shaders once and reuse). Safe to call on each node build.
+    pub fn shader_module(&self, label: &str, wgsl: &'static str) -> Arc<wgpu::ShaderModule> {
+        let dev_key = Arc::as_ptr(&self.device) as usize;
+        let mut guard = shader_cache().lock().expect("shader cache mutex");
+        let entry = guard.entry(dev_key).or_insert_with(|| DeviceShaders {
+            _device: Arc::clone(&self.device),
+            modules: HashMap::new(),
+        });
+        if let Some(m) = entry.modules.get(wgsl) {
+            return Arc::clone(m);
+        }
+        // Compiled under the lock: node construction is single-threaded (render/UI
+        // thread) and not a per-frame hot path, so contention is negligible.
+        let module = Arc::new(
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+                }),
+        );
+        entry.modules.insert(wgsl, Arc::clone(&module));
+        module
+    }
+```
+
+- [ ] **Step 4: Run the cache test to green**
+
+Run: `cargo test -p ferrolite-gpu shader_module_is_compiled_once -- --nocapture`
+Expected: PASS on the dev GPU; skips headless.
+
+- [ ] **Step 5: Route every edit node's module creation through the cache**
+
+In `ferrolite-pipeline/src/nodes.rs`:
+
+- Change `point_op_pipeline` to take a prebuilt module instead of compiling. Replace its signature + body:
+  ```rust
+  fn point_op_pipeline(
+      device: &wgpu::Device,
+      bgl: &wgpu::BindGroupLayout,
+      module: &wgpu::ShaderModule,
+      label: &str,
+  ) -> wgpu::ComputePipeline {
+      let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+          label: Some(label),
+          bind_group_layouts: &[bgl],
+          push_constant_ranges: &[],
+      });
+      device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+          label: Some(label),
+          layout: Some(&layout),
+          module,
+          entry_point: "main",
+          compilation_options: Default::default(),
+          cache: None,
+      })
+  }
+  ```
+- In `PointOpNode::new`, change the `wgsl: &str` param to `wgsl: &'static str`, and build the module via the cache:
+  ```rust
+      pub(crate) fn new(
+          ctx: Arc<GpuContext>,
+          wgsl: &'static str,
+          label: &str,
+          params: Rc<Cell<U>>,
+      ) -> Self {
+          let bgl = point_op_bgl(&ctx.device);
+          let module = ctx.shader_module(label, wgsl);
+          let pipeline = point_op_pipeline(&ctx.device, &bgl, &module, label);
+          // ... unchanged (uniform_buf, Self { .. }) ...
+  ```
+- In `CurveNode::new`, replace the inline `create_shader_module` with:
+  ```rust
+          let module = ctx.shader_module("tone-curve", include_str!("shaders/tone_curve.wgsl"));
+  ```
+  and change the pipeline's `module: &module,` (drop the old `module: &module` built inline — reuse the cached one). Keep the rest (layout, create_compute_pipeline) the same, referencing `&module`.
+- In `GeometryNode::new` and `GeometryHeadNode::new`, replace their inline `create_shader_module(... include_str!("shaders/geometry.wgsl") ...)` with:
+  ```rust
+          let module = ctx.shader_module("geometry", include_str!("shaders/geometry.wgsl"));
+  ```
+  (both use the same geometry.wgsl → they share one cached module) and reference `&module` in `create_compute_pipeline`.
+
+All `PointOpNode::new` call sites already pass `include_str!(...)` (`&'static str`), so the tightened param type compiles unchanged.
+
+- [ ] **Step 6: Add the startup pre-warm helper**
+
+In `ferrolite-pipeline/src/lib.rs`, add (adjust the `use`/path so `include_str!` resolves from `src/`):
+
+```rust
+/// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
+/// cached modules instead of compiling on the UI thread. Call once at startup,
+/// alongside the display-pipeline pre-warm.
+pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
+    for (label, src) in [
+        ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
+        ("exposure", include_str!("shaders/exposure.wgsl")),
+        ("white-balance", include_str!("shaders/white_balance.wgsl")),
+        ("contrast", include_str!("shaders/contrast.wgsl")),
+        ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
+        ("hsl", include_str!("shaders/hsl.wgsl")),
+        ("sharpen", include_str!("shaders/sharpen.wgsl")),
+        ("geometry", include_str!("shaders/geometry.wgsl")),
+    ] {
+        let _ = ctx.shader_module(label, src);
+    }
+}
+```
+
+> These `include_str!` paths resolve from `ferrolite-pipeline/src/` (lib.rs's dir) to `src/shaders/…`, the same files the nodes include — so the content-keyed cache entries pre-warmed here are exactly the ones the node constructors look up.
+
+- [ ] **Step 7: Call the pre-warm at startup**
+
+In `ferrolite-app/src/app.rs` `FerroliteApp::new` (the `if let Some(rs) = cc.wgpu_render_state()` pre-warm block, where `DisplayPipelines::new` is called on the local `gpu`), add after the pipelines are built:
+
+```rust
+        ferrolite_pipeline::prewarm_shaders(&gpu);
+```
+
+(Use the same `gpu = GpuContext::from_render_state(rs)` already built there for the display pre-warm; it clones the same `rs.device` Arc used on every later open, so the cache key matches.)
+
+- [ ] **Step 8: Verify (full gate) + confirm reuse**
+
+Run:
+- `cargo build -p ferrolite-app`
+- `cargo fmt --all` then `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace` — all green, including the new `shader_module_is_compiled_once_and_reused` and all existing GPU goldens (behavior is unchanged: same shaders, now reused).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add ferrolite-gpu/src/context.rs ferrolite-pipeline/src/nodes.rs ferrolite-pipeline/src/lib.rs ferrolite-app/src/app.rs
+git commit -m "perf(gpu): cache compiled shader modules per device; pre-warm edit shaders at startup"
+```
+
+---
+
 ## Self-Review notes
 
 - **Spec §5.1 (ColorMatrixNode at DAG head):** Tasks 1–2 (preview + full-res tiers). Op order preserved: `Source/GeoHead → ColorMatrix → Exposure → …`. `OpKind`/`OpStack` untouched → sidecar schema unchanged (it is not a user op).

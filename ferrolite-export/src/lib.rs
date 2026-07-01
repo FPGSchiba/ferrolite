@@ -7,6 +7,7 @@
 mod convert;
 mod encode;
 mod error;
+pub mod filename;
 pub mod job;
 mod metadata;
 mod options;
@@ -14,6 +15,9 @@ mod render;
 mod resize;
 
 pub use error::ExportError;
+pub use filename::{
+    expand as expand_filename, format_capture_date, resolve_collision, FilenameCtx,
+};
 pub use job::{run_export, ExportOutcome, ExportRequest};
 pub use options::{BitDepth, ExportFormat, ExportOptions, ResizeSpec};
 pub use render::{render_tiled, PixelData, RenderedImage};

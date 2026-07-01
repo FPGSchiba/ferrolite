@@ -1501,6 +1501,191 @@ git commit -m "perf(gpu): cache compiled shader modules per device; pre-warm edi
 
 ---
 
+## Task 10: Preview-open latency — off-thread conversion + single color pass
+
+**Evidence (release build, measured):** for a large Standard image (3072×2048) `apply_preview_ready` took **713 ms on the UI thread**, breakdown: `preview_to_linear` 161 (sRGB→f32, per-pixel, on UI thread — pre-existing) · `linear.clone` 16 · eager `EditPipeline::new` 117 · `evaluate` 213 (9 compute passes, 8 identity no-ops) · throwaway `single_texture` upload 200 (immediately overwritten). ~530 ms of that is redundant work Task 8 introduced.
+
+**Root cause (systematic-debugging, confirmed):** Task 8's preview path (a) uploads the image **twice** (once in `EditPipeline::new`'s source, once in the discarded `single_texture`), (b) builds+evaluates a **full 9-node** pipeline just to apply one sRGB→working matrix, and (c) runs the per-pixel sRGB→linear conversion **on the UI thread**.
+
+**Fix (author-approved "Full"):**
+1. **Off-thread conversion** — `PreviewReady` carries a `LinearRgbaF32` converted in the decode job (not an `ImageBuffer`); `preview_to_linear` moves off the UI thread.
+2. **Single color pass** — the initial preview is produced by ONE sRGB→working color-matrix pass (`ferrolite_pipeline::color_convert`), displayed directly (no throwaway upload); the full 9-node `EditPipeline` (`preview_edit`) stays **lazy**, built on first edit (as before Task 8).
+3. WS-change-before-edit re-runs the single pass.
+
+Keeps working-space correctness and runtime WS switching. Realistic result: worst case ~713 ms → ~100–150 ms UI-thread (the residual is the single f32→f16 GPU upload). Re-measure to confirm.
+
+**Files:** `ferrolite-vt/src/view.rs` (new `single_from_texture`), `ferrolite-pipeline` (new `color_convert` + re-export), `ferrolite-app/src/events.rs`, `viewer/load.rs`, `app.rs`.
+
+**Interfaces produced:**
+- `ferrolite_vt::VirtualTexture::single_from_texture(ctx: &GpuContext, texture: std::sync::Arc<wgpu::Texture>, dims: (u32,u32), pipelines: &DisplayPipelines) -> Self` — a rung-1 VT wrapping an existing `Rgba16Float` `TEXTURE_BINDING` texture (no upload).
+- `ferrolite_pipeline::color_convert(ctx: std::sync::Arc<GpuContext>, src: &LinearRgbaF32, matrix: [[f32;3];3]) -> PipelineImage` — upload `src` + ONE `color_matrix.wgsl` pass; returns the working-space texture.
+
+- [ ] **Step 1: `VirtualTexture::single_from_texture` (ferrolite-vt)**
+
+In `ferrolite-vt/src/view.rs`, add a constructor mirroring `single_texture` but taking an existing texture instead of uploading a `LinearRgbaF32`. Refactor the shared tail of `single_texture` (everything after the texture exists: grab bgl/pipeline/sampler/uniform_buf, build `SingleResources`, wrap in `Self`) into this. Concretely add:
+
+```rust
+    /// Rung-1 VT wrapping an already-GPU-resident `Rgba16Float` texture
+    /// (`TEXTURE_BINDING`), e.g. a pipeline color-convert output. No upload.
+    pub fn single_from_texture(
+        ctx: &GpuContext,
+        texture: std::sync::Arc<wgpu::Texture>,
+        dims: (u32, u32),
+        pipelines: &DisplayPipelines,
+    ) -> Self {
+        let device = &ctx.device;
+        let bgl = pipelines.layout(DisplayVariant::Single).clone();
+        let pipeline = pipelines.pipeline(DisplayVariant::Single).clone();
+        let sampler = pipelines.sampler().clone();
+        let display_matrix = pipelines.display_matrix_buffer().clone();
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-xf"),
+            size: std::mem::size_of::<TransformUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            single: Some(SingleResources {
+                texture,
+                texture_view,
+                bind_group_layout: bgl,
+                sampler,
+                pipeline,
+                image_dims: dims,
+                uniform_buf,
+                display_matrix,
+                bind_group: None,
+            }),
+            tiled: None,
+            streaming: None,
+            sparse: None,
+        }
+    }
+```
+
+(If `SingleResources` has fields beyond these, match `single_texture`'s literal exactly — read it first.) A quick unit test can assert `single_dims()` equals the passed dims, mirroring the existing `update_single_swaps_dims` test.
+
+- [ ] **Step 2: `color_convert` (ferrolite-pipeline)**
+
+In `ferrolite-pipeline/src/nodes.rs` (near `upload_source`), add — reusing the crate-internal `upload_source` + `PointOpNode<ColorMatrixUniform>` + the cached `color_matrix.wgsl`:
+
+```rust
+/// One-shot camera/sRGB→working color pass: upload `src`, run a single
+/// `color_matrix.wgsl` pass, return the working-space texture. Cheaper than a
+/// full `EditPipeline` for the preview's initial color conversion (one upload,
+/// one pass). Uses the shared shader cache (built once) via `PointOpNode`.
+pub fn color_convert(
+    ctx: std::sync::Arc<GpuContext>,
+    src: &LinearRgbaF32,
+    matrix: [[f32; 3]; 3],
+) -> PipelineImage {
+    let source = upload_source(&ctx, src);
+    let params = std::rc::Rc::new(std::cell::Cell::new(crate::uniforms::color_matrix_uniform(
+        matrix,
+    )));
+    let node = PointOpNode::new(
+        ctx,
+        include_str!("shaders/color_matrix.wgsl"),
+        "preview-color-convert",
+        params,
+    );
+    node.evaluate(&[&source])
+}
+```
+
+Re-export from `ferrolite-pipeline/src/lib.rs`: `pub use nodes::color_convert;` (and ensure `upload_source`/`PointOpNode`/`color_matrix_uniform` are reachable from `nodes` — they are, in-crate). `PointOpNode::evaluate` is the `Node` trait method; import `ferrolite_gpu::Node` in `nodes.rs` if not already in scope (it is).
+
+- [ ] **Step 3: Move sRGB→linear off-thread (`PreviewReady` carries `LinearRgbaF32`)**
+
+- `ferrolite-app/src/events.rs`: change `PreviewReady { image_id: i64, image: ferrolite_image::ImageBuffer }` → `PreviewReady { image_id: i64, linear: ferrolite_image::LinearRgbaF32 }`. The `apply()` fold arm `AppEvent::PreviewReady { .. } => None` is unaffected (`..`).
+- `ferrolite-app/src/viewer/load.rs` `spawn_preview`: after `decode_preview(...) => Ok(image)`, convert in the job: `let linear = preview_to_linear(&image);` then `tx.send(AppEvent::PreviewReady { image_id, linear })`. (`preview_to_linear` now runs on the job thread.)
+- `ferrolite-app/src/app.rs` match (~line 752): `AppEvent::PreviewReady { image_id, linear } => self.apply_preview_ready(frame, *image_id, linear)`.
+
+- [ ] **Step 4: Rewrite `apply_preview_ready` (one pass, lazy preview_edit)**
+
+Change the signature to `image: &ferrolite_image::LinearRgbaF32` → rename the param `linear`. Replace the body from the `preview_to_linear` line through `v.preview_edit = Some(ep);` (currently app.rs ~77–108) with:
+
+```rust
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let dims = (linear.width, linear.height);
+        // Retain the sRGB-linear source so the full preview EditPipeline can be
+        // built lazily on the first edit (built once, reused via set_stack).
+        let src = std::sync::Arc::new(linear.clone());
+        v.preview_source = Some(src.clone());
+        // Initial preview: ONE sRGB→working color pass (not a full 9-node
+        // pipeline). Display its working-space output directly.
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+        let vt = {
+            let renderer = rs.renderer.read();
+            let vp = renderer
+                .callback_resources
+                .get::<viewer::ViewerPipelines>()
+                .expect("ViewerPipelines pre-warmed at startup");
+            // A Standard image never reaches apply_full_decoded, so set the tail here.
+            vp.pipelines.set_display_matrix(&gpu.queue, w2d);
+            ferrolite_vt::VirtualTexture::single_from_texture(
+                &gpu,
+                converted.texture.clone(),
+                (converted.width, converted.height),
+                &vp.pipelines,
+            )
+        };
+```
+
+Then keep the existing `viewport`/`fit`/`image_dims`/`loaded`/`idle` block and the `ViewerGpu { preview: vt, .. }` insertion unchanged (they still reference `dims`/`vt`). `preview_edit` is NOT set here — it stays `None` (lazy).
+
+> `set_preview_and_full` already builds `preview_edit` lazily (`if v.preview_edit.is_none()`) with the `pw` matrix on the first edit — leave that as-is (confirm it passes `pw`, not `cam`).
+
+- [ ] **Step 5: WS-change before any edit re-runs the single pass**
+
+In `apply_working_space` (app.rs), the preview-tier update currently only runs `if let Some(ep) = v.preview_edit`. Add an `else` for the lazy case: recompute the single pass and swap the displayed texture. Compute `let pw = self.preview_to_working();` before the `&mut` borrow (alongside the existing `cam`). Then:
+
+```rust
+        if let Some(ep) = v.preview_edit.as_mut() {
+            ep.set_color_matrix(pw);
+            let img = ep.evaluate();
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == v.image_id {
+                    g.preview
+                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
+                }
+            }
+        } else if let Some(src) = v.preview_source.clone() {
+            // No edit yet: re-run the one-shot color pass with the new matrix.
+            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+            let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == v.image_id {
+                    g.preview.update_single_from_texture(
+                        converted.texture.clone(),
+                        (converted.width, converted.height),
+                    );
+                }
+            }
+        }
+```
+
+(The existing preview-tier block used `cam`; it must now use `pw` — the preview source is sRGB. Full-res `producer.set_color_matrix(cam)` stays `cam`.)
+
+- [ ] **Step 6: Verify + re-measure**
+
+- `cargo build -p ferrolite-app`; `cargo fmt --all` + `--check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace` (all green — the color goldens are unchanged; add the `single_from_texture` dims test).
+- Add a TEMPORARY `eprintln!("[perf] preview_ready TOTAL {:?}", t.elapsed())` at the end of `apply_preview_ready` (a `let t = std::time::Instant::now();` at the top) so the author can re-run `cargo run -p ferrolite-app --release`, open the same large image, and confirm the drop. Remove this timer in a follow-up cleanup commit once confirmed.
+- **Color correctness must be re-verified** (this re-touches the Task 8 path): unedited Standard image colors match the pre-Task-10 look; RAW unedited still correct; WS switch (before and after an edit) recolors; first edit still works.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add ferrolite-vt/src/view.rs ferrolite-pipeline/src/nodes.rs ferrolite-pipeline/src/lib.rs ferrolite-app/src/events.rs ferrolite-app/src/viewer/load.rs ferrolite-app/src/app.rs
+git commit -m "perf(app): off-thread preview conversion + single color pass on open (was ~700ms → ~150ms)"
+```
+
+---
+
 ## Self-Review notes
 
 - **Spec §5.1 (ColorMatrixNode at DAG head):** Tasks 1–2 (preview + full-res tiers). Op order preserved: `Source/GeoHead → ColorMatrix → Exposure → …`. `OpKind`/`OpStack` untouched → sidecar schema unchanged (it is not a user op).

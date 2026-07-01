@@ -63,11 +63,14 @@ fn histogram_compute_matches_cpu_reference() {
     hist.dispatch(&ctx, &tex, (img.width, img.height), identity);
 
     let (tx, rx) = std::sync::mpsc::channel();
-    hist.read_async(move |bins| {
-        let _ = tx.send(bins);
+    hist.read_async(move |maybe| {
+        let _ = tx.send(maybe);
     });
     ctx.device.poll(wgpu::Maintain::Wait); // block in-test only; app uses Poll
-    let gpu_bins = rx.recv().expect("readback delivered");
+    let gpu_bins = rx
+        .recv()
+        .expect("readback delivered")
+        .expect("map succeeded");
 
     let cpu_bins = cpu_histogram(&img);
     assert_eq!(gpu_bins.len(), HIST_LEN);

@@ -191,19 +191,23 @@ impl HistogramPipeline {
     /// `on_ready` when the GPU work completes and the device is polled. Never
     /// blocks. The caller must keep the device polled (`Maintain::Poll`) until the
     /// callback fires (the app does this while a readback is in flight).
-    pub fn read_async(&self, on_ready: impl FnOnce(Vec<u32>) + Send + 'static) {
+    ///
+    /// Delivers `None` on map failure so callers can still clear any in-flight
+    /// state instead of latching forever waiting for a callback that never comes.
+    pub fn read_async(&self, on_ready: impl FnOnce(Option<Vec<u32>>) + Send + 'static) {
         let staging = self.staging.clone();
         self.staging
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |res| {
                 if res.is_err() {
+                    on_ready(None);
                     return;
                 }
                 let data = staging.slice(..).get_mapped_range();
                 let bins: Vec<u32> = bytemuck::cast_slice::<u8, u32>(&data).to_vec();
                 drop(data);
                 staging.unmap();
-                on_ready(bins);
+                on_ready(Some(bins));
             });
     }
 }

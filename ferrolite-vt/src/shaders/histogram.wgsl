@@ -23,6 +23,8 @@ fn bin_index(v: f32) -> u32 {
 fn bin(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= p.dims.x || gid.y >= p.dims.y) { return; }
     let c = textureLoad(src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
+    // Clamp before the OETF: out-of-[0,1] (HDR overshoot) folds into bins 0/255.
+    // display.wgsl does not pre-clamp — intentional divergence for a fixed-range histogram.
     let disp = linear_to_srgb(clamp(p.m * c.rgb, vec3(0.0), vec3(1.0)));
     let luma = dot(disp, vec3<f32>(0.2126, 0.7152, 0.0722));
     atomicAdd(&bins[0u * 256u + bin_index(disp.r)], 1u);

@@ -197,7 +197,8 @@ impl FerroliteApp {
             vp.histogram.dispatch(&gpu, &tex, dims, matrix);
             let tx = self.state.tx.clone();
             let egui_ctx = ctx.clone();
-            vp.histogram.read_async(move |bins| {
+            vp.histogram.read_async(move |maybe| {
+                let bins = maybe.unwrap_or_default();
                 let _ = tx.send(crate::events::AppEvent::HistogramReady { image_id, bins });
                 egui_ctx.request_repaint();
             });
@@ -1041,7 +1042,9 @@ impl eframe::App for FerroliteApp {
                 crate::events::AppEvent::HistogramReady { image_id, bins } => {
                     if let Some(v) = self.state.viewer.as_mut() {
                         if v.image_id == *image_id {
-                            v.histogram.bins = Some(bins.clone());
+                            if !bins.is_empty() {
+                                v.histogram.bins = Some(bins.clone());
+                            }
                             v.histogram.inflight = false;
                         }
                     }

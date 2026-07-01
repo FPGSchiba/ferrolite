@@ -85,6 +85,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image
             }
         });
     }
+
+    ui.separator();
+    if ui.button("Add to export queue").clicked() {
+        if use_selection {
+            let ids: Vec<i64> = state.selection.iter().copied().collect();
+            state.queue_add_many(&ids);
+        } else {
+            state.queue_add(image_id);
+        }
+        ui.close_menu();
+    }
 }
 
 #[cfg(test)]

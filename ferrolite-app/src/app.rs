@@ -1318,8 +1318,15 @@ impl eframe::App for FerroliteApp {
                 });
                 let menu_action =
                     crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1", export_enabled);
-                if menu_action == Some(crate::chrome::MenuAction::ExportImage) {
-                    self.open_export_dialog();
+                match menu_action {
+                    Some(crate::chrome::MenuAction::ExportImage) => self.open_export_dialog(),
+                    Some(crate::chrome::MenuAction::AddToQueue) => {
+                        if let Some(id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                            self.state.queue_add(id);
+                            self.state.warning = Some("Added to export queue.".to_string());
+                        }
+                    }
+                    None => {}
                 }
             });
 

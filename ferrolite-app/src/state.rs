@@ -549,8 +549,6 @@ impl AppState {
     }
 
     /// Add several image ids to the export queue in order (dedup per-id).
-    // Task 6/7 ("Add selection to queue") is the first caller; remove this allow then.
-    #[allow(dead_code)]
     pub fn queue_add_many(&mut self, ids: &[i64]) {
         for &id in ids {
             self.queue_add(id);

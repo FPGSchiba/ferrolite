@@ -12,6 +12,7 @@ use egui::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAction {
     ExportImage,
+    AddToQueue,
 }
 
 /// Render the borderless title bar contents. `ui` is the 30px top panel's ui.
@@ -91,6 +92,13 @@ pub fn title_bar(
                     .clicked()
                 {
                     action = Some(MenuAction::ExportImage);
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(export_enabled, egui::Button::new("Add to export queue"))
+                    .clicked()
+                {
+                    action = Some(MenuAction::AddToQueue);
                     ui.close_menu();
                 }
             });

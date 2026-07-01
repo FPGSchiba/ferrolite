@@ -1,0 +1,14 @@
+[package]
+name = "ferrolite-color"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moxcms = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }

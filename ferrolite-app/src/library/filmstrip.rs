@@ -48,10 +48,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                         ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::click());
                     if ui.is_rect_visible(rect) {
                         // Lazy-load the thumbnail (same path as the grid), visible-only.
+                        // The DB read + JPEG decode run off-thread; decoded pixels
+                        // arrive over the event channel. NO UI-thread decode here.
                         if !state.textures.contains(id) && decodable {
-                            if let Ok(Some(thumb)) = state.reads.get_thumbnail(id) {
-                                state.upload_thumbnail(ui.ctx(), id, thumb.bytes);
-                            }
+                            state.request_thumbnail(ui.ctx(), id);
                         }
                         if let Some(tex) = state.textures.get(id) {
                             egui::Image::new(tex)

@@ -347,6 +347,11 @@ const VIEWER_TILE_BUDGET: u32 = 256;
 /// CLAUDE.md GPU rule). Remaining needed tiles are produced on subsequent frames.
 const MAX_PRODUCE_PER_FRAME: usize = 8;
 
+/// Max thumbnail texture uploads per frame (bounds per-frame GPU/texture work
+/// during bulk thumbnail delivery; CLAUDE.md responsiveness rule). Overflow is
+/// stashed in `AppState.pending_uploads` and flushed over subsequent frames.
+const MAX_THUMB_UPLOADS_PER_FRAME: usize = 16;
+
 impl FerroliteApp {
     /// Per-frame viewer drive: advance the crossfade, drive the sparse VT
     /// (reconcile against GPU-truth feedback + drain finished loads), paint the
@@ -557,6 +562,29 @@ impl eframe::App for FerroliteApp {
 
         // Drain job results into state; upload textures for ThumbReady events and
         // build the viewer's rung-1 VirtualTexture for PreviewReady events.
+        //
+        // Texture uploads are capped at MAX_THUMB_UPLOADS_PER_FRAME per frame so
+        // a burst of finished thumbnails (bulk generation) can't blow the frame
+        // budget. First flush any backlog stashed on a previous frame, then drain
+        // the channel; overflow decoded thumbnails are stashed for next frame.
+        let mut uploads_this_frame = 0usize;
+        {
+            // Drain the stashed backlog first (FIFO) up to the per-frame budget.
+            let take = self
+                .state
+                .pending_uploads
+                .len()
+                .min(MAX_THUMB_UPLOADS_PER_FRAME);
+            if take > 0 {
+                let backlog: Vec<(i64, Vec<u8>, u32, u32)> =
+                    self.state.pending_uploads.drain(..take).collect();
+                for (id, rgba, w, h) in backlog {
+                    self.state.upload_thumbnail(ctx, id, rgba, w, h);
+                    uploads_this_frame += 1;
+                }
+                self.state.dirty = true;
+            }
+        }
         let mut ingest_done = false;
         while let Ok(event) = self.state.rx.try_recv() {
             match &event {
@@ -600,10 +628,21 @@ impl eframe::App for FerroliteApp {
                 }
                 _ => {}
             }
-            if let Some((id, jpeg)) = self.state.apply(event) {
-                self.state.upload_thumbnail(ctx, id, jpeg);
+            if let Some((id, rgba, w, h)) = self.state.apply(event) {
+                if uploads_this_frame < MAX_THUMB_UPLOADS_PER_FRAME {
+                    self.state.upload_thumbnail(ctx, id, rgba, w, h);
+                    uploads_this_frame += 1;
+                } else {
+                    // Over budget this frame — stash for a subsequent frame.
+                    self.state.pending_uploads.push((id, rgba, w, h));
+                }
             }
             self.state.dirty = true;
+        }
+        // If a texture-upload backlog remains, schedule another frame so it
+        // flushes over subsequent frames (each capped) instead of all at once.
+        if !self.state.pending_uploads.is_empty() {
+            ctx.request_repaint();
         }
         // Refresh toolbar metadata-filter caches once per completed ingest (bounded).
         if ingest_done {

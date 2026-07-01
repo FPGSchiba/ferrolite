@@ -216,14 +216,14 @@ fn paint_cell(
     // Determine selection state early so we can adjust the thumbnail rect.
     let selected = state.selection.contains(&rec.id) || state.selected == Some(rec.id);
 
-    // Pull a ready thumbnail from the pool on demand if not yet cached.
+    // Request a thumbnail off-thread if not yet cached (visible cell only). The
+    // DB read + JPEG decode happen in a `Visible`-priority job; the decoded
+    // pixels arrive over the event channel and are uploaded there. NO UI-thread
+    // decode here.
     if !state.textures.contains(rec.id)
         && rec.decode_status != ferrolite_catalog::DecodeStatus::Failed
     {
-        if let Ok(Some(thumb)) = state.reads.get_thumbnail(rec.id) {
-            let jpeg = thumb.bytes;
-            state.upload_thumbnail(ui.ctx(), rec.id, jpeg);
-        }
+        state.request_thumbnail(ui.ctx(), rec.id);
     }
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);

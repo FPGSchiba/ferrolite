@@ -5,7 +5,8 @@
 use crate::events::AppEvent;
 use crate::state::AppState;
 use ferrolite_catalog::{
-    collect_dirs, scan_tree, Catalog, DecodeStatus, FileKind, NewImage, ReadPool, Thumbnail,
+    collect_dirs, scan_tree, Catalog, DecodeStatus, DecodedThumb, FileKind, NewImage, ReadPool,
+    Thumbnail,
 };
 use ferrolite_jobs::{CancelToken, JobHandle, JobSystem, Priority};
 use rayon::prelude::*;
@@ -381,12 +382,14 @@ fn ingest_job(
 }
 
 /// Headless thumbnail helper: decode preview → resize/encode → persist BLOB.
+/// Returns the persisted JPEG [`Thumbnail`] plus the already-resized RGBA8
+/// [`DecodedThumb`] so the caller can upload a texture without re-decoding.
 pub fn thumbnail_blocking(
     writer: &Arc<Mutex<Catalog>>,
     image_id: i64,
     path: &Path,
     kind: FileKind,
-) -> Result<Thumbnail, String> {
+) -> Result<(Thumbnail, DecodedThumb), String> {
     // Opt-in profiling (FERROLITE_PROFILE_THUMBS): time the disk read separately
     // from decode/encode. `measure_read` also warms the cache, so the decode
     // timed next reflects CPU only. Off by default with zero overhead.
@@ -402,7 +405,8 @@ pub fn thumbnail_blocking(
     let decode_us = t_decode.map_or(0, |t| t.elapsed().as_micros() as u64);
 
     let t_encode = profile.then(std::time::Instant::now);
-    let thumb = ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())?;
+    let (thumb, decoded) =
+        ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())?;
     let encode_us = t_encode.map_or(0, |t| t.elapsed().as_micros() as u64);
 
     // Time the writer-lock acquisition + SQLite commit together, so contention on
@@ -421,7 +425,7 @@ pub fn thumbnail_blocking(
     if profile {
         crate::thumb_profile::record(io_us, decode_us, encode_us, write_us);
     }
-    Ok(thumb)
+    Ok((thumb, decoded))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -442,10 +446,13 @@ pub fn spawn_thumbnail(
             return;
         }
         match thumbnail_blocking(&writer, image_id, &path, kind) {
-            Ok(thumb) => {
+            Ok((_thumb, decoded)) => {
+                // Deliver the already-decoded RGBA pixels — no re-encode/decode.
                 let _ = tx.send(AppEvent::ThumbReady {
                     image_id,
-                    jpeg: thumb.bytes,
+                    rgba: decoded.rgba,
+                    w: decoded.w,
+                    h: decoded.h,
                 });
             }
             Err(msg) => {

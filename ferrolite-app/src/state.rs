@@ -55,6 +55,14 @@ pub struct AppState {
     /// IDs visible in the grid on the last frame (for delta reprioritization).
     pub last_visible: HashSet<i64>,
 
+    /// Image ids with an in-flight off-thread thumbnail decode (lazy-load path).
+    /// Dedups repeated `request_thumbnail` calls while the job is running;
+    /// cleared on `ThumbReady`/`ThumbFailed`.
+    pub thumb_pending: HashSet<i64>,
+    /// Decoded thumbnails pulled from the event channel but not yet uploaded this
+    /// frame (per-frame upload cap overflow). Drained first each frame.
+    pub pending_uploads: Vec<(i64, Vec<u8>, u32, u32)>,
+
     /// Set to `true` whenever catalog-visible state changes (ingest events,
     /// folder switch). `app.rs` checks this flag before calling
     /// `refresh_images()` so idle frames issue zero SQL queries.
@@ -153,6 +161,8 @@ impl AppState {
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
+            thumb_pending: HashSet::new(),
+            pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,
             last_watch_check: None,
@@ -180,20 +190,73 @@ impl AppState {
         })
     }
 
-    /// Decode a thumbnail JPEG and upload it as an egui texture into the cache.
-    pub fn upload_thumbnail(&mut self, ctx: &egui::Context, image_id: i64, jpeg: Vec<u8>) {
-        let Ok(img) = image::load_from_memory(&jpeg) else {
+    /// Upload already-decoded RGBA8 pixels as an egui texture into the cache.
+    /// NO JPEG decode happens here — the pixels arrive pre-decoded from a job
+    /// thread (both the generation and lazy-load paths decode off the UI thread).
+    pub fn upload_thumbnail(
+        &mut self,
+        ctx: &egui::Context,
+        image_id: i64,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+    ) {
+        // Guard against a malformed buffer so `from_rgba_unmultiplied` never
+        // panics on a length mismatch.
+        if rgba.len() != (w as usize) * (h as usize) * 4 {
             return;
-        };
-        let rgba = img.to_rgba8();
-        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-        let color = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+        }
+        let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
         let tex = ctx.load_texture(
             format!("thumb-{image_id}"),
             color,
             egui::TextureOptions::LINEAR,
         );
         self.textures.insert(image_id, tex);
+    }
+
+    /// Request a thumbnail for a visible cell WITHOUT blocking the UI thread.
+    /// Dedups against already-textured ids and in-flight requests. On a miss,
+    /// spawns a `Visible`-priority job that reads the DB blob and decodes the
+    /// JPEG → RGBA8 OFF the UI thread, then delivers `ThumbReady` (or
+    /// `ThumbFailed`) over the app event channel.
+    pub fn request_thumbnail(&mut self, ctx: &egui::Context, image_id: i64) {
+        if self.textures.contains(image_id) || self.thumb_pending.contains(&image_id) {
+            return;
+        }
+        self.thumb_pending.insert(image_id);
+        let reads = Arc::clone(&self.reads);
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.jobs
+            .submit(ferrolite_jobs::Priority::Visible, move |cancel| {
+                if cancel.is_cancelled() {
+                    let _ = tx.send(AppEvent::ThumbFailed { image_id });
+                    ctx.request_repaint();
+                    return;
+                }
+                match reads.get_thumbnail(image_id) {
+                    Ok(Some(thumb)) => match image::load_from_memory(&thumb.bytes) {
+                        Ok(img) => {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let _ = tx.send(AppEvent::ThumbReady {
+                                image_id,
+                                rgba: rgba.into_raw(),
+                                w,
+                                h,
+                            });
+                        }
+                        Err(_) => {
+                            let _ = tx.send(AppEvent::ThumbFailed { image_id });
+                        }
+                    },
+                    _ => {
+                        let _ = tx.send(AppEvent::ThumbFailed { image_id });
+                    }
+                }
+                ctx.request_repaint();
+            });
     }
 
     /// Build a `LibraryQuery` from the current source + filter state.
@@ -422,6 +485,8 @@ impl AppState {
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
+            thumb_pending: HashSet::new(),
+            pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,
             last_watch_check: None,

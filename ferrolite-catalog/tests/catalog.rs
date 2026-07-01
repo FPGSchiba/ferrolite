@@ -133,7 +133,7 @@ fn solid_rgb(width: u32, height: u32) -> ImageBuffer {
 
 #[test]
 fn generate_thumbnail_fits_within_max_edge_and_is_decodable_jpeg() {
-    let thumb = generate_thumbnail(&solid_rgb(1024, 512)).expect("thumb");
+    let (thumb, decoded_thumb) = generate_thumbnail(&solid_rgb(1024, 512)).expect("thumb");
     assert!(thumb.width <= THUMB_MAX_EDGE && thumb.height <= THUMB_MAX_EDGE);
     assert_eq!(thumb.format, "jpeg");
     // Aspect ratio preserved: 2:1 source → wider than tall.
@@ -144,6 +144,13 @@ fn generate_thumbnail_fits_within_max_edge_and_is_decodable_jpeg() {
         .to_rgb8();
     assert_eq!(decoded.width(), thumb.width);
     assert_eq!(decoded.height(), thumb.height);
+    // The pre-decoded RGBA buffer matches the reported dimensions (tightly packed).
+    assert_eq!(decoded_thumb.w, thumb.width);
+    assert_eq!(decoded_thumb.h, thumb.height);
+    assert_eq!(
+        decoded_thumb.rgba.len(),
+        (thumb.width as usize) * (thumb.height as usize) * 4
+    );
 }
 
 #[test]
@@ -156,7 +163,7 @@ fn thumbnail_store_blob_round_trip() {
         .upsert_image(&sample_image(folder, "DSC_0001.NEF"))
         .unwrap();
 
-    let thumb = generate_thumbnail(&solid_rgb(640, 480)).unwrap();
+    let (thumb, _decoded) = generate_thumbnail(&solid_rgb(640, 480)).unwrap();
     cat.put_thumbnail(id, &thumb).unwrap();
 
     let got = cat.get_thumbnail(id).unwrap().expect("stored thumb");

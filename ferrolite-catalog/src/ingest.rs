@@ -99,7 +99,7 @@ fn decode_one(
 ) -> Result<(NewImage, Thumbnail), String> {
     let meta = ferrolite_decode::read_metadata(path, kind).map_err(|e| e.to_string())?;
     let preview = ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?;
-    let thumb = generate_thumbnail(&preview).map_err(|e| e.to_string())?;
+    let (thumb, _decoded) = generate_thumbnail(&preview).map_err(|e| e.to_string())?;
     let new_image = NewImage::from_metadata(
         folder_id,
         filename.to_string(),

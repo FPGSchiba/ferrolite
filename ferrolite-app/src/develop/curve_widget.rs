@@ -4,10 +4,15 @@
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::curve_math;
 use crate::theme;
+use crate::widgets::draw_reset_arrow;
 use ferrolite_pipeline::{Op, OpKind, OpStack, ToneCurve};
 
 const SIZE: f32 = 260.0; // square edit area
 const HIT_R: f32 = 0.04; // normalized hit radius
+const RESET_SIZE: f32 = 16.0; // reset hit-target square size
+const RESET_ICON_R: f32 = 4.5; // reset icon radius, matches EguiSlider's
+                               // Mirrors `EguiSlider`'s HANDLE_IDLE token (not in the shared `theme` module).
+const HANDLE_IDLE: egui::Color32 = egui::Color32::from_rgb(0x9a, 0x9a, 0x9a);
 
 pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     let mut points = stack
@@ -18,6 +23,27 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
 
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click_and_drag());
+
+    // Per-component reset affordance (top-right corner), consistent with the
+    // slider's reset icon. See CLAUDE.md "Per-component reset" rule.
+    let reset_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - 18.0, rect.top() + 2.0),
+        egui::pos2(rect.right() - 2.0, rect.top() + 2.0 + RESET_SIZE),
+    );
+    let modified = !curve_math::is_identity(&points);
+    let reset_resp = ui.interact(
+        reset_rect,
+        ui.id().with("tone_curve_reset"),
+        egui::Sense::click(),
+    );
+    if reset_resp.clicked() && modified {
+        return Some(EditOutcome {
+            stack: stack.reset(OpKind::ToneCurve),
+            kind: OpKind::ToneCurve,
+            commit: true,
+        });
+    }
+
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, theme::BG_BASE);
     // Grid (quarters).
@@ -59,9 +85,24 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         );
     }
 
+    // Reset icon: dim when already at default; matches the slider's scheme.
+    let reset_color = if modified {
+        if reset_resp.hovered() {
+            theme::ACCENT_BRIGHT
+        } else {
+            HANDLE_IDLE
+        }
+    } else {
+        theme::BORDER_STRONG
+    };
+    draw_reset_arrow(painter, reset_rect.center(), RESET_ICON_R, reset_color);
+
     let mut changed = false;
     let mut commit = false;
-    if let Some(pos) = resp.interact_pointer_pos() {
+    if let Some(pos) = resp
+        .interact_pointer_pos()
+        .filter(|p| !reset_rect.contains(*p))
+    {
         let norm = to_norm(pos);
         if resp.drag_started() || resp.clicked() {
             // Grab the nearest existing point, else insert a new one.

@@ -12,6 +12,13 @@ pub struct FerroliteApp {
     /// the edge and force a `set_preview_and_full` on the same frame before paint:
     /// enter → crop=full+angle view; exit → the real crop applied.
     crop_active_prev: bool,
+    /// Set when a Develop→Library switch happens mid-frame, after the filmstrip
+    /// has already painted (and thus recorded) its thumbnail textures. Clearing
+    /// `state.textures` in that same frame would free textures egui's paint jobs
+    /// still reference, and `queue.submit` would panic on a destroyed texture.
+    /// Instead we defer the clear to the top of the next frame, before anything
+    /// paints, so the grid/filmstrip re-upload fresh textures on the frame after.
+    pending_texture_clear: bool,
 }
 
 impl FerroliteApp {
@@ -35,6 +42,7 @@ impl FerroliteApp {
             thumb_size: 46.0,
             state,
             crop_active_prev: false,
+            pending_texture_clear: false,
         }
     }
 }
@@ -554,6 +562,14 @@ fn window_resize(ctx: &egui::Context) {
 
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Deferred from a previous Develop→Library switch: clearing thumbnail
+        // textures must happen BEFORE anything paints this frame, never in the same
+        // frame they were painted (egui frees dropped textures before queue.submit).
+        if self.pending_texture_clear {
+            self.state.textures.clear();
+            self.pending_texture_clear = false;
+        }
+
         // Module at the start of the frame; if the title bar or Esc switches us
         // from Develop back to Library this frame, the grid's thumbnail textures
         // may be stale after the viewer's GPU work — drop them before the grid
@@ -1013,10 +1029,13 @@ impl eframe::App for FerroliteApp {
             }
         }
 
-        // If we switched Develop → Library this frame, drop stale thumbnail
-        // textures so the grid re-uploads them (fixes all-grey cells after Develop).
+        // If we switched Develop → Library this frame, the filmstrip above already
+        // painted (and thus recorded) these textures in this frame's paint jobs —
+        // clearing now would free them before queue.submit and panic. Defer the
+        // clear to the top of next frame instead (fixes all-grey cells after
+        // Develop once the clear runs, without racing this frame's submit).
         if !module_at_frame_start.is_library() && self.module.is_library() {
-            self.state.textures.clear();
+            self.pending_texture_clear = true;
         }
 
         let mut opened: Option<i64> = None;

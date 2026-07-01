@@ -382,9 +382,7 @@ impl FerroliteApp {
     /// push the tail matrix to the display pipelines (once), update both edit tiers,
     /// and invalidate full-res tiles so they re-render. Never rebuilds pipelines.
     ///
-    /// Not yet wired to any UI control (Task 6 adds the working-space selector);
-    /// kept here so the composition path exists once that control lands.
-    #[allow(dead_code)]
+    /// Wired to the Develop adjustment panel's working-space `ComboBox`.
     fn apply_working_space(
         &mut self,
         ctx: &egui::Context,
@@ -1149,6 +1147,7 @@ impl eframe::App for FerroliteApp {
                 v.crop_active = false; // re-armed by the open Geometry section
             }
             let mut outcome = None;
+            let working_space = self.state.working_space;
             egui::SidePanel::right("develop_adjust")
                 .exact_width(296.0)
                 .frame(
@@ -1157,10 +1156,19 @@ impl eframe::App for FerroliteApp {
                         .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
                 )
                 .show(ctx, |ui| {
-                    outcome = crate::develop::adjustment_panel::show(ui, &mut self.state);
+                    outcome = Some(crate::develop::adjustment_panel::show(
+                        ui,
+                        &mut self.state,
+                        working_space,
+                    ));
                 });
-            if let Some(o) = outcome {
-                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+            if let Some(outcome) = outcome {
+                if let Some(ws) = outcome.working_space {
+                    self.apply_working_space(ctx, frame, ws);
+                }
+                if let Some(o) = outcome.edit {
+                    self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                }
             }
         }
 

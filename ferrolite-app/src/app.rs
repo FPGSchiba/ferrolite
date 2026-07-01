@@ -360,6 +360,14 @@ const MAX_PRODUCE_PER_FRAME: usize = 8;
 /// stashed in `AppState.pending_uploads` and flushed over subsequent frames.
 const MAX_THUMB_UPLOADS_PER_FRAME: usize = 16;
 
+/// Debounce (seconds) before the tier-2 full-RAW decode is submitted after a
+/// viewer opens. The tier-1 preview shows immediately regardless; the full
+/// decode is only needed for the 1:1 crossfade, so delaying it lets fast
+/// arrow-navigation cancel each superseded viewer's full decode WHILE IT IS
+/// STILL QUEUED (or never submit it at all), instead of piling up one
+/// `Visible`-priority full decode per image flipped through.
+const FULL_DECODE_DEBOUNCE: f32 = 0.15;
+
 impl FerroliteApp {
     /// Per-frame viewer drive: advance the crossfade, drive the sparse VT
     /// (reconcile against GPU-truth feedback + drain finished loads), paint the
@@ -973,8 +981,8 @@ impl eframe::App for FerroliteApp {
             }
         }
 
-        // Submit the tier-1 preview decode once when a viewer opens, and (for RAW)
-        // the tier-2 full decode in parallel.
+        // Submit the tier-1 preview decode once when a viewer opens, and (for RAW,
+        // once the debounce has elapsed) the tier-2 full decode.
         if let Some(v) = self.state.viewer.as_mut() {
             if !v.preview_requested {
                 let h = viewer::load::spawn_preview(
@@ -989,16 +997,30 @@ impl eframe::App for FerroliteApp {
                 v.preview_requested = true;
             }
             // Tier-2 is RAW-only: a Standard image's preview is already full-res.
+            // Debounced (FULL_DECODE_DEBOUNCE) so fast arrow-nav doesn't submit a
+            // full decode per image flipped through — only the settled-on image
+            // does, once `open_elapsed` crosses the threshold.
+            let dt = ctx.input(|i| i.stable_dt);
+            v.open_elapsed += dt;
             if !v.full_requested && v.kind == ferrolite_image::FileKind::Raw {
-                let h = viewer::load::spawn_full(
-                    &self.state.jobs,
-                    &self.state.tx,
-                    ctx,
-                    v.image_id,
-                    v.path.clone(),
-                );
-                v.full_handle = Some(h);
-                v.full_requested = true;
+                if v.open_elapsed >= FULL_DECODE_DEBOUNCE {
+                    let h = viewer::load::spawn_full(
+                        &self.state.jobs,
+                        &self.state.tx,
+                        ctx,
+                        v.image_id,
+                        v.path.clone(),
+                    );
+                    v.full_handle = Some(h);
+                    v.full_requested = true;
+                } else {
+                    // Guarantee a frame fires once the debounce elapses even if
+                    // the app would otherwise go idle waiting on input, so a
+                    // still (non-navigated) image's full decode still submits.
+                    ctx.request_repaint_after(std::time::Duration::from_secs_f32(
+                        FULL_DECODE_DEBOUNCE - v.open_elapsed,
+                    ));
+                }
             }
             // Read the persisted frl:ops sidecar once per open; the OpsLoaded
             // event hydrates the stack + both tiers without re-persisting.

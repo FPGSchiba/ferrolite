@@ -33,6 +33,11 @@ pub struct ViewerState {
     pub viewport: (f32, f32),
     /// True once an `Interactive` preview decode has been submitted (one-shot).
     pub preview_requested: bool,
+    /// Seconds elapsed since this viewer was opened. Used to debounce the
+    /// tier-2 full-RAW decode submission (`FULL_DECODE_DEBOUNCE` in `app.rs`)
+    /// so fast arrow-navigation doesn't queue a full decode per image —
+    /// only the image the user settles on submits one.
+    pub open_elapsed: f32,
     /// True once the rung-1 `VirtualTexture` is uploaded and the view fitted; the
     /// VT itself lives in eframe's `callback_resources` (paint reads it there).
     pub loaded: bool,
@@ -104,6 +109,7 @@ impl ViewerState {
             },
             viewport: (0.0, 0.0),
             preview_requested: false,
+            open_elapsed: 0.0,
             loaded: false,
             full_requested: false,
             full_ready: false,

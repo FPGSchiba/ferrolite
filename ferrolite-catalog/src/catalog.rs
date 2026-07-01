@@ -470,6 +470,77 @@ impl Catalog {
     pub fn query_images(&self, q: &crate::LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {
         crate::query::run(self.conn(), q)
     }
+
+    /// Append `image_id` to the persisted export queue at the next position.
+    /// Idempotent: re-adding an already-queued image is a no-op (keeps its slot).
+    pub fn add_to_export_queue(&self, image_id: i64, added_at: i64) -> Result<(), CatalogError> {
+        let next: i64 = self.conn().query_row(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM export_queue",
+            [],
+            |r| r.get(0),
+        )?;
+        self.conn().execute(
+            "INSERT OR IGNORE INTO export_queue (image_id, position, added_at)
+             VALUES (?1, ?2, ?3)",
+            rusqlite::params![image_id, next, added_at],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a single image from the export queue.
+    pub fn remove_from_export_queue(&self, image_id: i64) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "DELETE FROM export_queue WHERE image_id = ?1",
+            rusqlite::params![image_id],
+        )?;
+        Ok(())
+    }
+
+    /// Empty the export queue.
+    pub fn clear_export_queue(&self) -> Result<(), CatalogError> {
+        self.conn().execute("DELETE FROM export_queue", [])?;
+        Ok(())
+    }
+
+    /// Rewrite `position` so the queue matches `ordered_ids` exactly. Ids present
+    /// in the table but absent from `ordered_ids` are removed; ids in
+    /// `ordered_ids` absent from the table are ignored (never inserted here).
+    pub fn reorder_export_queue(&self, ordered_ids: &[i64]) -> Result<(), CatalogError> {
+        let tx = self.conn().unchecked_transaction()?;
+        let ordered_set: HashSet<i64> = ordered_ids.iter().copied().collect();
+        let existing: Vec<i64> = {
+            let mut stmt = tx.prepare("SELECT image_id FROM export_queue")?;
+            let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        for id in existing {
+            if !ordered_set.contains(&id) {
+                tx.execute(
+                    "DELETE FROM export_queue WHERE image_id = ?1",
+                    rusqlite::params![id],
+                )?;
+            }
+        }
+        for (pos, &id) in ordered_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE export_queue SET position = ?1 WHERE image_id = ?2",
+                rusqlite::params![pos as i64, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Image ids in the export queue, ordered by `position` ascending.
+    pub fn list_export_queue(&self) -> Result<Vec<i64>, CatalogError> {
+        crate::queries::list_export_queue(self.conn())
+    }
+
+    /// Fetch image records for a set of ids, preserving input order and
+    /// skipping ids that no longer exist. Used for rendering queue rows.
+    pub fn images_by_ids(&self, ids: &[i64]) -> Result<Vec<ImageRecord>, CatalogError> {
+        crate::queries::images_by_ids(self.conn(), ids)
+    }
 }
 
 #[cfg(test)]
@@ -627,5 +698,67 @@ mod rating_tests {
         assert_eq!(added, Some(1000), "added_at preserved on conflict");
         let rec = cat.list_images(f).unwrap().into_iter().next().unwrap();
         assert_eq!(rec.rating, Rating::new(5), "rating refreshed on conflict");
+    }
+}
+
+#[cfg(test)]
+mod export_queue_tests {
+    use super::*;
+    use ferrolite_image::FileKind;
+
+    fn img(cat: &Catalog, folder: i64, name: &str) -> i64 {
+        cat.upsert_image(&crate::model::NewImage::failed(
+            folder,
+            name.to_string(),
+            1,
+            1,
+            FileKind::Raw,
+            0,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn add_list_reorder_remove_clear() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let a = img(&cat, f, "a.nef");
+        let b = img(&cat, f, "b.nef");
+        let c = img(&cat, f, "c.nef");
+
+        cat.add_to_export_queue(a, 10).unwrap();
+        cat.add_to_export_queue(b, 11).unwrap();
+        cat.add_to_export_queue(c, 12).unwrap();
+        // idempotent re-add keeps order/length
+        cat.add_to_export_queue(a, 99).unwrap();
+        assert_eq!(cat.list_export_queue().unwrap(), vec![a, b, c]);
+
+        cat.reorder_export_queue(&[c, a, b]).unwrap();
+        assert_eq!(cat.list_export_queue().unwrap(), vec![c, a, b]);
+
+        cat.remove_from_export_queue(a).unwrap();
+        assert_eq!(cat.list_export_queue().unwrap(), vec![c, b]);
+
+        // images_by_ids preserves input order and skips missing ids
+        let recs = cat.images_by_ids(&[b, 99999, c]).unwrap();
+        assert_eq!(recs.iter().map(|r| r.id).collect::<Vec<_>>(), vec![b, c]);
+
+        cat.clear_export_queue().unwrap();
+        assert!(cat.list_export_queue().unwrap().is_empty());
+    }
+
+    #[test]
+    fn deleting_image_cascades_out_of_queue() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let a = img(&cat, f, "a.nef");
+        cat.add_to_export_queue(a, 1).unwrap();
+        cat.conn()
+            .execute("DELETE FROM images WHERE id = ?1", rusqlite::params![a])
+            .unwrap();
+        assert!(
+            cat.list_export_queue().unwrap().is_empty(),
+            "FK cascade removes queue row"
+        );
     }
 }

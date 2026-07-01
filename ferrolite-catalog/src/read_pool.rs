@@ -113,6 +113,17 @@ impl ReadPool {
     pub fn date_bounds(&self) -> Result<Option<(String, String)>, CatalogError> {
         self.with_conn(crate::queries::date_bounds)
     }
+
+    /// Image ids in the export queue, ordered by `position` ascending.
+    pub fn list_export_queue(&self) -> Result<Vec<i64>, CatalogError> {
+        self.with_conn(crate::queries::list_export_queue)
+    }
+
+    /// Fetch image records for a set of ids, preserving input order and
+    /// skipping ids that no longer exist.
+    pub fn images_by_ids(&self, ids: &[i64]) -> Result<Vec<crate::ImageRecord>, CatalogError> {
+        self.with_conn(|c| crate::queries::images_by_ids(c, ids))
+    }
 }
 
 #[cfg(test)]

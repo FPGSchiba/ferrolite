@@ -22,30 +22,29 @@ pub struct FilenameCtx {
 /// `{...}` run is emitted verbatim (braces included). Literal text passes through.
 pub fn expand(template: &str, ctx: &FilenameCtx) -> String {
     let mut out = String::with_capacity(template.len() + 8);
-    let bytes = template.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(close) = template[i..].find('}') {
-                let token = &template[i + 1..i + close];
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open..];
+        match after.find('}') {
+            Some(close) => {
+                let token = &after[1..close];
                 match resolve_token(token, ctx) {
-                    Some(rep) => {
-                        out.push_str(&rep);
-                        i += close + 1;
-                        continue;
-                    }
-                    None => {
-                        // Unknown token → emit verbatim including braces.
-                        out.push_str(&template[i..i + close + 1]);
-                        i += close + 1;
-                        continue;
-                    }
+                    // Recognised token → substituted value.
+                    Some(rep) => out.push_str(&rep),
+                    // Unknown token → emit verbatim, braces included.
+                    None => out.push_str(&after[..=close]),
                 }
+                rest = &after[close + 1..];
+            }
+            // Unterminated '{' → emit the remainder literally.
+            None => {
+                out.push_str(after);
+                rest = "";
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
     }
+    out.push_str(rest);
     out
 }
 
@@ -149,5 +148,16 @@ mod tests {
         );
         assert_eq!(format_capture_date(Some("garbage")), "");
         assert_eq!(format_capture_date(None), "");
+    }
+
+    #[test]
+    fn non_ascii_literal_text_is_preserved() {
+        // café / ü / – must survive verbatim around a token.
+        assert_eq!(expand("café_{name}_ü–", &ctx()), "café_DSC_0001_ü–");
+    }
+
+    #[test]
+    fn unterminated_brace_is_literal() {
+        assert_eq!(expand("a{name}_{oops", &ctx()), "aDSC_0001_{oops");
     }
 }

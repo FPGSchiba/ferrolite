@@ -66,7 +66,6 @@ impl FerroliteApp {
         image_id: i64,
         linear: &ferrolite_image::LinearRgbaF32,
     ) {
-        let __t = std::time::Instant::now();
         let pw = self.preview_to_working();
         let w2d = ferrolite_color::working_to_display(self.state.working_space);
         let Some(v) = self.state.viewer.as_mut() else {
@@ -131,7 +130,6 @@ impl FerroliteApp {
                 full: None,
                 image_id,
             });
-        eprintln!("[perf] preview_ready TOTAL {:?}", __t.elapsed());
     }
 
     /// Compose a source→working 3×3 for `profile` under the current working space.

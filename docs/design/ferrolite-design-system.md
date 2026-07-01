@@ -16,9 +16,10 @@ A professional, **dark, Lightroom/Capture-One-class** desktop tool. Restrained, 
 information-first. Muted steel-blue accent, neutral greys, monospaced numerics. No
 gradients except subtle thumbnail overlays; no rounded-everything; tight 3px radii.
 
-Two top-level modules switched by a segmented control in the title bar:
+Three top-level modules switched by a segmented control in the title bar:
 - **Library** — catalog browse, folders/collections, thumbnail grid. → **Spec 1**.
 - **Develop** — single-image edit: navigator, filmstrip, canvas, adjustment panel. → **Spec 2/3**.
+- **Export** — batch queue: collected images, a shared export-settings panel, a destination folder, a filename token template, and Start. → **Spec 3**.
 
 ---
 
@@ -116,6 +117,7 @@ Bundle both as static fonts in the binary (egui `FontDefinitions`) — do **not*
 **App shell:** `title bar` → `module body`. Each module body = `toolbar` → `content row`.
 - Library content row: `left panel (236)` | `grid column (breadcrumb → scroll grid → status bar)`.
 - Develop content row: `left (160: navigator + filmstrip)` | `center canvas (flex)` | `right (296: adjustment sections)`.
+- Export content row: `center queue list (flex)` | `right (296: shared export settings)`; a bottom bar (destination folder · filename token template · Start). Panels resizable (296px default, 250–400 clamp), matching Develop.
 
 Custom scrollbars: 10px, track `#141414`, thumb `#383838` (hover `#484848`), 5px radius.
 
@@ -179,6 +181,10 @@ drives non-edit values (thumbnail size, metadata-filter ranges).
 | Tone-curve editor | custom painted interactive widget | 2 |
 | HSL swatch selector | swatch row + `EguiSlider`s | 2 |
 | Before/After split | dual canvas region | 2/3 |
+| Export segmented tab | third `SelectableLabel`, accent bg | 3 |
+| Export queue list | rows (filename + reorder ▲▼ + remove ✕) in `ScrollArea` | 3 |
+| Export settings panel | resizable `SidePanel::right`; shared `settings_form` | 3 |
+| Export bottom bar | folder picker + template `TextEdit` + Start | 3 |
 
 ---
 
@@ -191,6 +197,7 @@ drives non-edit values (thumbnail size, metadata-filter ranges).
 - The **Develop module is the Spec 2/3 UI target.** Every adjustment `EguiSlider` is a control
   surface over a node in the `ferrolite-pipeline` retained edit DAG; the histogram + before/after
   are Spec 3 (color) surfaces.
+- The **Export module is a Spec 3 UI target:** its queue is the `export_queue` catalog cache and Start dispatches one `ferrolite-export` Background job per image.
 - **`EguiSlider` is built in Spec 1** (needed by the thumbnail-size control and metadata-filter
   ranges) and reused heavily in Spec 2 — so it lands early as a shared `ferrolite-app` widget.
 - The theme (`§2`/`§3`) is established in Spec 1's Phase-0 shell and reused unchanged thereafter.

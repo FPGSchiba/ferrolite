@@ -228,9 +228,15 @@ impl FerroliteApp {
     }
 
     /// camera→working for the open viewer's RAW profile (full-res tier).
+    ///
+    /// Row-normalized (`normalize_neutral`) because the RAW demosaic already
+    /// applied the as-shot white-balance gains; without this the DNG color
+    /// matrix re-neutralizes the camera response and neutrals skew red (double
+    /// white balance). The sRGB preview tier is NOT normalized — see
+    /// `preview_to_working`.
     fn camera_to_working(&self) -> [[f32; 3]; 3] {
         match self.state.viewer.as_ref() {
-            Some(v) => self.source_to_working(&v.color_profile),
+            Some(v) => ferrolite_color::normalize_neutral(self.source_to_working(&v.color_profile)),
             None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
@@ -368,6 +374,16 @@ impl FerroliteApp {
                 if v.image_id == image_id {
                     v.full_ready = true;
                     v.begin_crossfade();
+                    // The full tier's dimensions (uprighted, half-res demosaic)
+                    // differ from the embedded preview's, so the view fit
+                    // computed for the preview would appear zoomed/cropped once
+                    // the full VT swaps in. Refit to the full dims (the user has
+                    // not interacted yet at open time).
+                    let full_dims = (image.width, image.height);
+                    v.image_dims = Some(full_dims);
+                    if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
+                        v.view = ferrolite_vt::ViewTransform::fit(full_dims, v.viewport);
+                    }
                     // Build the GPU-resident pyramid UNCONDITIONALLY so the
                     // full-res edit producer can be created on the first edit even
                     // for an image that opened unedited (identity stack).
@@ -678,6 +694,12 @@ impl FerroliteApp {
         // marks the CURRENT frame. This converges over frames; the coarse-LOD
         // fallback keeps showing tiles meanwhile.
         let mut tiles_pending: Option<usize> = None;
+        // Producer-drive convergence signals (Plan 3): CPU load jobs stay at 0 in
+        // producer mode, so the sparse VT's producer progress is tracked here to
+        // decide when the shown full view is fully rendered.
+        let mut produce_pending: Option<usize> = None;
+        let mut needed_established = false;
+        let mut produced_this_frame = 0usize;
         if let (Some(rs), Some(_v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -694,10 +716,13 @@ impl FerroliteApp {
                     if let Some(v) = self.state.viewer.as_mut() {
                         if let Some(producer) = v.edit_producer.as_mut() {
                             let needed = full.needed_now();
-                            full.produce_view(&g.ctx, producer, &needed, MAX_PRODUCE_PER_FRAME);
+                            produced_this_frame =
+                                full.produce_view(&g.ctx, producer, &needed, MAX_PRODUCE_PER_FRAME);
                         }
                     }
                     tiles_pending = full.sparse_pending();
+                    produce_pending = full.produce_pending();
+                    needed_established = full.needed_established();
                 }
             }
         }
@@ -719,8 +744,21 @@ impl FerroliteApp {
         let tiles_settled = matches!(tiles_pending, Some(0));
         let show_full = v.full_ready && factor >= 1.0 && tiles_settled;
 
-        // Terminal state: full ready, crossfade done, nothing pending -> idle.
-        if show_full && !v.crossfading {
+        // Producer convergence: the shown full view is fully rendered only once
+        // the GPU-truth needed set has been established (the sparse shader painted
+        // + its feedback read back) AND every needed tile is produced at the
+        // current version AND nothing was produced this frame. Because feedback is
+        // one frame latent and production is bounded per frame, this takes several
+        // frames after `show_full` first flips true.
+        let full_converged = needed_established
+            && matches!(produce_pending, Some(0) | None)
+            && produced_this_frame == 0;
+
+        // Terminal state: full shown, crossfade done, AND the producer has
+        // converged. Gating idle on `full_converged` (not merely `show_full`)
+        // keeps the drive loop alive across the feedback→produce frames so tiles
+        // stream in without a manual pan/zoom.
+        if show_full && !v.crossfading && full_converged {
             v.idle = true;
         }
 
@@ -756,7 +794,11 @@ impl FerroliteApp {
         // A pan/zoom clears `idle` so the loop resumes and the new view's tiles
         // (requested next frame) drain and display.
         let tiles_loading = matches!(tiles_pending, Some(n) if n > 0);
-        if !idle && (loading_preview || crossfading || tiles_loading) {
+        // Keep repainting while the producer is still converging on the shown full
+        // view (feedback is one frame latent + production is bounded per frame),
+        // so the sparse tiles stream in on open without a manual pan/zoom.
+        let full_warming = show_full && !full_converged;
+        if !idle && (loading_preview || crossfading || tiles_loading || full_warming) {
             ui.ctx().request_repaint();
         }
 

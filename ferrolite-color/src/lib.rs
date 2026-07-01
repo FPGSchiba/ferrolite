@@ -15,7 +15,7 @@ mod tail;
 mod working_space;
 
 pub use adapt::chromatic_adaptation;
-pub use camera::camera_to_working;
+pub use camera::{camera_to_working, normalize_neutral};
 pub use error::ColorError;
 pub use icc::{emit_icc, parse_icc};
 pub use matrix::{diag, identity, inverse, mul_mat3, mul_vec3, Mat3, Xy};

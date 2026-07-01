@@ -90,6 +90,7 @@ mod tests {
             white_level: 100.0,
             wb_coeffs: [1.0, 1.0, 1.0, 1.0],
             color_profile: crate::color::ColorProfile::srgb_fallback(),
+            orientation: ferrolite_image::Orientation::Normal,
         }
     }
 

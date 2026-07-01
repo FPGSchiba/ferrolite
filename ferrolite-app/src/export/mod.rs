@@ -9,11 +9,24 @@ use ferrolite_export::{
     run_export, BitDepth, ExportFormat, ExportOptions, ExportRequest, ResizeSpec,
 };
 use ferrolite_gpu::GpuContext;
+use ferrolite_image::LinearRgbaF32;
 use ferrolite_jobs::Priority;
 use ferrolite_pipeline::GpuPyramidSource;
 
 use crate::events::AppEvent;
 use crate::state::AppState;
+
+/// The full-resolution source an export renders from. RAW images have a
+/// GPU-resident pyramid (tier-2); Standard (JPEG/PNG/…) images are never tier-2
+/// decoded — their tier-1 preview already IS the full-resolution image, so the
+/// pyramid is built from that CPU buffer inside the Background job (off the UI
+/// thread) via the shared device.
+pub enum ExportSource {
+    /// A ready GPU pyramid (RAW). Used directly.
+    Pyramid(Arc<GpuPyramidSource>),
+    /// A full-res CPU image (Standard). The job builds the pyramid from it.
+    FullResCpu(Arc<LinearRgbaF32>),
+}
 
 #[derive(Default)]
 pub struct ExportDialogState {
@@ -152,7 +165,7 @@ pub fn spawn_export(
     state: &AppState,
     egui_ctx: &egui::Context,
     gpu: Arc<GpuContext>,
-    pyramid: Arc<GpuPyramidSource>,
+    source: ExportSource,
     stack: ferrolite_pipeline::OpStack,
     camera_to_working: [[f32; 3]; 3],
     working_space: WorkingSpace,
@@ -164,6 +177,12 @@ pub fn spawn_export(
     let tx = state.tx.clone();
     let egui_ctx = egui_ctx.clone();
     state.jobs.submit(Priority::Background, move |cancel| {
+        // Resolve the source to a GPU pyramid. For a Standard image this uploads
+        // the full-res pyramid on the worker thread (never the UI thread).
+        let pyramid = match source {
+            ExportSource::Pyramid(p) => p,
+            ExportSource::FullResCpu(img) => Arc::new(GpuPyramidSource::new(&gpu, &img)),
+        };
         let mut last_repaint = 0u32;
         let mut progress = |done: u32, total: u32| {
             let _ = tx.send(AppEvent::ExportProgress {

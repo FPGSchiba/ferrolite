@@ -256,7 +256,21 @@ impl FerroliteApp {
         let Some(v) = self.state.viewer.as_ref() else {
             return;
         };
-        let Some(pyramid) = v.pyramid.clone() else {
+        // Pick the full-res source: RAW uses its tier-2 GPU pyramid; a Standard
+        // image (never tier-2 decoded) exports from its full-res tier-1 preview,
+        // whose pyramid is built inside the Background job.
+        let source = if let Some(p) = v.pyramid.clone() {
+            crate::export::ExportSource::Pyramid(p)
+        } else if v.kind != ferrolite_image::FileKind::Raw {
+            match v.preview_source.clone() {
+                Some(src) => crate::export::ExportSource::FullResCpu(src),
+                None => {
+                    self.state.warning =
+                        Some("Image still loading; cannot export yet.".to_string());
+                    return;
+                }
+            }
+        } else {
             self.state.warning = Some("Image still loading; cannot export yet.".to_string());
             return;
         };
@@ -293,7 +307,7 @@ impl FerroliteApp {
             &self.state,
             ctx,
             gpu,
-            pyramid,
+            source,
             stack,
             camera_to_working,
             working_space,
@@ -1211,11 +1225,13 @@ impl eframe::App for FerroliteApp {
             .exact_height(30.0)
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
             .show(ctx, |ui| {
-                let export_enabled = self
-                    .state
-                    .viewer
-                    .as_ref()
-                    .is_some_and(|v| v.pyramid.is_some());
+                // Exportable once a full-res source exists: RAW has the tier-2
+                // GPU pyramid; a Standard image's tier-1 preview already IS the
+                // full-res image (no tier-2), so its retained source qualifies.
+                let export_enabled = self.state.viewer.as_ref().is_some_and(|v| {
+                    v.pyramid.is_some()
+                        || (v.kind != ferrolite_image::FileKind::Raw && v.preview_source.is_some())
+                });
                 let menu_action =
                     crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1", export_enabled);
                 if menu_action == Some(crate::chrome::MenuAction::ExportImage) {

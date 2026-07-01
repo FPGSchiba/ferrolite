@@ -11,3 +11,4 @@ pub mod history;
 pub mod hsl_widget;
 pub mod ops_edit;
 pub mod ops_persist;
+pub mod split;

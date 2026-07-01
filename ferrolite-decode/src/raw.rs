@@ -1,3 +1,4 @@
+use crate::color::ColorProfile;
 use crate::error::{rawler as rawler_err, DecodeError};
 use rawler::decoders::RawDecodeParams;
 use rawler::rawimage::{RawImageData, RawPhotometricInterpretation};
@@ -24,6 +25,9 @@ pub struct RawDecoded {
     /// Camera white-balance multipliers [R, G1, B, G2]; any non-finite or
     /// non-positive value is replaced with 1.0.
     pub wb_coeffs: [f32; 4],
+    /// Camera color calibration (XYZ→camera matrix + reference white). Additive
+    /// decode product; consumed by `ferrolite-pipeline` via `ferrolite-color`.
+    pub color_profile: ColorProfile,
 }
 
 pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
@@ -91,6 +95,7 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
         black_levels,
         white_level,
         wb_coeffs,
+        color_profile: ColorProfile::from_color_matrix(&img.color_matrix),
     })
 }
 
@@ -140,5 +145,15 @@ mod tests {
             "all WB coefficients must be finite and positive, got: {:?}",
             d.wb_coeffs
         );
+        // Color profile is always present (real matrix or sRGB fallback), finite.
+        assert!(
+            d.color_profile
+                .xyz_to_cam
+                .iter()
+                .flatten()
+                .all(|v| v.is_finite()),
+            "color profile matrix must be finite"
+        );
+        assert!(d.color_profile.white_xy.iter().all(|v| *v > 0.0));
     }
 }

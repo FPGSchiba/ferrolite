@@ -89,6 +89,7 @@ mod tests {
             black_levels: [0.0; 4],
             white_level: 100.0,
             wb_coeffs: [1.0, 1.0, 1.0, 1.0],
+            color_profile: crate::color::ColorProfile::srgb_fallback(),
         }
     }
 

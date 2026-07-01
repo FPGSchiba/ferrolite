@@ -11,7 +11,6 @@ use crate::options::{BitDepth, ResizeSpec};
 
 /// Target dimensions for a resize spec applied to a `w × h` image. Never returns
 /// a zero axis (clamps to 1).
-#[allow(dead_code)]
 pub(crate) fn resize_dims(spec: ResizeSpec, w: u32, h: u32) -> (u32, u32) {
     let (tw, th) = match spec {
         ResizeSpec::None => (w, h),
@@ -35,7 +34,6 @@ pub(crate) fn resize_dims(spec: ResizeSpec, w: u32, h: u32) -> (u32, u32) {
 
 /// Resize an interleaved RGB byte buffer to `tw × th`. `depth` selects the pixel
 /// type (`U8x3` / `U16x3`). No-op (clone) when the size is unchanged.
-#[allow(dead_code)]
 pub(crate) fn apply_resize(
     rgb: &[u8],
     w: u32,

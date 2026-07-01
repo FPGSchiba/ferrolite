@@ -9,10 +9,6 @@ use little_exif::metadata::Metadata;
 
 /// Read EXIF from `source` and write it into `dest` (which must already exist as a
 /// valid encoded image). Returns `Err` with a human message on any failure.
-///
-/// Not yet called outside tests: the orchestrator (Task 9) wires this in behind the
-/// `ExportOptions::copy_exif` flag.
-#[allow(dead_code)]
 pub(crate) fn copy_exif(source: &Path, dest: &Path) -> Result<(), String> {
     let meta = Metadata::new_from_path(source).map_err(|e| format!("read source EXIF: {e}"))?;
     meta.write_to_file(dest)

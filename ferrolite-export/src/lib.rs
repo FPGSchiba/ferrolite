@@ -7,17 +7,16 @@
 mod convert;
 mod encode;
 mod error;
-mod job;
+pub mod job;
 mod metadata;
 mod options;
 mod render;
 mod resize;
 
 pub use error::ExportError;
+pub use job::{run_export, ExportOutcome, ExportRequest};
 pub use options::{BitDepth, ExportFormat, ExportOptions, ResizeSpec};
 pub use render::{render_tiled, PixelData, RenderedImage};
-
-// (job module wiring — run_export/ExportRequest/ExportOutcome — added in Task 9)
 
 /// Test-only re-export of the internal encoder so integration tests can encode a
 /// `RenderedImage` without going through the GPU render path.

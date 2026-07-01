@@ -1149,7 +1149,9 @@ impl eframe::App for FerroliteApp {
             let mut outcome = None;
             let working_space = self.state.working_space;
             egui::SidePanel::right("develop_adjust")
-                .exact_width(296.0)
+                .resizable(true)
+                .default_width(296.0)
+                .width_range(250.0..=400.0)
                 .frame(
                     egui::Frame::none()
                         .fill(theme::BG_APP)

@@ -129,6 +129,10 @@ pub struct AppState {
     pub images_rev: u64,
     /// Cached justified-rows layout, rebuilt only when its inputs change.
     pub grid_layout: Option<crate::library::grid_layout::CachedGridLayout>,
+
+    /// Editing working space (spec §4.1, default Rec.2020). Global preference; the
+    /// ColorMatrixNode + display tail are recomposed on change.
+    pub working_space: ferrolite_color::WorkingSpace,
 }
 
 impl AppState {
@@ -187,6 +191,7 @@ impl AppState {
             ops_save_failed: false,
             images_rev: 0,
             grid_layout: None,
+            working_space: ferrolite_color::WorkingSpace::default(),
         })
     }
 
@@ -511,6 +516,7 @@ impl AppState {
             ops_save_failed: false,
             images_rev: 0,
             grid_layout: None,
+            working_space: ferrolite_color::WorkingSpace::default(),
         }
     }
 

@@ -113,6 +113,25 @@ impl FerroliteApp {
             });
     }
 
+    /// Compose the camera→working 3×3 for the open viewer + current working space.
+    fn camera_to_working(&self) -> [[f32; 3]; 3] {
+        let ws = self.state.working_space;
+        match self.state.viewer.as_ref() {
+            Some(v) => {
+                let p = &v.color_profile;
+                ferrolite_color::camera_to_working(
+                    p.xyz_to_cam,
+                    ferrolite_color::Xy {
+                        x: p.white_xy[0],
+                        y: p.white_xy[1],
+                    },
+                    ws,
+                )
+            }
+            None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
+    }
+
     /// Handle a tier-2 full decode: build a `PyramidTileSource` from the
     /// display-linear image, wrap it as a sparse (rung-4) `VirtualTexture`,
     /// store it alongside the preview in `ViewerGpu`, and begin the preview→full
@@ -122,6 +141,7 @@ impl FerroliteApp {
         frame: &eframe::Frame,
         image_id: i64,
         image: &ferrolite_image::LinearRgbaF32,
+        color_profile: &ferrolite_decode::ColorProfile,
     ) {
         let Some(v) = self.state.viewer.as_mut() else {
             return; // viewer closed while decoding
@@ -129,6 +149,7 @@ impl FerroliteApp {
         if v.image_id != image_id {
             return; // stale: a different image is now open
         }
+        v.color_profile = color_profile.clone();
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -149,6 +170,10 @@ impl FerroliteApp {
                 .callback_resources
                 .get::<viewer::ViewerPipelines>()
                 .expect("ViewerPipelines pre-warmed at startup");
+            vp.pipelines.set_display_matrix(
+                &gpu.queue,
+                ferrolite_color::working_to_display(self.state.working_space),
+            );
             ferrolite_vt::VirtualTexture::sparse(
                 &gpu,
                 source,
@@ -175,6 +200,9 @@ impl FerroliteApp {
         }
 
         if full_installed {
+            // Compute before taking the exclusive `viewer` borrow below:
+            // `camera_to_working` itself borrows `self.state.viewer` immutably.
+            let cam = self.camera_to_working();
             if let Some(v) = self.state.viewer.as_mut() {
                 if v.image_id == image_id {
                     v.full_ready = true;
@@ -193,7 +221,7 @@ impl FerroliteApp {
                             ctx_arc,
                             pyramid,
                             v.op_stack.clone(),
-                            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                            cam,
                         );
                         v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                         // Mark the VT producer-driven + bump its version so the
@@ -223,6 +251,9 @@ impl FerroliteApp {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
+        // Compute before taking the exclusive `viewer` borrow below:
+        // `camera_to_working` itself borrows `self.state.viewer` immutably.
+        let cam = self.camera_to_working();
         let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
@@ -261,7 +292,7 @@ impl FerroliteApp {
                     ctx_arc,
                     &src,
                     shown.clone(),
-                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    cam,
                 ));
             }
         }
@@ -296,12 +327,8 @@ impl FerroliteApp {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let tep = ferrolite_pipeline::TileEditPipeline::new(
-                        ctx_arc,
-                        pyr,
-                        shown.clone(),
-                        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                    );
+                    let tep =
+                        ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, shown.clone(), cam);
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {
@@ -349,6 +376,77 @@ impl FerroliteApp {
             rec.has_edits = has_edits; // optimistic cache update (filmstrip badge)
         }
         self.persist_ops(ctx, image_id, path, stack);
+    }
+
+    /// Change the editing working space: recompose camera→working + working→display,
+    /// push the tail matrix to the display pipelines (once), update both edit tiers,
+    /// and invalidate full-res tiles so they re-render. Never rebuilds pipelines.
+    ///
+    /// Not yet wired to any UI control (Task 6 adds the working-space selector);
+    /// kept here so the composition path exists once that control lands.
+    #[allow(dead_code)]
+    fn apply_working_space(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        ws: ferrolite_color::WorkingSpace,
+    ) {
+        if ws == self.state.working_space {
+            return;
+        }
+        self.state.working_space = ws;
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+
+        // Push the working→display tail (shared uniform; not per-frame).
+        {
+            let renderer = rs.renderer.read();
+            if let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() {
+                vp.pipelines
+                    .set_display_matrix(&gpu.queue, ferrolite_color::working_to_display(ws));
+            }
+        }
+
+        let cam = self.camera_to_working();
+        let Some(v) = self.state.viewer.as_mut() else {
+            ctx.request_repaint();
+            return;
+        };
+
+        // Preview tier: update the matrix, re-evaluate, swap the displayed texture.
+        if let Some(ep) = v.preview_edit.as_mut() {
+            ep.set_color_matrix(cam);
+            let img = ep.evaluate();
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == v.image_id {
+                    g.preview
+                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
+                }
+            }
+        }
+
+        // Full-res tier: update the producer's matrix + invalidate cached tiles.
+        if let Some(producer) = v.edit_producer.as_mut() {
+            producer.set_color_matrix(cam);
+        }
+        v.opstack_version = v.opstack_version.wrapping_add(1);
+        let version = v.opstack_version;
+        let image_id = v.image_id;
+        {
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == image_id {
+                    if let Some(full) = g.full.as_mut() {
+                        full.set_opstack_version(&g.ctx, version);
+                    }
+                }
+            }
+        }
+        v.idle = false;
+        ctx.request_repaint();
     }
 }
 
@@ -628,8 +726,12 @@ impl eframe::App for FerroliteApp {
                     self.state.dirty = true;
                     continue;
                 }
-                crate::events::AppEvent::FullDecoded { image_id, image } => {
-                    self.apply_full_decoded(frame, *image_id, image);
+                crate::events::AppEvent::FullDecoded {
+                    image_id,
+                    image,
+                    color_profile,
+                } => {
+                    self.apply_full_decoded(frame, *image_id, image, color_profile);
                     self.state.dirty = true;
                     continue;
                 }

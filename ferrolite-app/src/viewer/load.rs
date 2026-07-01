@@ -100,8 +100,13 @@ pub fn spawn_full(
                 if cancel.is_cancelled() {
                     return;
                 }
+                let color_profile = raw.color_profile.clone();
                 let image = QuadBin.to_linear_rgba_f32(&raw);
-                let _ = tx.send(AppEvent::FullDecoded { image_id, image });
+                let _ = tx.send(AppEvent::FullDecoded {
+                    image_id,
+                    image,
+                    color_profile,
+                });
             }
             Err(e) => {
                 eprintln!("ferrolite: full decode failed for #{image_id}: {e}");

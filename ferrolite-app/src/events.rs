@@ -42,6 +42,7 @@ pub enum AppEvent {
     FullDecoded {
         image_id: i64,
         image: ferrolite_image::LinearRgbaF32,
+        color_profile: ferrolite_decode::ColorProfile,
     },
     /// The tier-2 full decode failed; the viewer keeps showing the preview and
     /// goes idle. Folded by `apply` (no GPU work) but matched in `app.rs`.

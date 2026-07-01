@@ -24,6 +24,13 @@ impl EditTileProducer {
     pub fn set_stack(&mut self, stack: ferrolite_pipeline::OpStack) {
         self.pipeline.set_stack(stack);
     }
+
+    /// Update the producer's camera→working color matrix in place (working-space
+    /// change). Geometry / halo-radius changes still require rebuilding the whole
+    /// producer, not this passthrough.
+    pub fn set_color_matrix(&mut self, m: [[f32; 3]; 3]) {
+        self.pipeline.set_color_matrix(m);
+    }
 }
 
 impl TileProducer for EditTileProducer {

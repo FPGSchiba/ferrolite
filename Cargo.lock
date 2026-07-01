@@ -1060,6 +1060,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "ferrolite-catalog",
+ "ferrolite-color",
  "ferrolite-decode",
  "ferrolite-gpu",
  "ferrolite-image",

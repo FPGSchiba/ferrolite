@@ -7,6 +7,11 @@ pub struct FerroliteApp {
     module: Module,
     thumb_size: f32,
     state: crate::state::AppState,
+    /// Last frame's `viewer.crop_active`. A transition (enter/exit crop mode)
+    /// with no other edit does not otherwise re-render the preview, so we detect
+    /// the edge and force a `set_preview_and_full` on the same frame before paint:
+    /// enter → crop=full+angle view; exit → the real crop applied.
+    crop_active_prev: bool,
 }
 
 impl FerroliteApp {
@@ -29,6 +34,7 @@ impl FerroliteApp {
             module: Module::default(),
             thumb_size: 46.0,
             state,
+            crop_active_prev: false,
         }
     }
 }
@@ -216,15 +222,26 @@ impl FerroliteApp {
         v.opstack_version = v.opstack_version.wrapping_add(1);
 
         // What the preview should show: the live stack, or the empty stack in
-        // before/after mode. While the crop tool is active, show the image
-        // uncropped (crop forced full) so the overlay handles remain reachable.
+        // before/after mode. While the crop tool is active, keep the ROTATION
+        // (and aspect) applied but force crop = full: the crop rectangle is then
+        // represented by the overlay drawn over the full, rotated image, and the
+        // Angle slider rotates the preview live. (In before/after mode `shown` is
+        // identity — no geometry — so this branch is a no-op, which is correct.)
         let mut shown = if v.before_after {
             ferrolite_pipeline::OpStack::default()
         } else {
             stack.clone()
         };
         if v.crop_active {
-            shown = shown.reset(ferrolite_pipeline::OpKind::Geometry);
+            if let Some(g) = shown.geometry() {
+                shown = shown.set_op(ferrolite_pipeline::Op::Geometry(
+                    ferrolite_pipeline::Geometry {
+                        crop: ferrolite_pipeline::CropRect::full(),
+                        angle_deg: g.angle_deg,
+                        aspect: g.aspect,
+                    },
+                ));
+            }
         }
 
         // Preview tier (built once per image, reused).
@@ -412,9 +429,12 @@ impl FerroliteApp {
         }
 
         let crossfading = v.crossfading;
+        // While the crop tool is active, the crop overlay is the sole input
+        // target: gate the canvas pan/zoom interaction off so it doesn't compete.
+        let interactive = !v.crop_active;
         // `paint` applies this frame's pan/zoom and clears `idle` when the view
         // moved, so read `idle` AFTER it to catch an interaction this frame.
-        let loading_preview = viewer::paint(ui, v, show_full);
+        let loading_preview = viewer::paint(ui, v, show_full, interactive);
         let idle = v.idle;
 
         // Repaint only while there is pending work:
@@ -938,6 +958,31 @@ impl eframe::App for FerroliteApp {
                     opened =
                         crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 } else if self.state.viewer.is_some() {
+                    // FIX C: crop mode enter/exit transition. `crop_active` was
+                    // (re)armed above by the Geometry section this frame; if it
+                    // just changed, re-evaluate the preview NOW (before paint) so
+                    // entering shows crop=full+angle and exiting applies the real
+                    // crop — neither transition otherwise triggers a re-render.
+                    // Gather the op_stack into a local first (borrow discipline:
+                    // `set_preview_and_full(&mut self, …)` needs an exclusive
+                    // borrow, so no live `&self.state.viewer` may overlap it).
+                    let crop_active = self
+                        .state
+                        .viewer
+                        .as_ref()
+                        .map(|v| v.crop_active)
+                        .unwrap_or(false);
+                    if crop_active != self.crop_active_prev {
+                        let stack = self
+                            .state
+                            .viewer
+                            .as_ref()
+                            .map(|v| v.op_stack.clone());
+                        if let Some(stack) = stack {
+                            self.set_preview_and_full(frame, stack);
+                        }
+                        self.crop_active_prev = crop_active;
+                    }
                     self.drive_viewer(ui, frame);
                     // Crop overlay: shown while the Geometry section is open.
                     // Gather all viewer data into locals BEFORE calling apply_edit
@@ -966,7 +1011,16 @@ impl eframe::App for FerroliteApp {
                             self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
                         }
                     }
-                    if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                    // Loupe context-menu widget covers the whole canvas; while
+                    // cropping it must NOT be registered, or it competes with the
+                    // crop overlay for input. Gate it on `!crop_active`.
+                    let ctx_menu_id = self
+                        .state
+                        .viewer
+                        .as_ref()
+                        .filter(|v| !v.crop_active)
+                        .map(|v| v.image_id);
+                    if let Some(image_id) = ctx_menu_id {
                         let rect = ui.min_rect();
                         let resp =
                             ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());

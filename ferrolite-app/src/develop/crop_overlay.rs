@@ -58,11 +58,19 @@ pub fn show(
             egui::Stroke::new(1.0, theme::ACCENT),
         );
     }
+    // All 8 handles (spec §8.4): 4 corners + 4 edge midpoints. `hit_test`
+    // recognizes all 8, so paint all 8 so they're discoverable, not just corners.
     for (nx, ny) in [
+        // Corners.
         (crop.x, crop.y),
         (crop.x + crop.w, crop.y),
         (crop.x, crop.y + crop.h),
         (crop.x + crop.w, crop.y + crop.h),
+        // Edge midpoints.
+        (crop.x + crop.w * 0.5, crop.y),
+        (crop.x + crop.w, crop.y + crop.h * 0.5),
+        (crop.x + crop.w * 0.5, crop.y + crop.h),
+        (crop.x, crop.y + crop.h * 0.5),
     ] {
         painter.circle(
             to_screen(nx, ny),

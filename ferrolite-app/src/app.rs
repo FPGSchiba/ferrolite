@@ -562,6 +562,11 @@ fn window_resize(ctx: &egui::Context) {
 
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Free textures retired last frame BEFORE anything paints this frame (see
+        // TextureCache::begin_frame): prevents destroying a texture still referenced by
+        // this frame's paint jobs.
+        self.state.textures.begin_frame();
+
         // Deferred from a previous Develop→Library switch: clearing thumbnail
         // textures must happen BEFORE anything paints this frame, never in the same
         // frame they were painted (egui frees dropped textures before queue.submit).

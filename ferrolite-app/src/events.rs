@@ -6,6 +6,9 @@ use crate::state::AppState;
 
 #[derive(Debug)]
 pub enum AppEvent {
+    /// `added` stat-only placeholder rows were inserted by the instant index pass
+    /// (grid shows the filenames immediately; metadata/thumbnails stream in after).
+    Scanned { added: usize },
     /// `added` rows were indexed (status-bar "N indexed").
     Indexed { added: usize },
     /// A thumbnail finished: JPEG bytes for immediate texture upload.
@@ -59,6 +62,10 @@ impl AppState {
     /// texture — keeping this function egui-free.
     pub fn apply(&mut self, event: AppEvent) -> Option<(i64, Vec<u8>)> {
         match event {
+            AppEvent::Scanned { added } => {
+                self.scanned += added as u64;
+                None
+            }
             AppEvent::Indexed { added } => {
                 self.indexed += added as u64;
                 None

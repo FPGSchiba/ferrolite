@@ -549,6 +549,12 @@ fn window_resize(ctx: &egui::Context) {
 
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Module at the start of the frame; if the title bar or Esc switches us
+        // from Develop back to Library this frame, the grid's thumbnail textures
+        // may be stale after the viewer's GPU work — drop them before the grid
+        // paints (below) so it re-uploads fresh instead of showing grey cells.
+        let module_at_frame_start = self.module;
+
         // Drain job results into state; upload textures for ThumbReady events and
         // build the viewer's rung-1 VirtualTexture for PreviewReady events.
         let mut ingest_done = false;
@@ -603,6 +609,17 @@ impl eframe::App for FerroliteApp {
         if ingest_done {
             self.state.reload_vocab();
         }
+
+        // Once-per-second pipeline diagnostic (only when FERROLITE_PROFILE_THUMBS
+        // is set): shows whether throughput is gated by indexing/spawning or by
+        // workers being saturated with ingest jobs.
+        crate::thumb_profile::diag(
+            self.state.indexed,
+            self.state.thumb_done as u64,
+            self.state.thumb_total as u64,
+            self.state.jobs.active_count(),
+            self.state.jobs.pending_count(),
+        );
         if self.state.dirty {
             self.state.refresh_images();
             self.state.dirty = false;
@@ -953,6 +970,12 @@ impl eframe::App for FerroliteApp {
             if let Some(o) = outcome {
                 self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
             }
+        }
+
+        // If we switched Develop → Library this frame, drop stale thumbnail
+        // textures so the grid re-uploads them (fixes all-grey cells after Develop).
+        if !module_at_frame_start.is_library() && self.module.is_library() {
+            self.state.textures.clear();
         }
 
         let mut opened: Option<i64> = None;

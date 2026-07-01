@@ -122,6 +122,36 @@ impl NewImage {
         }
     }
 
+    /// Build a stat-only `Pending` row (no file read yet). Used by the instant
+    /// index pass so every filename appears in the grid immediately; a later
+    /// metadata pass upgrades it to `Done` (or `Failed`).
+    pub fn pending(
+        folder_id: i64,
+        filename: String,
+        mtime: i64,
+        size: i64,
+        kind: FileKind,
+        added_at: i64,
+    ) -> Self {
+        Self {
+            folder_id,
+            filename,
+            mtime,
+            size,
+            make: None,
+            model: None,
+            width: None,
+            height: None,
+            orientation: Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: DecodeStatus::Pending,
+            kind,
+            rating: Rating::default(),
+            added_at,
+        }
+    }
+
     /// Build a `Failed` placeholder row (decode failed; grid shows a broken cell).
     pub fn failed(
         folder_id: i64,

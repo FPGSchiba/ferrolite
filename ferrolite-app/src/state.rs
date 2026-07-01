@@ -40,6 +40,8 @@ pub struct AppState {
     pub images: Vec<ImageRecord>,
     pub selected: Option<i64>,
 
+    /// Stat-only placeholder rows inserted by the instant index pass (Phase A).
+    pub scanned: u64,
     pub indexed: u64,
     pub thumb_total: usize,
     pub thumb_done: usize,
@@ -112,6 +114,13 @@ pub struct AppState {
     pub iso_range: Option<(u32, u32)>,
     /// (earliest, latest) capture-date strings from the catalog, or None.
     pub date_range: Option<(String, String)>,
+
+    /// Bumped every time `images` is reassigned, so the grid's justified-layout
+    /// cache knows when to rebuild (covers streaming ingest, filter, folder
+    /// switch, and in-place edits — all funnel through `refresh_images`).
+    pub images_rev: u64,
+    /// Cached justified-rows layout, rebuilt only when its inputs change.
+    pub grid_layout: Option<crate::library::grid_layout::CachedGridLayout>,
 }
 
 impl AppState {
@@ -136,6 +145,7 @@ impl AppState {
             current_folder: None,
             images: Vec::new(),
             selected: None,
+            scanned: 0,
             indexed: 0,
             thumb_total: 0,
             thumb_done: 0,
@@ -165,6 +175,8 @@ impl AppState {
             renaming: None,
             ops_save_inflight: 0,
             ops_save_failed: false,
+            images_rev: 0,
+            grid_layout: None,
         })
     }
 
@@ -288,7 +300,9 @@ impl AppState {
         if let Ok(rows) = self.reads.query_images(&q) {
             self.images = rows;
         }
-        // Invalidate the per-cell tag cache so the grid re-fetches for the new set.
+        // Bump the layout revision so the grid rebuilds its justified layout for
+        // the new set, and invalidate the per-cell tag cache so it re-fetches.
+        self.images_rev = self.images_rev.wrapping_add(1);
         self.visible_tags.clear();
     }
 
@@ -324,10 +338,14 @@ impl AppState {
     /// Reset per-folder job + counter state when switching folders.
     pub fn reset_for_new_folder(&mut self) {
         self.cancel_pending_jobs();
+        self.scanned = 0;
         self.indexed = 0;
         self.thumb_total = 0;
         self.thumb_done = 0;
         self.images.clear();
+        // Bump so the grid's layout cache rebuilds for the now-empty set instead
+        // of indexing the previous folder's rows (stale-index panic otherwise).
+        self.images_rev = self.images_rev.wrapping_add(1);
         self.selected = None;
         self.dirty = true;
     }
@@ -396,6 +414,7 @@ impl AppState {
             current_folder: None,
             images: Vec::new(),
             selected: None,
+            scanned: 0,
             indexed: 0,
             thumb_total: 0,
             thumb_done: 0,
@@ -425,6 +444,8 @@ impl AppState {
             renaming: None,
             ops_save_inflight: 0,
             ops_save_failed: false,
+            images_rev: 0,
+            grid_layout: None,
         }
     }
 
@@ -490,6 +511,7 @@ mod tests {
         s.thumb_jobs.insert(2, ferrolite_jobs::JobId(101));
         s.selected = Some(1);
         s.dirty = false; // simulate an idle frame that already cleared the flag
+        let rev_before = s.images_rev;
 
         s.reset_for_new_folder();
 
@@ -500,6 +522,10 @@ mod tests {
         assert!(s.images.is_empty(), "images must be cleared");
         assert_eq!(s.selected, None, "selected must be cleared");
         assert!(s.dirty, "dirty flag must be set after reset");
+        assert_ne!(
+            s.images_rev, rev_before,
+            "images_rev must bump so the grid layout cache rebuilds for the empty set"
+        );
     }
 
     /// `select_folder` must delegate to `reset_for_new_folder` and then set the

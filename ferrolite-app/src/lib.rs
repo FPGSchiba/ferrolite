@@ -10,5 +10,6 @@ pub mod metadata;
 pub mod state;
 pub mod status_bar;
 pub mod theme;
+pub mod thumb_profile;
 pub mod viewer;
 pub mod widgets;

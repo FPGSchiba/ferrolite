@@ -88,15 +88,18 @@ pub(crate) fn needs_reingest(
     mtime: i64,
     size: i64,
 ) -> Result<bool, CatalogError> {
-    let existing: Option<(i64, i64)> = conn
+    let existing: Option<(i64, i64, i64)> = conn
         .query_row(
-            "SELECT mtime, size FROM images WHERE folder_id = ?1 AND filename = ?2",
+            "SELECT mtime, size, decode_status FROM images \
+             WHERE folder_id = ?1 AND filename = ?2",
             rusqlite::params![folder_id, filename],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     Ok(match existing {
-        Some((m, s)) => m != mtime || s != size,
+        // Reingest when the file changed OR the row is still a stat-only
+        // placeholder from the instant index pass (metadata not yet read).
+        Some((m, s, status)) => m != mtime || s != size || status == DecodeStatus::Pending.as_i64(),
         None => true,
     })
 }

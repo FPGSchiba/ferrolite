@@ -1,5 +1,6 @@
 //! ferrolite-vt — source-agnostic sparse virtual texture. Engine-transferable.
 
+mod histogram;
 mod page_table;
 mod pipelines;
 mod pool;
@@ -9,6 +10,7 @@ mod source;
 mod transform;
 mod view;
 
+pub use histogram::{bin_index, HistogramPipeline, HIST_BINS, HIST_CHANNELS, HIST_LEN};
 pub use page_table::{FeedbackBuffer, LevelLayout, PageTable};
 pub use pipelines::{DisplayPipelines, DisplayVariant};
 pub use pool::{SlotAllocator, TilePool, NOT_RESIDENT};

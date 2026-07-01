@@ -273,6 +273,12 @@ impl VirtualTexture {
         self.single.as_ref().map(|s| s.image_dims)
     }
 
+    /// The current rung-1 texture (`Rgba16Float`) as an `Arc`, for a compute pass
+    /// (e.g. the histogram) that reads what is on screen. `None` on a non-single VT.
+    pub fn single_texture_arc(&self) -> Option<std::sync::Arc<wgpu::Texture>> {
+        self.single.as_ref().map(|s| s.texture.clone())
+    }
+
     /// Replace the rung-1 single texture with an externally-owned GPU texture
     /// (e.g. an edit-pipeline output). The texture must be `Rgba16Float` with
     /// `TEXTURE_BINDING` usage. The next `prepare_single` rebuilds the bind group

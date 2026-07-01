@@ -18,3 +18,14 @@ pub use options::{BitDepth, ExportFormat, ExportOptions, ResizeSpec};
 pub use render::{render_tiled, PixelData, RenderedImage};
 
 // (job module wiring — run_export/ExportRequest/ExportOutcome — added in Task 9)
+
+/// Test-only re-export of the internal encoder so integration tests can encode a
+/// `RenderedImage` without going through the GPU render path.
+#[doc(hidden)]
+pub fn encode_for_test(
+    img: &RenderedImage,
+    opts: &ExportOptions,
+    dest: &std::path::Path,
+) -> Result<Vec<String>, ExportError> {
+    crate::encode::encode_to_file(img, opts, dest)
+}

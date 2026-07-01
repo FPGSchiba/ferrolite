@@ -4,6 +4,9 @@
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 
+struct DisplayColor { m: mat3x3<f32> };
+@group(0) @binding(2) var<uniform> disp: DisplayColor;
+
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -28,5 +31,5 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let lin = textureSampleLevel(src, samp, in.uv, 0.0).rgb;
-    return vec4(linear_to_srgb(lin), 1.0);
+    return vec4(linear_to_srgb(disp.m * lin), 1.0);
 }

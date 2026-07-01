@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::LinearRgbaF32;
+use wgpu::util::DeviceExt;
 
 use crate::image::PipelineImage;
 use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode};
@@ -220,11 +221,30 @@ impl EditPipeline {
     }
 }
 
-/// Render a display-linear `PipelineImage` to an sRGB `Rgba8Unorm` buffer at 1:1
-/// (its own dims), returning `width*height*4` row-unpadded bytes. Used by golden
-/// tests and (later) any CPU-side preview/export readback. Builds its pipeline
-/// per call — acceptable for the test/readback path (not the per-frame path).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlitMatrix {
+    m: [[f32; 4]; 3],
+}
+
+/// Identity-matrix blit (working≡display, i.e. sRGB working space). Existing
+/// golden/readback callers use this; it reduces to the old sRGB OETF path exactly.
 pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
+    blit_to_rgba8_with_matrix(
+        ctx,
+        img,
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+}
+
+/// Render a display-linear `PipelineImage` to an sRGB `Rgba8Unorm` buffer at 1:1,
+/// applying `working_to_display` (row-major 3×3) before the sRGB OETF. Builds its
+/// pipeline per call — for the test/readback path, not per-frame.
+pub fn blit_to_rgba8_with_matrix(
+    ctx: &GpuContext,
+    img: &PipelineImage,
+    working_to_display: [[f32; 3]; 3],
+) -> Vec<u8> {
     let device = &ctx.device;
     let (w, h) = (img.width, img.height);
 
@@ -257,6 +277,16 @@ pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -286,6 +316,14 @@ pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
         cache: None,
     });
 
+    let matrix_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("pipeline-blit-matrix"),
+        contents: bytemuck::bytes_of(&BlitMatrix {
+            m: crate::uniforms::pack_mat3(working_to_display),
+        }),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
     let src_view = img
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
@@ -300,6 +338,10 @@ pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: matrix_buf.as_entire_binding(),
             },
         ],
     });

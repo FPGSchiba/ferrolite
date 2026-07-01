@@ -62,3 +62,35 @@ fn color_matrix_node_applies_matrix_before_srgb() {
         }
     }
 }
+
+/// Regression invariant (spec §4.3): the identity-matrix tail == the old
+/// hardcoded `linear_to_srgb`. Proven by comparing the identity blit against
+/// `ferrolite_color::srgb_oetf` over a known image.
+#[test]
+fn blit_srgb_identity_equals_old_linear_to_srgb() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let img = probe_image();
+    // Upload as a PipelineImage via a no-op identity EditPipeline evaluate.
+    let mut ep = EditPipeline::new(
+        std::sync::Arc::new(ctx),
+        &img,
+        OpStack::default(),
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    );
+    let out = ep.render_to_image(); // uses blit_to_rgba8 (identity)
+
+    for i in 0..4usize {
+        for c in 0..3 {
+            let lin = img.pixels[i * 4 + c];
+            let want = (ferrolite_color::srgb_oetf(lin).clamp(0.0, 1.0) * 255.0).round() as i32;
+            let got = out[i * 4 + c] as i32;
+            assert!(
+                (want - got).abs() <= TOL as i32,
+                "texel {i} ch {c}: identity tail drifted from sRGB OETF (want {want}, got {got})"
+            );
+        }
+    }
+}

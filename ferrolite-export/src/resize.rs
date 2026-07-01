@@ -64,7 +64,7 @@ pub(crate) fn apply_resize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::options::ResizeSpec;
+    use crate::options::{BitDepth, ResizeSpec};
 
     #[test]
     fn none_is_identity() {
@@ -106,5 +106,41 @@ mod tests {
     fn dims_never_zero() {
         assert_eq!(resize_dims(ResizeSpec::Percent(0.0001), 100, 100), (1, 1));
         assert_eq!(resize_dims(ResizeSpec::LongEdge(0), 100, 50), (1, 1));
+    }
+
+    #[test]
+    fn apply_resize_noop_returns_same_bytes() {
+        // 4×4 U8x3 RGB buffer (48 bytes: 4*4*3)
+        let buffer = vec![100u8; 4 * 4 * 3];
+        let result = apply_resize(&buffer, 4, 4, 4, 4, BitDepth::Eight)
+            .expect("resize to same dims should succeed");
+        assert_eq!(result, buffer, "no-op resize should return equal bytes");
+    }
+
+    #[test]
+    fn apply_resize_8bit_changes_size() {
+        // 4×4 U8x3 RGB buffer (48 bytes)
+        let buffer = vec![50u8; 4 * 4 * 3];
+        let result = apply_resize(&buffer, 4, 4, 2, 2, BitDepth::Eight)
+            .expect("resize to 2×2 should succeed");
+        assert_eq!(
+            result.len(),
+            2 * 2 * 3,
+            "2×2 U8x3 output should be 12 bytes"
+        );
+    }
+
+    #[test]
+    fn apply_resize_16bit_changes_size() {
+        // 4×4 U16x3 RGB buffer: 4*4*3 = 48 u16 values = 96 bytes
+        let u16_buffer = vec![30000u16; 4 * 4 * 3];
+        let bytes = bytemuck::cast_slice(&u16_buffer).to_vec();
+        let result = apply_resize(&bytes, 4, 4, 2, 2, BitDepth::Sixteen)
+            .expect("resize to 2×2 should succeed");
+        assert_eq!(
+            result.len(),
+            2 * 2 * 3 * 2,
+            "2×2 U16x3 output should be 24 bytes"
+        );
     }
 }

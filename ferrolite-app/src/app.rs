@@ -35,6 +35,10 @@ impl FerroliteApp {
                 .write()
                 .callback_resources
                 .insert(viewer::ViewerPipelines { pipelines });
+            // Pre-warm the edit-pass shaders too, on the same device, so the
+            // first image open reuses cached modules instead of compiling
+            // ~8 compute shaders synchronously on the UI thread.
+            ferrolite_pipeline::prewarm_shaders(&gpu);
         }
         let state = crate::state::AppState::new().expect("open catalog");
         Self {

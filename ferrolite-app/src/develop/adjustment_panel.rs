@@ -77,6 +77,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         ui.add_space(4.0);
     }
 
+    // ── Histogram (spec §7.1) ── read-only; GPU-computed, display-referred.
+    {
+        let bins = state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.histogram.bins.as_deref());
+        crate::develop::histogram_widget::show(ui, bins);
+        ui.add_space(6.0);
+    }
+
     // ── Basic ──
     egui::CollapsingHeader::new("Basic")
         .default_open(true)

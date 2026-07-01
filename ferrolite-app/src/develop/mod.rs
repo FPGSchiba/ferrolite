@@ -6,6 +6,7 @@ pub mod crop_math;
 pub mod crop_overlay;
 pub mod curve_math;
 pub mod curve_widget;
+pub mod histogram_widget;
 pub mod history;
 pub mod hsl_widget;
 pub mod ops_edit;

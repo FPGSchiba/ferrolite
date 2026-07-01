@@ -21,4 +21,4 @@ mod working_space;
 pub use matrix::{diag, identity, inverse, mul_mat3, mul_vec3, Mat3, Xy};
 // pub use oetf::{srgb_eotf, srgb_oetf};
 // pub use tail::{working_to_display, working_to_output};
-// pub use working_space::WorkingSpace;
+pub use working_space::WorkingSpace;

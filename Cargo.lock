@@ -1089,6 +1089,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrolite-color"
+version = "0.0.1"
+dependencies = [
+ "moxcms",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ferrolite-decode"
 version = "0.0.1"
 dependencies = [

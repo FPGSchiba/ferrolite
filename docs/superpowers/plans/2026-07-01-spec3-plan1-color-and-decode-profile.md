@@ -291,7 +291,7 @@ git commit -m "feat(color): scaffold ferrolite-color crate + Mat3 linear-algebra
 
 **Interfaces:**
 - Consumes: `Mat3`, `Xy`, `mul_mat3`, `mul_vec3`, `diag`, `inverse` (Task 1).
-- Produces: `pub enum WorkingSpace { Srgb, AdobeRgb, DisplayP3, Rec2020, ProPhoto }` deriving `Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize`, with `impl Default` returning `Rec2020`; methods `pub fn white_point(&self) -> Xy`, `pub fn rgb_to_xyz(&self) -> Mat3`, `pub fn xyz_to_rgb(&self) -> Mat3`, and `pub const ALL: [WorkingSpace; 5]`.
+- Produces: `pub enum WorkingSpace { Srgb, AdobeRgb, DisplayP3, Rec2020, ProPhoto }` deriving `Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize` with `#[default]` on `Rec2020` (derive, not a manual impl — a manual `impl Default` here trips `clippy::derivable_impls` under `-D warnings`); methods `pub fn white_point(&self) -> Xy`, `pub fn rgb_to_xyz(&self) -> Mat3`, `pub fn xyz_to_rgb(&self) -> Mat3`, and `pub const ALL: [WorkingSpace; 5]`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -367,19 +367,16 @@ Prepend above the test module:
 use crate::matrix::{diag, inverse, mul_mat3, mul_vec3, Mat3, Xy};
 
 /// The curated working/output color spaces. Default = linear Rec.2020.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum WorkingSpace {
     Srgb,
     AdobeRgb,
     DisplayP3,
+    #[default]
     Rec2020,
     ProPhoto,
-}
-
-impl Default for WorkingSpace {
-    fn default() -> Self {
-        WorkingSpace::Rec2020
-    }
 }
 
 impl WorkingSpace {

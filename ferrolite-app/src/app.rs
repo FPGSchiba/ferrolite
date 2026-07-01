@@ -723,7 +723,7 @@ impl eframe::App for FerroliteApp {
                     }
                 });
             egui::TopBottomPanel::top("develop_filmstrip")
-                .exact_height(72.0)
+                .exact_height(80.0)
                 .frame(
                     egui::Frame::none()
                         .fill(theme::BG_TOOLBAR)
@@ -769,7 +769,9 @@ impl eframe::App for FerroliteApp {
 
         if self.module.is_library() {
             egui::SidePanel::left("left")
-                .exact_width(236.0)
+                .resizable(true)
+                .default_width(236.0)
+                .width_range(180.0..=460.0)
                 .frame(
                     egui::Frame::none()
                         .fill(theme::BG_PANEL)

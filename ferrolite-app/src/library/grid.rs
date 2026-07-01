@@ -129,7 +129,7 @@ fn label_width(ui: &egui::Ui, rec: &ImageRecord) -> f32 {
 /// Upright aspect ratio (width / height) of an image, applying its orientation
 /// so portrait/landscape cells match what the thumbnail actually shows. Falls
 /// back to square (1.0) when dimensions are unknown.
-fn cell_aspect(rec: &ImageRecord) -> f32 {
+pub(crate) fn cell_aspect(rec: &ImageRecord) -> f32 {
     let w = rec.width.unwrap_or(0).max(1) as f32;
     let h = rec.height.unwrap_or(0).max(1) as f32;
     let (w, h) = if rec.orientation.swaps_dimensions() {

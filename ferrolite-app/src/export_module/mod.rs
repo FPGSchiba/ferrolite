@@ -1,12 +1,14 @@
 //! The Export module (spec §8.4): a third top-level module. Chrome grammar —
 //! toolbar (queue summary + Clear) → content row (queue list · settings panel ·
-//! bottom bar). Panels are filled in Task 7; this file owns the toolbar + the
-//! outbound action enum.
+//! bottom bar). This file owns the toolbar + the outbound action enum; the
+//! content panels live in `queue_list` and `bottom_bar`.
 
 use crate::state::AppState;
 
+pub mod bottom_bar;
+pub mod queue_list;
+
 /// Actions the Export module surfaces up to `app.rs` (which owns GPU state).
-#[allow(dead_code)] // constructed by queue_list/bottom_bar, handled in app.rs (Task 7)
 pub enum ExportModuleAction {
     /// The user hit Start with a chosen destination — run the batch.
     Start,

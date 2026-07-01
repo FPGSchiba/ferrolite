@@ -319,6 +319,89 @@ impl FerroliteApp {
         self.state.warning = Some("Exporting…".to_string());
     }
 
+    /// Resolve output filenames and spawn one Background export job per queued
+    /// image (spec §8.4). Filenames are expanded + collision-resolved up front on
+    /// the UI thread so {seq} is deterministic and disk collisions are avoided.
+    fn start_batch(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(dest_dir) = self.state.export_dest.clone() else {
+            self.state.warning = Some("Choose a destination folder first.".to_string());
+            return;
+        };
+        let ids = self.state.export_queue.clone();
+        if ids.is_empty() {
+            return;
+        }
+        // Metadata for {name}/{date}.
+        let recs = self.state.reads.images_by_ids(&ids).unwrap_or_default();
+        let options = self.state.export_settings;
+        let template = self.state.export_template.clone();
+        let ext = options.format.extension();
+
+        // Seed collision set with files already on disk in the destination.
+        let mut taken: std::collections::HashSet<String> = std::fs::read_dir(&dest_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut items: Vec<crate::export::batch::BatchItem> = Vec::new();
+        let mut seq = 0usize;
+        for &id in &ids {
+            let Some(rec) = recs.iter().find(|r| r.id == id) else {
+                continue;
+            };
+            // Skip images whose folder can't be resolved (moved/deleted on disk);
+            // the batch proceeds with the remaining queued images.
+            let Some(path) = self.state.image_path(rec) else {
+                continue;
+            };
+            seq += 1;
+            let stem = std::path::Path::new(&rec.filename)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| rec.filename.clone());
+            let fctx = ferrolite_export::FilenameCtx {
+                name: stem,
+                seq,
+                date: ferrolite_export::format_capture_date(rec.capture_time.as_deref()),
+                // `ImageRecord` does not carry make/model (only `NewImage` does at
+                // ingest time), so `{camera}` resolves to empty until the catalog
+                // read model exposes it.
+                camera: String::new(),
+            };
+            let expanded = ferrolite_export::expand_filename(&template, &fctx);
+            let filename = ferrolite_export::resolve_collision(&expanded, ext, &mut taken);
+            items.push(crate::export::batch::BatchItem {
+                image_id: id,
+                path,
+                kind: rec.kind,
+                dest: dest_dir.join(&filename),
+            });
+        }
+
+        if items.is_empty() {
+            self.state.warning =
+                Some("No queued images could be resolved to a file on disk.".to_string());
+            return;
+        }
+
+        let Some(rs) = frame.wgpu_render_state() else {
+            self.state.warning = Some("No GPU render state; cannot export.".to_string());
+            return;
+        };
+        let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let working_space = self.state.working_space;
+
+        let handles =
+            crate::export::batch::spawn_batch(&self.state, ctx, gpu, items, working_space, options);
+        let total = handles.len();
+        let mut bs = crate::export::batch::BatchExportState::new(total);
+        bs.handles = handles;
+        self.state.batch = Some(bs);
+        self.state.warning = Some(format!("Exporting {total} image(s)…"));
+    }
+
     /// sRGB→working for the preview tier: the embedded preview and Standard images
     /// are sRGB-primaries, so they convert via the sRGB fallback profile.
     fn preview_to_working(&self) -> [[f32; 3]; 3] {
@@ -1618,6 +1701,50 @@ impl eframe::App for FerroliteApp {
             self.pending_texture_clear = true;
         }
 
+        if self.module == crate::module::Module::Export {
+            egui::TopBottomPanel::bottom("export_bottom")
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
+                .show(ctx, |ui| {
+                    if let Some(a) = crate::export_module::bottom_bar::show(ui, &mut self.state) {
+                        match a {
+                            crate::export_module::ExportModuleAction::Start => {
+                                self.start_batch(ctx, frame)
+                            }
+                            crate::export_module::ExportModuleAction::Cancel => {
+                                if let Some(b) = self.state.batch.as_ref() {
+                                    b.cancel_all();
+                                }
+                            }
+                        }
+                    }
+                });
+            egui::SidePanel::right("export_settings")
+                .resizable(true)
+                .default_width(296.0)
+                .width_range(250.0..=400.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_APP)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new("EXPORT SETTINGS")
+                            .small()
+                            .color(theme::TEXT_FAINT),
+                    );
+                    ui.add_space(6.0);
+                    crate::export::settings_form::settings_form(
+                        ui,
+                        &mut self.state.export_settings,
+                    );
+                });
+        }
+
         let mut opened: Option<i64> = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG_CANVAS))
@@ -1710,9 +1837,7 @@ impl eframe::App for FerroliteApp {
                     }
                 }
                 crate::module::Module::Export => {
-                    // Filled in Task 7. For now, an empty canvas placeholder.
-                    let rect = ui.available_rect_before_wrap();
-                    canvas::paint(ui, rect);
+                    crate::export_module::queue_list::show(ui, &mut self.state);
                 }
             });
         if let Some(id) = opened {

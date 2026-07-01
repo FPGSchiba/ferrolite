@@ -97,20 +97,12 @@ pub struct AppState {
 
     /// Persisted export queue: ordered image_ids. Authoritative in-memory copy
     /// (the DB table is a cache — its loss never loses photos). Loaded at startup.
-    // Task 6/7 (queue UI + Start button) reads this; remove this allow then.
-    #[allow(dead_code)]
     pub export_queue: Vec<i64>,
     /// Shared batch export settings (spec §8.2).
-    // Task 6/7 wires the export options panel to this; remove this allow then.
-    #[allow(dead_code)]
     pub export_settings: ferrolite_export::ExportOptions,
     /// Batch destination folder (spec §8.4). `None` until picked.
-    // Task 6/7 wires the destination picker to this; remove this allow then.
-    #[allow(dead_code)]
     pub export_dest: Option<std::path::PathBuf>,
     /// Filename token template (spec §8.4). Default "{name}".
-    // Task 6/7 wires the template field to this; remove this allow then.
-    #[allow(dead_code)]
     pub export_template: String,
 
     /// Active filter state (search text, rating, flags, tags, etc.).
@@ -423,6 +415,16 @@ impl AppState {
         }
     }
 
+    /// Absolute path of an image: its folder path + filename. `None` if the
+    /// folder can't be resolved. Mirrors `open_image_in_viewer`'s path build.
+    pub fn image_path(&self, rec: &ferrolite_catalog::ImageRecord) -> Option<PathBuf> {
+        self.reads
+            .folder_path(rec.folder_id)
+            .ok()
+            .flatten()
+            .map(|fp| PathBuf::from(fp).join(&rec.filename))
+    }
+
     /// Cancel any in-flight ingest + pending thumbnail jobs, without touching the
     /// view (images/current_folder/selection) or counters. Used by reindex.
     pub fn cancel_pending_jobs(&mut self) {
@@ -556,8 +558,6 @@ impl AppState {
     }
 
     /// Remove `image_id` from the export queue and persist the change.
-    // Task 6/7 (queue list row "Remove") is the first non-test caller; remove this allow then.
-    #[allow(dead_code)]
     pub fn queue_remove(&mut self, image_id: i64) {
         self.export_queue.retain(|&id| id != image_id);
         self.persist_queue(|cat| cat.remove_from_export_queue(image_id));
@@ -572,8 +572,6 @@ impl AppState {
     }
 
     /// Move the row at `index` by `delta` (clamped), then persist the new order.
-    // Task 6/7 (queue list reorder buttons) is the first non-test caller; remove this allow then.
-    #[allow(dead_code)]
     pub fn queue_move(&mut self, index: usize, delta: isize) {
         let len = self.export_queue.len();
         if index >= len {

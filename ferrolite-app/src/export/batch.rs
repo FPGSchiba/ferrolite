@@ -21,9 +21,6 @@ use crate::state::AppState;
 
 /// One image to export in a batch. `dest` is the final, collision-resolved path.
 #[derive(Debug, Clone)]
-// Task 7 (queue list + Start button) constructs and consumes these; until then
-// the fields are only exercised by `spawn_batch`, which is itself dead code.
-#[allow(dead_code)]
 pub struct BatchItem {
     pub image_id: i64,
     pub path: PathBuf,
@@ -42,8 +39,6 @@ pub struct BatchExportState {
 }
 
 impl BatchExportState {
-    // Task 7 (queue list + Start button) is the first caller; remove this allow then.
-    #[allow(dead_code)]
     pub fn new(total: usize) -> Self {
         Self {
             total,
@@ -53,8 +48,6 @@ impl BatchExportState {
     pub fn is_done(&self) -> bool {
         self.completed >= self.total
     }
-    // Task 7 wires the Cancel button that calls this; remove this allow then.
-    #[allow(dead_code)]
     pub fn cancel_all(&self) {
         for h in &self.handles {
             h.cancel();
@@ -63,8 +56,6 @@ impl BatchExportState {
 }
 
 /// Submit one Background job per item. Returns the job handles (for cancellation).
-// Task 7 (queue list + Start button) is the first caller; remove this allow then.
-#[allow(dead_code)]
 pub fn spawn_batch(
     state: &AppState,
     egui_ctx: &egui::Context,

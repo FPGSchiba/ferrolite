@@ -31,10 +31,14 @@ impl FerroliteApp {
             // open will borrow from this holder instead of compiling a new pipeline.
             let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
             let pipelines = ferrolite_vt::DisplayPipelines::new(&gpu, rs.target_format);
+            let histogram = ferrolite_vt::HistogramPipeline::new(&gpu);
             rs.renderer
                 .write()
                 .callback_resources
-                .insert(viewer::ViewerPipelines { pipelines });
+                .insert(viewer::ViewerPipelines {
+                    pipelines,
+                    histogram,
+                });
             // Pre-warm the edit-pass shaders too, on the same device, so the
             // first image open reuses cached modules instead of compiling
             // ~8 compute shaders synchronously on the UI thread.
@@ -128,8 +132,87 @@ impl FerroliteApp {
                 ctx: gpu,
                 preview: vt,
                 full: None,
+                preview_before: None,
                 image_id,
             });
+        self.mark_histogram_dirty();
+    }
+
+    /// Flag the histogram stale so the next frame recomputes it (debounced).
+    fn mark_histogram_dirty(&mut self) {
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.histogram.mark_dirty();
+        }
+    }
+
+    /// Debounced GPU histogram recompute over the on-screen preview texture.
+    /// While a readback is in flight, poll the device (non-blocking) so the
+    /// `map_async` callback fires and keep repainting until it delivers. Never
+    /// blocks the UI thread and never reads back the image (only the 4 KB bins).
+    fn maybe_update_histogram(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let dt = ctx.input(|i| i.stable_dt);
+        let (inflight, do_dispatch, image_id) = {
+            let Some(v) = self.state.viewer.as_mut() else {
+                return;
+            };
+            v.histogram.tick(dt);
+            (
+                v.histogram.inflight,
+                v.histogram.should_dispatch(),
+                v.image_id,
+            )
+        };
+
+        // A readback is pending: drive the map callback + keep the frame loop alive.
+        if inflight {
+            let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+            gpu.device.poll(wgpu::Maintain::Poll);
+            ctx.request_repaint();
+            return;
+        }
+        if !do_dispatch {
+            return;
+        }
+
+        let matrix = ferrolite_color::working_to_display(self.state.working_space);
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let dispatched = {
+            let renderer = rs.renderer.read();
+            let Some(g) = renderer.callback_resources.get::<viewer::ViewerGpu>() else {
+                return;
+            };
+            if g.image_id != image_id {
+                return;
+            }
+            let (Some(tex), Some(dims)) = (g.preview.single_texture_arc(), g.preview.single_dims())
+            else {
+                return;
+            };
+            let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
+                return;
+            };
+            vp.histogram.dispatch(&gpu, &tex, dims, matrix);
+            let tx = self.state.tx.clone();
+            let egui_ctx = ctx.clone();
+            vp.histogram.read_async(move |maybe| {
+                let bins = maybe.unwrap_or_default();
+                let _ = tx.send(crate::events::AppEvent::HistogramReady { image_id, bins });
+                egui_ctx.request_repaint();
+            });
+            true
+        };
+        if dispatched {
+            if let Some(v) = self.state.viewer.as_mut() {
+                v.histogram.inflight = true;
+                v.histogram.dirty = false;
+            }
+            // Poll now so the just-submitted work can complete promptly.
+            gpu.device.poll(wgpu::Maintain::Poll);
+            ctx.request_repaint();
+        }
     }
 
     /// Compose a source→working 3×3 for `profile` under the current working space.
@@ -156,6 +239,58 @@ impl FerroliteApp {
     /// are sRGB-primaries, so they convert via the sRGB fallback profile.
     fn preview_to_working(&self) -> [[f32; 3]; 3] {
         self.source_to_working(&ferrolite_decode::ColorProfile::srgb_fallback())
+    }
+
+    /// Ensure `ViewerGpu.preview_before` holds the unedited (identity stack,
+    /// `sRGB→working`) rung-1 preview while split-compare is active. Built from the
+    /// retained `preview_source` via one `color_convert` pass (no upload of a new
+    /// image beyond that). Rebuilt only when missing (invalidated on WS change /
+    /// image open), so edits do not recompute it — the before never changes.
+    fn ensure_before_view(&mut self, frame: &eframe::Frame) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let (active, image_id, src) = match self.state.viewer.as_ref() {
+            Some(v) => (v.split_compare, v.image_id, v.preview_source.clone()),
+            None => return,
+        };
+        if !active {
+            return;
+        }
+        let Some(src) = src else {
+            return;
+        };
+        // Already built for this image? Nothing to do.
+        {
+            let renderer = rs.renderer.read();
+            if let Some(g) = renderer.callback_resources.get::<viewer::ViewerGpu>() {
+                if g.image_id == image_id && g.preview_before.is_some() {
+                    return;
+                }
+            }
+        }
+        let pw = self.preview_to_working();
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+        let vt = {
+            let renderer = rs.renderer.read();
+            let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
+                return;
+            };
+            ferrolite_vt::VirtualTexture::single_from_texture(
+                &gpu,
+                converted.texture.clone(),
+                (converted.width, converted.height),
+                &vp.pipelines,
+            )
+        };
+        let mut renderer = rs.renderer.write();
+        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+            if g.image_id == image_id {
+                g.preview_before = Some(vt);
+            }
+        }
     }
 
     /// Handle a tier-2 full decode: build a `PyramidTileSource` from the
@@ -265,6 +400,7 @@ impl FerroliteApp {
                 }
             }
         }
+        self.mark_histogram_dirty();
     }
 
     /// Apply `stack` to both render tiers (GPU + memory only; no history/persist).
@@ -375,6 +511,7 @@ impl FerroliteApp {
             }
         }
         v.idle = false; // wake the drive loop so producer tiles re-render
+        self.mark_histogram_dirty();
     }
 
     /// Apply a panel/widget edit: update both tiers immediately; on commit (drag
@@ -479,6 +616,7 @@ impl FerroliteApp {
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == image_id {
+                    g.preview_before = None; // rebuilt by ensure_before_view with new WS
                     if let Some(full) = g.full.as_mut() {
                         full.set_opstack_version(&g.ctx, version);
                     }
@@ -486,6 +624,7 @@ impl FerroliteApp {
             }
         }
         v.idle = false;
+        self.mark_histogram_dirty();
         ctx.request_repaint();
     }
 }
@@ -588,7 +727,22 @@ impl FerroliteApp {
         let crossfading = v.crossfading;
         // While the crop tool is active, the crop overlay is the sole input
         // target: gate the canvas pan/zoom interaction off so it doesn't compete.
-        let interactive = !v.crop_active;
+        // While the before/after SPLIT is shown on the preview tier, the divider
+        // strip (drawn below) owns pointer input instead, so gate pan/zoom off
+        // then too (at 1:1 the split is suppressed and pan/zoom resumes).
+        let interactive = !v.crop_active && (show_full || !v.split_compare);
+
+        let canvas_rect = ui.available_rect_before_wrap();
+        let split_active = v.split_compare && !show_full;
+        let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
+        if v.split_compare && show_full && !v.split_full_logged {
+            eprintln!("before/after split suppressed at 1:1 zoom; showing after-view");
+            v.split_full_logged = true;
+        }
+        if !show_full {
+            v.split_full_logged = false;
+        }
+
         // `paint` applies this frame's pan/zoom and clears `idle` when the view
         // moved, so read `idle` AFTER it to catch an interaction this frame.
         let loading_preview = viewer::paint(ui, v, show_full, interactive);
@@ -604,6 +758,88 @@ impl FerroliteApp {
         let tiles_loading = matches!(tiles_pending, Some(n) if n > 0);
         if !idle && (loading_preview || crossfading || tiles_loading) {
             ui.ctx().request_repaint();
+        }
+
+        // The `v` borrow has ended; the split render/drag needs `&mut self`
+        // (`ensure_before_view` + writing `split_pos` on drag).
+        if split_active {
+            self.ensure_before_view(frame);
+            let div_x = crate::develop::split::divider_x(
+                canvas_rect.left(),
+                canvas_rect.width(),
+                split_pos,
+            );
+            // Paint the "before" clipped to the left of the divider, on top of
+            // the already-painted "after". Same `canvas_rect` for both callbacks
+            // keeps the image geometry identical; only the clip rect (scissor)
+            // differs, so left = before, right = after.
+            let left_clip =
+                egui::Rect::from_min_max(canvas_rect.min, egui::pos2(div_x, canvas_rect.max.y));
+            ui.painter()
+                .with_clip_rect(left_clip)
+                .add(egui_wgpu::Callback::new_paint_callback(
+                    canvas_rect,
+                    viewer::ViewerCallback {
+                        image_id,
+                        view,
+                        viewport,
+                        show_full: false,
+                        which: viewer::PreviewWhich::Before,
+                    },
+                ));
+            // Divider line + a grab handle at mid-height.
+            let painter = ui.painter();
+            painter.vline(
+                div_x,
+                canvas_rect.y_range(),
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+            let handle_center = egui::pos2(div_x, canvas_rect.center().y);
+            painter.circle(
+                handle_center,
+                7.0,
+                egui::Color32::from_black_alpha(120),
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+            // Drag: a thin full-height strip around the divider owns the pointer.
+            let hit = crate::develop::split::HANDLE_TOL;
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(div_x - hit, canvas_rect.top()),
+                egui::pos2(div_x + hit, canvas_rect.bottom()),
+            );
+            let resp = ui.interact(
+                strip,
+                ui.id().with(("split-divider", image_id)),
+                egui::Sense::click_and_drag(),
+            );
+            // Precise hover check against the divider itself (not just the strip
+            // rect) via the pure hit-test, so the cursor only swaps within the
+            // documented `HANDLE_TOL` of the actual divider line.
+            let hovering_divider = resp.hover_pos().is_some_and(|pos| {
+                crate::develop::split::hit_divider(
+                    canvas_rect.left(),
+                    canvas_rect.width(),
+                    split_pos,
+                    pos.x,
+                    hit,
+                )
+            });
+            if hovering_divider || resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if resp.dragged() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let new_pos = crate::develop::split::pos_from_pointer(
+                        canvas_rect.left(),
+                        canvas_rect.width(),
+                        pos.x,
+                    );
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.split_pos = new_pos;
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
         }
     }
 
@@ -802,6 +1038,17 @@ impl eframe::App for FerroliteApp {
                 }
                 crate::events::AppEvent::IngestDone => {
                     ingest_done = true;
+                }
+                crate::events::AppEvent::HistogramReady { image_id, bins } => {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == *image_id {
+                            if !bins.is_empty() {
+                                v.histogram.bins = Some(bins.clone());
+                            }
+                            v.histogram.inflight = false;
+                        }
+                    }
+                    ctx.request_repaint();
                 }
                 _ => {}
             }
@@ -1182,6 +1429,10 @@ impl eframe::App for FerroliteApp {
                 );
                 v.ops_read_handle = Some(h);
             }
+        }
+
+        if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
+            self.maybe_update_histogram(ctx, frame);
         }
 
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {

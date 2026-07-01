@@ -10,6 +10,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> bool {
     let mut changed = false;
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
+        if let Some(v) = state.viewer.as_mut() {
+            if ui
+                .selectable_label(v.split_compare, "\u{21D4} Before/After")
+                .on_hover_text("Split-compare the original against the current edit")
+                .clicked()
+            {
+                v.split_compare = !v.split_compare;
+                if v.split_compare {
+                    v.split_pos = 0.5;
+                }
+            }
+            ui.separator();
+        }
         changed |= fw::sort_controls(ui, &mut state.filter.sort_key, &mut state.filter.sort_desc);
         changed |= fw::rating_threshold(
             ui,

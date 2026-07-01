@@ -62,6 +62,10 @@ pub enum AppEvent {
     /// Distinct from `MetadataResult` (rating/flag/tag path) so the save-state
     /// indicator can track ops-persist inflight count and failure separately.
     OpsSaved { ok: bool, warning: Option<String> },
+    /// An off-thread (async `map_async`) histogram readback finished: 1024 bins
+    /// (256 × {R,G,B,luma}). Handled in `app.rs` (stores into the viewer); the
+    /// `apply` fold ignores it.
+    HistogramReady { image_id: i64, bins: Vec<u32> },
 }
 
 impl AppState {
@@ -133,6 +137,7 @@ impl AppState {
                 }
                 None
             }
+            AppEvent::HistogramReady { .. } => None,
         }
     }
 }

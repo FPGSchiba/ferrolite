@@ -52,16 +52,21 @@ impl FerroliteApp {
 }
 
 impl FerroliteApp {
-    /// Handle a tier-1 preview: convert to display-linear, build the rung-1
-    /// `VirtualTexture`, stash it (+ GpuContext) in eframe's `callback_resources`,
-    /// and fit the view. Stale events (no open viewer, or a different image_id)
-    /// are dropped — the user may have closed/switched the viewer mid-decode.
+    /// Handle a tier-1 preview: run ONE sRGB→working color pass on the
+    /// already-off-thread-converted linear buffer, build the rung-1
+    /// `VirtualTexture` wrapping its output directly (no throwaway upload),
+    /// stash it (+ GpuContext) in eframe's `callback_resources`, and fit the
+    /// view. The full 9-node preview `EditPipeline` stays lazy — built on the
+    /// first edit by `set_preview_and_full`, not here. Stale events (no open
+    /// viewer, or a different image_id) are dropped — the user may have
+    /// closed/switched the viewer mid-decode.
     fn apply_preview_ready(
         &mut self,
         frame: &eframe::Frame,
         image_id: i64,
-        image: &ferrolite_image::ImageBuffer,
+        linear: &ferrolite_image::LinearRgbaF32,
     ) {
+        let __t = std::time::Instant::now();
         let pw = self.preview_to_working();
         let w2d = ferrolite_color::working_to_display(self.state.working_space);
         let Some(v) = self.state.viewer.as_mut() else {
@@ -75,37 +80,30 @@ impl FerroliteApp {
         };
 
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-        let linear = viewer::load::preview_to_linear(image);
         let dims = (linear.width, linear.height);
-        // Keep the display-linear source so the preview EditPipeline can be built
-        // lazily on the first edit (built once, reused via set_stack thereafter).
-        v.preview_source = Some(std::sync::Arc::new(linear.clone()));
-        // Build the preview EditPipeline eagerly (identity op-stack, sRGB→working
-        // matrix) and display ITS output, so the single texture is working-space
-        // linear rather than raw sRGB-linear texels.
+        // Retain the sRGB-linear source so the full preview EditPipeline can be
+        // built lazily on the first edit (built once, reused via set_stack).
+        let src = std::sync::Arc::new(linear.clone());
+        v.preview_source = Some(src.clone());
+        // Initial preview: ONE sRGB→working color pass (not a full 9-node
+        // pipeline). Display its working-space output directly.
         let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-        let mut ep = ferrolite_pipeline::EditPipeline::new(
-            ctx_arc,
-            &linear,
-            ferrolite_pipeline::OpStack::default(),
-            pw,
-        );
-        let edited = ep.evaluate();
-        // Fetch the pre-warmed pipelines, build the VT while borrowing them,
-        // then release the lock before inserting ViewerGpu (separate write scope).
-        let mut vt = {
+        let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+        let vt = {
             let renderer = rs.renderer.read();
             let vp = renderer
                 .callback_resources
                 .get::<viewer::ViewerPipelines>()
                 .expect("ViewerPipelines pre-warmed at startup");
-            // Push the working→display tail now: a Standard image never reaches
-            // apply_full_decoded, so this is the only place its tail gets set.
+            // A Standard image never reaches apply_full_decoded, so set the tail here.
             vp.pipelines.set_display_matrix(&gpu.queue, w2d);
-            ferrolite_vt::VirtualTexture::single_texture(&gpu, &linear, &vp.pipelines)
+            ferrolite_vt::VirtualTexture::single_from_texture(
+                &gpu,
+                converted.texture.clone(),
+                (converted.width, converted.height),
+                &vp.pipelines,
+            )
         };
-        vt.update_single_from_texture(edited.texture.clone(), (edited.width, edited.height));
-        v.preview_edit = Some(ep);
 
         // Fit to the last-known viewport; fall back to the image's own size when
         // the canvas has not painted yet (zoom is normalized away by fit anyway).
@@ -133,6 +131,7 @@ impl FerroliteApp {
                 full: None,
                 image_id,
             });
+        eprintln!("[perf] preview_ready TOTAL {:?}", __t.elapsed());
     }
 
     /// Compose a source→working 3×3 for `profile` under the current working space.
@@ -444,6 +443,8 @@ impl FerroliteApp {
         };
 
         // Preview tier: update the matrix, re-evaluate, swap the displayed texture.
+        // The preview source is sRGB (embedded thumbnail / Standard image), so this
+        // always uses `pw` (sRGB→working), never `cam` (camera→working, full-res only).
         if let Some(ep) = v.preview_edit.as_mut() {
             ep.set_color_matrix(pw);
             let img = ep.evaluate();
@@ -452,6 +453,19 @@ impl FerroliteApp {
                 if g.image_id == v.image_id {
                     g.preview
                         .update_single_from_texture(img.texture.clone(), (img.width, img.height));
+                }
+            }
+        } else if let Some(src) = v.preview_source.clone() {
+            // No edit yet: re-run the one-shot color pass with the new matrix.
+            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+            let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == v.image_id {
+                    g.preview.update_single_from_texture(
+                        converted.texture.clone(),
+                        (converted.width, converted.height),
+                    );
                 }
             }
         }
@@ -749,8 +763,8 @@ impl eframe::App for FerroliteApp {
         let mut ingest_done = false;
         while let Ok(event) = self.state.rx.try_recv() {
             match &event {
-                crate::events::AppEvent::PreviewReady { image_id, image } => {
-                    self.apply_preview_ready(frame, *image_id, image);
+                crate::events::AppEvent::PreviewReady { image_id, linear } => {
+                    self.apply_preview_ready(frame, *image_id, linear);
                     self.state.dirty = true;
                     continue;
                 }

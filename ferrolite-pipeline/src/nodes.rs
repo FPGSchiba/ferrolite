@@ -44,6 +44,28 @@ pub fn upload_source(ctx: &GpuContext, img: &LinearRgbaF32) -> PipelineImage {
     }
 }
 
+/// One-shot camera/sRGB→working color pass: upload `src`, run a single
+/// `color_matrix.wgsl` pass, return the working-space texture. Cheaper than a
+/// full `EditPipeline` for the preview's initial color conversion (one upload,
+/// one pass). Uses the shared shader cache (built once) via `PointOpNode`.
+pub fn color_convert(
+    ctx: std::sync::Arc<GpuContext>,
+    src: &LinearRgbaF32,
+    matrix: [[f32; 3]; 3],
+) -> PipelineImage {
+    let source = upload_source(&ctx, src);
+    let params = std::rc::Rc::new(std::cell::Cell::new(crate::uniforms::color_matrix_uniform(
+        matrix,
+    )));
+    let node = PointOpNode::new(
+        ctx,
+        include_str!("shaders/color_matrix.wgsl"),
+        "preview-color-convert",
+        params,
+    );
+    node.evaluate(&[&source])
+}
+
 /// Graph root: returns the pre-uploaded source image (ignores inputs).
 pub(crate) struct SourceNode {
     image: PipelineImage,

@@ -12,7 +12,7 @@ mod uniforms;
 
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
-pub use nodes::upload_source;
+pub use nodes::{color_convert, upload_source};
 pub use op::{
     Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, HslBand, Op, OpKind, OpStack, Sharpen,
     ToneCurve, WhiteBalance, STACK_VERSION,

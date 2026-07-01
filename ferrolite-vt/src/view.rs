@@ -230,6 +230,44 @@ impl VirtualTexture {
         }
     }
 
+    /// Rung-1 VT wrapping an already-GPU-resident `Rgba16Float` texture
+    /// (`TEXTURE_BINDING`), e.g. a pipeline color-convert output. No upload.
+    pub fn single_from_texture(
+        ctx: &GpuContext,
+        texture: std::sync::Arc<wgpu::Texture>,
+        dims: (u32, u32),
+        pipelines: &DisplayPipelines,
+    ) -> Self {
+        let device = &ctx.device;
+        let bgl = pipelines.layout(DisplayVariant::Single).clone();
+        let pipeline = pipelines.pipeline(DisplayVariant::Single).clone();
+        let sampler = pipelines.sampler().clone();
+        let display_matrix = pipelines.display_matrix_buffer().clone();
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-xf"),
+            size: std::mem::size_of::<TransformUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            single: Some(SingleResources {
+                texture,
+                texture_view,
+                bind_group_layout: bgl,
+                sampler,
+                pipeline,
+                image_dims: dims,
+                uniform_buf,
+                display_matrix,
+                bind_group: None,
+            }),
+            tiled: None,
+            streaming: None,
+            sparse: None,
+        }
+    }
+
     /// Image dimensions of the rung-1 texture, if this is a single-texture VT.
     pub fn single_dims(&self) -> Option<(u32, u32)> {
         self.single.as_ref().map(|s| s.image_dims)
@@ -1591,5 +1629,32 @@ mod single_update_tests {
             Some((4, 4)),
             "dims reflect the swapped texture"
         );
+    }
+
+    #[test]
+    fn single_from_texture_reports_passed_dims() {
+        let Some(ctx) = GpuContext::headless() else {
+            return; // CI headless: skip (spec §10 GPU-test convention)
+        };
+        let pipelines = DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+
+        // A 6x3 Rgba16Float texture with TEXTURE_BINDING (mirrors a pipeline output).
+        let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-color-convert-out"),
+            size: wgpu::Extent3d {
+                width: 6,
+                height: 3,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let vt =
+            VirtualTexture::single_from_texture(&ctx, std::sync::Arc::new(tex), (6, 3), &pipelines);
+        assert_eq!(vt.single_dims(), Some((6, 3)));
     }
 }

@@ -29,11 +29,12 @@ pub enum AppEvent {
     /// The ingest walk + row upserts completed.
     IngestDone,
     /// A viewer tier-1 embedded preview finished decoding off-thread. Carries the
-    /// upright RGB8/RGBA8 buffer for upload as a rung-1 `VirtualTexture`. Handled
-    /// directly in `app.rs` (needs the GPU render state), not folded by `apply`.
+    /// display-linear RGBA f32 buffer (sRGB→linear conversion already done on the
+    /// job thread) for upload as a rung-1 `VirtualTexture`. Handled directly in
+    /// `app.rs` (needs the GPU render state), not folded by `apply`.
     PreviewReady {
         image_id: i64,
-        image: ferrolite_image::ImageBuffer,
+        linear: ferrolite_image::LinearRgbaF32,
     },
     /// A viewer tier-2 full RAW decode + quad-bin finished off-thread. Carries the
     /// display-linear RGBA f32 image for upload as a sparse `VirtualTexture`.

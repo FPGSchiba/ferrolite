@@ -87,6 +87,10 @@ pub struct AppState {
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
 
+    /// The single-file export dialog, `Some` while the format+options popup is
+    /// open (spec §8.3).
+    pub export_dialog: Option<crate::export::ExportDialogState>,
+
     /// Active filter state (search text, rating, flags, tags, etc.).
     pub filter: FilterState,
     /// Which set of images is shown (folder, all, collection, recently added).
@@ -175,6 +179,7 @@ impl AppState {
             expanded_folders: HashSet::new(),
             pending_remove: None,
             viewer: None,
+            export_dialog: None,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),
@@ -500,6 +505,7 @@ impl AppState {
             expanded_folders: HashSet::new(),
             pending_remove: None,
             viewer: None,
+            export_dialog: None,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),

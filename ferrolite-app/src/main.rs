@@ -3,6 +3,7 @@ mod canvas;
 mod chrome;
 mod develop;
 mod events;
+mod export;
 mod ingest;
 mod library;
 mod metadata;

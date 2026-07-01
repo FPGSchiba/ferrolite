@@ -1088,6 +1088,7 @@ dependencies = [
  "ferrolite-catalog",
  "ferrolite-color",
  "ferrolite-decode",
+ "ferrolite-export",
  "ferrolite-gpu",
  "ferrolite-image",
  "ferrolite-jobs",

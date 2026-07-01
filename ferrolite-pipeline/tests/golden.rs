@@ -283,7 +283,7 @@ fn sharpen_tiles_match_whole_image_at_seam() {
 
     // Per-tile producer over the GPU-resident source pyramid.
     let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
-    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack);
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY);
 
     // Produce both tiles, read interiors, and compare the valid region against
     // the whole-image reference — focusing on the seam column.

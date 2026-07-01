@@ -193,6 +193,7 @@ impl FerroliteApp {
                             ctx_arc,
                             pyramid,
                             v.op_stack.clone(),
+                            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                         );
                         v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                         // Mark the VT producer-driven + bump its version so the
@@ -295,8 +296,12 @@ impl FerroliteApp {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let tep =
-                        ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, shown.clone());
+                    let tep = ferrolite_pipeline::TileEditPipeline::new(
+                        ctx_arc,
+                        pyr,
+                        shown.clone(),
+                        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    );
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {

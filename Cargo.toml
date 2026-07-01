@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog", "ferrolite-jobs", "ferrolite-gpu", "ferrolite-vt", "ferrolite-pipeline", "ferrolite-color"]
+members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog", "ferrolite-jobs", "ferrolite-gpu", "ferrolite-vt", "ferrolite-pipeline", "ferrolite-color", "ferrolite-export"]
 
 [workspace.package]
 edition = "2021"
@@ -16,6 +16,8 @@ ferrolite-gpu = { path = "ferrolite-gpu" }
 ferrolite-vt = { path = "ferrolite-vt" }
 ferrolite-pipeline = { path = "ferrolite-pipeline" }
 ferrolite-color = { path = "ferrolite-color" }
+ferrolite-export = { path = "ferrolite-export" }
+little_exif = "0.6"
 moxcms = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -66,6 +66,23 @@ pub enum AppEvent {
     /// (256 × {R,G,B,luma}). Handled in `app.rs` (stores into the viewer); the
     /// `apply` fold ignores it.
     HistogramReady { image_id: i64, bins: Vec<u32> },
+    /// Tile progress for the running single-file export.
+    ExportProgress {
+        image_id: i64,
+        done: u32,
+        total: u32,
+    },
+    /// The single-file export finished (ok=false → failed/cancelled). `message`
+    /// is the status-bar text (success path, warnings, or the error).
+    ExportFinished {
+        // Reserved for a future per-image status indicator; currently only
+        // `ok`/`message` drive the (global) status bar, so this is discarded
+        // (`image_id: _`) at the one call site — same pattern as `OpsLoaded`.
+        #[allow(dead_code)]
+        image_id: i64,
+        ok: bool,
+        message: String,
+    },
 }
 
 impl AppState {
@@ -138,6 +155,11 @@ impl AppState {
                 None
             }
             AppEvent::HistogramReady { .. } => None,
+            // Handled in `app.rs` (needs GPU-independent status-bar update, but
+            // routed there alongside the other viewer-scoped events); nothing to
+            // fold here.
+            AppEvent::ExportProgress { .. } => None,
+            AppEvent::ExportFinished { .. } => None,
         }
     }
 }

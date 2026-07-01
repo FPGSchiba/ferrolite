@@ -46,3 +46,23 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         let _ = ctx.shader_module(label, src);
     }
 }
+
+/// Output image dimensions after the stack's geometry (crop/rotate) is applied to
+/// a `src_w × src_h` source. For an identity/absent geometry op this is the source
+/// size. The tiled full-res export renders `ceil(out_w/TILE_SIZE) × ceil(out_h/
+/// TILE_SIZE)` tiles in this output space.
+pub fn edited_output_dims(stack: &OpStack, src_w: u32, src_h: u32) -> (u32, u32) {
+    let (_, out_w, out_h) = crate::uniforms::geometry_uniform(stack.geometry(), src_w, src_h);
+    (out_w, out_h)
+}
+
+#[cfg(test)]
+mod lib_tests {
+    use crate::{edited_output_dims, OpStack};
+
+    #[test]
+    fn edited_output_dims_identity_equals_source() {
+        let stack = OpStack::default();
+        assert_eq!(edited_output_dims(&stack, 6000, 4000), (6000, 4000));
+    }
+}

@@ -141,10 +141,8 @@ pub struct ViewerState {
     /// distinct from `before_after` (the `\` momentary full-before swap).
     pub split_compare: bool,
     /// Divider position as a fraction of the canvas width, in [MIN_POS, MAX_POS].
-    #[allow(dead_code)] // read by the split-compare render/drag path in Task 6
     pub split_pos: f32,
     /// One-shot guard so the "split suppressed at 1:1" note logs once, not per frame.
-    #[allow(dead_code)] // read by the split-compare render path in Task 6
     pub split_full_logged: bool,
     /// When `true`, the crop overlay is active.
     pub crop_active: bool,

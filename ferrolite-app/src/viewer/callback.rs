@@ -27,7 +27,6 @@ pub struct ViewerPipelines {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PreviewWhich {
     After,
-    #[allow(dead_code)] // constructed by the split-compare render path in Task 6
     Before,
 }
 

@@ -2,8 +2,6 @@
 //! in `[MIN_POS, MAX_POS]`, screen-x mapping, pointer→position, and hit-testing.
 //! No egui types — egui only routes pointer events into these functions.
 
-#![allow(dead_code)]
-
 /// Keep the divider clear of the extreme edges so a sliver of each side stays
 /// visible and the handle is always grabbable.
 pub const MIN_POS: f32 = 0.03;

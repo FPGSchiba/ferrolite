@@ -245,7 +245,6 @@ impl FerroliteApp {
     /// retained `preview_source` via one `color_convert` pass (no upload of a new
     /// image beyond that). Rebuilt only when missing (invalidated on WS change /
     /// image open), so edits do not recompute it — the before never changes.
-    #[allow(dead_code)] // wired to the split-compare render path in Task 6
     fn ensure_before_view(&mut self, frame: &eframe::Frame) {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
@@ -727,7 +726,22 @@ impl FerroliteApp {
         let crossfading = v.crossfading;
         // While the crop tool is active, the crop overlay is the sole input
         // target: gate the canvas pan/zoom interaction off so it doesn't compete.
-        let interactive = !v.crop_active;
+        // While the before/after SPLIT is shown on the preview tier, the divider
+        // strip (drawn below) owns pointer input instead, so gate pan/zoom off
+        // then too (at 1:1 the split is suppressed and pan/zoom resumes).
+        let interactive = !v.crop_active && (show_full || !v.split_compare);
+
+        let canvas_rect = ui.available_rect_before_wrap();
+        let split_active = v.split_compare && !show_full;
+        let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
+        if v.split_compare && show_full && !v.split_full_logged {
+            eprintln!("before/after split suppressed at 1:1 zoom; showing after-view");
+            v.split_full_logged = true;
+        }
+        if !show_full {
+            v.split_full_logged = false;
+        }
+
         // `paint` applies this frame's pan/zoom and clears `idle` when the view
         // moved, so read `idle` AFTER it to catch an interaction this frame.
         let loading_preview = viewer::paint(ui, v, show_full, interactive);
@@ -743,6 +757,88 @@ impl FerroliteApp {
         let tiles_loading = matches!(tiles_pending, Some(n) if n > 0);
         if !idle && (loading_preview || crossfading || tiles_loading) {
             ui.ctx().request_repaint();
+        }
+
+        // The `v` borrow has ended; the split render/drag needs `&mut self`
+        // (`ensure_before_view` + writing `split_pos` on drag).
+        if split_active {
+            self.ensure_before_view(frame);
+            let div_x = crate::develop::split::divider_x(
+                canvas_rect.left(),
+                canvas_rect.width(),
+                split_pos,
+            );
+            // Paint the "before" clipped to the left of the divider, on top of
+            // the already-painted "after". Same `canvas_rect` for both callbacks
+            // keeps the image geometry identical; only the clip rect (scissor)
+            // differs, so left = before, right = after.
+            let left_clip =
+                egui::Rect::from_min_max(canvas_rect.min, egui::pos2(div_x, canvas_rect.max.y));
+            ui.painter()
+                .with_clip_rect(left_clip)
+                .add(egui_wgpu::Callback::new_paint_callback(
+                    canvas_rect,
+                    viewer::ViewerCallback {
+                        image_id,
+                        view,
+                        viewport,
+                        show_full: false,
+                        which: viewer::PreviewWhich::Before,
+                    },
+                ));
+            // Divider line + a grab handle at mid-height.
+            let painter = ui.painter();
+            painter.vline(
+                div_x,
+                canvas_rect.y_range(),
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+            let handle_center = egui::pos2(div_x, canvas_rect.center().y);
+            painter.circle(
+                handle_center,
+                7.0,
+                egui::Color32::from_black_alpha(120),
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+            // Drag: a thin full-height strip around the divider owns the pointer.
+            let hit = crate::develop::split::HANDLE_TOL;
+            let strip = egui::Rect::from_min_max(
+                egui::pos2(div_x - hit, canvas_rect.top()),
+                egui::pos2(div_x + hit, canvas_rect.bottom()),
+            );
+            let resp = ui.interact(
+                strip,
+                ui.id().with(("split-divider", image_id)),
+                egui::Sense::click_and_drag(),
+            );
+            // Precise hover check against the divider itself (not just the strip
+            // rect) via the pure hit-test, so the cursor only swaps within the
+            // documented `HANDLE_TOL` of the actual divider line.
+            let hovering_divider = resp.hover_pos().is_some_and(|pos| {
+                crate::develop::split::hit_divider(
+                    canvas_rect.left(),
+                    canvas_rect.width(),
+                    split_pos,
+                    pos.x,
+                    hit,
+                )
+            });
+            if hovering_divider || resp.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if resp.dragged() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let new_pos = crate::develop::split::pos_from_pointer(
+                        canvas_rect.left(),
+                        canvas_rect.width(),
+                        pos.x,
+                    );
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.split_pos = new_pos;
+                    }
+                    ui.ctx().request_repaint();
+                }
+            }
         }
     }
 

@@ -79,6 +79,7 @@ const VALUE_IDLE: Color32 = Color32::from_rgb(0xbd, 0xbd, 0xbd);
 const LABEL_W: f32 = 74.0;
 const VALUE_W: f32 = 48.0;
 const ROW_H: f32 = 22.0;
+const RESET_W: f32 = 16.0;
 
 impl<'a> Widget for EguiSlider<'a> {
     fn ui(self, ui: &mut Ui) -> Response {
@@ -87,11 +88,18 @@ impl<'a> Widget for EguiSlider<'a> {
             ui.allocate_exact_size(vec2(full, ROW_H), Sense::click_and_drag());
 
         let track_left = rect.left() + LABEL_W + 8.0;
-        let track_right = rect.right() - VALUE_W - 8.0;
+        let track_right = rect.right() - VALUE_W - 8.0 - RESET_W;
         let track_w = (track_right - track_left).max(1.0);
         let mid_y = rect.center().y;
-        let value_rect =
-            egui::Rect::from_min_max(pos2(track_right + 8.0, rect.top()), rect.right_bottom());
+        let reset_rect = egui::Rect::from_min_max(
+            pos2(rect.right() - RESET_W, rect.top()),
+            rect.right_bottom(),
+        );
+        let reset_c = reset_rect.center();
+        let value_rect = egui::Rect::from_min_max(
+            pos2(track_right + 8.0, rect.top()),
+            pos2(rect.right() - RESET_W - 4.0, rect.bottom()),
+        );
 
         let edit_id = response.id.with("slider_entry");
         let mut editing = ui.data_mut(|d| d.get_temp::<String>(edit_id));
@@ -126,6 +134,14 @@ impl<'a> Widget for EguiSlider<'a> {
                 }
             }
         }
+
+        let reset_resp = ui.interact(reset_rect, response.id.with("reset"), Sense::click());
+        let modified = (value - self.default).abs() > f32::EPSILON;
+        if reset_resp.clicked() && modified {
+            value = self.default;
+            response.mark_changed();
+        }
+
         *self.value = value;
 
         // `active` reflects this frame's interaction state; read after writeback is intentional (writeback doesn't affect `response`).
@@ -170,6 +186,17 @@ impl<'a> Widget for EguiSlider<'a> {
                 handle_color,
                 Stroke::new(1.0, HANDLE_BORDER),
             );
+            // reset icon: small circular-arrow, dim when already at default
+            let reset_color = if modified {
+                if reset_resp.hovered() {
+                    theme::ACCENT_BRIGHT
+                } else {
+                    HANDLE_IDLE
+                }
+            } else {
+                theme::BORDER_STRONG
+            };
+            draw_reset_arrow(painter, reset_c, 4.5, reset_color);
         }
 
         // Value region: inline text entry while editing, plain text otherwise.
@@ -203,7 +230,7 @@ impl<'a> Widget for EguiSlider<'a> {
         } else {
             let value_color = if active { theme::ACCENT } else { VALUE_IDLE };
             ui.painter().text(
-                pos2(rect.right() - 4.0, mid_y),
+                pos2(rect.right() - RESET_W - 4.0, mid_y),
                 egui::Align2::RIGHT_CENTER,
                 math::format(value, self.decimals, self.unit, self.signed),
                 egui::FontId::monospace(11.0),
@@ -212,6 +239,48 @@ impl<'a> Widget for EguiSlider<'a> {
         }
 
         response
+    }
+}
+
+/// Draw a small circular-arrow "reset" glyph centered at `center` with radius
+/// `r`: a ~280° stroked arc plus a tiny two-segment arrowhead at its open end.
+/// Pure `egui::Painter` geometry (no font glyph), matching the `icons` module's
+/// convention of sampling points along curves into a `Shape::line`.
+fn draw_reset_arrow(painter: &egui::Painter, center: egui::Pos2, r: f32, color: Color32) {
+    use std::f32::consts::PI;
+
+    // Arc spans 280°, leaving a gap at the top-right for the arrowhead.
+    let start_angle = -PI / 2.0 - 0.35; // just past top, going clockwise
+    let sweep = 2.0 * PI * (280.0 / 360.0);
+    let steps = 16;
+    let arc_points: Vec<egui::Pos2> = (0..=steps)
+        .map(|i| {
+            let t = start_angle + sweep * (i as f32 / steps as f32);
+            center + vec2(r * t.cos(), r * t.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        arc_points.clone(),
+        Stroke::new(1.2, color),
+    ));
+
+    // Arrowhead at the arc's end, pointing in the direction of travel.
+    if let Some(&tip) = arc_points.last() {
+        let end_angle = start_angle + sweep;
+        let tangent = vec2(-end_angle.sin(), end_angle.cos()); // direction of travel
+        let normal = vec2(tangent.y, -tangent.x);
+        let head_len = r * 0.9;
+        let back = tip - tangent * head_len;
+        let p1 = back + normal * head_len * 0.6;
+        let p2 = back - normal * head_len * 0.6;
+        painter.add(egui::Shape::line_segment(
+            [tip, p1],
+            Stroke::new(1.2, color),
+        ));
+        painter.add(egui::Shape::line_segment(
+            [tip, p2],
+            Stroke::new(1.2, color),
+        ));
     }
 }
 

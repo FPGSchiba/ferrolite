@@ -15,7 +15,6 @@ mod resize;
 
 pub use error::ExportError;
 pub use options::{BitDepth, ExportFormat, ExportOptions, ResizeSpec};
-pub use render::{PixelData, RenderedImage};
+pub use render::{render_tiled, PixelData, RenderedImage};
 
-// (job module wiring — render_tiled/run_export/ExportRequest/ExportOutcome —
-// added in Tasks 6/9)
+// (job module wiring — run_export/ExportRequest/ExportOutcome — added in Task 9)

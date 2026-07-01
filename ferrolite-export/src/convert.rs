@@ -5,7 +5,6 @@
 use ferrolite_color::{mul_vec3, output_oetf, Mat3, WorkingSpace};
 
 /// Apply the working→output 3×3, clamp to `[0,1]`, then the output OETF.
-#[allow(dead_code)]
 pub(crate) fn convert_pixel(rgb_lin: [f32; 3], m: &Mat3, out: WorkingSpace) -> [f32; 3] {
     let lin = mul_vec3(m, &rgb_lin);
     [
@@ -16,14 +15,12 @@ pub(crate) fn convert_pixel(rgb_lin: [f32; 3], m: &Mat3, out: WorkingSpace) -> [
 }
 
 /// Quantize an encoded (0..1) RGB triple to 8-bit, rounding + clamping.
-#[allow(dead_code)]
 pub(crate) fn to_u8(encoded: [f32; 3]) -> [u8; 3] {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
     [q(encoded[0]), q(encoded[1]), q(encoded[2])]
 }
 
 /// Quantize an encoded (0..1) RGB triple to 16-bit, rounding + clamping.
-#[allow(dead_code)]
 pub(crate) fn to_u16(encoded: [f32; 3]) -> [u16; 3] {
     let q = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
     [q(encoded[0]), q(encoded[1]), q(encoded[2])]

@@ -21,6 +21,16 @@ pub struct ViewerPipelines {
     pub histogram: ferrolite_vt::HistogramPipeline,
 }
 
+/// Which of the two rung-1 previews a callback draws: the edited `After`
+/// (the normal preview) or the unedited `Before` (identity stack). Used by the
+/// before/after split — two callbacks with the same rect but different clip rects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PreviewWhich {
+    After,
+    #[allow(dead_code)] // constructed by the split-compare render path in Task 6
+    Before,
+}
+
 /// Holder stashed in `callback_resources`: the viewer's GPU context plus the
 /// rung-1 preview texture and (once tier-2 finishes) the sparse full-res VT.
 pub struct ViewerGpu {
@@ -29,6 +39,9 @@ pub struct ViewerGpu {
     pub preview: VirtualTexture,
     /// Rung-4 sparse full-res VT (tier-2). `None` until `FullDecoded` arrives.
     pub full: Option<VirtualTexture>,
+    /// Rung-1 "before" (unedited, `sRGB→working`) preview for the split view.
+    /// Built on demand while split-compare is active; `None` otherwise.
+    pub preview_before: Option<VirtualTexture>,
     /// Image id whose textures these are — guards against painting a holder that
     /// belongs to a viewer that has since been closed/replaced.
     pub image_id: i64,
@@ -44,6 +57,7 @@ pub struct ViewerCallback {
     pub view: ViewTransform,
     pub viewport: (f32, f32),
     pub show_full: bool,
+    pub which: PreviewWhich,
 }
 
 impl CallbackTrait for ViewerCallback {
@@ -57,14 +71,24 @@ impl CallbackTrait for ViewerCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(g) = resources.get_mut::<ViewerGpu>() {
             if g.image_id == self.image_id {
-                if self.show_full {
-                    if let Some(full) = g.full.as_mut() {
-                        full.prepare_sparse(&g.ctx, &self.view, self.viewport);
-                    } else {
-                        g.preview.prepare_single(&g.ctx, &self.view, self.viewport);
+                match self.which {
+                    PreviewWhich::After => {
+                        if self.show_full {
+                            if let Some(full) = g.full.as_mut() {
+                                full.prepare_sparse(&g.ctx, &self.view, self.viewport);
+                            } else {
+                                g.preview.prepare_single(&g.ctx, &self.view, self.viewport);
+                            }
+                        } else {
+                            g.preview.prepare_single(&g.ctx, &self.view, self.viewport);
+                        }
                     }
-                } else {
-                    g.preview.prepare_single(&g.ctx, &self.view, self.viewport);
+                    PreviewWhich::Before => {
+                        // Split is preview-tier only: the before is always rung-1.
+                        if let Some(pb) = g.preview_before.as_mut() {
+                            pb.prepare_single(&g.ctx, &self.view, self.viewport);
+                        }
+                    }
                 }
             }
         }
@@ -79,14 +103,23 @@ impl CallbackTrait for ViewerCallback {
     ) {
         if let Some(g) = resources.get::<ViewerGpu>() {
             if g.image_id == self.image_id {
-                if self.show_full {
-                    if let Some(full) = g.full.as_ref() {
-                        full.draw_sparse(pass);
-                    } else {
-                        g.preview.draw_single(pass);
+                match self.which {
+                    PreviewWhich::After => {
+                        if self.show_full {
+                            if let Some(full) = g.full.as_ref() {
+                                full.draw_sparse(pass);
+                            } else {
+                                g.preview.draw_single(pass);
+                            }
+                        } else {
+                            g.preview.draw_single(pass);
+                        }
                     }
-                } else {
-                    g.preview.draw_single(pass);
+                    PreviewWhich::Before => {
+                        if let Some(pb) = g.preview_before.as_ref() {
+                            pb.draw_single(pass);
+                        }
+                    }
                 }
             }
         }

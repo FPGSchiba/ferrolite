@@ -132,6 +132,7 @@ impl FerroliteApp {
                 ctx: gpu,
                 preview: vt,
                 full: None,
+                preview_before: None,
                 image_id,
             });
         self.mark_histogram_dirty();
@@ -237,6 +238,59 @@ impl FerroliteApp {
     /// are sRGB-primaries, so they convert via the sRGB fallback profile.
     fn preview_to_working(&self) -> [[f32; 3]; 3] {
         self.source_to_working(&ferrolite_decode::ColorProfile::srgb_fallback())
+    }
+
+    /// Ensure `ViewerGpu.preview_before` holds the unedited (identity stack,
+    /// `sRGB→working`) rung-1 preview while split-compare is active. Built from the
+    /// retained `preview_source` via one `color_convert` pass (no upload of a new
+    /// image beyond that). Rebuilt only when missing (invalidated on WS change /
+    /// image open), so edits do not recompute it — the before never changes.
+    #[allow(dead_code)] // wired to the split-compare render path in Task 6
+    fn ensure_before_view(&mut self, frame: &eframe::Frame) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let (active, image_id, src) = match self.state.viewer.as_ref() {
+            Some(v) => (v.split_compare, v.image_id, v.preview_source.clone()),
+            None => return,
+        };
+        if !active {
+            return;
+        }
+        let Some(src) = src else {
+            return;
+        };
+        // Already built for this image? Nothing to do.
+        {
+            let renderer = rs.renderer.read();
+            if let Some(g) = renderer.callback_resources.get::<viewer::ViewerGpu>() {
+                if g.image_id == image_id && g.preview_before.is_some() {
+                    return;
+                }
+            }
+        }
+        let pw = self.preview_to_working();
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+        let vt = {
+            let renderer = rs.renderer.read();
+            let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
+                return;
+            };
+            ferrolite_vt::VirtualTexture::single_from_texture(
+                &gpu,
+                converted.texture.clone(),
+                (converted.width, converted.height),
+                &vp.pipelines,
+            )
+        };
+        let mut renderer = rs.renderer.write();
+        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+            if g.image_id == image_id {
+                g.preview_before = Some(vt);
+            }
+        }
     }
 
     /// Handle a tier-2 full decode: build a `PyramidTileSource` from the
@@ -562,6 +616,7 @@ impl FerroliteApp {
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == image_id {
+                    g.preview_before = None; // rebuilt by ensure_before_view with new WS
                     if let Some(full) = g.full.as_mut() {
                         full.set_opstack_version(&g.ctx, version);
                     }

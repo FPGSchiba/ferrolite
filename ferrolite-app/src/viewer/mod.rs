@@ -6,7 +6,7 @@ pub mod edit_producer;
 pub mod load;
 pub mod nav;
 
-pub use callback::{ViewerCallback, ViewerGpu, ViewerPipelines};
+pub use callback::{PreviewWhich, ViewerCallback, ViewerGpu, ViewerPipelines};
 pub use edit_producer::EditTileProducer;
 
 use std::path::PathBuf;
@@ -137,6 +137,15 @@ pub struct ViewerState {
     pub history: crate::develop::history::History,
     /// When `true`, the viewer renders the before/after split view.
     pub before_after: bool,
+    /// When `true`, the viewer renders the before/after SPLIT (draggable divider);
+    /// distinct from `before_after` (the `\` momentary full-before swap).
+    pub split_compare: bool,
+    /// Divider position as a fraction of the canvas width, in [MIN_POS, MAX_POS].
+    #[allow(dead_code)] // read by the split-compare render/drag path in Task 6
+    pub split_pos: f32,
+    /// One-shot guard so the "split suppressed at 1:1" note logs once, not per frame.
+    #[allow(dead_code)] // read by the split-compare render path in Task 6
+    pub split_full_logged: bool,
     /// When `true`, the crop overlay is active.
     pub crop_active: bool,
     /// Index of the currently-selected HSL band in the HSL panel (0–7).
@@ -183,6 +192,9 @@ impl ViewerState {
             opstack_version: 0,
             history: crate::develop::history::History::new(OpStack::default(), 100),
             before_after: false,
+            split_compare: false,
+            split_pos: 0.5,
+            split_full_logged: false,
             crop_active: false,
             hsl_band: 0,
             ops_loaded: false,
@@ -360,6 +372,7 @@ pub fn paint(
                 view: state.view,
                 viewport,
                 show_full,
+                which: crate::viewer::PreviewWhich::After,
             },
         ));
         false

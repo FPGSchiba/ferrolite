@@ -979,11 +979,7 @@ impl eframe::App for FerroliteApp {
                         .map(|v| v.crop_active)
                         .unwrap_or(false);
                     if crop_active != self.crop_active_prev {
-                        let stack = self
-                            .state
-                            .viewer
-                            .as_ref()
-                            .map(|v| v.op_stack.clone());
+                        let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
                         if let Some(stack) = stack {
                             self.set_preview_and_full(frame, stack);
                         }

@@ -232,9 +232,6 @@ mod tests {
             warning: None,
         });
 
-        assert_eq!(
-            s.ops_save_inflight, 0,
-            "saturating_sub must not underflow"
-        );
+        assert_eq!(s.ops_save_inflight, 0, "saturating_sub must not underflow");
     }
 }

@@ -226,7 +226,12 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 /// pan/zoom/double-click interaction is SKIPPED entirely — the drag interaction
 /// is not even registered — so the crop overlay is the sole input target over
 /// this area. The image still renders (viewport recorded + paint callback added).
-pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool, interactive: bool) -> bool {
+pub fn paint(
+    ui: &mut egui::Ui,
+    state: &mut ViewerState,
+    show_full: bool,
+    interactive: bool,
+) -> bool {
     let rect = ui.available_rect_before_wrap();
     // Scope the painter so it drops before any `ui.put` / mutable-borrow calls
     // further down (the `!state.loaded` spinner branch needs `ui` mutably).

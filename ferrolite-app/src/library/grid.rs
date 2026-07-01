@@ -3,59 +3,189 @@
 //! window's pending thumbnail jobs to `Visible` priority.
 
 use crate::library::cell_state::{cell_state, CellState};
-use crate::library::grid_layout::{metrics, visible_items};
+use crate::library::grid_layout::{layout, CachedGridLayout, LayoutSig};
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
+use ferrolite_catalog::ImageRecord;
 use ferrolite_image::Flag;
 use ferrolite_jobs::Priority;
 use std::collections::HashSet;
 
 const GAP: f32 = 8.0;
 const SEL_ROUND: f32 = 6.0;
+/// Height of the meta-label band (filename + capture date) under each cell.
+const LABEL_H: f32 = 30.0;
+/// Gap between the thumbnail and its label band.
+const LABEL_PAD: f32 = 3.0;
+/// Outer padding around the grid (left, right, top, bottom) so cells don't hug
+/// the panel edges.
+const MARGIN: f32 = 14.0;
+/// Upper bound on how wide a filename label may push a cell, so one very long
+/// name can't blow out a whole row.
+const MAX_LABEL_W: f32 = 240.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
-    let avail_w = ui.available_width();
-    let m = metrics(avail_w, cell, GAP);
-    let item_count = state.images.len();
-    let total_rows = item_count.div_ceil(m.columns.max(1));
-    let total_height = total_rows as f32 * m.row_height;
+    let avail_w = (ui.available_width() - 2.0 * MARGIN).max(1.0);
+    let target_h = cell;
+
+    // Rebuild the justified-rows layout only when the image set, width, or cell
+    // size changed. Taken out of `state` for the render pass so `paint_cell` can
+    // borrow `state` mutably without aliasing; restored at the end.
+    let sig = LayoutSig {
+        images_rev: state.images_rev,
+        item_count: state.images.len(),
+        avail_w: avail_w.round() as u32,
+        target_h: target_h.round() as u32,
+    };
+    let mut cache = state.grid_layout.take();
+    if cache.as_ref().map(|c| c.sig) != Some(sig) {
+        let aspects: Vec<f32> = state.images.iter().map(cell_aspect).collect();
+        // Per-cell minimum width = its label width, so portrait filenames aren't
+        // clipped (the cell widens to the text and the image is centered in it).
+        let min_widths: Vec<f32> = state.images.iter().map(|r| label_width(ui, r)).collect();
+        cache = Some(CachedGridLayout {
+            sig,
+            layout: layout(&aspects, &min_widths, avail_w, target_h, GAP, LABEL_H),
+        });
+    }
+    let cache = cache.expect("layout built above");
 
     let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
     let mut opened: Option<i64> = None;
-    let out = scroll.show_viewport(ui, |ui, viewport| {
-        ui.set_height(total_height);
-        let scroll_top = viewport.min.y.max(0.0);
-        let vh = viewport.height();
-        let range = visible_items(scroll_top, vh, &m, item_count);
+    scroll.show_viewport(ui, |ui, viewport| {
+        ui.set_height(cache.layout.total_height + 2.0 * MARGIN);
+        // Content is offset down/right by MARGIN, so map the viewport into the
+        // layout's own (0-based) coordinate space before picking visible rows.
+        let scroll_top = (viewport.min.y - MARGIN).max(0.0);
+        let vh = viewport.height() + MARGIN;
+        let rows = cache.layout.visible_rows(scroll_top, vh);
 
         // Promote visible pending thumbnail jobs; demote ones that scrolled away.
         // Compute visible set immutably first (borrow checker: reprioritize borrows
         // state immutably; the mut paint loop comes after).
         let mut now_visible: HashSet<i64> = HashSet::new();
-        for idx in range.clone() {
-            now_visible.insert(state.images[idx].id);
+        for ri in rows.clone() {
+            for item in &cache.layout.rows[ri].items {
+                now_visible.insert(state.images[item.index].id);
+            }
         }
         reprioritize(state, &now_visible);
         // Fetch tag associations for the visible window (only missing ids queried).
         state.ensure_tags_for(&now_visible);
         state.last_visible = now_visible;
 
-        for idx in range {
-            let rec = state.images[idx].clone();
-            let row = idx / m.columns;
-            let col = idx % m.columns;
-            // col stride equals row_height because cells are square (cell+GAP == row_height).
-            let x = ui.min_rect().left() + col as f32 * m.row_height;
-            let y = ui.min_rect().top() + row as f32 * m.row_height;
-            let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell, cell));
-            if let Some(id) = paint_cell(ui, state, &rec, rect) {
-                opened = Some(id);
+        let origin = ui.min_rect().left_top() + egui::vec2(MARGIN, MARGIN);
+        for ri in rows {
+            let row = &cache.layout.rows[ri];
+            for item in &row.items {
+                let rec = state.images[item.index].clone();
+                let cell_x = origin.x + item.x;
+                let cell_y = origin.y + row.y;
+                // Image centered within its (possibly wider) cell footprint.
+                let img_x = cell_x + (item.width - item.img_width) * 0.5;
+                let img_rect = egui::Rect::from_min_size(
+                    egui::pos2(img_x, cell_y),
+                    egui::vec2(item.img_width, row.img_height),
+                );
+                if let Some(id) = paint_cell(ui, state, &rec, img_rect) {
+                    opened = Some(id);
+                }
+                let label_rect = egui::Rect::from_min_size(
+                    egui::pos2(cell_x, img_rect.bottom() + LABEL_PAD),
+                    egui::vec2(item.width, LABEL_H - LABEL_PAD),
+                );
+                paint_meta(ui, &rec, label_rect);
             }
         }
     });
-    let _ = out;
+    state.grid_layout = Some(cache);
     opened
+}
+
+/// Measured pixel width of a cell's meta label (the wider of filename/date), so
+/// the layout can widen narrow cells enough to show the name. Capped so one long
+/// name can't dominate a row. egui caches galleys, so repeated calls are cheap.
+fn label_width(ui: &egui::Ui, rec: &ImageRecord) -> f32 {
+    let name = ui.fonts(|f| {
+        f.layout_no_wrap(
+            rec.filename.clone(),
+            egui::FontId::proportional(11.0),
+            theme::TEXT_PRIMARY,
+        )
+        .size()
+        .x
+    });
+    let date = format_capture_date(rec.capture_time.as_deref()).map_or(0.0, |d| {
+        ui.fonts(|f| {
+            f.layout_no_wrap(d, egui::FontId::proportional(10.0), theme::TEXT_DIM)
+                .size()
+                .x
+        })
+    });
+    (name.max(date) + 6.0).min(MAX_LABEL_W)
+}
+
+/// Upright aspect ratio (width / height) of an image, applying its orientation
+/// so portrait/landscape cells match what the thumbnail actually shows. Falls
+/// back to square (1.0) when dimensions are unknown.
+pub(crate) fn cell_aspect(rec: &ImageRecord) -> f32 {
+    let w = rec.width.unwrap_or(0).max(1) as f32;
+    let h = rec.height.unwrap_or(0).max(1) as f32;
+    let (w, h) = if rec.orientation.swaps_dimensions() {
+        (h, w)
+    } else {
+        (w, h)
+    };
+    (w / h).clamp(0.1, 10.0)
+}
+
+/// Draw the per-cell meta label centered under the (centered) thumbnail:
+/// filename on top, capture date below. The cell footprint is at least the label
+/// width (see `label_width`), so the centered text is never clipped.
+/// Non-interactive — the thumbnail above is the click target.
+fn paint_meta(ui: &egui::Ui, rec: &ImageRecord, rect: egui::Rect) {
+    let p = ui.painter_at(rect);
+    let cx = rect.center().x;
+    p.text(
+        egui::pos2(cx, rect.top()),
+        egui::Align2::CENTER_TOP,
+        &rec.filename,
+        egui::FontId::proportional(11.0),
+        theme::TEXT_PRIMARY,
+    );
+    if let Some(date) = format_capture_date(rec.capture_time.as_deref()) {
+        p.text(
+            egui::pos2(cx, rect.top() + 14.0),
+            egui::Align2::CENTER_TOP,
+            date,
+            egui::FontId::proportional(10.0),
+            theme::TEXT_DIM,
+        );
+    }
+}
+
+/// Format an EXIF `DateTimeOriginal` ("YYYY:MM:DD HH:MM:SS") as "YYYY-MM-DD
+/// HH:MM" for display. Returns `None` for missing/empty values; passes through
+/// unexpected formats (first 16 chars) rather than failing.
+fn format_capture_date(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let out: String = s
+        .chars()
+        .take(16)
+        .enumerate()
+        .map(|(i, c)| {
+            if (i == 4 || i == 7) && c == ':' {
+                '-'
+            } else {
+                c
+            }
+        })
+        .collect();
+    Some(out)
 }
 
 fn reprioritize(state: &AppState, now_visible: &HashSet<i64>) {
@@ -86,14 +216,14 @@ fn paint_cell(
     // Determine selection state early so we can adjust the thumbnail rect.
     let selected = state.selection.contains(&rec.id) || state.selected == Some(rec.id);
 
-    // Pull a ready thumbnail from the pool on demand if not yet cached.
+    // Request a thumbnail off-thread if not yet cached (visible cell only). The
+    // DB read + JPEG decode happen in a `Visible`-priority job; the decoded
+    // pixels arrive over the event channel and are uploaded there. NO UI-thread
+    // decode here.
     if !state.textures.contains(rec.id)
         && rec.decode_status != ferrolite_catalog::DecodeStatus::Failed
     {
-        if let Ok(Some(thumb)) = state.reads.get_thumbnail(rec.id) {
-            let jpeg = thumb.bytes;
-            state.upload_thumbnail(ui.ctx(), rec.id, jpeg);
-        }
+        state.request_thumbnail(ui.ctx(), rec.id);
     }
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
@@ -280,5 +410,28 @@ mod tests {
     fn range_indices_same_point() {
         let r: Vec<usize> = range_indices(3, 3).collect();
         assert_eq!(r, vec![3]);
+    }
+
+    #[test]
+    fn format_capture_date_converts_exif_to_display() {
+        assert_eq!(
+            format_capture_date(Some("2023:05:14 18:32:07")).as_deref(),
+            Some("2023-05-14 18:32")
+        );
+    }
+
+    #[test]
+    fn format_capture_date_handles_missing_and_empty() {
+        assert_eq!(format_capture_date(None), None);
+        assert_eq!(format_capture_date(Some("   ")), None);
+    }
+
+    #[test]
+    fn format_capture_date_passes_through_unexpected() {
+        // Not the EXIF shape → first 16 chars, no colon swaps at non-date spots.
+        assert_eq!(
+            format_capture_date(Some("sometime")).as_deref(),
+            Some("sometime")
+        );
     }
 }

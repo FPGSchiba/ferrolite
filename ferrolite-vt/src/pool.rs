@@ -80,6 +80,41 @@ impl TilePool {
         &self.texture
     }
 
+    /// GPU→GPU copy: copy a `TILE_SIZE`² `Rgba16Float` texture (the producer's
+    /// rendered tile, `COPY_SRC`) into physical `slot` (array layer). No CPU
+    /// readback. The source must be exactly `TILE_SIZE`² and `Rgba16Float`.
+    pub fn copy_into(&self, ctx: &GpuContext, slot: u32, src: &wgpu::Texture) {
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("vt-pool-copy-into"),
+            });
+        enc.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: src,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: slot,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: TILE_SIZE,
+                height: TILE_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        ctx.queue.submit([enc.finish()]);
+    }
+
     /// Upload one tile's pixels into physical `slot` (array layer).
     pub fn upload(&self, ctx: &GpuContext, slot: u32, tile: &LinearRgbaF32) {
         let texels: Vec<f16> = tile.pixels.iter().map(|&v| f16::from_f32(v)).collect();

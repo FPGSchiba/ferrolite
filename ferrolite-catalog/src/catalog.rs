@@ -98,6 +98,37 @@ impl Catalog {
         Ok(id)
     }
 
+    /// Insert a stat-only `Pending` row for the instant index pass, leaving any
+    /// existing row (already indexed/done) untouched. Cheap: no file read.
+    pub fn insert_pending(&self, img: &NewImage) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "INSERT INTO images
+               (folder_id, filename, mtime, size, camera_make, camera_model,
+                width, height, orientation, capture_time, iso, decode_status, kind,
+                rating, added_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+             ON CONFLICT(folder_id, filename) DO NOTHING",
+            rusqlite::params![
+                img.folder_id,
+                img.filename,
+                img.mtime,
+                img.size,
+                img.make,
+                img.model,
+                img.width,
+                img.height,
+                img.orientation.to_exif(),
+                img.capture_time,
+                img.iso,
+                img.decode_status.as_i64(),
+                img.kind.as_i64(),
+                img.rating.as_i64(),
+                img.added_at,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn image_by_name(
         &self,
         folder_id: i64,
@@ -242,6 +273,15 @@ impl Catalog {
         self.conn().execute(
             "UPDATE images SET flag=?1 WHERE id=?2",
             rusqlite::params![flag.as_i64(), image_id],
+        )?;
+        Ok(())
+    }
+
+    /// Update the cached `has_edits` flag for an image row.
+    pub fn set_has_edits(&self, image_id: i64, has_edits: bool) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "UPDATE images SET has_edits=?1 WHERE id=?2",
+            rusqlite::params![has_edits as i64, image_id],
         )?;
         Ok(())
     }
@@ -514,6 +554,45 @@ mod tag_tests {
         assert_eq!(cat.list_tags().unwrap().len(), 1);
         // cascade removed associations to `red`
         assert!(!cat.tags_for_images(&[b]).unwrap().contains_key(&b));
+    }
+}
+
+#[cfg(test)]
+mod has_edits_tests {
+    use super::*;
+
+    #[test]
+    fn set_has_edits_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("frl-hasedits-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Catalog::open(&dir.join("c.db")).unwrap();
+        let folder = db.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let id = db
+            .upsert_image(&crate::NewImage::failed(
+                folder,
+                "a.nef".into(),
+                1,
+                1,
+                ferrolite_image::FileKind::Raw,
+                0,
+            ))
+            .unwrap();
+        db.set_has_edits(id, true).unwrap();
+        let rec = db
+            .list_images(folder)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        assert!(rec.has_edits, "has_edits read back true");
+        db.set_has_edits(id, false).unwrap();
+        let rec = db
+            .list_images(folder)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == id)
+            .unwrap();
+        assert!(!rec.has_edits, "has_edits read back false");
     }
 }
 

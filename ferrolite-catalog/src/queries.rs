@@ -13,6 +13,7 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
     let kind: i64 = row.get(9)?;
     let rating: i64 = row.get(10)?;
     let flag: i64 = row.get(11)?;
+    let has_edits: i64 = row.get(12)?;
     Ok(ImageRecord {
         id: row.get(0)?,
         folder_id: row.get(1)?,
@@ -26,11 +27,12 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
         kind: FileKind::from_i64(kind),
         rating: Rating::from_i64(rating),
         flag: Flag::from_i64(flag),
+        has_edits: has_edits != 0,
     })
 }
 
 pub(crate) const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
-                          capture_time, iso, decode_status, kind, rating, flag";
+                          capture_time, iso, decode_status, kind, rating, flag, has_edits";
 
 pub(crate) fn list_images(
     conn: &Connection,
@@ -86,15 +88,18 @@ pub(crate) fn needs_reingest(
     mtime: i64,
     size: i64,
 ) -> Result<bool, CatalogError> {
-    let existing: Option<(i64, i64)> = conn
+    let existing: Option<(i64, i64, i64)> = conn
         .query_row(
-            "SELECT mtime, size FROM images WHERE folder_id = ?1 AND filename = ?2",
+            "SELECT mtime, size, decode_status FROM images \
+             WHERE folder_id = ?1 AND filename = ?2",
             rusqlite::params![folder_id, filename],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     Ok(match existing {
-        Some((m, s)) => m != mtime || s != size,
+        // Reingest when the file changed OR the row is still a stat-only
+        // placeholder from the instant index pass (metadata not yet read).
+        Some((m, s, status)) => m != mtime || s != size || status == DecodeStatus::Pending.as_i64(),
         None => true,
     })
 }

@@ -32,3 +32,14 @@ is green, **STOP and wait for the author (Jann) to visually test the running app
 explicit feedback** before merging, pushing/PR-ing, or otherwise finishing the branch.
 Do not present finish options as the final step — present them, then hold for the
 author's hands-on test results, and address any issues found before completing.
+
+## Per-component reset (design, load-bearing)
+
+Every adjustable component in the editing UI MUST expose its own individual
+reset-to-default affordance — each slider, the tone curve, the crop/geometry,
+HSL, and any future editable control — not only a section-level or global
+"Reset all". A user must be able to revert any single control on its own
+without touching its neighbors and without hunting for the original value.
+Reuse the shared reset affordance (`ferrolite-app/src/widgets` `draw_reset_arrow`
++ the `EguiSlider` reset column) so it stays visually consistent. A new editable
+control is not complete until it has a per-control reset.

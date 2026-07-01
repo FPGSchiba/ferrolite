@@ -6,10 +6,19 @@ use crate::state::AppState;
 
 #[derive(Debug)]
 pub enum AppEvent {
+    /// `added` stat-only placeholder rows were inserted by the instant index pass
+    /// (grid shows the filenames immediately; metadata/thumbnails stream in after).
+    Scanned { added: usize },
     /// `added` rows were indexed (status-bar "N indexed").
     Indexed { added: usize },
-    /// A thumbnail finished: JPEG bytes for immediate texture upload.
-    ThumbReady { image_id: i64, jpeg: Vec<u8> },
+    /// A thumbnail finished: decoded RGBA8 pixels (tightly packed, len = w*h*4)
+    /// ready for direct texture upload (NO UI-thread JPEG decode).
+    ThumbReady {
+        image_id: i64,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+    },
     /// A thumbnail (or its decode) failed; the cell shows a broken placeholder.
     ThumbFailed { image_id: i64 },
     /// A thumbnail job was submitted; record its JobId for reprioritization.
@@ -40,26 +49,49 @@ pub enum AppEvent {
     /// Result of an off-thread metadata persist. `ok==false` → reload truth;
     /// `warning` → surface in the status bar.
     MetadataResult { ok: bool, warning: Option<String> },
+    /// An off-thread frl:ops sidecar read finished. Carries the hydrated stack
+    /// (default = unedited). Handled in `app.rs` (needs GPU state), not folded.
+    #[allow(dead_code)] // constructed in ops_persist; handled in app.rs (Task 9)
+    OpsLoaded {
+        image_id: i64,
+        stack: ferrolite_pipeline::OpStack,
+    },
+    /// Result of an off-thread frl:ops persist (sidecar + catalog `has_edits`).
+    /// Distinct from `MetadataResult` (rating/flag/tag path) so the save-state
+    /// indicator can track ops-persist inflight count and failure separately.
+    OpsSaved { ok: bool, warning: Option<String> },
 }
 
 impl AppState {
-    /// Fold a non-texture event into counters. Returns the JPEG bytes for a
-    /// `ThumbReady` so the caller (which holds egui `Context`) can upload a
-    /// texture — keeping this function egui-free.
-    pub fn apply(&mut self, event: AppEvent) -> Option<(i64, Vec<u8>)> {
+    /// Fold a non-texture event into counters. Returns the decoded RGBA8 pixels
+    /// (+ dimensions) for a `ThumbReady` so the caller (which holds egui
+    /// `Context`) can upload a texture — keeping this function egui-free. No
+    /// decode happens here; the pixels arrive already decoded from a job thread.
+    pub fn apply(&mut self, event: AppEvent) -> Option<(i64, Vec<u8>, u32, u32)> {
         match event {
+            AppEvent::Scanned { added } => {
+                self.scanned += added as u64;
+                None
+            }
             AppEvent::Indexed { added } => {
                 self.indexed += added as u64;
                 None
             }
-            AppEvent::ThumbReady { image_id, jpeg } => {
+            AppEvent::ThumbReady {
+                image_id,
+                rgba,
+                w,
+                h,
+            } => {
                 self.thumb_done += 1;
                 self.thumb_jobs.remove(&image_id);
-                Some((image_id, jpeg))
+                self.thumb_pending.remove(&image_id);
+                Some((image_id, rgba, w, h))
             }
             AppEvent::ThumbFailed { image_id } => {
                 self.thumb_done += 1;
                 self.thumb_jobs.remove(&image_id);
+                self.thumb_pending.remove(&image_id);
                 None
             }
             AppEvent::ThumbRegistered { image_id, job_id } => {
@@ -87,6 +119,18 @@ impl AppState {
                 }
                 None
             }
+            // Handled in `app.rs` (needs GPU state); nothing to fold here.
+            AppEvent::OpsLoaded { .. } => None,
+            AppEvent::OpsSaved { ok, warning } => {
+                self.ops_save_inflight = self.ops_save_inflight.saturating_sub(1);
+                self.ops_save_failed = !ok;
+                match warning {
+                    Some(w) => self.warning = Some(w),
+                    None if ok => self.warning = None,
+                    None => {}
+                }
+                None
+            }
         }
     }
 }
@@ -104,23 +148,36 @@ mod tests {
     }
 
     #[test]
-    fn thumb_ready_returns_bytes_and_advances_done() {
+    fn thumb_ready_returns_pixels_and_advances_done() {
         let mut s = AppState::for_test();
         s.thumb_total = 2;
+        s.thumb_pending.insert(7);
+        // 1x1 RGBA pixel (4 bytes).
         let out = s.apply(AppEvent::ThumbReady {
             image_id: 7,
-            jpeg: vec![1, 2, 3],
+            rgba: vec![10, 20, 30, 255],
+            w: 1,
+            h: 1,
         });
-        assert_eq!(out, Some((7, vec![1, 2, 3])));
+        assert_eq!(out, Some((7, vec![10, 20, 30, 255], 1, 1)));
         assert_eq!(s.thumb_done, 1);
+        assert!(
+            !s.thumb_pending.contains(&7),
+            "ThumbReady must clear the pending marker"
+        );
     }
 
     #[test]
     fn thumb_failed_advances_done_without_bytes() {
         let mut s = AppState::for_test();
+        s.thumb_pending.insert(9);
         let out = s.apply(AppEvent::ThumbFailed { image_id: 9 });
         assert_eq!(out, None);
         assert_eq!(s.thumb_done, 1);
+        assert!(
+            !s.thumb_pending.contains(&9),
+            "ThumbFailed must clear the pending marker"
+        );
     }
 
     #[test]
@@ -180,5 +237,35 @@ mod tests {
             Some("sidecar write failed".into()),
             "warning must be set when provided"
         );
+    }
+
+    #[test]
+    fn ops_saved_ok_decrements_inflight_and_clears_failed() {
+        let mut s = AppState::for_test();
+        s.ops_save_inflight = 1;
+        s.ops_save_failed = true;
+        s.warning = Some("prior".into());
+
+        s.apply(AppEvent::OpsSaved {
+            ok: true,
+            warning: None,
+        });
+
+        assert_eq!(s.ops_save_inflight, 0, "inflight decremented to 0");
+        assert!(!s.ops_save_failed, "failed cleared on ok=true");
+        assert_eq!(s.warning, None, "warning cleared on clean ok=true");
+    }
+
+    #[test]
+    fn ops_saved_ok_saturates_at_zero_when_already_zero() {
+        let mut s = AppState::for_test();
+        s.ops_save_inflight = 0;
+
+        s.apply(AppEvent::OpsSaved {
+            ok: true,
+            warning: None,
+        });
+
+        assert_eq!(s.ops_save_inflight, 0, "saturating_sub must not underflow");
     }
 }

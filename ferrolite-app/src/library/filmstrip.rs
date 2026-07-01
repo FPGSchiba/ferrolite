@@ -7,26 +7,33 @@
 use crate::state::AppState;
 use crate::theme;
 
-/// Thumbnail cell size (3:2) and gap, in points.
-const THUMB_W: f32 = 96.0;
-const THUMB_H: f32 = 64.0;
-const GAP: f32 = 6.0;
+/// Thumbnail row height and inter-cell gap, in points. Each cell's width is
+/// derived from the image's own upright aspect ratio (see `cell_aspect`) so
+/// portrait images aren't letterboxed into a fixed landscape box.
+const THUMB_H: f32 = 72.0;
+const GAP: f32 = 10.0;
+/// Clamp on cell width (as a multiple of `THUMB_H`) so extreme panoramas or
+/// super-tall portraits can't break the strip's layout.
+const MIN_ASPECT: f32 = 0.4;
+const MAX_ASPECT: f32 = 2.5;
 
 /// Render the strip; return the image id clicked this frame, if any.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) -> Option<i64> {
     let mut clicked: Option<i64> = None;
-    // Snapshot the ids/decode-status/rating/flag up front so we don't hold an
-    // immutable borrow of `state.images` while mutably borrowing `state` for
-    // thumbnails.
-    let cells: Vec<(i64, bool, u8, ferrolite_image::Flag)> = state
+    // Snapshot the ids/decode-status/aspect/rating/flag up front so we don't
+    // hold an immutable borrow of `state.images` while mutably borrowing
+    // `state` for thumbnails.
+    let cells: Vec<(i64, bool, f32, u8, ferrolite_image::Flag, bool)> = state
         .images
         .iter()
         .map(|r| {
             (
                 r.id,
                 r.decode_status != ferrolite_catalog::DecodeStatus::Failed,
+                crate::library::grid::cell_aspect(r),
                 r.rating.get(),
                 r.flag,
+                r.has_edits,
             )
         })
         .collect();
@@ -36,21 +43,24 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
-                for (id, decodable, rating, flag) in cells {
+                for (id, decodable, aspect, rating, flag, has_edits) in cells {
                     // Always reserve the cell's space so the scroll extent and
                     // `scroll_to_rect` stay correct, but only do the expensive
                     // thumbnail work (DB read + JPEG decode + GPU upload + paint)
                     // for cells actually on screen. Without this, opening the
                     // viewer would synchronously decode EVERY image's thumbnail on
                     // the first Develop frame, blocking the UI thread for seconds.
+                    let cell_w = (aspect * THUMB_H)
+                        .round()
+                        .clamp(MIN_ASPECT * THUMB_H, MAX_ASPECT * THUMB_H);
                     let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::click());
+                        ui.allocate_exact_size(egui::vec2(cell_w, THUMB_H), egui::Sense::click());
                     if ui.is_rect_visible(rect) {
                         // Lazy-load the thumbnail (same path as the grid), visible-only.
+                        // The DB read + JPEG decode run off-thread; decoded pixels
+                        // arrive over the event channel. NO UI-thread decode here.
                         if !state.textures.contains(id) && decodable {
-                            if let Ok(Some(thumb)) = state.reads.get_thumbnail(id) {
-                                state.upload_thumbnail(ui.ctx(), id, thumb.bytes);
-                            }
+                            state.request_thumbnail(ui.ctx(), id);
                         }
                         if let Some(tex) = state.textures.get(id) {
                             egui::Image::new(tex)
@@ -92,6 +102,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                                 c,
                                 true,
                             );
+                        }
+                        // "Edited" pip (top-right) when the image carries edits.
+                        if has_edits {
+                            let c = rect.right_top() + egui::vec2(-7.0, 7.0);
+                            ui.painter()
+                                .circle_filled(c, 3.0, crate::theme::ACCENT_BRIGHT);
                         }
                     }
                     // Keep the current image centered in the strip. egui clamps

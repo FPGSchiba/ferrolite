@@ -37,6 +37,7 @@ mod tests {
             kind: FileKind::Raw,
             rating: Rating::default(),
             flag: Flag::None,
+            has_edits: false,
         }
     }
 

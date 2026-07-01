@@ -66,10 +66,17 @@ pub fn spawn_preview(
     })
 }
 
-/// Submit an `Interactive` tier-2 full-decode job: full RAW decode →
+/// Submit a `Visible`-priority tier-2 full-decode job: full RAW decode →
 /// `QuadBin.to_linear_rgba_f32` (display-linear half-res), then send
 /// `AppEvent::FullDecoded { image_id, image }`. On decode error sends
 /// `AppEvent::FullFailed { image_id }` and logs.
+///
+/// Priority is `Visible`, not `Interactive`: the full decode is not
+/// latency-critical (the tier-1 preview is already on screen), and running it
+/// at top priority on the single strict-priority worker pool starved thumbnail
+/// jobs (also `Visible`) — see CLAUDE.md responsiveness rules. The caller in
+/// `app.rs` additionally debounces submission so fast navigation doesn't pile
+/// up full-RAW decodes for images the user has already navigated past.
 ///
 /// RAW-only: `decode_full` decodes via rawler, which has no full path for
 /// Standard/JPEG images. For a Standard image the tier-1 preview already IS the
@@ -84,7 +91,7 @@ pub fn spawn_full(
 ) -> JobHandle {
     let tx = tx.clone();
     let ctx = ctx.clone();
-    jobs.submit(Priority::Interactive, move |cancel| {
+    jobs.submit(Priority::Visible, move |cancel| {
         if cancel.is_cancelled() {
             return;
         }

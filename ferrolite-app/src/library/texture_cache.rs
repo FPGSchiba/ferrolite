@@ -30,11 +30,24 @@ impl Lru {
             None
         }
     }
+    fn clear(&mut self) {
+        self.order.clear();
+    }
 }
 
 pub struct TextureCache {
     lru: Lru,
     textures: HashMap<i64, egui::TextureHandle>,
+    /// Handles retired this frame (evicted, replaced, or cleared) but not yet
+    /// dropped. Dropping a `TextureHandle` queues its texture in egui's
+    /// `TexturesDelta.free`, which egui_wgpu destroys BETWEEN encoding the
+    /// render pass and `queue.submit`. If the same texture is still referenced
+    /// by a mesh painted THIS frame, dropping it this frame destroys it before
+    /// the submit that uses it → wgpu validation panic. Holding retired
+    /// handles here and dropping them at the top of the NEXT frame (see
+    /// `begin_frame`) guarantees a texture is never destroyed in a frame that
+    /// still paints it.
+    retiring: Vec<egui::TextureHandle>,
 }
 
 impl TextureCache {
@@ -42,6 +55,7 @@ impl TextureCache {
         Self {
             lru: Lru::new(capacity),
             textures: HashMap::new(),
+            retiring: Vec::new(),
         }
     }
     pub fn contains(&self, id: i64) -> bool {
@@ -57,9 +71,33 @@ impl TextureCache {
     }
     pub fn insert(&mut self, id: i64, tex: egui::TextureHandle) {
         if let Some(evict) = self.lru.insert(id) {
-            self.textures.remove(&evict);
+            if let Some(old) = self.textures.remove(&evict) {
+                self.retiring.push(old);
+            }
         }
-        self.textures.insert(id, tex);
+        if let Some(old) = self.textures.insert(id, tex) {
+            self.retiring.push(old); // replacing same id: retire old handle, don't drop mid-frame
+        }
+    }
+    /// Retire all cached textures (and LRU order) instead of dropping them now.
+    /// Used when returning from the GPU-heavy Develop viewer, whose full-res
+    /// `VirtualTexture` work can leave the shared wgpu textures stale —
+    /// forcing the grid to re-upload fresh. The retired handles are dropped
+    /// on the following frame's `begin_frame` call, same as evicted/replaced
+    /// handles, so they are never freed in a frame that still paints them.
+    pub fn clear(&mut self) {
+        self.retiring.extend(self.textures.drain().map(|(_, h)| h));
+        self.lru.clear();
+    }
+    /// Drop the handles retired during the PREVIOUS frame. MUST be called once
+    /// at the very top of each frame, before anything paints. Deferring frees
+    /// by one frame guarantees a texture painted this frame is never destroyed
+    /// before this frame's `queue.submit` (egui_wgpu destroys `delta.free`
+    /// textures between the render-pass encode and submit). The retired ids
+    /// were already removed from the map when retired, so they are not
+    /// painted in the frame they are finally freed.
+    pub fn begin_frame(&mut self) {
+        self.retiring.clear();
     }
     /// Number of cached textures. Not called in the current UI but kept as a
     /// public API for future diagnostics / Plan 4 memory-pressure logic.

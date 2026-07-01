@@ -5,7 +5,8 @@
 use crate::events::AppEvent;
 use crate::state::AppState;
 use ferrolite_catalog::{
-    collect_dirs, scan_tree, Catalog, DecodeStatus, FileKind, NewImage, ReadPool, Thumbnail,
+    collect_dirs, scan_tree, Catalog, DecodeStatus, DecodedThumb, FileKind, NewImage, ReadPool,
+    Thumbnail,
 };
 use ferrolite_jobs::{CancelToken, JobHandle, JobSystem, Priority};
 use rayon::prelude::*;
@@ -213,22 +214,129 @@ fn ingest_job(
     }
     let root_folder_id = dir_ids.get(&folder).copied();
 
-    // Parallel metadata decode. Incremental skips unchanged files; Full forces all.
-    let rows: Vec<(NewImage, PathBuf, FileKind)> = files
-        .par_iter()
-        .filter(|_| !cancel.is_cancelled())
-        .filter_map(|f| {
-            let folder_id = *f.path.parent().and_then(|p| dir_ids.get(p))?;
+    // Phase A — instant index. Insert a stat-only `Pending` row for every scanned
+    // file not already in the catalog (no file reads: filename/mtime/size/kind
+    // come straight from the scan). The grid shows every filename within a moment
+    // instead of being gated by the ~metadata rate; dimensions and thumbnails
+    // stream in during Phase B below. `insert_pending` leaves already-indexed rows
+    // untouched, so re-opening a folder stays instant.
+    {
+        let added_at = now_epoch_secs();
+        let mut inserted = 0usize;
+        for f in &files {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Some(folder_id) = f.path.parent().and_then(|p| dir_ids.get(p)).copied() else {
+                continue;
+            };
+            let pending = NewImage::pending(
+                folder_id,
+                f.filename.clone(),
+                f.mtime,
+                f.size,
+                f.kind,
+                added_at,
+            );
+            if writer
+                .lock()
+                .expect("writer")
+                .insert_pending(&pending)
+                .is_ok()
+            {
+                inserted += 1;
+                // Refresh the grid periodically so rows appear as they're inserted.
+                if inserted.is_multiple_of(256) {
+                    let _ = tx.send(AppEvent::Scanned { added: 256 });
+                    ctx.request_repaint();
+                }
+            }
+        }
+        let _ = tx.send(AppEvent::Scanned {
+            added: inserted % 256,
+        });
+        ctx.request_repaint();
+    }
+
+    // Streaming ingest. The expensive part — RAW metadata decode at ~tens of ms
+    // per file — runs in parallel and feeds finished rows over a channel. A
+    // single consumer performs the serial row upserts under the writer lock and
+    // emits an `Indexed` event per row, so the grid fills in progressively (the
+    // app re-queries on each event) instead of staying empty behind a
+    // whole-folder `.collect()` barrier. For a 3k-file folder that barrier was
+    // tens of seconds of an empty grid; now the first tiles appear immediately.
+    let (row_tx, row_rx) = std::sync::mpsc::channel::<(NewImage, PathBuf, FileKind)>();
+    let mut kept_image_ids: HashSet<i64> = HashSet::new();
+
+    std::thread::scope(|scope| {
+        // Consumer: serial DB writes + thumbnail enqueues. Clones the shareable
+        // handles so the originals remain usable for the prune/IngestDone below.
+        let consumer = {
+            let writer = Arc::clone(&writer);
+            let jobs = Arc::clone(&jobs);
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            scope.spawn(move || {
+                // For Full, collect every present file's id so prune can delete the rest.
+                let mut kept: HashSet<i64> = HashSet::new();
+                for (new_image, path, kind) in row_rx {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let t_up = crate::thumb_profile::enabled().then(std::time::Instant::now);
+                    let id = match writer.lock().expect("writer").upsert_image(&new_image) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            eprintln!("ferrolite: upsert_image failed: {e}");
+                            continue;
+                        }
+                    };
+                    if let Some(t) = t_up {
+                        crate::thumb_profile::record_upsert(t.elapsed().as_micros() as u64);
+                    }
+                    if force {
+                        kept.insert(id);
+                    }
+                    let _ = tx.send(AppEvent::Indexed { added: 1 });
+                    if new_image.decode_status != DecodeStatus::Failed {
+                        let job_id = spawn_thumbnail(&jobs, &writer, &tx, &ctx, id, path, kind);
+                        let _ = tx.send(AppEvent::ThumbRegistered {
+                            image_id: id,
+                            job_id,
+                        });
+                    }
+                    ctx.request_repaint();
+                }
+                kept
+            })
+        };
+
+        // Producer: parallel metadata decode. Incremental skips unchanged files;
+        // Full forces all. Each finished row is streamed to the consumer; when
+        // the parallel pass ends, every cloned sender drops and the channel
+        // closes, draining the consumer to completion.
+        files.par_iter().for_each_with(row_tx, |sender, f| {
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Some(folder_id) = f.path.parent().and_then(|p| dir_ids.get(p)).copied() else {
+                return;
+            };
             if !force {
                 match reads.needs_reingest(folder_id, &f.filename, f.mtime, f.size) {
                     Ok(true) => {}
-                    _ => return None,
+                    _ => return,
                 }
             }
             let added_at = now_epoch_secs();
             let rating = ferrolite_catalog::read_rating(&ferrolite_catalog::sidecar_path(&f.path))
                 .unwrap_or_default();
-            let new_image = match ferrolite_decode::read_metadata(&f.path, f.kind) {
+            let t_meta = crate::thumb_profile::enabled().then(std::time::Instant::now);
+            let meta = ferrolite_decode::read_metadata(&f.path, f.kind);
+            if let Some(t) = t_meta {
+                crate::thumb_profile::record_meta(t.elapsed().as_micros() as u64);
+            }
+            let new_image = match meta {
                 Ok(meta) => NewImage::from_metadata(
                     folder_id,
                     f.filename.clone(),
@@ -248,37 +356,11 @@ fn ingest_job(
                     added_at,
                 ),
             };
-            Some((new_image, f.path.clone(), f.kind))
-        })
-        .collect();
+            let _ = sender.send((new_image, f.path.clone(), f.kind));
+        });
 
-    // Serial row upserts under the writer lock; enqueue a thumbnail job per row.
-    // For Full, collect every present file's id so prune can delete the rest.
-    let mut kept_image_ids: HashSet<i64> = HashSet::new();
-    for (new_image, path, kind) in rows {
-        if cancel.is_cancelled() {
-            break;
-        }
-        let id = match writer.lock().expect("writer").upsert_image(&new_image) {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("ferrolite: upsert_image failed: {e}");
-                continue;
-            }
-        };
-        if force {
-            kept_image_ids.insert(id);
-        }
-        let _ = tx.send(AppEvent::Indexed { added: 1 });
-        if new_image.decode_status != DecodeStatus::Failed {
-            let job_id = spawn_thumbnail(&jobs, &writer, &tx, &ctx, id, path, kind);
-            let _ = tx.send(AppEvent::ThumbRegistered {
-                image_id: id,
-                job_id,
-            });
-        }
-        ctx.request_repaint();
-    }
+        kept_image_ids = consumer.join().expect("ingest consumer thread panicked");
+    });
 
     // Full: prune catalog rows for files/folders no longer on disk. Skip if
     // cancelled (kept set would be incomplete).
@@ -300,14 +382,36 @@ fn ingest_job(
 }
 
 /// Headless thumbnail helper: decode preview → resize/encode → persist BLOB.
+/// Returns the persisted JPEG [`Thumbnail`] plus the already-resized RGBA8
+/// [`DecodedThumb`] so the caller can upload a texture without re-decoding.
 pub fn thumbnail_blocking(
     writer: &Arc<Mutex<Catalog>>,
     image_id: i64,
     path: &Path,
     kind: FileKind,
-) -> Result<Thumbnail, String> {
+) -> Result<(Thumbnail, DecodedThumb), String> {
+    // Opt-in profiling (FERROLITE_PROFILE_THUMBS): time the disk read separately
+    // from decode/encode. `measure_read` also warms the cache, so the decode
+    // timed next reflects CPU only. Off by default with zero overhead.
+    let profile = crate::thumb_profile::enabled();
+    let io_us = if profile {
+        crate::thumb_profile::measure_read(path)
+    } else {
+        0
+    };
+
+    let t_decode = profile.then(std::time::Instant::now);
     let preview = ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?;
-    let thumb = ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())?;
+    let decode_us = t_decode.map_or(0, |t| t.elapsed().as_micros() as u64);
+
+    let t_encode = profile.then(std::time::Instant::now);
+    let (thumb, decoded) =
+        ferrolite_catalog::generate_thumbnail(&preview).map_err(|e| e.to_string())?;
+    let encode_us = t_encode.map_or(0, |t| t.elapsed().as_micros() as u64);
+
+    // Time the writer-lock acquisition + SQLite commit together, so contention on
+    // the shared writer and the DB write cost show up separately in the profile.
+    let t_write = profile.then(std::time::Instant::now);
     {
         use ferrolite_catalog::ThumbnailStore;
         writer
@@ -316,7 +420,12 @@ pub fn thumbnail_blocking(
             .put_thumbnail(image_id, &thumb)
             .map_err(|e| e.to_string())?;
     }
-    Ok(thumb)
+    let write_us = t_write.map_or(0, |t| t.elapsed().as_micros() as u64);
+
+    if profile {
+        crate::thumb_profile::record(io_us, decode_us, encode_us, write_us);
+    }
+    Ok((thumb, decoded))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -337,10 +446,13 @@ pub fn spawn_thumbnail(
             return;
         }
         match thumbnail_blocking(&writer, image_id, &path, kind) {
-            Ok(thumb) => {
+            Ok((_thumb, decoded)) => {
+                // Deliver the already-decoded RGBA pixels — no re-encode/decode.
                 let _ = tx.send(AppEvent::ThumbReady {
                     image_id,
-                    jpeg: thumb.bytes,
+                    rgba: decoded.rgba,
+                    w: decoded.w,
+                    h: decoded.h,
                 });
             }
             Err(msg) => {

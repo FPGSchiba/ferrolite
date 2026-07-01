@@ -40,6 +40,8 @@ pub struct AppState {
     pub images: Vec<ImageRecord>,
     pub selected: Option<i64>,
 
+    /// Stat-only placeholder rows inserted by the instant index pass (Phase A).
+    pub scanned: u64,
     pub indexed: u64,
     pub thumb_total: usize,
     pub thumb_done: usize,
@@ -52,6 +54,14 @@ pub struct AppState {
     pub textures: crate::library::texture_cache::TextureCache,
     /// IDs visible in the grid on the last frame (for delta reprioritization).
     pub last_visible: HashSet<i64>,
+
+    /// Image ids with an in-flight off-thread thumbnail decode (lazy-load path).
+    /// Dedups repeated `request_thumbnail` calls while the job is running;
+    /// cleared on `ThumbReady`/`ThumbFailed`.
+    pub thumb_pending: HashSet<i64>,
+    /// Decoded thumbnails pulled from the event channel but not yet uploaded this
+    /// frame (per-frame upload cap overflow). Drained first each frame.
+    pub pending_uploads: Vec<(i64, Vec<u8>, u32, u32)>,
 
     /// Set to `true` whenever catalog-visible state changes (ingest events,
     /// folder switch). `app.rs` checks this flag before calling
@@ -98,6 +108,13 @@ pub struct AppState {
     /// Set on double-click or "Rename" context-menu; cleared on Enter/blur.
     pub renaming: Option<(RenameKind, i64, String)>,
 
+    /// Number of ops-persist jobs currently in flight (incremented before
+    /// `spawn_ops_write`, decremented on `OpsSaved`). Drives the save-state indicator.
+    pub ops_save_inflight: usize,
+    /// Set to `true` when the most recent ops-persist completed with `ok=false`.
+    /// Cleared on the next successful save. Drives the "Save failed" indicator.
+    pub ops_save_failed: bool,
+
     // ── Cached toolbar metadata-filter aggregates (populated by reload_vocab) ──
     /// Distinct camera-model strings from the catalog.
     pub camera_options: Vec<String>,
@@ -105,6 +122,13 @@ pub struct AppState {
     pub iso_range: Option<(u32, u32)>,
     /// (earliest, latest) capture-date strings from the catalog, or None.
     pub date_range: Option<(String, String)>,
+
+    /// Bumped every time `images` is reassigned, so the grid's justified-layout
+    /// cache knows when to rebuild (covers streaming ingest, filter, folder
+    /// switch, and in-place edits — all funnel through `refresh_images`).
+    pub images_rev: u64,
+    /// Cached justified-rows layout, rebuilt only when its inputs change.
+    pub grid_layout: Option<crate::library::grid_layout::CachedGridLayout>,
 }
 
 impl AppState {
@@ -129,6 +153,7 @@ impl AppState {
             current_folder: None,
             images: Vec::new(),
             selected: None,
+            scanned: 0,
             indexed: 0,
             thumb_total: 0,
             thumb_done: 0,
@@ -136,6 +161,8 @@ impl AppState {
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
+            thumb_pending: HashSet::new(),
+            pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,
             last_watch_check: None,
@@ -156,23 +183,80 @@ impl AppState {
             iso_range: None,
             date_range: None,
             renaming: None,
+            ops_save_inflight: 0,
+            ops_save_failed: false,
+            images_rev: 0,
+            grid_layout: None,
         })
     }
 
-    /// Decode a thumbnail JPEG and upload it as an egui texture into the cache.
-    pub fn upload_thumbnail(&mut self, ctx: &egui::Context, image_id: i64, jpeg: Vec<u8>) {
-        let Ok(img) = image::load_from_memory(&jpeg) else {
+    /// Upload already-decoded RGBA8 pixels as an egui texture into the cache.
+    /// NO JPEG decode happens here — the pixels arrive pre-decoded from a job
+    /// thread (both the generation and lazy-load paths decode off the UI thread).
+    pub fn upload_thumbnail(
+        &mut self,
+        ctx: &egui::Context,
+        image_id: i64,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+    ) {
+        // Guard against a malformed buffer so `from_rgba_unmultiplied` never
+        // panics on a length mismatch.
+        if rgba.len() != (w as usize) * (h as usize) * 4 {
             return;
-        };
-        let rgba = img.to_rgba8();
-        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
-        let color = egui::ColorImage::from_rgba_unmultiplied([w, h], rgba.as_raw());
+        }
+        let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
         let tex = ctx.load_texture(
             format!("thumb-{image_id}"),
             color,
             egui::TextureOptions::LINEAR,
         );
         self.textures.insert(image_id, tex);
+    }
+
+    /// Request a thumbnail for a visible cell WITHOUT blocking the UI thread.
+    /// Dedups against already-textured ids and in-flight requests. On a miss,
+    /// spawns a `Visible`-priority job that reads the DB blob and decodes the
+    /// JPEG → RGBA8 OFF the UI thread, then delivers `ThumbReady` (or
+    /// `ThumbFailed`) over the app event channel.
+    pub fn request_thumbnail(&mut self, ctx: &egui::Context, image_id: i64) {
+        if self.textures.contains(image_id) || self.thumb_pending.contains(&image_id) {
+            return;
+        }
+        self.thumb_pending.insert(image_id);
+        let reads = Arc::clone(&self.reads);
+        let tx = self.tx.clone();
+        let ctx = ctx.clone();
+        self.jobs
+            .submit(ferrolite_jobs::Priority::Visible, move |cancel| {
+                if cancel.is_cancelled() {
+                    let _ = tx.send(AppEvent::ThumbFailed { image_id });
+                    ctx.request_repaint();
+                    return;
+                }
+                match reads.get_thumbnail(image_id) {
+                    Ok(Some(thumb)) => match image::load_from_memory(&thumb.bytes) {
+                        Ok(img) => {
+                            let rgba = img.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let _ = tx.send(AppEvent::ThumbReady {
+                                image_id,
+                                rgba: rgba.into_raw(),
+                                w,
+                                h,
+                            });
+                        }
+                        Err(_) => {
+                            let _ = tx.send(AppEvent::ThumbFailed { image_id });
+                        }
+                    },
+                    _ => {
+                        let _ = tx.send(AppEvent::ThumbFailed { image_id });
+                    }
+                }
+                ctx.request_repaint();
+            });
     }
 
     /// Build a `LibraryQuery` from the current source + filter state.
@@ -279,7 +363,9 @@ impl AppState {
         if let Ok(rows) = self.reads.query_images(&q) {
             self.images = rows;
         }
-        // Invalidate the per-cell tag cache so the grid re-fetches for the new set.
+        // Bump the layout revision so the grid rebuilds its justified layout for
+        // the new set, and invalidate the per-cell tag cache so it re-fetches.
+        self.images_rev = self.images_rev.wrapping_add(1);
         self.visible_tags.clear();
     }
 
@@ -315,10 +401,14 @@ impl AppState {
     /// Reset per-folder job + counter state when switching folders.
     pub fn reset_for_new_folder(&mut self) {
         self.cancel_pending_jobs();
+        self.scanned = 0;
         self.indexed = 0;
         self.thumb_total = 0;
         self.thumb_done = 0;
         self.images.clear();
+        // Bump so the grid's layout cache rebuilds for the now-empty set instead
+        // of indexing the previous folder's rows (stale-index panic otherwise).
+        self.images_rev = self.images_rev.wrapping_add(1);
         self.selected = None;
         self.dirty = true;
     }
@@ -387,6 +477,7 @@ impl AppState {
             current_folder: None,
             images: Vec::new(),
             selected: None,
+            scanned: 0,
             indexed: 0,
             thumb_total: 0,
             thumb_done: 0,
@@ -394,6 +485,8 @@ impl AppState {
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             last_visible: HashSet::new(),
+            thumb_pending: HashSet::new(),
+            pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,
             last_watch_check: None,
@@ -414,6 +507,10 @@ impl AppState {
             iso_range: None,
             date_range: None,
             renaming: None,
+            ops_save_inflight: 0,
+            ops_save_failed: false,
+            images_rev: 0,
+            grid_layout: None,
         }
     }
 
@@ -479,6 +576,7 @@ mod tests {
         s.thumb_jobs.insert(2, ferrolite_jobs::JobId(101));
         s.selected = Some(1);
         s.dirty = false; // simulate an idle frame that already cleared the flag
+        let rev_before = s.images_rev;
 
         s.reset_for_new_folder();
 
@@ -489,6 +587,10 @@ mod tests {
         assert!(s.images.is_empty(), "images must be cleared");
         assert_eq!(s.selected, None, "selected must be cleared");
         assert!(s.dirty, "dirty flag must be set after reset");
+        assert_ne!(
+            s.images_rev, rev_before,
+            "images_rev must bump so the grid layout cache rebuilds for the empty set"
+        );
     }
 
     /// `select_folder` must delegate to `reset_for_new_folder` and then set the
@@ -736,6 +838,7 @@ mod tests {
             kind: FileKind::Raw,
             rating: Rating::default(),
             flag: Flag::None,
+            has_edits: false,
         };
 
         s.images = vec![mk_rec(1), mk_rec(2)];
@@ -872,6 +975,7 @@ mod tests {
             kind: FileKind::Raw,
             rating: Rating::default(),
             flag: Flag::None,
+            has_edits: false,
         };
         s.images = vec![mk(1), mk(2)];
         // Selection is image 2, but we edit image 1 explicitly.

@@ -18,6 +18,16 @@ pub struct Thumbnail {
     pub bytes: Vec<u8>,
 }
 
+/// The resized thumbnail as tightly-packed RGBA8 pixels (len = w*h*4), produced
+/// alongside the JPEG-encoded [`Thumbnail`] so the caller can upload a texture
+/// WITHOUT re-decoding the JPEG it just encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedThumb {
+    pub rgba: Vec<u8>,
+    pub w: u32,
+    pub h: u32,
+}
+
 /// Storage for thumbnail blobs. A trait so a memory-mapped mipmap cache can
 /// replace the SQLite-BLOB impl later with zero call-site change (design §4).
 pub trait ThumbnailStore {
@@ -26,8 +36,12 @@ pub trait ThumbnailStore {
 }
 
 /// Resize an RGB8 preview to fit within `THUMB_MAX_EDGE` (aspect preserved,
-/// never upscaled) and encode it as JPEG q85.
-pub fn generate_thumbnail(preview: &ImageBuffer) -> Result<Thumbnail, CatalogError> {
+/// never upscaled) and encode it as JPEG q85. Also returns the resized pixels
+/// as RGBA8 ([`DecodedThumb`]) so callers can upload a texture directly without
+/// re-decoding the JPEG.
+pub fn generate_thumbnail(
+    preview: &ImageBuffer,
+) -> Result<(Thumbnail, DecodedThumb), CatalogError> {
     // JPEG has no alpha; drop it if the source is RGBA.
     let (rgb, src_w, src_h) = to_rgb8(preview);
 
@@ -45,17 +59,33 @@ pub fn generate_thumbnail(preview: &ImageBuffer) -> Result<Thumbnail, CatalogErr
         .resize(&src_img, &mut dst_img, &opts)
         .map_err(|e| CatalogError::Encode(e.to_string()))?;
 
+    let dst_rgb = dst_img.buffer();
     let mut bytes = Vec::new();
     JpegEncoder::new_with_quality(&mut bytes, THUMB_QUALITY)
-        .encode(dst_img.buffer(), dst_w, dst_h, ExtendedColorType::Rgb8)
+        .encode(dst_rgb, dst_w, dst_h, ExtendedColorType::Rgb8)
         .map_err(|e| CatalogError::Encode(e.to_string()))?;
 
-    Ok(Thumbnail {
-        width: dst_w,
-        height: dst_h,
-        format: "jpeg".to_string(),
-        bytes,
-    })
+    // Widen the already-resized RGB8 buffer to RGBA8 (opaque alpha) so the UI
+    // can upload it as a texture with no JPEG round-trip.
+    let mut rgba = Vec::with_capacity((dst_w as usize) * (dst_h as usize) * 4);
+    for px in dst_rgb.chunks_exact(3) {
+        rgba.extend_from_slice(px);
+        rgba.push(255);
+    }
+
+    Ok((
+        Thumbnail {
+            width: dst_w,
+            height: dst_h,
+            format: "jpeg".to_string(),
+            bytes,
+        },
+        DecodedThumb {
+            rgba,
+            w: dst_w,
+            h: dst_h,
+        },
+    ))
 }
 
 /// Return tightly-packed RGB8 bytes plus dimensions, dropping alpha if present.

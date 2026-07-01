@@ -2,15 +2,18 @@
 //! preview decode → upload → paint wiring (egui↔wgpu callback).
 
 pub mod callback;
+pub mod edit_producer;
 pub mod load;
 pub mod nav;
 
 pub use callback::{ViewerCallback, ViewerGpu, ViewerPipelines};
+pub use edit_producer::EditTileProducer;
 
 use std::path::PathBuf;
 
 use ferrolite_image::FileKind;
 use ferrolite_jobs::JobHandle;
+use ferrolite_pipeline::{EditPipeline, GpuPyramidSource, OpStack};
 use ferrolite_vt::ViewTransform;
 
 /// Preview→full crossfade duration (seconds). Short enough to read as instant,
@@ -21,11 +24,20 @@ pub struct ViewerState {
     pub image_id: i64,
     pub path: PathBuf,
     pub kind: FileKind,
+    pub op_stack: OpStack,
+    /// Plan 3: the full-res edit producer (built on full-decode when the stack is
+    /// non-identity). `!Send`/`!Sync`, so it lives here, never in callback_resources.
+    pub edit_producer: Option<edit_producer::EditTileProducer>,
     pub view: ViewTransform,
     /// Last painted canvas size (image-space fit + zoom/pan math need it).
     pub viewport: (f32, f32),
     /// True once an `Interactive` preview decode has been submitted (one-shot).
     pub preview_requested: bool,
+    /// Seconds elapsed since this viewer was opened. Used to debounce the
+    /// tier-2 full-RAW decode submission (`FULL_DECODE_DEBOUNCE` in `app.rs`)
+    /// so fast arrow-navigation doesn't queue a full decode per image —
+    /// only the image the user settles on submits one.
+    pub open_elapsed: f32,
     /// True once the rung-1 `VirtualTexture` is uploaded and the view fitted; the
     /// VT itself lives in eframe's `callback_resources` (paint reads it there).
     pub loaded: bool,
@@ -52,6 +64,33 @@ pub struct ViewerState {
     /// superseded image's decode does not race the newly-opened one.
     pub preview_handle: Option<JobHandle>,
     pub full_handle: Option<JobHandle>,
+
+    // ── Edit state (Task 8 / Plan 4) — read by Tasks 9+ ────────────────────
+    /// The full-res linear source retained for re-evaluation when the op stack
+    /// changes (built from the tier-2 full decode).
+    pub preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+    /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
+    /// `edit_producer`). Rebuilt when geometry / halo radius changes.
+    pub preview_edit: Option<EditPipeline>,
+    /// The GPU pyramid retained so the full-res producer can be rebuilt on
+    /// geometry or halo-radius changes.
+    pub pyramid: Option<std::sync::Arc<GpuPyramidSource>>,
+    /// Monotonically-increasing counter; bumped on every op-stack mutation so
+    /// GPU evaluation knows to re-run.
+    pub opstack_version: u64,
+    /// Bounded undo/redo ring for the current image's op stack.
+    pub history: crate::develop::history::History,
+    /// When `true`, the viewer renders the before/after split view.
+    pub before_after: bool,
+    /// When `true`, the crop overlay is active.
+    pub crop_active: bool,
+    /// Index of the currently-selected HSL band in the HSL panel (0–7).
+    pub hsl_band: usize,
+    /// `true` once the `OpsLoaded` event for this image has been received (the
+    /// op-stack read job finished and the stack has been applied).
+    pub ops_loaded: bool,
+    /// Handle for the in-flight op-stack read job; cancelled on navigation.
+    pub ops_read_handle: Option<JobHandle>,
 }
 
 impl ViewerState {
@@ -62,12 +101,15 @@ impl ViewerState {
             image_id,
             path,
             kind,
+            op_stack: OpStack::default(),
+            edit_producer: None,
             view: ViewTransform {
                 zoom: 1.0,
                 pan: (0.0, 0.0),
             },
             viewport: (0.0, 0.0),
             preview_requested: false,
+            open_elapsed: 0.0,
             loaded: false,
             full_requested: false,
             full_ready: false,
@@ -77,6 +119,16 @@ impl ViewerState {
             image_dims: None,
             preview_handle: None,
             full_handle: None,
+            preview_source: None,
+            preview_edit: None,
+            pyramid: None,
+            opstack_version: 0,
+            history: crate::develop::history::History::new(OpStack::default(), 100),
+            before_after: false,
+            crop_active: false,
+            hsl_band: 0,
+            ops_loaded: false,
+            ops_read_handle: None,
         }
     }
 
@@ -110,6 +162,9 @@ impl ViewerState {
             h.cancel();
         }
         if let Some(h) = self.full_handle.as_ref() {
+            h.cancel();
+        }
+        if let Some(h) = self.ops_read_handle.as_ref() {
             h.cancel();
         }
     }
@@ -172,7 +227,17 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 /// the sparse full-res VT over the preview (swap-on-ready crossfade). Returns
 /// `true` while the preview is still loading so the caller can `request_repaint`
 /// for a prompt first pixel.
-pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> bool {
+///
+/// When `interactive == false` (e.g. the crop tool is active) the canvas
+/// pan/zoom/double-click interaction is SKIPPED entirely — the drag interaction
+/// is not even registered — so the crop overlay is the sole input target over
+/// this area. The image still renders (viewport recorded + paint callback added).
+pub fn paint(
+    ui: &mut egui::Ui,
+    state: &mut ViewerState,
+    show_full: bool,
+    interactive: bool,
+) -> bool {
     let rect = ui.available_rect_before_wrap();
     // Scope the painter so it drops before any `ui.put` / mutable-borrow calls
     // further down (the `!state.loaded` spinner branch needs `ui` mutably).
@@ -185,12 +250,14 @@ pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> boo
     state.viewport = viewport;
 
     // Pointer interaction over the canvas: drag pans, scroll zooms about cursor.
-    let resp = ui.interact(
-        rect,
-        ui.id().with(("viewer-canvas", state.image_id)),
-        egui::Sense::click_and_drag(),
-    );
-    if state.loaded {
+    // Skipped when non-interactive so the crop overlay owns input over this area
+    // (no competing `viewer-canvas` drag registered, no scroll/drag read).
+    if interactive && state.loaded {
+        let resp = ui.interact(
+            rect,
+            ui.id().with(("viewer-canvas", state.image_id)),
+            egui::Sense::click_and_drag(),
+        );
         if resp.dragged() {
             let d = resp.drag_delta();
             state.view = apply_pan(state.view, (d.x, d.y));
@@ -259,6 +326,44 @@ pub fn paint(ui: &mut egui::Ui, state: &mut ViewerState, show_full: bool) -> boo
     }
 }
 
+/// Map image bounds to the on-screen rect using the same zoom/pan convention
+/// as the display shader (`display.wgsl`):
+///
+/// ```wgsl
+/// let center = image * 0.5 + pan;
+/// let img_px = center + (screen_px - viewport * 0.5) / zoom;
+/// ```
+///
+/// Inverting: `screen_px = viewport/2 + (img_px − center) * zoom`.
+/// So `center = (image_w/2 + pan_x, image_h/2 + pan_y)` is the image-space
+/// point that maps to the viewport centre.
+///
+/// This is a pure helper — no GPU, no egui state. The fit case (pan = 0,
+/// zoom = min(vw/iw, vh/ih)) returns the sub-rect of `canvas` that the image
+/// occupies; the zoomed/panned case correctly maps to wherever the image sits.
+pub fn image_screen_rect(
+    canvas: egui::Rect,
+    dims: (u32, u32),
+    view: ferrolite_vt::ViewTransform,
+    viewport: (f32, f32),
+) -> egui::Rect {
+    let (iw, ih) = (dims.0 as f32, dims.1 as f32);
+    let (vw, vh) = viewport;
+    let zoom = view.zoom;
+    let (pan_x, pan_y) = view.pan;
+    // Image-space point that maps to the viewport centre (matches the shader).
+    let cx = iw * 0.5 + pan_x;
+    let cy = ih * 0.5 + pan_y;
+    // Canvas offset of the viewport centre.
+    let ox = canvas.left() + vw * 0.5;
+    let oy = canvas.top() + vh * 0.5;
+    let left = ox + (0.0 - cx) * zoom;
+    let top = oy + (0.0 - cy) * zoom;
+    let right = ox + (iw - cx) * zoom;
+    let bottom = oy + (ih - cy) * zoom;
+    egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +404,64 @@ mod tests {
         // point under the cursor fixed, the viewport center must shift right in
         // image space (pan.0 increases).
         assert!(z.pan.0 > 0.0, "zoom about off-center cursor pans toward it");
+    }
+
+    #[test]
+    fn image_screen_rect_fit_square_equals_canvas() {
+        // Square image, square canvas, fit zoom → image fills the entire canvas.
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let dims = (100u32, 100u32);
+        let viewport = (100.0f32, 100.0f32);
+        let view = ViewTransform::fit(dims, viewport);
+        let r = super::image_screen_rect(canvas, dims, view, viewport);
+        assert!(
+            (r.left() - canvas.left()).abs() < 1e-4,
+            "left: {}",
+            r.left()
+        );
+        assert!((r.top() - canvas.top()).abs() < 1e-4, "top: {}", r.top());
+        assert!(
+            (r.right() - canvas.right()).abs() < 1e-4,
+            "right: {}",
+            r.right()
+        );
+        assert!(
+            (r.bottom() - canvas.bottom()).abs() < 1e-4,
+            "bottom: {}",
+            r.bottom()
+        );
+    }
+
+    #[test]
+    fn image_screen_rect_fit_landscape_letterboxed() {
+        // 200×100 image in a 100×100 canvas: zoom = 0.5, image fills width, letterboxed top/bottom.
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        let dims = (200u32, 100u32);
+        let viewport = (100.0f32, 100.0f32);
+        let view = ViewTransform::fit(dims, viewport);
+        // zoom = min(100/200, 100/100) = 0.5; image screen size = 100×50
+        let r = super::image_screen_rect(canvas, dims, view, viewport);
+        assert!(
+            (r.left() - 0.0).abs() < 1e-4,
+            "left should be 0, got {}",
+            r.left()
+        );
+        assert!(
+            (r.right() - 100.0).abs() < 1e-4,
+            "right should be 100, got {}",
+            r.right()
+        );
+        // Vertical center: image height on screen = 50, centered in 100 → top=25, bottom=75
+        assert!(
+            (r.top() - 25.0).abs() < 1e-4,
+            "top should be 25, got {}",
+            r.top()
+        );
+        assert!(
+            (r.bottom() - 75.0).abs() < 1e-4,
+            "bottom should be 75, got {}",
+            r.bottom()
+        );
     }
 
     #[test]

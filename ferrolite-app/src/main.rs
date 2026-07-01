@@ -1,6 +1,7 @@
 mod app;
 mod canvas;
 mod chrome;
+mod develop;
 mod events;
 mod ingest;
 mod library;
@@ -9,6 +10,7 @@ mod module;
 mod state;
 mod status_bar;
 mod theme;
+mod thumb_profile;
 mod viewer;
 mod widgets;
 

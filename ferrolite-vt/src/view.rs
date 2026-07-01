@@ -14,7 +14,8 @@ use wgpu::util::DeviceExt;
 use crate::page_table::{FeedbackBuffer, LevelLayout as FlatLayout, PageTable};
 use crate::pipelines::{DisplayPipelines, DisplayVariant};
 use crate::pool::{SlotAllocator, TilePool, NOT_RESIDENT};
-use crate::residency::{needed_tiles, ResidencySet};
+use crate::producer::TileProducer;
+use crate::residency::{needed_tiles, ResidencySet, VersionedResidency};
 use crate::{TileSource, ViewTransform};
 
 /// Max LOD levels the `TileMeta` uniform can carry (matches `array<vec4<u32>, 8>` in WGSL).
@@ -59,7 +60,7 @@ pub struct TiledResources {
 
 /// Rung-1 (single-texture) GPU resources.
 struct SingleResources {
-    texture: wgpu::Texture,
+    texture: std::sync::Arc<wgpu::Texture>,
     texture_view: wgpu::TextureView,
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     sampler: Arc<wgpu::Sampler>,
@@ -132,6 +133,14 @@ struct SparseResources {
     // CPU mirror of the per-tile slot (all NOT_RESIDENT until uploaded).
     slots: Vec<u32>,
 
+    // Plan 3: edited-tile version tracking + producer-drive bookkeeping. The
+    // producer object itself is NOT stored here (it is !Send/!Sync); it is passed
+    // to `produce_view` per call. `producing` suppresses CPU job submission in
+    // `request_view_feedback` while the producer fills tiles instead.
+    versions: VersionedResidency,
+    producing: bool,
+    last_needed: Vec<TileCoord>,
+
     // GPU bind resources.
     page_table: PageTable,
     feedback: FeedbackBuffer,
@@ -200,7 +209,7 @@ impl VirtualTexture {
 
         Self {
             single: Some(SingleResources {
-                texture,
+                texture: std::sync::Arc::new(texture),
                 texture_view,
                 bind_group_layout: bgl,
                 sampler,
@@ -218,6 +227,23 @@ impl VirtualTexture {
     /// Image dimensions of the rung-1 texture, if this is a single-texture VT.
     pub fn single_dims(&self) -> Option<(u32, u32)> {
         self.single.as_ref().map(|s| s.image_dims)
+    }
+
+    /// Replace the rung-1 single texture with an externally-owned GPU texture
+    /// (e.g. an edit-pipeline output). The texture must be `Rgba16Float` with
+    /// `TEXTURE_BINDING` usage. The next `prepare_single` rebuilds the bind group
+    /// from the new view; a no-op on a non-single VT.
+    pub fn update_single_from_texture(
+        &mut self,
+        texture: std::sync::Arc<wgpu::Texture>,
+        dims: (u32, u32),
+    ) {
+        if let Some(s) = self.single.as_mut() {
+            s.texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            s.texture = texture;
+            s.image_dims = dims;
+            s.bind_group = None; // force rebuild in prepare_single
+        }
     }
 
     /// Prepare-half of the rung-1 paint (egui_wgpu `CallbackTrait::prepare`):
@@ -1052,6 +1078,9 @@ impl VirtualTexture {
             rx: Mutex::new(rx),
             in_flight: HashMap::new(),
             slots,
+            versions: VersionedResidency::new(),
+            producing: false,
+            last_needed: Vec::new(),
             page_table,
             feedback,
             array_view,
@@ -1093,12 +1122,14 @@ impl VirtualTexture {
 
         // GPU-truth needed set: the tiles the shader marked last frame.
         let needed = s.feedback.read_back(ctx, &s.layout);
+        s.last_needed = needed.clone();
         let (to_load, to_evict) = s.residency.diff(&needed);
 
         // Evict: free physical slots + drop residency + clear the page-table entry.
         for t in &to_evict {
             s.allocator.free(*t);
             s.residency.forget(*t);
+            s.versions.forget(*t);
             if let Some(idx) = flat_index(&s.layout, *t) {
                 s.slots[idx] = NOT_RESIDENT;
             }
@@ -1119,21 +1150,24 @@ impl VirtualTexture {
         }
 
         // Submit loads for newly-needed tiles not already resident or in flight.
-        for t in to_load {
-            if s.residency.contains(t) || s.in_flight.contains_key(&t) {
-                continue;
-            }
-            let tx = s.tx.clone();
-            let source = Arc::clone(&s.source);
-            let coord = t;
-            let handle = s.jobs.submit(Priority::Visible, move |token| {
-                if token.is_cancelled() {
-                    return;
+        // Skipped when producer-driven: the producer fills tiles instead of CPU jobs.
+        if !s.producing {
+            for t in to_load {
+                if s.residency.contains(t) || s.in_flight.contains_key(&t) {
+                    continue;
                 }
-                let tile = source.tile(coord);
-                let _ = tx.send((coord, tile));
-            });
-            s.in_flight.insert(t, handle);
+                let tx = s.tx.clone();
+                let source = Arc::clone(&s.source);
+                let coord = t;
+                let handle = s.jobs.submit(Priority::Visible, move |token| {
+                    if token.is_cancelled() {
+                        return;
+                    }
+                    let tile = source.tile(coord);
+                    let _ = tx.send((coord, tile));
+                });
+                s.in_flight.insert(t, handle);
+            }
         }
 
         // Push the (possibly updated) page table and clear feedback for next frame.
@@ -1163,6 +1197,7 @@ impl VirtualTexture {
                     if let Some(victim) = s.residency.lru() {
                         s.allocator.free(victim);
                         s.residency.forget(victim);
+                        s.versions.forget(victim);
                         if let Some(idx) = flat_index(&s.layout, victim) {
                             s.slots[idx] = NOT_RESIDENT;
                         }
@@ -1340,6 +1375,100 @@ impl VirtualTexture {
         }
     }
 
+    /// Plan 3: mark this sparse VT producer-driven. While `on`, `request_view_
+    /// feedback` keeps reconciling residency + clearing feedback but skips CPU
+    /// load-job submission (the producer fills tiles instead). No-op if non-sparse.
+    pub fn set_producing(&mut self, on: bool) {
+        if let Some(s) = self.sparse.as_mut() {
+            s.producing = on;
+        }
+    }
+
+    /// Plan 3: the needed set from the most recent `request_view_feedback`
+    /// (GPU-truth). The producer-drive loop produces these. Empty if non-sparse
+    /// or before the first reconcile.
+    pub fn needed_now(&self) -> Vec<TileCoord> {
+        self.sparse
+            .as_ref()
+            .map(|s| s.last_needed.clone())
+            .unwrap_or_default()
+    }
+
+    /// Plan 3: set the active opstack version. On change, free the slots of every
+    /// resident tile produced at an older version, clear their CPU slot-mirror
+    /// entries, AND flush the GPU page table so the shader never samples a
+    /// freed/aliased slot for a frame. No-op if unchanged or non-sparse.
+    pub fn set_opstack_version(&mut self, ctx: &GpuContext, version: u64) {
+        let Some(s) = self.sparse.as_mut() else {
+            return;
+        };
+        let stale = s.versions.set_version(version);
+        for t in &stale {
+            s.allocator.free(*t);
+            s.residency.forget(*t);
+            if let Some(idx) = flat_index(&s.layout, *t) {
+                s.slots[idx] = NOT_RESIDENT;
+            }
+        }
+        if !stale.is_empty() {
+            s.page_table.update(ctx, &s.slots);
+        }
+    }
+
+    /// Plan 3: render up to `budget` not-current tiles from `needed` (in order)
+    /// via the passed `producer`, copy each into its pool slot, update residency
+    /// + page table. Returns the count produced.
+    ///
+    /// The producer is borrowed per call (it is !Send/!Sync, owned by
+    /// `ViewerState`). Runs on the render thread (GPU work); bounded by `budget`
+    /// per call. No-op (0) on a non-sparse VT.
+    pub fn produce_view(
+        &mut self,
+        ctx: &GpuContext,
+        producer: &mut dyn TileProducer,
+        needed: &[TileCoord],
+        budget: usize,
+    ) -> usize {
+        let Some(s) = self.sparse.as_mut() else {
+            return 0;
+        };
+
+        let to_produce = s.versions.to_produce(needed);
+        let mut produced = 0;
+        for coord in to_produce.into_iter().take(budget) {
+            // Allocate a slot, evicting an LRU resident if the pool is full.
+            let slot = match s.allocator.alloc(coord) {
+                Some(slot) => slot,
+                None => {
+                    if let Some(victim) = s.residency.lru() {
+                        s.allocator.free(victim);
+                        s.residency.forget(victim);
+                        s.versions.forget(victim);
+                        if let Some(idx) = flat_index(&s.layout, victim) {
+                            s.slots[idx] = NOT_RESIDENT;
+                        }
+                    }
+                    match s.allocator.alloc(coord) {
+                        Some(slot) => slot,
+                        None => continue, // capacity 0; nothing to do
+                    }
+                }
+            };
+            let tile_tex = producer.produce(ctx, coord);
+            s.pool.copy_into(ctx, slot, &tile_tex);
+            s.residency.touch(coord);
+            s.versions.mark(coord);
+            if let Some(idx) = flat_index(&s.layout, coord) {
+                s.slots[idx] = slot;
+            }
+            produced += 1;
+        }
+        if produced > 0 {
+            s.page_table.update(ctx, &s.slots);
+        }
+        produced
+    }
+
     /// Test-introspection: is `t` currently resident (has a physical slot)?
     /// Works on the sparse path (rung 4) and the streaming path (rung 3).
     pub fn is_resident(&self, t: TileCoord) -> bool {
@@ -1384,4 +1513,43 @@ fn slot_index(layout: &LevelLayout, t: TileCoord) -> Option<usize> {
         return None;
     }
     Some(idx as usize)
+}
+
+#[cfg(test)]
+mod single_update_tests {
+    use super::*;
+    use ferrolite_image::LinearRgbaF32;
+
+    #[test]
+    fn update_single_swaps_dims() {
+        let Some(ctx) = GpuContext::headless() else {
+            return; // CI headless: skip (spec §10 GPU-test convention)
+        };
+        let pipelines = DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+        let img = LinearRgbaF32::new(2, 2, vec![0.0; 2 * 2 * 4]).unwrap();
+        let mut vt = VirtualTexture::single_texture(&ctx, &img, &pipelines);
+        assert_eq!(vt.single_dims(), Some((2, 2)));
+
+        // A 4x4 Rgba16Float texture with TEXTURE_BINDING (mirrors a pipeline output).
+        let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-edit-out"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        vt.update_single_from_texture(std::sync::Arc::new(tex), (4, 4));
+        assert_eq!(
+            vt.single_dims(),
+            Some((4, 4)),
+            "dims reflect the swapped texture"
+        );
+    }
 }

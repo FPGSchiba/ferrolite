@@ -216,6 +216,97 @@ fn render_sparse_frame(
     ctx.device.poll(wgpu::Maintain::Wait);
 }
 
+/// A trivial GPU producer for testing the VT produce path without any photo
+/// dependency: uploads a solid-color `TILE_SIZE`² `Rgba16Float` tile whose color
+/// encodes the coord, returning a `COPY_SRC` texture.
+struct SolidProducer;
+impl ferrolite_vt::TileProducer for SolidProducer {
+    fn produce(
+        &mut self,
+        ctx: &ferrolite_gpu::GpuContext,
+        coord: ferrolite_image::TileCoord,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        let n = (TILE_SIZE * TILE_SIZE) as usize;
+        let r = half::f16::from_f32((coord.x as f32 + 1.0) / 16.0);
+        let g = half::f16::from_f32((coord.y as f32 + 1.0) / 16.0);
+        let b = half::f16::from_f32(0.5);
+        let a = half::f16::from_f32(1.0);
+        let mut texels = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            texels.extend_from_slice(&[r, g, b, a]);
+        }
+        ctx.device.create_texture_with_data(
+            &ctx.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("solid-producer-tile"),
+                size: wgpu::Extent3d {
+                    width: TILE_SIZE,
+                    height: TILE_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&texels),
+        )
+    }
+}
+
+#[test]
+fn producer_fills_requested_tiles_and_version_bump_invalidates() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let (iw, ih) = (600u32, 500u32);
+    let img = ferrolite_image::LinearRgbaF32::black(iw, ih);
+    let src: Arc<dyn TileSource + Send + Sync> = Arc::new(PyramidTileSource::new(img));
+    let total: u32 = (0..src.level_count())
+        .map(|lod| {
+            let (lw, lh) = src.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(1));
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let mut vt =
+        VirtualTexture::sparse(&ctx, Arc::clone(&src), Arc::clone(&jobs), total, &pipelines);
+    let mut producer = SolidProducer;
+
+    let needed = vec![
+        TileCoord { lod: 0, x: 0, y: 0 },
+        TileCoord { lod: 0, x: 1, y: 0 },
+    ];
+    let made = vt.produce_view(&ctx, &mut producer, &needed, 8);
+    assert_eq!(made, 2, "both needed tiles produced");
+    assert!(vt.is_resident(needed[0]) && vt.is_resident(needed[1]));
+
+    // Re-producing the same view with no version change produces nothing more.
+    assert_eq!(
+        vt.produce_view(&ctx, &mut producer, &needed, 8),
+        0,
+        "already current"
+    );
+
+    // A version bump invalidates them; they must re-produce.
+    vt.set_opstack_version(&ctx, 1);
+    assert!(
+        !vt.is_resident(needed[0]),
+        "stale tile freed by version bump"
+    );
+    assert_eq!(
+        vt.produce_view(&ctx, &mut producer, &needed, 8),
+        2,
+        "re-produced at new version"
+    );
+}
+
 /// Rung 4 (the full engine-style sparse VT): the display shader marks the tiles
 /// it actually sampled into a GPU feedback buffer; the CPU reads that back one
 /// frame later and loads the missing tiles, updating the page table. After a few

@@ -20,3 +20,4 @@ serde_json = { workspace = true }
 [dev-dependencies]
 pollster = { workspace = true }
 image = { workspace = true, features = ["png"] }
+ferrolite-color = { workspace = true }

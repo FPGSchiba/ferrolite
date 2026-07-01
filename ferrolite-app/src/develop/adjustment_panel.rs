@@ -6,6 +6,7 @@ use crate::develop::{curve_widget, hsl_widget, ops_edit};
 use crate::state::AppState;
 use crate::theme;
 use crate::widgets::slider::EguiSlider;
+use ferrolite_color::WorkingSpace;
 use ferrolite_pipeline::{Aspect, Geometry, Op, OpKind, OpStack};
 
 pub struct EditOutcome {
@@ -14,12 +15,24 @@ pub struct EditOutcome {
     pub commit: bool,
 }
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
+/// What the adjustment panel produced this frame: an op edit and/or a working-space change.
+pub struct PanelOutcome {
+    pub edit: Option<EditOutcome>,
+    pub working_space: Option<WorkingSpace>,
+}
+
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace) -> PanelOutcome {
     let stack = match state.viewer.as_ref() {
         Some(v) => v.op_stack.clone(),
-        None => return None,
+        None => {
+            return PanelOutcome {
+                edit: None,
+                working_space: None,
+            }
+        }
     };
     let mut out: Option<EditOutcome> = None;
+    let mut ws_change: Option<WorkingSpace> = None;
 
     // ── Save-state indicator ──
     // Edits auto-save: each commit calls persist_ops → spawn_ops_write off-thread.
@@ -44,6 +57,23 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
 
         ui.add_space(2.0);
         ui.label(egui::RichText::new(label).color(color).size(11.0));
+        ui.add_space(4.0);
+    }
+
+    // ── Working space (spec §4.1) ── global preference; not an editable op, so no
+    // per-control reset. Recomposes the ColorMatrixNode + display tail on change.
+    {
+        let mut ws = working_space;
+        egui::ComboBox::from_label("Working space")
+            .selected_text(format!("{ws:?}"))
+            .show_ui(ui, |ui| {
+                for w in WorkingSpace::ALL {
+                    ui.selectable_value(&mut ws, w, format!("{w:?}"));
+                }
+            });
+        if ws != working_space {
+            ws_change = Some(ws);
+        }
         ui.add_space(4.0);
     }
 
@@ -275,5 +305,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
         });
     }
 
-    out
+    PanelOutcome {
+        edit: out,
+        working_space: ws_change,
+    }
 }

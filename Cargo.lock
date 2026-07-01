@@ -1060,6 +1060,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "ferrolite-catalog",
+ "ferrolite-color",
  "ferrolite-decode",
  "ferrolite-gpu",
  "ferrolite-image",
@@ -1132,6 +1133,7 @@ name = "ferrolite-pipeline"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "ferrolite-color",
  "ferrolite-gpu",
  "ferrolite-image",
  "half",

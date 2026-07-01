@@ -6,14 +6,15 @@ use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::LinearRgbaF32;
+use wgpu::util::DeviceExt;
 
 use crate::image::PipelineImage;
 use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    contrast_uniform, curve_lut, exposure_uniform, geometry_uniform, hsl_uniform, sharpen_uniform,
-    wb_uniform, ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, SharpenUniform,
-    WbUniform,
+    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, geometry_uniform,
+    hsl_uniform, sharpen_uniform, wb_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform,
+    GeometryUniform, HslUniform, SharpenUniform, WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -23,6 +24,8 @@ pub struct EditPipeline {
     ctx: Arc<GpuContext>,
     graph: Graph<PipelineImage>,
     output_id: NodeId,
+    color_matrix_id: NodeId,
+    color_matrix: Rc<Cell<ColorMatrixUniform>>,
     exposure_id: NodeId,
     exposure: Rc<Cell<ExposureUniform>>,
     wb_id: NodeId,
@@ -44,10 +47,24 @@ pub struct EditPipeline {
 }
 
 impl EditPipeline {
-    pub fn new(ctx: Arc<GpuContext>, source: &LinearRgbaF32, stack: OpStack) -> Self {
+    pub fn new(
+        ctx: Arc<GpuContext>,
+        source: &LinearRgbaF32,
+        stack: OpStack,
+        camera_to_working: [[f32; 3]; 3],
+    ) -> Self {
         let mut graph = Graph::new();
         let (src_w, src_h) = (source.width, source.height);
         let source_id = graph.add_node(Box::new(SourceNode::new(&ctx, source)), vec![]);
+
+        let color_matrix = Rc::new(Cell::new(color_matrix_uniform(camera_to_working)));
+        let color_matrix_node = PointOpNode::new(
+            ctx.clone(),
+            include_str!("shaders/color_matrix.wgsl"),
+            "color-matrix",
+            color_matrix.clone(),
+        );
+        let color_matrix_id = graph.add_node(Box::new(color_matrix_node), vec![source_id]);
 
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
         let exposure_node = PointOpNode::new(
@@ -56,7 +73,7 @@ impl EditPipeline {
             "exposure",
             exposure.clone(),
         );
-        let exposure_id = graph.add_node(Box::new(exposure_node), vec![source_id]);
+        let exposure_id = graph.add_node(Box::new(exposure_node), vec![color_matrix_id]);
 
         let wb = Rc::new(Cell::new(wb_uniform(stack.white_balance())));
         let wb_node = PointOpNode::new(
@@ -109,6 +126,8 @@ impl EditPipeline {
             ctx,
             graph,
             output_id: geometry_id,
+            color_matrix_id,
+            color_matrix,
             exposure_id,
             exposure,
             wb_id,
@@ -125,8 +144,18 @@ impl EditPipeline {
             geometry,
             src_w,
             src_h,
-            node_count: 8,
+            node_count: 9,
             stack,
+        }
+    }
+
+    /// Update the camera→working matrix (working-space change) and dirty the head
+    /// so the chain re-runs. `m` is a row-major 3×3.
+    pub fn set_color_matrix(&mut self, m: [[f32; 3]; 3]) {
+        let u = color_matrix_uniform(m);
+        if u != self.color_matrix.get() {
+            self.color_matrix.set(u);
+            self.graph.mark_dirty(self.color_matrix_id);
         }
     }
 
@@ -192,11 +221,30 @@ impl EditPipeline {
     }
 }
 
-/// Render a display-linear `PipelineImage` to an sRGB `Rgba8Unorm` buffer at 1:1
-/// (its own dims), returning `width*height*4` row-unpadded bytes. Used by golden
-/// tests and (later) any CPU-side preview/export readback. Builds its pipeline
-/// per call — acceptable for the test/readback path (not the per-frame path).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlitMatrix {
+    m: [[f32; 4]; 3],
+}
+
+/// Identity-matrix blit (working≡display, i.e. sRGB working space). Existing
+/// golden/readback callers use this; it reduces to the old sRGB OETF path exactly.
 pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
+    blit_to_rgba8_with_matrix(
+        ctx,
+        img,
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+}
+
+/// Render a display-linear `PipelineImage` to an sRGB `Rgba8Unorm` buffer at 1:1,
+/// applying `working_to_display` (row-major 3×3) before the sRGB OETF. Builds its
+/// pipeline per call — for the test/readback path, not per-frame.
+pub fn blit_to_rgba8_with_matrix(
+    ctx: &GpuContext,
+    img: &PipelineImage,
+    working_to_display: [[f32; 3]; 3],
+) -> Vec<u8> {
     let device = &ctx.device;
     let (w, h) = (img.width, img.height);
 
@@ -229,6 +277,16 @@ pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -258,6 +316,14 @@ pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
         cache: None,
     });
 
+    let matrix_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("pipeline-blit-matrix"),
+        contents: bytemuck::bytes_of(&BlitMatrix {
+            m: crate::uniforms::pack_mat3(working_to_display),
+        }),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+
     let src_view = img
         .texture
         .create_view(&wgpu::TextureViewDescriptor::default());
@@ -272,6 +338,10 @@ pub fn blit_to_rgba8(ctx: &GpuContext, img: &PipelineImage) -> Vec<u8> {
             wgpu::BindGroupEntry {
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: matrix_buf.as_entire_binding(),
             },
         ],
     });

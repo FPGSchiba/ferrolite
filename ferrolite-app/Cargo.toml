@@ -23,6 +23,7 @@ egui-wgpu = "0.29"
 wgpu = "22"
 ferrolite-jobs = { workspace = true }
 ferrolite-catalog = { workspace = true }
+ferrolite-color = { workspace = true }
 ferrolite-decode = { workspace = true }
 ferrolite-gpu = { workspace = true }
 ferrolite-image = { workspace = true }

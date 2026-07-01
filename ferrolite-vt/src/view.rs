@@ -52,6 +52,7 @@ pub struct TiledResources {
     meta_buf: wgpu::Buffer,
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     sampler: Arc<wgpu::Sampler>,
+    display_matrix: Arc<wgpu::Buffer>,
     pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     // keep the texture alive (the view borrows from it conceptually)
@@ -64,6 +65,7 @@ struct SingleResources {
     texture_view: wgpu::TextureView,
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     sampler: Arc<wgpu::Sampler>,
+    display_matrix: Arc<wgpu::Buffer>,
     pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     /// Per-frame uniform buffer (transform), reused and rewritten via `prepare_single`.
@@ -106,6 +108,7 @@ struct StreamingResources {
     meta_buf: wgpu::Buffer,
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     sampler: Arc<wgpu::Sampler>,
+    display_matrix: Arc<wgpu::Buffer>,
     pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     /// Per-frame transform uniform, rewritten by `prepare_streaming` (so the
@@ -148,6 +151,7 @@ struct SparseResources {
     meta_buf: wgpu::Buffer,
     bind_group_layout: Arc<wgpu::BindGroupLayout>,
     sampler: Arc<wgpu::Sampler>,
+    display_matrix: Arc<wgpu::Buffer>,
     pipeline: Arc<wgpu::RenderPipeline>,
     image_dims: (u32, u32),
     /// Per-frame transform uniform, rewritten by `prepare_sparse` (so the
@@ -196,6 +200,7 @@ impl VirtualTexture {
         let bgl = pipelines.layout(DisplayVariant::Single).clone();
         let pipeline = pipelines.pipeline(DisplayVariant::Single).clone();
         let sampler = pipelines.sampler().clone();
+        let display_matrix = pipelines.display_matrix_buffer().clone();
 
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
@@ -213,9 +218,48 @@ impl VirtualTexture {
                 texture_view,
                 bind_group_layout: bgl,
                 sampler,
+                display_matrix,
                 pipeline,
                 image_dims: (image.width, image.height),
                 uniform_buf,
+                bind_group: None,
+            }),
+            tiled: None,
+            streaming: None,
+            sparse: None,
+        }
+    }
+
+    /// Rung-1 VT wrapping an already-GPU-resident `Rgba16Float` texture
+    /// (`TEXTURE_BINDING`), e.g. a pipeline color-convert output. No upload.
+    pub fn single_from_texture(
+        ctx: &GpuContext,
+        texture: std::sync::Arc<wgpu::Texture>,
+        dims: (u32, u32),
+        pipelines: &DisplayPipelines,
+    ) -> Self {
+        let device = &ctx.device;
+        let bgl = pipelines.layout(DisplayVariant::Single).clone();
+        let pipeline = pipelines.pipeline(DisplayVariant::Single).clone();
+        let sampler = pipelines.sampler().clone();
+        let display_matrix = pipelines.display_matrix_buffer().clone();
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-xf"),
+            size: std::mem::size_of::<TransformUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self {
+            single: Some(SingleResources {
+                texture,
+                texture_view,
+                bind_group_layout: bgl,
+                sampler,
+                pipeline,
+                image_dims: dims,
+                uniform_buf,
+                display_matrix,
                 bind_group: None,
             }),
             tiled: None,
@@ -279,6 +323,10 @@ impl VirtualTexture {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: single.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: single.display_matrix.as_entire_binding(),
                 },
             ],
         });
@@ -345,6 +393,10 @@ impl VirtualTexture {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: ubuf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: single.display_matrix.as_entire_binding(),
                 },
             ],
         });
@@ -511,6 +563,7 @@ impl VirtualTexture {
         let bgl = pipelines.layout(DisplayVariant::Tiled).clone();
         let pipeline = pipelines.pipeline(DisplayVariant::Tiled).clone();
         let sampler = pipelines.sampler().clone();
+        let display_matrix = pipelines.display_matrix_buffer().clone();
 
         let tiled = TiledResources {
             array_view,
@@ -518,6 +571,7 @@ impl VirtualTexture {
             meta_buf,
             bind_group_layout: bgl,
             sampler,
+            display_matrix,
             pipeline,
             image_dims: (img_w, img_h),
             _array_tex: array_tex,
@@ -580,6 +634,10 @@ impl VirtualTexture {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: tiled.meta_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: tiled.display_matrix.as_entire_binding(),
                 },
             ],
         });
@@ -696,6 +754,7 @@ impl VirtualTexture {
 
         let bind_group_layout = pipelines.layout(DisplayVariant::Streaming).clone();
         let sampler = pipelines.sampler().clone();
+        let display_matrix = pipelines.display_matrix_buffer().clone();
         let pipeline = pipelines.pipeline(DisplayVariant::Streaming).clone();
 
         // Persistent transform uniform, rewritten each frame by `prepare_streaming`.
@@ -724,6 +783,7 @@ impl VirtualTexture {
             meta_buf,
             bind_group_layout,
             sampler,
+            display_matrix,
             pipeline,
             image_dims: (img_w, img_h),
             uniform_buf,
@@ -917,6 +977,10 @@ impl VirtualTexture {
                     binding: 5,
                     resource: s.meta_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: s.display_matrix.as_entire_binding(),
+                },
             ],
         });
         s.bind_group = Some(bind);
@@ -989,6 +1053,10 @@ impl VirtualTexture {
                     binding: 5,
                     resource: s.meta_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: s.display_matrix.as_entire_binding(),
+                },
             ],
         });
         pass.set_pipeline(&s.pipeline);
@@ -1055,6 +1123,7 @@ impl VirtualTexture {
 
         let bind_group_layout = pipelines.layout(DisplayVariant::Sparse).clone();
         let sampler = pipelines.sampler().clone();
+        let display_matrix = pipelines.display_matrix_buffer().clone();
         let pipeline = pipelines.pipeline(DisplayVariant::Sparse).clone();
 
         // Persistent transform uniform, rewritten each frame by `prepare_sparse`.
@@ -1087,6 +1156,7 @@ impl VirtualTexture {
             meta_buf,
             bind_group_layout,
             sampler,
+            display_matrix,
             pipeline,
             image_dims: (img_w, img_h),
             uniform_buf,
@@ -1276,6 +1346,10 @@ impl VirtualTexture {
                     binding: 7,
                     resource: s.feedback.buffer().as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: s.display_matrix.as_entire_binding(),
+                },
             ],
         });
         pass.set_pipeline(&s.pipeline);
@@ -1332,6 +1406,10 @@ impl VirtualTexture {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: s.feedback.buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: s.display_matrix.as_entire_binding(),
                 },
             ],
         });
@@ -1551,5 +1629,32 @@ mod single_update_tests {
             Some((4, 4)),
             "dims reflect the swapped texture"
         );
+    }
+
+    #[test]
+    fn single_from_texture_reports_passed_dims() {
+        let Some(ctx) = GpuContext::headless() else {
+            return; // CI headless: skip (spec §10 GPU-test convention)
+        };
+        let pipelines = DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+
+        // A 6x3 Rgba16Float texture with TEXTURE_BINDING (mirrors a pipeline output).
+        let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-color-convert-out"),
+            size: wgpu::Extent3d {
+                width: 6,
+                height: 3,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let vt =
+            VirtualTexture::single_from_texture(&ctx, std::sync::Arc::new(tex), (6, 3), &pipelines);
+        assert_eq!(vt.single_dims(), Some((6, 3)));
     }
 }

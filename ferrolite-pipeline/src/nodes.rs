@@ -44,6 +44,28 @@ pub fn upload_source(ctx: &GpuContext, img: &LinearRgbaF32) -> PipelineImage {
     }
 }
 
+/// One-shot camera/sRGB→working color pass: upload `src`, run a single
+/// `color_matrix.wgsl` pass, return the working-space texture. Cheaper than a
+/// full `EditPipeline` for the preview's initial color conversion (one upload,
+/// one pass). Uses the shared shader cache (built once) via `PointOpNode`.
+pub fn color_convert(
+    ctx: std::sync::Arc<GpuContext>,
+    src: &LinearRgbaF32,
+    matrix: [[f32; 3]; 3],
+) -> PipelineImage {
+    let source = upload_source(&ctx, src);
+    let params = std::rc::Rc::new(std::cell::Cell::new(crate::uniforms::color_matrix_uniform(
+        matrix,
+    )));
+    let node = PointOpNode::new(
+        ctx,
+        include_str!("shaders/color_matrix.wgsl"),
+        "preview-color-convert",
+        params,
+    );
+    node.evaluate(&[&source])
+}
+
 /// Graph root: returns the pre-uploaded source image (ignores inputs).
 pub(crate) struct SourceNode {
     image: PipelineImage,
@@ -106,13 +128,9 @@ pub(crate) fn point_op_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 fn point_op_pipeline(
     device: &wgpu::Device,
     bgl: &wgpu::BindGroupLayout,
-    wgsl: &str,
+    module: &wgpu::ShaderModule,
     label: &str,
 ) -> wgpu::ComputePipeline {
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-    });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: &[bgl],
@@ -121,7 +139,7 @@ fn point_op_pipeline(
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
         layout: Some(&layout),
-        module: &module,
+        module,
         entry_point: "main",
         compilation_options: Default::default(),
         cache: None,
@@ -140,9 +158,15 @@ pub(crate) struct PointOpNode<U: bytemuck::Pod> {
 }
 
 impl<U: bytemuck::Pod> PointOpNode<U> {
-    pub(crate) fn new(ctx: Arc<GpuContext>, wgsl: &str, label: &str, params: Rc<Cell<U>>) -> Self {
+    pub(crate) fn new(
+        ctx: Arc<GpuContext>,
+        wgsl: &'static str,
+        label: &str,
+        params: Rc<Cell<U>>,
+    ) -> Self {
         let bgl = point_op_bgl(&ctx.device);
-        let pipeline = point_op_pipeline(&ctx.device, &bgl, wgsl, label);
+        let module = ctx.shader_module(label, wgsl);
+        let pipeline = point_op_pipeline(&ctx.device, &bgl, &module, label);
         let uniform_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
             size: std::mem::size_of::<U>() as u64,
@@ -309,12 +333,7 @@ impl GeometryNode {
         params: Rc<Cell<crate::uniforms::GeometryUniform>>,
     ) -> Self {
         let bgl = geometry_bgl(&ctx.device);
-        let module = ctx
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("geometry"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/geometry.wgsl").into()),
-            });
+        let module = ctx.shader_module("geometry", include_str!("shaders/geometry.wgsl"));
         let layout = ctx
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -502,12 +521,7 @@ pub(crate) struct CurveNode {
 impl CurveNode {
     pub(crate) fn new(ctx: Arc<GpuContext>, lut: Rc<Cell<[f32; 256]>>) -> Self {
         let bgl = curve_bgl(&ctx.device);
-        let module = ctx
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("tone-curve"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/tone_curve.wgsl").into()),
-            });
+        let module = ctx.shader_module("tone-curve", include_str!("shaders/tone_curve.wgsl"));
         let layout = ctx
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -658,12 +672,7 @@ impl GeometryHeadNode {
         request: Rc<Cell<TileRequest>>,
     ) -> Self {
         let bgl = geometry_bgl(&ctx.device); // reuse the geometry pass bind layout
-        let module = ctx
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("geometry-head"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/geometry.wgsl").into()),
-            });
+        let module = ctx.shader_module("geometry", include_str!("shaders/geometry.wgsl"));
         let layout = ctx
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

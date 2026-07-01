@@ -11,6 +11,25 @@
 use std::sync::Arc;
 
 use ferrolite_gpu::GpuContext;
+use wgpu::util::DeviceExt;
+
+/// WGSL `mat3x3<f32>` uniform for the working→display tail transform. Column-major,
+/// each column padded to 16 bytes. Generic (no photo concepts): the app supplies a
+/// plain row-major 3×3.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct DisplayColorUniform {
+    m: [[f32; 4]; 3],
+}
+
+/// Pack a row-major 3×3 into WGSL column-major padded columns (`M * v == m · v`).
+pub fn pack_display_matrix(m: [[f32; 3]; 3]) -> [[f32; 4]; 3] {
+    [
+        [m[0][0], m[1][0], m[2][0], 0.0],
+        [m[0][1], m[1][1], m[2][1], 0.0],
+        [m[0][2], m[1][2], m[2][2], 0.0],
+    ]
+}
 
 /// The four display pipeline variants. Each owns its own bind-group layout and
 /// fragment entry point; `Tiled` and `Streaming` are identical (both `fs_tiled`).
@@ -31,6 +50,7 @@ pub struct DisplayPipelines {
     // wgpu 22 handles are not `Clone`, so the cache hands out cheap `Arc` clones
     // that the per-image VT resources hold for `prepare_*`/`draw_*`.
     sampler: Arc<wgpu::Sampler>,
+    display_matrix: Arc<wgpu::Buffer>,
     single: (Arc<wgpu::BindGroupLayout>, Arc<wgpu::RenderPipeline>),
     tiled: (Arc<wgpu::BindGroupLayout>, Arc<wgpu::RenderPipeline>),
     streaming: (Arc<wgpu::BindGroupLayout>, Arc<wgpu::RenderPipeline>),
@@ -115,6 +135,16 @@ impl DisplayPipelines {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let single_pipeline = mk(&single_bgl, "vs_main", "fs_main");
@@ -164,6 +194,16 @@ impl DisplayPipelines {
                     },
                     wgpu::BindGroupLayoutEntry {
                         binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
@@ -243,13 +283,34 @@ impl DisplayPipelines {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let sparse_pipeline = mk(&sparse_bgl, "vs_main", "fs_sparse");
 
+        let display_matrix = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("vt-display-matrix"),
+                contents: bytemuck::bytes_of(&DisplayColorUniform {
+                    m: pack_display_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+                }),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
+
         Self {
             target_format,
             sampler: Arc::new(sampler),
+            display_matrix,
             single: (Arc::new(single_bgl), Arc::new(single_pipeline)),
             tiled: (Arc::new(tiled_layout), Arc::new(tiled_pipeline)),
             streaming: (Arc::new(streaming_layout), Arc::new(streaming_pipeline)),
@@ -266,6 +327,24 @@ impl DisplayPipelines {
     /// callers can cheaply clone a handle to store in their per-image resources.
     pub fn sampler(&self) -> &Arc<wgpu::Sampler> {
         &self.sampler
+    }
+
+    /// The shared working→display matrix uniform buffer (bound at @8 by every
+    /// variant). Cloned into per-image VT resources.
+    pub fn display_matrix_buffer(&self) -> &Arc<wgpu::Buffer> {
+        &self.display_matrix
+    }
+
+    /// Push a new working→display matrix (row-major 3×3). Call ONLY when the working
+    /// space changes — never per frame, never per image. Cheap `write_buffer`.
+    pub fn set_display_matrix(&self, queue: &wgpu::Queue, m: [[f32; 3]; 3]) {
+        queue.write_buffer(
+            &self.display_matrix,
+            0,
+            bytemuck::bytes_of(&DisplayColorUniform {
+                m: pack_display_matrix(m),
+            }),
+        );
     }
 
     /// The bind-group layout for `v` (used to build the per-image bind group).
@@ -286,5 +365,36 @@ impl DisplayPipelines {
             DisplayVariant::Streaming => &self.streaming.1,
             DisplayVariant::Sparse => &self.sparse.1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_display_matrix;
+
+    #[test]
+    fn pack_identity_columns() {
+        let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        assert_eq!(
+            pack_display_matrix(id),
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn pack_transposes_rows_into_columns() {
+        let m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        assert_eq!(
+            pack_display_matrix(m),
+            [
+                [1.0, 4.0, 7.0, 0.0],
+                [2.0, 5.0, 8.0, 0.0],
+                [3.0, 6.0, 9.0, 0.0]
+            ]
+        );
     }
 }

@@ -2,11 +2,26 @@
 //! it spins up a headless adapter (returning None when none is available so
 //! GPU tests skip cleanly in headless CI). Engine-transferable.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 pub struct GpuContext {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
+}
+
+/// One device's compiled shader modules, keyed by WGSL source (content-compared
+/// via `&'static str`). `_device` pins the `Arc` so the device-pointer cache key
+/// cannot be reused by a later device allocated at the same address.
+struct DeviceShaders {
+    _device: Arc<wgpu::Device>,
+    modules: HashMap<&'static str, Arc<wgpu::ShaderModule>>,
+}
+
+/// Process-global shader cache: `device-ptr -> that device's compiled modules`.
+fn shader_cache() -> &'static Mutex<HashMap<usize, DeviceShaders>> {
+    static CACHE: OnceLock<Mutex<HashMap<usize, DeviceShaders>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl GpuContext {
@@ -41,6 +56,34 @@ impl GpuContext {
             device: Arc::new(device),
             queue: Arc::new(queue),
         })
+    }
+
+    /// Compile `wgsl` into a `ShaderModule` at most once per (device, source) and
+    /// reuse it across every pipeline instance. Compiling WGSL (naga front-end) is
+    /// the expensive part of pipeline creation; caching it keeps per-image
+    /// EditPipeline/TileEditPipeline builds off the "recompile on every open" path
+    /// (CLAUDE.md: build shaders once and reuse). Safe to call on each node build.
+    pub fn shader_module(&self, label: &str, wgsl: &'static str) -> Arc<wgpu::ShaderModule> {
+        let dev_key = Arc::as_ptr(&self.device) as usize;
+        let mut guard = shader_cache().lock().expect("shader cache mutex");
+        let entry = guard.entry(dev_key).or_insert_with(|| DeviceShaders {
+            _device: Arc::clone(&self.device),
+            modules: HashMap::new(),
+        });
+        if let Some(m) = entry.modules.get(wgsl) {
+            return Arc::clone(m);
+        }
+        // Compiled under the lock: node construction is single-threaded (render/UI
+        // thread) and not a per-frame hot path, so contention is negligible.
+        let module = Arc::new(
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(label),
+                    source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+                }),
+        );
+        entry.modules.insert(wgsl, Arc::clone(&module));
+        module
     }
 
     /// A `RENDER_ATTACHMENT | COPY_SRC` texture for offscreen rendering.
@@ -153,5 +196,20 @@ mod tests {
         let pixels = ctx.read_rgba8(&tex, 4, 4);
         assert_eq!(pixels.len(), 4 * 4 * 4);
         assert_eq!(&pixels[0..4], &[255, 0, 0, 255]); // first texel red
+    }
+
+    #[test]
+    fn shader_module_is_compiled_once_and_reused() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        const SRC: &str = "@compute @workgroup_size(1,1,1) fn main() {}";
+        let a = ctx.shader_module("cache-test", SRC);
+        let b = ctx.shader_module("cache-test", SRC);
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "same (device, source) must return the cached module"
+        );
     }
 }

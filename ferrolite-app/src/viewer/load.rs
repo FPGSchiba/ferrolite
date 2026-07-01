@@ -37,9 +37,11 @@ pub fn preview_to_linear(buf: &ImageBuffer) -> LinearRgbaF32 {
     LinearRgbaF32::new(buf.width, buf.height, px).expect("preview length")
 }
 
-/// Submit an `Interactive` decode-preview job. On success it sends an
-/// `AppEvent::PreviewReady { image_id, image }` and requests a repaint so the
-/// UI thread picks up the decoded preview and uploads it as a rung-1 texture.
+/// Submit an `Interactive` decode-preview job. On success it converts the
+/// decoded sRGB preview to display-linear OFF-THREAD (so the UI thread never
+/// pays the per-pixel sRGB→linear cost) and sends an
+/// `AppEvent::PreviewReady { image_id, linear }`, then requests a repaint so
+/// the UI thread picks up the linear buffer and uploads it as a rung-1 texture.
 pub fn spawn_preview(
     jobs: &std::sync::Arc<JobSystem>,
     tx: &std::sync::mpsc::Sender<AppEvent>,
@@ -56,7 +58,8 @@ pub fn spawn_preview(
         }
         match ferrolite_decode::decode_preview(&path, kind) {
             Ok(image) => {
-                let _ = tx.send(AppEvent::PreviewReady { image_id, image });
+                let linear = preview_to_linear(&image);
+                let _ = tx.send(AppEvent::PreviewReady { image_id, linear });
             }
             Err(e) => {
                 eprintln!("ferrolite: preview decode failed for #{image_id}: {e}");
@@ -100,8 +103,13 @@ pub fn spawn_full(
                 if cancel.is_cancelled() {
                     return;
                 }
+                let color_profile = raw.color_profile.clone();
                 let image = QuadBin.to_linear_rgba_f32(&raw);
-                let _ = tx.send(AppEvent::FullDecoded { image_id, image });
+                let _ = tx.send(AppEvent::FullDecoded {
+                    image_id,
+                    image,
+                    color_profile,
+                });
             }
             Err(e) => {
                 eprintln!("ferrolite: full decode failed for #{image_id}: {e}");

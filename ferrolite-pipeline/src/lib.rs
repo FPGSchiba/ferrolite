@@ -12,7 +12,7 @@ mod uniforms;
 
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
-pub use nodes::upload_source;
+pub use nodes::{color_convert, upload_source};
 pub use op::{
     Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, HslBand, Op, OpKind, OpStack, Sharpen,
     ToneCurve, WhiteBalance, STACK_VERSION,
@@ -28,3 +28,21 @@ pub use uniforms::{
     geometry_tile_uniform, sharpen_halo, ContrastUniform, ExposureUniform, GeometryUniform,
     HslUniform, SharpenUniform, WbUniform, MAX_SHARPEN_RADIUS,
 };
+
+/// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
+/// cached modules instead of compiling on the UI thread. Call once at startup,
+/// alongside the display-pipeline pre-warm.
+pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
+    for (label, src) in [
+        ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
+        ("exposure", include_str!("shaders/exposure.wgsl")),
+        ("white-balance", include_str!("shaders/white_balance.wgsl")),
+        ("contrast", include_str!("shaders/contrast.wgsl")),
+        ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
+        ("hsl", include_str!("shaders/hsl.wgsl")),
+        ("sharpen", include_str!("shaders/sharpen.wgsl")),
+        ("geometry", include_str!("shaders/geometry.wgsl")),
+    ] {
+        let _ = ctx.shader_module(label, src);
+    }
+}

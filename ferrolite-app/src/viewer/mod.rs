@@ -75,6 +75,9 @@ pub struct ViewerState {
     /// The GPU pyramid retained so the full-res producer can be rebuilt on
     /// geometry or halo-radius changes.
     pub pyramid: Option<std::sync::Arc<GpuPyramidSource>>,
+    /// Camera color profile from the tier-2 full decode; feeds the ColorMatrixNode
+    /// via `ferrolite_color::camera_to_working`. sRGB fallback until full decode.
+    pub color_profile: ferrolite_decode::ColorProfile,
     /// Monotonically-increasing counter; bumped on every op-stack mutation so
     /// GPU evaluation knows to re-run.
     pub opstack_version: u64,
@@ -122,6 +125,7 @@ impl ViewerState {
             preview_source: None,
             preview_edit: None,
             pyramid: None,
+            color_profile: ferrolite_decode::ColorProfile::srgb_fallback(),
             opstack_version: 0,
             history: crate::develop::history::History::new(OpStack::default(), 100),
             before_after: false,

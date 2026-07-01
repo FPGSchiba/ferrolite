@@ -23,8 +23,9 @@ use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest};
 use crate::op::{Aspect, CropRect, Geometry, OpStack};
 use crate::uniforms::{
-    contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_halo, sharpen_uniform,
-    ContrastUniform, ExposureUniform, HslUniform, SharpenUniform, WbUniform,
+    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_halo,
+    sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform,
+    SharpenUniform, WbUniform,
 };
 
 pub struct TileEditPipeline {
@@ -33,6 +34,8 @@ pub struct TileEditPipeline {
     output_id: NodeId,
     request: Rc<Cell<TileRequest>>,
     head_id: NodeId,
+    color_matrix_id: NodeId,
+    color_matrix: Rc<Cell<ColorMatrixUniform>>,
     halo: u32,
     // Param cells (set from the stack; Plan 4 mutates via set_stack).
     exposure: Rc<Cell<ExposureUniform>>,
@@ -44,7 +47,12 @@ pub struct TileEditPipeline {
 }
 
 impl TileEditPipeline {
-    pub fn new(ctx: Arc<GpuContext>, source: Arc<GpuPyramidSource>, stack: OpStack) -> Self {
+    pub fn new(
+        ctx: Arc<GpuContext>,
+        source: Arc<GpuPyramidSource>,
+        stack: OpStack,
+        camera_to_working: [[f32; 3]; 3],
+    ) -> Self {
         let halo = sharpen_halo(stack.sharpen());
         let geometry = stack.geometry().unwrap_or(Geometry {
             crop: CropRect::full(),
@@ -60,6 +68,17 @@ impl TileEditPipeline {
         let head = GeometryHeadNode::new(ctx.clone(), source, geometry, request.clone());
         let head_id = graph.add_node(Box::new(head), vec![]);
 
+        let color_matrix = Rc::new(Cell::new(color_matrix_uniform(camera_to_working)));
+        let color_matrix_id = graph.add_node(
+            Box::new(PointOpNode::new(
+                ctx.clone(),
+                include_str!("shaders/color_matrix.wgsl"),
+                "color-matrix",
+                color_matrix.clone(),
+            )),
+            vec![head_id],
+        );
+
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
         let exposure_id = graph.add_node(
             Box::new(PointOpNode::new(
@@ -68,7 +87,7 @@ impl TileEditPipeline {
                 "exposure",
                 exposure.clone(),
             )),
-            vec![head_id],
+            vec![color_matrix_id],
         );
         let wb = Rc::new(Cell::new(crate::uniforms::wb_uniform(
             stack.white_balance(),
@@ -126,6 +145,8 @@ impl TileEditPipeline {
             output_id: sharpen_id,
             request,
             head_id,
+            color_matrix_id,
+            color_matrix,
             halo,
             exposure,
             wb,
@@ -162,6 +183,15 @@ impl TileEditPipeline {
         self.hsl.set(hsl_uniform(stack.hsl()));
         self.sharpen.set(sharpen_uniform(stack.sharpen()));
         self.graph.mark_dirty(self.head_id);
+    }
+
+    /// Update the camera→working matrix (working-space change) and dirty the head.
+    pub fn set_color_matrix(&mut self, m: [[f32; 3]; 3]) {
+        let u = color_matrix_uniform(m);
+        if u != self.color_matrix.get() {
+            self.color_matrix.set(u);
+            self.graph.mark_dirty(self.color_matrix_id);
+        }
     }
 
     /// Render the edited interior `TILE_SIZE`² for `coord` as an `Rgba16Float`

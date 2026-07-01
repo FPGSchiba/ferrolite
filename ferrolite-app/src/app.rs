@@ -58,6 +58,8 @@ impl FerroliteApp {
         image_id: i64,
         image: &ferrolite_image::ImageBuffer,
     ) {
+        let pw = self.preview_to_working();
+        let w2d = ferrolite_color::working_to_display(self.state.working_space);
         let Some(v) = self.state.viewer.as_mut() else {
             return; // viewer closed while decoding
         };
@@ -74,16 +76,32 @@ impl FerroliteApp {
         // Keep the display-linear source so the preview EditPipeline can be built
         // lazily on the first edit (built once, reused via set_stack thereafter).
         v.preview_source = Some(std::sync::Arc::new(linear.clone()));
+        // Build the preview EditPipeline eagerly (identity op-stack, sRGB→working
+        // matrix) and display ITS output, so the single texture is working-space
+        // linear rather than raw sRGB-linear texels.
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let mut ep = ferrolite_pipeline::EditPipeline::new(
+            ctx_arc,
+            &linear,
+            ferrolite_pipeline::OpStack::default(),
+            pw,
+        );
+        let edited = ep.evaluate();
         // Fetch the pre-warmed pipelines, build the VT while borrowing them,
         // then release the lock before inserting ViewerGpu (separate write scope).
-        let vt = {
+        let mut vt = {
             let renderer = rs.renderer.read();
             let vp = renderer
                 .callback_resources
                 .get::<viewer::ViewerPipelines>()
                 .expect("ViewerPipelines pre-warmed at startup");
+            // Push the working→display tail now: a Standard image never reaches
+            // apply_full_decoded, so this is the only place its tail gets set.
+            vp.pipelines.set_display_matrix(&gpu.queue, w2d);
             ferrolite_vt::VirtualTexture::single_texture(&gpu, &linear, &vp.pipelines)
         };
+        vt.update_single_from_texture(edited.texture.clone(), (edited.width, edited.height));
+        v.preview_edit = Some(ep);
 
         // Fit to the last-known viewport; fall back to the image's own size when
         // the canvas has not painted yet (zoom is normalized away by fit anyway).
@@ -113,23 +131,30 @@ impl FerroliteApp {
             });
     }
 
-    /// Compose the camera→working 3×3 for the open viewer + current working space.
+    /// Compose a source→working 3×3 for `profile` under the current working space.
+    fn source_to_working(&self, profile: &ferrolite_decode::ColorProfile) -> [[f32; 3]; 3] {
+        ferrolite_color::camera_to_working(
+            profile.xyz_to_cam,
+            ferrolite_color::Xy {
+                x: profile.white_xy[0],
+                y: profile.white_xy[1],
+            },
+            self.state.working_space,
+        )
+    }
+
+    /// camera→working for the open viewer's RAW profile (full-res tier).
     fn camera_to_working(&self) -> [[f32; 3]; 3] {
-        let ws = self.state.working_space;
         match self.state.viewer.as_ref() {
-            Some(v) => {
-                let p = &v.color_profile;
-                ferrolite_color::camera_to_working(
-                    p.xyz_to_cam,
-                    ferrolite_color::Xy {
-                        x: p.white_xy[0],
-                        y: p.white_xy[1],
-                    },
-                    ws,
-                )
-            }
+            Some(v) => self.source_to_working(&v.color_profile),
             None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
+    }
+
+    /// sRGB→working for the preview tier: the embedded preview and Standard images
+    /// are sRGB-primaries, so they convert via the sRGB fallback profile.
+    fn preview_to_working(&self) -> [[f32; 3]; 3] {
+        self.source_to_working(&ferrolite_decode::ColorProfile::srgb_fallback())
     }
 
     /// Handle a tier-2 full decode: build a `PyramidTileSource` from the
@@ -213,28 +238,26 @@ impl FerroliteApp {
                     let pyramid =
                         std::sync::Arc::new(ferrolite_pipeline::GpuPyramidSource::new(&gpu, image));
                     v.pyramid = Some(std::sync::Arc::clone(&pyramid));
-                    if !v.op_stack.is_identity() {
-                        // Build the per-tile edit pipeline + attach the producer.
-                        let ctx_arc =
-                            std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                        let tep = ferrolite_pipeline::TileEditPipeline::new(
-                            ctx_arc,
-                            pyramid,
-                            v.op_stack.clone(),
-                            cam,
-                        );
-                        v.edit_producer = Some(viewer::EditTileProducer::new(tep));
-                        // Mark the VT producer-driven + bump its version so the
-                        // producer fills tiles instead of the CPU path.
-                        let version = v.opstack_version.max(1);
-                        let mut renderer = rs.renderer.write();
-                        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>()
-                        {
-                            if g.image_id == image_id {
-                                if let Some(full) = g.full.as_mut() {
-                                    full.set_producing(true);
-                                    full.set_opstack_version(&g.ctx, version);
-                                }
+                    // Always attach the full-res producer so the sparse VT tiles
+                    // pass through camera→working (the raw camera-native CPU path
+                    // must never reach the working→display tail). Identity stack =
+                    // unedited-but-color-managed.
+                    let ctx_arc =
+                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let tep = ferrolite_pipeline::TileEditPipeline::new(
+                        ctx_arc,
+                        pyramid,
+                        v.op_stack.clone(),
+                        cam,
+                    );
+                    v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                    let version = v.opstack_version.max(1);
+                    let mut renderer = rs.renderer.write();
+                    if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                        if g.image_id == image_id {
+                            if let Some(full) = g.full.as_mut() {
+                                full.set_producing(true);
+                                full.set_opstack_version(&g.ctx, version);
                             }
                         }
                     }
@@ -252,8 +275,10 @@ impl FerroliteApp {
             return;
         };
         // Compute before taking the exclusive `viewer` borrow below:
-        // `camera_to_working` itself borrows `self.state.viewer` immutably.
+        // `camera_to_working`/`preview_to_working` themselves borrow
+        // `self.state.viewer` immutably.
         let cam = self.camera_to_working();
+        let pw = self.preview_to_working();
         let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
@@ -292,7 +317,7 @@ impl FerroliteApp {
                     ctx_arc,
                     &src,
                     shown.clone(),
-                    cam,
+                    pw,
                 ));
             }
         }
@@ -315,11 +340,12 @@ impl FerroliteApp {
 
         // Full-res tier (only meaningful once the full decode + pyramid exist).
         // Render `shown` here too (not the live `stack`): in before/after mode
-        // `shown` is identity, so `set_producing(false)` makes the sparse VT fall
-        // back to the raw CPU-upload path = the correct unedited "before" at 1:1,
-        // regardless of the edited stack's geometry/halo. The opstack_version bump
-        // above invalidates stale produced tiles so the new (edited or raw) tiles
-        // are re-produced on toggle.
+        // `shown` is identity. The sparse VT is now ALWAYS producer-driven: the
+        // "before" (identity `shown`) is rendered by the producer with an
+        // identity op-stack + camera→working — the correct unedited image in
+        // working space — never the raw camera-native CPU path. The
+        // opstack_version bump above invalidates stale produced tiles so the new
+        // (edited or unedited) tiles are re-produced on toggle.
         if v.full_ready {
             let rebuild = v.edit_producer.is_none()
                 || crate::develop::ops_edit::needs_full_rebuild(&old, &shown);
@@ -336,13 +362,12 @@ impl FerroliteApp {
                 producer.set_stack(shown.clone());
             }
             let version = v.opstack_version;
-            let identity = shown.is_identity();
             let image_id = v.image_id;
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == image_id {
                     if let Some(full) = g.full.as_mut() {
-                        full.set_producing(!identity);
+                        full.set_producing(true);
                         full.set_opstack_version(&g.ctx, version);
                     }
                 }
@@ -408,6 +433,7 @@ impl FerroliteApp {
         }
 
         let cam = self.camera_to_working();
+        let pw = self.preview_to_working();
         let Some(v) = self.state.viewer.as_mut() else {
             ctx.request_repaint();
             return;
@@ -415,7 +441,7 @@ impl FerroliteApp {
 
         // Preview tier: update the matrix, re-evaluate, swap the displayed texture.
         if let Some(ep) = v.preview_edit.as_mut() {
-            ep.set_color_matrix(cam);
+            ep.set_color_matrix(pw);
             let img = ep.evaluate();
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {

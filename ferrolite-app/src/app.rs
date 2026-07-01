@@ -31,10 +31,14 @@ impl FerroliteApp {
             // open will borrow from this holder instead of compiling a new pipeline.
             let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
             let pipelines = ferrolite_vt::DisplayPipelines::new(&gpu, rs.target_format);
+            let histogram = ferrolite_vt::HistogramPipeline::new(&gpu);
             rs.renderer
                 .write()
                 .callback_resources
-                .insert(viewer::ViewerPipelines { pipelines });
+                .insert(viewer::ViewerPipelines {
+                    pipelines,
+                    histogram,
+                });
             // Pre-warm the edit-pass shaders too, on the same device, so the
             // first image open reuses cached modules instead of compiling
             // ~8 compute shaders synchronously on the UI thread.
@@ -130,6 +134,83 @@ impl FerroliteApp {
                 full: None,
                 image_id,
             });
+        self.mark_histogram_dirty();
+    }
+
+    /// Flag the histogram stale so the next frame recomputes it (debounced).
+    fn mark_histogram_dirty(&mut self) {
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.histogram.mark_dirty();
+        }
+    }
+
+    /// Debounced GPU histogram recompute over the on-screen preview texture.
+    /// While a readback is in flight, poll the device (non-blocking) so the
+    /// `map_async` callback fires and keep repainting until it delivers. Never
+    /// blocks the UI thread and never reads back the image (only the 4 KB bins).
+    fn maybe_update_histogram(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let dt = ctx.input(|i| i.stable_dt);
+        let (inflight, do_dispatch, image_id) = {
+            let Some(v) = self.state.viewer.as_mut() else {
+                return;
+            };
+            v.histogram.tick(dt);
+            (
+                v.histogram.inflight,
+                v.histogram.should_dispatch(),
+                v.image_id,
+            )
+        };
+
+        // A readback is pending: drive the map callback + keep the frame loop alive.
+        if inflight {
+            let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+            gpu.device.poll(wgpu::Maintain::Poll);
+            ctx.request_repaint();
+            return;
+        }
+        if !do_dispatch {
+            return;
+        }
+
+        let matrix = ferrolite_color::working_to_display(self.state.working_space);
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let dispatched = {
+            let renderer = rs.renderer.read();
+            let Some(g) = renderer.callback_resources.get::<viewer::ViewerGpu>() else {
+                return;
+            };
+            if g.image_id != image_id {
+                return;
+            }
+            let (Some(tex), Some(dims)) = (g.preview.single_texture_arc(), g.preview.single_dims())
+            else {
+                return;
+            };
+            let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
+                return;
+            };
+            vp.histogram.dispatch(&gpu, &tex, dims, matrix);
+            let tx = self.state.tx.clone();
+            let egui_ctx = ctx.clone();
+            vp.histogram.read_async(move |bins| {
+                let _ = tx.send(crate::events::AppEvent::HistogramReady { image_id, bins });
+                egui_ctx.request_repaint();
+            });
+            true
+        };
+        if dispatched {
+            if let Some(v) = self.state.viewer.as_mut() {
+                v.histogram.inflight = true;
+                v.histogram.dirty = false;
+            }
+            // Poll now so the just-submitted work can complete promptly.
+            gpu.device.poll(wgpu::Maintain::Poll);
+            ctx.request_repaint();
+        }
     }
 
     /// Compose a source→working 3×3 for `profile` under the current working space.
@@ -265,6 +346,7 @@ impl FerroliteApp {
                 }
             }
         }
+        self.mark_histogram_dirty();
     }
 
     /// Apply `stack` to both render tiers (GPU + memory only; no history/persist).
@@ -375,6 +457,7 @@ impl FerroliteApp {
             }
         }
         v.idle = false; // wake the drive loop so producer tiles re-render
+        self.mark_histogram_dirty();
     }
 
     /// Apply a panel/widget edit: update both tiers immediately; on commit (drag
@@ -486,6 +569,7 @@ impl FerroliteApp {
             }
         }
         v.idle = false;
+        self.mark_histogram_dirty();
         ctx.request_repaint();
     }
 }
@@ -802,6 +886,15 @@ impl eframe::App for FerroliteApp {
                 }
                 crate::events::AppEvent::IngestDone => {
                     ingest_done = true;
+                }
+                crate::events::AppEvent::HistogramReady { image_id, bins } => {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == *image_id {
+                            v.histogram.bins = Some(bins.clone());
+                            v.histogram.inflight = false;
+                        }
+                    }
+                    ctx.request_repaint();
                 }
                 _ => {}
             }
@@ -1182,6 +1275,10 @@ impl eframe::App for FerroliteApp {
                 );
                 v.ops_read_handle = Some(h);
             }
+        }
+
+        if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
+            self.maybe_update_histogram(ctx, frame);
         }
 
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {

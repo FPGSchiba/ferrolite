@@ -17,6 +17,8 @@ use ferrolite_vt::{DisplayPipelines, ViewTransform, VirtualTexture};
 /// open borrows from this so no per-open pipeline compilation occurs.
 pub struct ViewerPipelines {
     pub pipelines: DisplayPipelines,
+    /// Once-built histogram compute pipeline (pre-warmed at startup, reused).
+    pub histogram: ferrolite_vt::HistogramPipeline,
 }
 
 /// Holder stashed in `callback_resources`: the viewer's GPU context plus the

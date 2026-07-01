@@ -20,6 +20,58 @@ use ferrolite_vt::ViewTransform;
 /// long enough to avoid a hard pop.
 pub const CROSSFADE_SECS: f32 = 0.15;
 
+/// Debounce (seconds) between a preview recompute and the histogram dispatch, so
+/// a slider drag coalesces into one compute rather than one per frame.
+pub const HIST_DEBOUNCE: f32 = 0.10;
+
+/// Per-viewer histogram state: the last delivered bins (1024 = 256×{R,G,B,luma}),
+/// plus debounce + in-flight bookkeeping. `bins` is drawn read-only in the panel.
+pub struct HistogramState {
+    pub bins: Option<Vec<u32>>,
+    /// `pub(crate)` (rather than private) because `app.rs`'s
+    /// `maybe_update_histogram`/event handler drive these directly across the
+    /// module boundary; `mark_dirty`/`tick`/`should_dispatch` remain the normal
+    /// entry points for everything else.
+    pub(crate) dirty: bool,
+    pub(crate) inflight: bool,
+    since_dirty: f32,
+}
+
+impl HistogramState {
+    pub fn new() -> Self {
+        Self {
+            bins: None,
+            dirty: true, // compute once as soon as the preview is up
+            inflight: false,
+            since_dirty: 0.0,
+        }
+    }
+
+    /// A preview recompute happened: recompute the histogram after the debounce.
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.since_dirty = 0.0;
+    }
+
+    /// Advance the debounce timer (only while dirty).
+    pub fn tick(&mut self, dt: f32) {
+        if self.dirty {
+            self.since_dirty += dt;
+        }
+    }
+
+    /// True when a fresh compute should be dispatched now.
+    pub fn should_dispatch(&self) -> bool {
+        self.dirty && !self.inflight && self.since_dirty >= HIST_DEBOUNCE
+    }
+}
+
+impl Default for HistogramState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct ViewerState {
     pub image_id: i64,
     pub path: PathBuf,
@@ -94,6 +146,8 @@ pub struct ViewerState {
     pub ops_loaded: bool,
     /// Handle for the in-flight op-stack read job; cancelled on navigation.
     pub ops_read_handle: Option<JobHandle>,
+    /// Live GPU histogram of the on-screen preview (spec §7.1).
+    pub histogram: HistogramState,
 }
 
 impl ViewerState {
@@ -133,6 +187,7 @@ impl ViewerState {
             hsl_band: 0,
             ops_loaded: false,
             ops_read_handle: None,
+            histogram: HistogramState::new(),
         }
     }
 

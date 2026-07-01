@@ -24,7 +24,9 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.monospace("GPU: idle"); // static until Plan 4
             ui.monospace("·");
-            ui.monospace(format!("{} indexed", state.indexed));
+            // "indexed / scanned": Phase A inserts stat-only rows (scanned),
+            // Phase B fills their metadata (indexed).
+            ui.monospace(format!("{} / {} indexed", state.indexed, state.scanned));
             ui.monospace("·");
             ui.monospace(activity_text(
                 active,

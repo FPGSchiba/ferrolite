@@ -30,6 +30,9 @@ impl Lru {
             None
         }
     }
+    fn clear(&mut self) {
+        self.order.clear();
+    }
 }
 
 pub struct TextureCache {
@@ -60,6 +63,13 @@ impl TextureCache {
             self.textures.remove(&evict);
         }
         self.textures.insert(id, tex);
+    }
+    /// Drop all cached textures (and LRU order). Used when returning from the
+    /// GPU-heavy Develop viewer, whose full-res `VirtualTexture` work can leave
+    /// the shared wgpu textures stale — forcing the grid to re-upload fresh.
+    pub fn clear(&mut self) {
+        self.textures.clear();
+        self.lru.clear();
     }
     /// Number of cached textures. Not called in the current UI but kept as a
     /// public API for future diagnostics / Plan 4 memory-pressure logic.

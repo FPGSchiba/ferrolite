@@ -98,6 +98,37 @@ impl Catalog {
         Ok(id)
     }
 
+    /// Insert a stat-only `Pending` row for the instant index pass, leaving any
+    /// existing row (already indexed/done) untouched. Cheap: no file read.
+    pub fn insert_pending(&self, img: &NewImage) -> Result<(), CatalogError> {
+        self.conn().execute(
+            "INSERT INTO images
+               (folder_id, filename, mtime, size, camera_make, camera_model,
+                width, height, orientation, capture_time, iso, decode_status, kind,
+                rating, added_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+             ON CONFLICT(folder_id, filename) DO NOTHING",
+            rusqlite::params![
+                img.folder_id,
+                img.filename,
+                img.mtime,
+                img.size,
+                img.make,
+                img.model,
+                img.width,
+                img.height,
+                img.orientation.to_exif(),
+                img.capture_time,
+                img.iso,
+                img.decode_status.as_i64(),
+                img.kind.as_i64(),
+                img.rating.as_i64(),
+                img.added_at,
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn image_by_name(
         &self,
         folder_id: i64,

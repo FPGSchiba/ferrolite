@@ -503,8 +503,6 @@ impl AppState {
 
     /// Load the persisted export queue (spec §8.4). Cache contract: on DB error
     /// keep an empty in-memory queue and surface a warning; never panic.
-    // Task 6 (startup wiring) is the first caller; remove this allow then.
-    #[allow(dead_code)]
     pub fn load_export_queue(&mut self) {
         match self.reads.list_export_queue() {
             Ok(ids) => self.export_queue = ids,
@@ -562,8 +560,6 @@ impl AppState {
     }
 
     /// Empty the export queue and persist the change.
-    // Task 6/7 (queue list "Clear") is the first non-test caller; remove this allow then.
-    #[allow(dead_code)]
     pub fn queue_clear(&mut self) {
         self.export_queue.clear();
         self.persist_queue(|cat| cat.clear_export_queue());

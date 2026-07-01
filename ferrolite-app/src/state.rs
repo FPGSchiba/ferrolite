@@ -389,6 +389,10 @@ impl AppState {
                 old.cancel_loads();
             }
             self.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
+            // Keep the current selection in sync with the viewed image so the
+            // bottom status bar (filename · dims · ISO, driven by `selected`)
+            // updates on Develop filmstrip navigation, not just library clicks.
+            self.selected = Some(rec.id);
         }
     }
 

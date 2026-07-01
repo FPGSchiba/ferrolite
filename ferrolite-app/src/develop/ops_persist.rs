@@ -1,5 +1,5 @@
 //! Off-thread frl:ops sidecar persistence (mirrors `metadata.rs`): the in-memory
-//! OpStack edit is immediate; this job follows and reports a MetadataResult.
+//! OpStack edit is immediate; this job follows and reports an OpsSaved event.
 
 use crate::events::AppEvent;
 use ferrolite_catalog::Catalog;
@@ -39,7 +39,7 @@ pub fn spawn_ops_write(
                 warning = Some(format!("catalog write failed: {e}"));
             }
         }
-        let _ = tx.send(AppEvent::MetadataResult { ok, warning });
+        let _ = tx.send(AppEvent::OpsSaved { ok, warning });
         ctx.request_repaint();
     });
 }

@@ -334,15 +334,7 @@ impl FerroliteApp {
         if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
             rec.has_edits = has_edits; // optimistic cache update (filmstrip badge)
         }
-        crate::develop::ops_persist::spawn_ops_write(
-            &self.state.jobs,
-            &self.state.writer,
-            &self.state.tx,
-            ctx,
-            image_id,
-            path,
-            stack,
-        );
+        self.persist_ops(ctx, image_id, path, stack);
     }
 }
 
@@ -468,6 +460,28 @@ impl FerroliteApp {
         self.state.open_image_in_viewer(rec);
         self.module = crate::module::Module::Develop;
         ctx.request_repaint();
+    }
+
+    /// Increment the inflight counter and spawn an ops-persist job. Both call
+    /// sites (apply_edit commit branch + undo/redo handler) must go through here
+    /// so the counter stays balanced with the single `OpsSaved` event each job emits.
+    fn persist_ops(
+        &mut self,
+        ctx: &egui::Context,
+        image_id: i64,
+        path: std::path::PathBuf,
+        stack: ferrolite_pipeline::OpStack,
+    ) {
+        self.state.ops_save_inflight += 1;
+        crate::develop::ops_persist::spawn_ops_write(
+            &self.state.jobs,
+            &self.state.writer,
+            &self.state.tx,
+            ctx,
+            image_id,
+            path,
+            stack,
+        );
     }
 
     /// Cancel the sparse VT's in-flight tile-load jobs for the named viewer.
@@ -874,15 +888,7 @@ impl eframe::App for FerroliteApp {
                         if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
                             rec.has_edits = !stack.is_identity();
                         }
-                        crate::develop::ops_persist::spawn_ops_write(
-                            &self.state.jobs,
-                            &self.state.writer,
-                            &self.state.tx,
-                            ctx,
-                            image_id,
-                            path,
-                            stack,
-                        );
+                        self.persist_ops(ctx, image_id, path, stack);
                     }
                 }
             }

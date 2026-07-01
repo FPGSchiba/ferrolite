@@ -98,6 +98,13 @@ pub struct AppState {
     /// Set on double-click or "Rename" context-menu; cleared on Enter/blur.
     pub renaming: Option<(RenameKind, i64, String)>,
 
+    /// Number of ops-persist jobs currently in flight (incremented before
+    /// `spawn_ops_write`, decremented on `OpsSaved`). Drives the save-state indicator.
+    pub ops_save_inflight: usize,
+    /// Set to `true` when the most recent ops-persist completed with `ok=false`.
+    /// Cleared on the next successful save. Drives the "Save failed" indicator.
+    pub ops_save_failed: bool,
+
     // ── Cached toolbar metadata-filter aggregates (populated by reload_vocab) ──
     /// Distinct camera-model strings from the catalog.
     pub camera_options: Vec<String>,
@@ -156,6 +163,8 @@ impl AppState {
             iso_range: None,
             date_range: None,
             renaming: None,
+            ops_save_inflight: 0,
+            ops_save_failed: false,
         })
     }
 
@@ -414,6 +423,8 @@ impl AppState {
             iso_range: None,
             date_range: None,
             renaming: None,
+            ops_save_inflight: 0,
+            ops_save_failed: false,
         }
     }
 

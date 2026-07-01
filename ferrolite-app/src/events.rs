@@ -47,6 +47,10 @@ pub enum AppEvent {
         image_id: i64,
         stack: ferrolite_pipeline::OpStack,
     },
+    /// Result of an off-thread frl:ops persist (sidecar + catalog `has_edits`).
+    /// Distinct from `MetadataResult` (rating/flag/tag path) so the save-state
+    /// indicator can track ops-persist inflight count and failure separately.
+    OpsSaved { ok: bool, warning: Option<String> },
 }
 
 impl AppState {
@@ -96,6 +100,16 @@ impl AppState {
             }
             // Handled in `app.rs` (needs GPU state); nothing to fold here.
             AppEvent::OpsLoaded { .. } => None,
+            AppEvent::OpsSaved { ok, warning } => {
+                self.ops_save_inflight = self.ops_save_inflight.saturating_sub(1);
+                self.ops_save_failed = !ok;
+                match warning {
+                    Some(w) => self.warning = Some(w),
+                    None if ok => self.warning = None,
+                    None => {}
+                }
+                None
+            }
         }
     }
 }
@@ -188,6 +202,39 @@ mod tests {
             s.warning,
             Some("sidecar write failed".into()),
             "warning must be set when provided"
+        );
+    }
+
+    #[test]
+    fn ops_saved_ok_decrements_inflight_and_clears_failed() {
+        let mut s = AppState::for_test();
+        s.ops_save_inflight = 1;
+        s.ops_save_failed = true;
+        s.warning = Some("prior".into());
+
+        s.apply(AppEvent::OpsSaved {
+            ok: true,
+            warning: None,
+        });
+
+        assert_eq!(s.ops_save_inflight, 0, "inflight decremented to 0");
+        assert!(!s.ops_save_failed, "failed cleared on ok=true");
+        assert_eq!(s.warning, None, "warning cleared on clean ok=true");
+    }
+
+    #[test]
+    fn ops_saved_ok_saturates_at_zero_when_already_zero() {
+        let mut s = AppState::for_test();
+        s.ops_save_inflight = 0;
+
+        s.apply(AppEvent::OpsSaved {
+            ok: true,
+            warning: None,
+        });
+
+        assert_eq!(
+            s.ops_save_inflight, 0,
+            "saturating_sub must not underflow"
         );
     }
 }

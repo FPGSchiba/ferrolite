@@ -4,6 +4,7 @@
 
 use crate::develop::{curve_widget, hsl_widget, ops_edit};
 use crate::state::AppState;
+use crate::theme;
 use crate::widgets::slider::EguiSlider;
 use ferrolite_pipeline::{Aspect, Geometry, Op, OpKind, OpStack};
 
@@ -19,6 +20,32 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
         None => return None,
     };
     let mut out: Option<EditOutcome> = None;
+
+    // ── Save-state indicator ──
+    // Edits auto-save: each commit calls persist_ops → spawn_ops_write off-thread.
+    // This compact line surfaces the current save state so the author can confirm
+    // that edits are being persisted (there is no manual Ctrl+S).
+    {
+        let image_id = state.viewer.as_ref().map(|v| v.image_id);
+        let has_edits = image_id
+            .and_then(|id| state.images.iter().find(|r| r.id == id))
+            .map(|r| r.has_edits)
+            .unwrap_or(false);
+
+        let (label, color) = if state.ops_save_inflight > 0 {
+            ("Saving\u{2026}", theme::TEXT_DIM)
+        } else if state.ops_save_failed {
+            ("Save failed", theme::SEMANTIC_RED)
+        } else if has_edits {
+            ("Saved", theme::SEMANTIC_GREEN)
+        } else {
+            ("No edits", theme::TEXT_FAINT)
+        };
+
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(label).color(color).size(11.0));
+        ui.add_space(4.0);
+    }
 
     // ── Basic ──
     egui::CollapsingHeader::new("Basic")

@@ -91,6 +91,10 @@ pub struct AppState {
     /// open (spec §8.3).
     pub export_dialog: Option<crate::export::ExportDialogState>,
 
+    /// Aggregate progress + cancel handles for a running batch export (spec §8.4).
+    /// `None` when no batch is active.
+    pub batch: Option<crate::export::batch::BatchExportState>,
+
     /// Active filter state (search text, rating, flags, tags, etc.).
     pub filter: FilterState,
     /// Which set of images is shown (folder, all, collection, recently added).
@@ -180,6 +184,7 @@ impl AppState {
             pending_remove: None,
             viewer: None,
             export_dialog: None,
+            batch: None,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),
@@ -510,6 +515,7 @@ impl AppState {
             pending_remove: None,
             viewer: None,
             export_dialog: None,
+            batch: None,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),

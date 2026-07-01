@@ -14,6 +14,7 @@ use ferrolite_pipeline::GpuPyramidSource;
 use crate::events::AppEvent;
 use crate::state::AppState;
 
+pub mod batch;
 pub mod settings_form;
 
 use settings_form::settings_form;

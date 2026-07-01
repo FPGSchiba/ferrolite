@@ -134,8 +134,11 @@ pub fn title_bar(
         })
     };
     let btn_pad = ui.spacing().button_padding.x * 2.0;
-    let tabs_w =
-        text_w("Library") + text_w("Develop") + btn_pad * 2.0 + ui.spacing().item_spacing.x;
+    let tabs_w = text_w("Library")
+        + text_w("Develop")
+        + text_w("Export")
+        + btn_pad * 3.0
+        + ui.spacing().item_spacing.x * 2.0;
     let center_rect = Rect::from_center_size(bar.center(), vec2(tabs_w, bar.height()));
     ui.allocate_new_ui(
         UiBuilder::new()
@@ -143,16 +146,22 @@ pub fn title_bar(
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
             if ui
-                .selectable_label(module.is_library(), "Library")
+                .selectable_label(*module == Module::Library, "Library")
                 .clicked()
             {
                 *module = Module::Library;
             }
             if ui
-                .selectable_label(!module.is_library(), "Develop")
+                .selectable_label(*module == Module::Develop, "Develop")
                 .clicked()
             {
                 *module = Module::Develop;
+            }
+            if ui
+                .selectable_label(*module == Module::Export, "Export")
+                .clicked()
+            {
+                *module = Module::Export;
             }
         },
     );

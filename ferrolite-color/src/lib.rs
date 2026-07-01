@@ -14,7 +14,7 @@ mod oetf;
 mod tail;
 mod working_space;
 
-// pub use adapt::chromatic_adaptation;
+pub use adapt::chromatic_adaptation;
 // pub use camera::camera_to_working;
 // pub use error::ColorError;
 // pub use icc::{emit_icc, parse_icc};

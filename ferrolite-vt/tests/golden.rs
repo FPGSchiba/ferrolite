@@ -380,3 +380,37 @@ fn rung4_feedback_makes_center_tile_resident() {
         "feedback round-trip should make the center tile {center:?} resident"
     );
 }
+
+/// The working→display matrix uniform is applied before the sRGB OETF. A
+/// channel-swap matrix must visibly change the rendered output, proving the
+/// tail is wired end-to-end (bind group + layout + shader).
+#[test]
+fn display_tail_applies_matrix() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    // Channel-swap matrix (row-major): display.r = g, .g = b, .b = r.
+    pipelines.set_display_matrix(
+        &ctx.queue,
+        [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+    );
+    let img = common::split_image();
+    let (w, h) = (64u32, 64u32);
+    let view = ViewTransform::fit((img.width, img.height), (w as f32, h as f32));
+    let pixels =
+        VirtualTexture::render_to_image(&ctx, &img, &view, (w as f32, h as f32), w, h, &pipelines);
+
+    let golden_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/display_tail_swap.png"
+    );
+    if std::env::var("UPDATE_GOLDEN").is_ok() || !std::path::Path::new(golden_path).exists() {
+        image::save_buffer(golden_path, &pixels, w, h, image::ColorType::Rgba8).unwrap();
+        eprintln!("wrote golden {golden_path}");
+        return;
+    }
+    let golden = image::open(golden_path).unwrap().to_rgba8();
+    assert!(common::max_abs_diff(&pixels, golden.as_raw()) <= TOL);
+}

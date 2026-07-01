@@ -235,6 +235,76 @@ impl FerroliteApp {
         }
     }
 
+    /// Open the single-file export dialog for the current viewer image.
+    fn open_export_dialog(&mut self) {
+        if self.state.viewer.is_some() {
+            self.state.export_dialog = Some(crate::export::ExportDialogState::default());
+        }
+    }
+
+    /// The user confirmed the export dialog: pick a destination and spawn the job.
+    fn confirm_export(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(dialog) = self.state.export_dialog.take() else {
+            return;
+        };
+        let options = dialog.options;
+
+        // Compute camera→working BEFORE any borrow of `self.state.viewer` is held,
+        // since `camera_to_working()` itself immutably borrows `self`.
+        let camera_to_working = self.camera_to_working();
+
+        let Some(v) = self.state.viewer.as_ref() else {
+            return;
+        };
+        let Some(pyramid) = v.pyramid.clone() else {
+            self.state.warning = Some("Image still loading; cannot export yet.".to_string());
+            return;
+        };
+        let source_path = v.path.clone();
+        let image_id = v.image_id;
+        let stack = v.op_stack.clone();
+
+        // Default filename: source basename + new extension.
+        let stem = source_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "export".to_string());
+        let ext = options.format.extension();
+        let default_name = format!("{stem}.{ext}");
+
+        let Some(dest) = rfd::FileDialog::new()
+            .set_file_name(default_name)
+            .add_filter(options.format.label(), &[ext])
+            .save_file()
+        else {
+            return; // user cancelled the save dialog
+        };
+
+        // Build the shared GpuContext from eframe's render state.
+        let Some(rs) = frame.wgpu_render_state() else {
+            self.state.warning = Some("No GPU render state; cannot export.".to_string());
+            return;
+        };
+        let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+
+        let working_space = self.state.working_space;
+
+        crate::export::spawn_export(
+            &self.state,
+            ctx,
+            gpu,
+            pyramid,
+            stack,
+            camera_to_working,
+            working_space,
+            options,
+            source_path,
+            dest,
+            image_id,
+        );
+        self.state.warning = Some("Exporting…".to_string());
+    }
+
     /// sRGB→working for the preview tier: the embedded preview and Standard images
     /// are sRGB-primaries, so they convert via the sRGB fallback profile.
     fn preview_to_working(&self) -> [[f32; 3]; 3] {
@@ -1050,6 +1120,33 @@ impl eframe::App for FerroliteApp {
                     }
                     ctx.request_repaint();
                 }
+                crate::events::AppEvent::ExportProgress {
+                    image_id,
+                    done,
+                    total,
+                } => {
+                    if self
+                        .state
+                        .viewer
+                        .as_ref()
+                        .is_some_and(|v| v.image_id == *image_id)
+                    {
+                        self.state.warning = Some(format!("Exporting… {done}/{total}"));
+                    }
+                    ctx.request_repaint();
+                    continue;
+                }
+                crate::events::AppEvent::ExportFinished {
+                    image_id: _,
+                    ok,
+                    message,
+                } => {
+                    // Surface success + warnings, or the failure, in the status bar.
+                    let _ = ok;
+                    self.state.warning = Some(message.clone());
+                    ctx.request_repaint();
+                    continue;
+                }
                 _ => {}
             }
             if let Some((id, rgba, w, h)) = self.state.apply(event) {
@@ -1114,7 +1211,16 @@ impl eframe::App for FerroliteApp {
             .exact_height(30.0)
             .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
             .show(ctx, |ui| {
-                crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1");
+                let export_enabled = self
+                    .state
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.pyramid.is_some());
+                let menu_action =
+                    crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1", export_enabled);
+                if menu_action == Some(crate::chrome::MenuAction::ExportImage) {
+                    self.open_export_dialog();
+                }
             });
 
         let mut film_clicked: Option<i64> = None;
@@ -1599,6 +1705,23 @@ impl eframe::App for FerroliteApp {
                 });
             if !open {
                 self.state.pending_remove = None;
+            }
+        }
+
+        // Single-file export dialog (spec §8.3).
+        if self.state.export_dialog.is_some() {
+            let outcome = {
+                let dialog = self.state.export_dialog.as_mut().unwrap();
+                crate::export::draw_dialog(ctx, dialog)
+            };
+            match outcome {
+                Some(crate::export::DialogOutcome::Cancel) => {
+                    self.state.export_dialog = None;
+                }
+                Some(crate::export::DialogOutcome::Confirm) => {
+                    self.confirm_export(ctx, frame);
+                }
+                None => {}
             }
         }
 

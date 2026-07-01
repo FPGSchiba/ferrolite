@@ -11,6 +11,11 @@ use std::sync::Arc;
 const W: u32 = 64;
 const H: u32 = 48;
 
+/// Identity camera->working matrix — these goldens predate Spec 3's color
+/// pipeline and assert on the existing (pre-color-matrix) op chain, so the
+/// color matrix must be a no-op here.
+const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
 #[test]
 fn source_upload_blit_matches_golden() {
     let Some(ctx) = GpuContext::headless() else {
@@ -30,7 +35,7 @@ fn exposure_plus_one_ev_matches_golden() {
         return;
     };
     let stack = OpStack::default().set_op(Op::Exposure(Exposure { ev: 1.0 }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "exposure_plus1.png");
 }
@@ -45,7 +50,7 @@ fn white_balance_warm_matches_golden() {
         temp: 0.5,
         tint: -0.2,
     }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "wb_warm.png");
 }
@@ -61,7 +66,7 @@ fn identity_stack_matches_source_render() {
     // Source rendered directly through the blit.
     let source_render = blit_to_rgba8(&ctx, &upload_source(&ctx, &src));
     // Empty stack through the full pipeline must match within tolerance.
-    let mut pipe = EditPipeline::new(ctx.clone(), &src, OpStack::default());
+    let mut pipe = EditPipeline::new(ctx.clone(), &src, OpStack::default(), IDENTITY);
     let edited = pipe.render_to_image();
     let diff = common::max_abs_diff(&source_render, &edited);
     assert!(
@@ -77,7 +82,7 @@ fn contrast_boost_matches_golden() {
         return;
     };
     let stack = OpStack::default().set_op(Op::Contrast(Contrast { amount: 0.5 }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "contrast_boost.png");
 }
@@ -95,7 +100,7 @@ fn full_stack_matches_golden() {
             tint: 0.0,
         }))
         .set_op(Op::Contrast(Contrast { amount: 0.4 }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "full_stack.png");
 }
@@ -107,7 +112,12 @@ fn editing_one_op_reevaluates_minimally() {
         return;
     };
     let base = OpStack::default().set_op(Op::Exposure(Exposure { ev: 0.2 }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), base.clone());
+    let mut pipe = EditPipeline::new(
+        Arc::new(ctx),
+        &common::gradient(W, H),
+        base.clone(),
+        IDENTITY,
+    );
 
     // First evaluate runs every node exactly once (source + one per op).
     let _ = pipe.evaluate();
@@ -123,15 +133,16 @@ fn editing_one_op_reevaluates_minimally() {
         "no node re-ran when nothing changed"
     );
 
-    // Dirtying the root op (exposure) re-runs it + every downstream op; the
-    // source node stays cached -> exactly node_count - 1 re-evaluations.
+    // Dirtying exposure re-runs it + every downstream op; the source node AND
+    // the upstream camera→working color-matrix node (both ahead of exposure in
+    // the chain) stay cached -> exactly node_count - 2 re-evaluations.
     let prev = pipe.eval_count();
     pipe.set_stack(OpStack::default().set_op(Op::Exposure(Exposure { ev: 1.5 })));
     let _ = pipe.evaluate();
     assert_eq!(
         pipe.eval_count(),
-        prev + (pipe.node_count() - 1),
-        "exposure + every downstream op re-evaluated (source stays cached)"
+        prev + (pipe.node_count() - 2),
+        "exposure + downstream re-evaluated; source and color-matrix stay cached"
     );
 }
 
@@ -144,7 +155,7 @@ fn tone_curve_darken_midtones_matches_golden() {
     let stack = OpStack::default().set_op(Op::ToneCurve(ToneCurve {
         points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
     }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "tone_curve.png");
 }
@@ -159,7 +170,7 @@ fn sharpen_matches_golden() {
         amount: 0.8,
         radius: 2,
     }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "sharpen.png");
 }
@@ -178,7 +189,7 @@ fn hsl_shift_matches_golden() {
             lum: 0.0,
         }; 8],
     }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "hsl.png");
 }
@@ -199,7 +210,7 @@ fn geometry_crop_rotate_matches_golden() {
         angle_deg: 10.0,
         aspect: Aspect::Free,
     }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     // out dims = round(0.8 * 64) x round(0.8 * 48) = 51 x 38.
     common::assert_golden(&pixels, 51, 38, "geometry_crop_rotate.png");
@@ -242,7 +253,7 @@ fn full_seven_op_stack_matches_golden() {
             angle_deg: 3.0,
             aspect: Aspect::Free,
         }));
-    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack);
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     // out dims = round(0.9*64) x round(0.9*48) = 58 x 43.
     common::assert_golden(&pixels, 58, 43, "full_seven_op_stack.png");
@@ -267,7 +278,7 @@ fn sharpen_tiles_match_whole_image_at_seam() {
 
     // Whole-image reference: render the edited image to display-linear f32 by
     // evaluating the EditPipeline and reading its output back.
-    let mut whole = EditPipeline::new(ctx.clone(), &src, stack.clone());
+    let mut whole = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
     let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
 
     // Per-tile producer over the GPU-resident source pyramid.

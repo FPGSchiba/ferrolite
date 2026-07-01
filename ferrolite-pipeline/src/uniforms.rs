@@ -249,6 +249,29 @@ pub fn geometry_tile_uniform(
     }
 }
 
+/// WGSL `mat3x3<f32>` uniform for a 3×3 color transform. Column-major with each
+/// column padded to 16 bytes (`[[f32; 4]; 3]`), matching WGSL layout rules.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ColorMatrixUniform {
+    pub m: [[f32; 4]; 3],
+}
+
+/// Pack a **row-major** 3×3 (`m[row][col]`) into WGSL column-major padded columns
+/// so that in-shader `M * v` equals the row-major `m · v`.
+pub fn pack_mat3(m: [[f32; 3]; 3]) -> [[f32; 4]; 3] {
+    [
+        [m[0][0], m[1][0], m[2][0], 0.0],
+        [m[0][1], m[1][1], m[2][1], 0.0],
+        [m[0][2], m[1][2], m[2][2], 0.0],
+    ]
+}
+
+/// Build the color-matrix uniform from a row-major camera→working (or any) 3×3.
+pub fn color_matrix_uniform(m: [[f32; 3]; 3]) -> ColorMatrixUniform {
+    ColorMatrixUniform { m: pack_mat3(m) }
+}
+
 pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
     let a = op.map(|c| c.amount).unwrap_or(0.0);
     let (gain, pivot) = contrast_gain_pivot(a);
@@ -473,5 +496,39 @@ mod tests {
         // Identity transform + source dims preserved.
         assert_eq!(u.m, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(u.src_dims, [600.0, 500.0]);
+    }
+
+    #[test]
+    fn pack_mat3_identity_columns() {
+        // Row-major identity packs to WGSL column-major identity (last lane = 0 pad).
+        let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        assert_eq!(
+            pack_mat3(id),
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn pack_mat3_transposes_into_columns() {
+        // Row-major m[row][col]; WGSL column c = (m[0][c], m[1][c], m[2][c], 0).
+        let m = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        assert_eq!(
+            pack_mat3(m),
+            [
+                [1.0, 4.0, 7.0, 0.0],
+                [2.0, 5.0, 8.0, 0.0],
+                [3.0, 6.0, 9.0, 0.0]
+            ]
+        );
+    }
+
+    #[test]
+    fn color_matrix_uniform_wraps_packed_mat() {
+        let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        assert_eq!(color_matrix_uniform(id).m, pack_mat3(id));
     }
 }

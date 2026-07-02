@@ -1191,6 +1191,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrolite-previews"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "ferrolite-vt"
 version = "0.0.1"
 dependencies = [

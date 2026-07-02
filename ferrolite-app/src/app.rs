@@ -2071,16 +2071,27 @@ impl eframe::App for FerroliteApp {
     /// (no `glow`), so `App::on_exit` takes no `gl` parameter — see
     /// eframe-0.29.1 src/epi.rs `#[cfg(not(feature = "glow"))] fn on_exit(&mut self)`.
     fn on_exit(&mut self) {
+        let t0 = crate::diag::enabled().then(std::time::Instant::now);
+        let before = crate::diag::enabled().then(|| self.state.jobs.stats());
+
         self.state.cancel_pending_jobs();
         self.state.jobs.request_shutdown();
-        if !self
+        let timeout_ms = 75u64;
+        let joined = self
             .state
             .jobs
-            .join_with_timeout(std::time::Duration::from_millis(75))
-        {
+            .join_with_timeout(std::time::Duration::from_millis(timeout_ms));
+        if !joined {
             eprintln!(
-                "ferrolite: worker(s) still running at close after 75ms; detaching so the app can exit"
+                "ferrolite: worker(s) still running at close after {timeout_ms}ms; detaching so the app can exit"
             );
+        }
+
+        if let (Some(t0), Some(before)) = (t0, before) {
+            let on_exit_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            crate::diag::write_log(&crate::diag::format_shutdown(
+                before, joined, timeout_ms, on_exit_ms,
+            ));
         }
     }
 }

@@ -560,6 +560,23 @@ pub fn draw_overlay(ctx: &egui::Context, s: &Snapshot) {
         });
 }
 
+/// One-line close-path report (emitted from `on_exit`, where the overlay is
+/// already gone). Shows work in flight at close and the bounded-join outcome.
+pub fn format_shutdown(before: JobStats, joined: bool, timeout_ms: u64, on_exit_ms: f64) -> String {
+    let pending: u64 = before.pending.iter().sum();
+    let detach = if joined {
+        String::new()
+    } else {
+        format!("(detach@{timeout_ms}ms)")
+    };
+    format!(
+        "[diag close] active {act} pending {pend}  joined={joined}{detach}  on_exit {ms:.0}ms",
+        act = before.active,
+        pend = pending,
+        ms = on_exit_ms,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +726,26 @@ mod tests {
         assert!(out.contains("frame"), "overlay shows frame time");
         assert!(out.contains("active 6"), "overlay shows active jobs");
         assert!(out.contains("pending"), "overlay shows a pending gauge");
+    }
+
+    #[test]
+    fn format_shutdown_reports_join_result_and_counts() {
+        let mut before = ferrolite_jobs::JobStats {
+            active: 6,
+            ..Default::default()
+        };
+        before.pending[ferrolite_jobs::Priority::Visible.index()] = 640;
+        let detached = format_shutdown(before, false, 75, 78.0);
+        assert!(detached.contains("[diag close]"));
+        assert!(detached.contains("active 6"));
+        assert!(detached.contains("pending 640"));
+        assert!(detached.contains("joined=false"));
+        assert!(detached.contains("detach@75ms"));
+        assert!(detached.contains("on_exit 78"));
+
+        let joined = format_shutdown(ferrolite_jobs::JobStats::default(), true, 75, 3.0);
+        assert!(joined.contains("joined=true"));
+        assert!(!joined.contains("detach@"), "no detach note when joined");
     }
 
     #[test]

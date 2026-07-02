@@ -4,6 +4,7 @@
 // UI module tree (app, chrome, canvas, etc.) lives in main.rs only.
 pub mod develop;
 pub mod events;
+pub mod export;
 pub mod ingest;
 pub mod library;
 pub mod metadata;

@@ -18,6 +18,31 @@ pub fn camera_to_working(xyz_to_cam: Mat3, cam_white: Xy, working: WorkingSpace)
     mul_mat3(&xyz_to_working, &mul_mat3(&adapt, &cam_to_xyz))
 }
 
+/// Row-normalize a camera→working matrix so each row sums to 1, making a
+/// white-balanced neutral (1,1,1) map to a working-space neutral (1,1,1).
+///
+/// Apply this ONLY when the camera samples have already been white-balanced by
+/// the as-shot neutral gains (as the RAW demosaic does): the DNG `ColorMatrix`
+/// that `camera_to_working` is built from independently neutralizes the camera's
+/// native response, so without this the white balance is effectively applied
+/// twice and neutrals skew (typically red). This is the dcraw/libraw camera-to-
+/// output convention. Do NOT apply it to an already-neutral source (e.g. an sRGB
+/// preview), whose transform legitimately has non-unit row sums.
+///
+/// A row summing to ~0 is left unscaled rather than producing non-finite values.
+pub fn normalize_neutral(m: Mat3) -> Mat3 {
+    let mut out = m;
+    for row in out.iter_mut() {
+        let sum = row[0] + row[1] + row[2];
+        if sum.abs() > 1e-6 {
+            row[0] /= sum;
+            row[1] /= sum;
+            row[2] /= sum;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use crate::matrix::{approx_eq_mat3, Mat3, Xy};
@@ -63,5 +88,30 @@ mod tests {
         let singular: Mat3 = [[0.0; 3]; 3];
         let m = super::camera_to_working(singular, D65, WorkingSpace::Rec2020);
         assert!(m.iter().flatten().all(|v: &f32| v.is_finite()));
+    }
+
+    #[test]
+    fn normalize_neutral_maps_neutral_to_neutral() {
+        // A matrix whose rows sum to != 1 skews a white-balanced neutral; after
+        // row-normalization, (1,1,1) maps to (1,1,1).
+        let m: Mat3 = [
+            [3.125, -0.067, -0.174],
+            [0.075, 1.267, -0.458],
+            [0.149, -0.268, 1.410],
+        ];
+        let n = super::normalize_neutral(m);
+        let out = crate::matrix::mul_vec3(&n, &[1.0, 1.0, 1.0]);
+        assert!(
+            (0..3).all(|i| (out[i] - 1.0).abs() < 1e-5),
+            "neutral should stay neutral, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_neutral_leaves_zero_row_unscaled() {
+        let m: Mat3 = [[1.0, -0.5, -0.5], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]];
+        let n = super::normalize_neutral(m);
+        assert_eq!(n[1], [0.0, 0.0, 0.0], "zero-sum row is left as-is");
+        assert!(n.iter().flatten().all(|v: &f32| v.is_finite()));
     }
 }

@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 /// Bump this and add a `if version < N { ... }` block when the schema changes.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Apply migrations using the SQLite `user_version` pragma. Idempotent.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -92,6 +92,22 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         version = 4;
     }
 
+    if version < 5 {
+        // Persisted export queue (spec §8.4). This is UI-state CACHE, not
+        // source-of-truth: ON DELETE CASCADE means a deleted image drops out of
+        // the queue automatically, and losing the table never loses photos/edits.
+        conn.execute_batch(
+            "CREATE TABLE export_queue (
+                 image_id  INTEGER NOT NULL PRIMARY KEY
+                            REFERENCES images(id) ON DELETE CASCADE,
+                 position  INTEGER NOT NULL,
+                 added_at  INTEGER NOT NULL
+             );
+             CREATE INDEX idx_export_queue_position ON export_queue(position);",
+        )?;
+        version = 5;
+    }
+
     debug_assert_eq!(
         version, SCHEMA_VERSION,
         "every migration block must advance `version` to SCHEMA_VERSION"
@@ -124,7 +140,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, super::SCHEMA_VERSION);
-        assert_eq!(super::SCHEMA_VERSION, 4);
+        assert_eq!(super::SCHEMA_VERSION, 5);
 
         let img = table_columns(&conn, "images");
         assert!(img.contains(&"flag".to_string()));
@@ -144,5 +160,21 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "table {t} must exist");
         }
+    }
+
+    #[test]
+    fn migrate_creates_export_queue_v5() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::migrate(&conn).unwrap();
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('export_queue')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(cols.contains(&"image_id".to_string()));
+        assert!(cols.contains(&"position".to_string()));
+        assert!(cols.contains(&"added_at".to_string()));
     }
 }

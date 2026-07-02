@@ -1,0 +1,23 @@
+[package]
+name = "ferrolite-export"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrolite-color = { workspace = true }
+ferrolite-pipeline = { workspace = true }
+ferrolite-gpu = { workspace = true }
+ferrolite-image = { workspace = true }
+ferrolite-jobs = { workspace = true }
+image = { workspace = true, features = ["jpeg", "png", "tiff", "webp"] }
+fast_image_resize = { workspace = true }
+little_exif = { workspace = true }
+half = { workspace = true }
+bytemuck = { workspace = true }
+thiserror = { workspace = true }
+wgpu = { workspace = true }

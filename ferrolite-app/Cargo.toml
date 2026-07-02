@@ -25,12 +25,13 @@ ferrolite-jobs = { workspace = true }
 ferrolite-catalog = { workspace = true }
 ferrolite-color = { workspace = true }
 ferrolite-decode = { workspace = true }
+ferrolite-export = { workspace = true }
 ferrolite-gpu = { workspace = true }
 ferrolite-image = { workspace = true }
 ferrolite-pipeline = { path = "../ferrolite-pipeline" }
 ferrolite-vt = { workspace = true }
 half = { workspace = true }
-image = { workspace = true, features = ["jpeg"] }
+image = { workspace = true, features = ["jpeg", "png", "tiff", "webp"] }
 rayon = { workspace = true }
 rfd = { workspace = true }
 

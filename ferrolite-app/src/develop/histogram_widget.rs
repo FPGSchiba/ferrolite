@@ -53,17 +53,24 @@ pub fn show(ui: &mut egui::Ui, bins: Option<&[u32]>) {
         (2, egui::Color32::from_rgba_unmultiplied(80, 130, 235, 150)),
         (3, egui::Color32::from_rgba_unmultiplied(200, 200, 200, 90)),
     ];
+    // Draw each channel as adjacent per-bin vertical bars. A histogram silhouette
+    // is not convex, so `Shape::convex_polygon` (which fan-fills from the first
+    // vertex) renders it as a wedge — draw one filled rect per bin instead.
+    let bin_w = rect.width() / HIST_BINS as f32;
+    let usable_h = rect.height() - 2.0;
     for (ch, color) in channels {
         let heights = channel_norm(bins, ch, peak);
-        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(HIST_BINS + 2);
-        pts.push(egui::pos2(rect.left(), rect.bottom()));
         for (i, h) in heights.iter().enumerate() {
-            let x = rect.left() + (i as f32 / (HIST_BINS - 1) as f32) * rect.width();
-            let y = rect.bottom() - h * (rect.height() - 2.0);
-            pts.push(egui::pos2(x, y));
+            if *h <= 0.0 {
+                continue;
+            }
+            let x0 = rect.left() + i as f32 * bin_w;
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(x0, rect.bottom() - h * usable_h),
+                egui::pos2(x0 + bin_w, rect.bottom()),
+            );
+            painter.rect_filled(bar, 0.0, color);
         }
-        pts.push(egui::pos2(rect.right(), rect.bottom()));
-        painter.add(egui::Shape::convex_polygon(pts, color, egui::Stroke::NONE));
     }
     painter.rect_stroke(
         rect,

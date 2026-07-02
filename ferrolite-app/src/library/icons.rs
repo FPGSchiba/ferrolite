@@ -159,6 +159,80 @@ pub fn caret(painter: &Painter, center: Pos2, half_w: f32, color: Color32, down:
     ));
 }
 
+/// Draw a small "✕" (remove/close) icon as two crossing diagonal strokes
+/// centred at `center` with half-extent `r`.
+pub fn cross(painter: &Painter, center: Pos2, r: f32, color: Color32) {
+    let stroke = Stroke::new(1.4, color);
+    painter.line_segment(
+        [
+            Pos2::new(center.x - r, center.y - r),
+            Pos2::new(center.x + r, center.y + r),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(center.x - r, center.y + r),
+            Pos2::new(center.x + r, center.y - r),
+        ],
+        stroke,
+    );
+}
+
+/// Draw an "export to queue" glyph: a downward arrow landing into an open
+/// tray, centred at `center`. `size` is the overall icon height/width.
+///
+/// Reads universally as "send/add to queue" without relying on font glyphs.
+pub fn export_tray(painter: &Painter, center: Pos2, size: f32, color: Color32) {
+    let stroke = Stroke::new(1.3, color);
+    let half = size * 0.5;
+
+    // Downward arrow shaft, from just below the top to mid-height.
+    let shaft_top = Pos2::new(center.x, center.y - half);
+    let shaft_bottom = Pos2::new(center.x, center.y + half * 0.15);
+    painter.line_segment([shaft_top, shaft_bottom], stroke);
+
+    // Arrowhead at the shaft's bottom tip.
+    let head_w = size * 0.28;
+    let head_h = size * 0.28;
+    let head_left = Pos2::new(shaft_bottom.x - head_w, shaft_bottom.y - head_h);
+    let head_right = Pos2::new(shaft_bottom.x + head_w, shaft_bottom.y - head_h);
+    painter.line_segment([shaft_bottom, head_left], stroke);
+    painter.line_segment([shaft_bottom, head_right], stroke);
+
+    // Tray: bottom line + two short upturned sides, sitting under the arrow.
+    let tray_y = center.y + half * 0.55;
+    let tray_half_w = half * 0.85;
+    let side_h = size * 0.22;
+    let tray_left_bottom = Pos2::new(center.x - tray_half_w, tray_y);
+    let tray_right_bottom = Pos2::new(center.x + tray_half_w, tray_y);
+    let tray_left_top = Pos2::new(center.x - tray_half_w, tray_y - side_h);
+    let tray_right_top = Pos2::new(center.x + tray_half_w, tray_y - side_h);
+    painter.line_segment([tray_left_top, tray_left_bottom], stroke);
+    painter.line_segment([tray_left_bottom, tray_right_bottom], stroke);
+    painter.line_segment([tray_right_bottom, tray_right_top], stroke);
+}
+
+/// Draw a small "in export queue" badge: an accent-filled rounded square with
+/// a "Q" glyph, anchored by its top-right corner at `top_right`.
+///
+/// Used by the Library grid and the Develop filmstrip to mark thumbnails that
+/// are currently queued for export. `size` is the badge's edge length.
+pub fn queued_badge(painter: &Painter, top_right: Pos2, size: f32, fg: Color32, bg: Color32) {
+    let rect = Rect::from_min_size(
+        Pos2::new(top_right.x - size, top_right.y),
+        Vec2::splat(size),
+    );
+    painter.rect_filled(rect, size * 0.25, bg);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Q",
+        egui::FontId::proportional(size * 0.65),
+        fg,
+    );
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

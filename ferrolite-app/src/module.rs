@@ -1,10 +1,11 @@
-//! Top-level UI module selection (Library vs Develop).
+//! Top-level UI module selection (Library, Develop, Export).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Module {
     #[default]
     Library,
     Develop,
+    Export,
 }
 
 impl Module {

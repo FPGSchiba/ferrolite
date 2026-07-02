@@ -30,7 +30,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
         .map(|r| {
             (
                 r.id,
-                r.decode_status != ferrolite_catalog::DecodeStatus::Failed,
+                // Gated on `Done` (not just `!= Failed`), matching the grid's
+                // `paint_cell` guard: a `Pending` row has no thumbnail blob yet,
+                // so requesting one would submit a job that immediately finds
+                // nothing (wasted one-shot lazy-load job on a cold `Pending`
+                // cell). `Done` implies the blob is present.
+                r.decode_status == ferrolite_catalog::DecodeStatus::Done,
                 crate::library::grid::cell_aspect(r),
                 r.rating.get(),
                 r.flag,

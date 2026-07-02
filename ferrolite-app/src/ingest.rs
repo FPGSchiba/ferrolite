@@ -70,6 +70,17 @@ pub enum ReindexMode {
 /// Submit one ingest job for `folder` at `priority` with `mode`, incrementing
 /// the in-flight counter. Returns the handle so the caller can store it for
 /// cancellation. Does NOT reset the view — callers decide that.
+///
+/// Resets the scan/ingest progress counters (`scanned`/`indexed`/
+/// `ingest_total`/`ingest_done`) when this call starts a brand-new wave
+/// (`active_ingests` transitioning 0→1). These are monotonic `+=`
+/// accumulators folded from `Scanned`/`Indexed`/`IngestPlanned` events; without
+/// a per-wave reset they inflate across the many ingest passes that touch the
+/// same files (per-root startup rescans, the 10s watcher re-scan), since the
+/// only prior reset point was a folder switch. Concurrent per-root passes
+/// *within* one wave still accumulate together correctly (summing to the real
+/// file count) because they all land between one 0→1 and the matching
+/// N→0 `IngestDone`; the reset only fires at the very start of a wave.
 pub(crate) fn submit_ingest(
     state: &mut AppState,
     ctx: &egui::Context,
@@ -77,6 +88,9 @@ pub(crate) fn submit_ingest(
     mode: ReindexMode,
     priority: Priority,
 ) -> JobHandle {
+    if state.active_ingests == 0 {
+        state.reset_ingest_counters();
+    }
     state.active_ingests += 1;
     let writer = Arc::clone(&state.writer);
     let reads = Arc::clone(&state.reads);

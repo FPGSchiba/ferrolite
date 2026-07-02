@@ -194,10 +194,15 @@ fn paint_thumb(
 ) -> egui::Rect {
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::hover());
 
-    let failed = rec
-        .map(|r| r.decode_status == ferrolite_catalog::DecodeStatus::Failed)
+    // Gated on `Done` (not just `!= Failed`), matching the Library grid's
+    // `paint_cell` guard: a `Pending` row has no thumbnail blob yet, so
+    // requesting one would submit a job that immediately finds nothing
+    // (wasted one-shot lazy-load job on a cold `Pending` cell). `Done` implies
+    // the blob is present.
+    let ready_to_load = rec
+        .map(|r| r.decode_status == ferrolite_catalog::DecodeStatus::Done)
         .unwrap_or(false);
-    if !state.textures.contains(id) && !failed {
+    if !state.textures.contains(id) && ready_to_load {
         state.request_thumbnail(ui.ctx(), id);
     }
 

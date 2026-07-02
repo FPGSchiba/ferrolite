@@ -489,13 +489,21 @@ impl AppState {
         }
     }
 
-    /// Reset per-folder job + counter state when switching folders.
-    pub fn reset_for_new_folder(&mut self) {
-        self.cancel_pending_jobs();
+    /// Zero the four scan/ingest progress counters (`scanned`, `indexed`,
+    /// `ingest_total`, `ingest_done`). Shared by `reset_for_new_folder` (folder
+    /// switch) and the start-of-wave reset in `submit_ingest` (active_ingests
+    /// 0→1), so both call sites stay in sync as the counter set evolves.
+    pub fn reset_ingest_counters(&mut self) {
         self.scanned = 0;
         self.indexed = 0;
         self.ingest_total = 0;
         self.ingest_done = 0;
+    }
+
+    /// Reset per-folder job + counter state when switching folders.
+    pub fn reset_for_new_folder(&mut self) {
+        self.cancel_pending_jobs();
+        self.reset_ingest_counters();
         self.thumb_missing.clear();
         self.images.clear();
         // Bump so the grid's layout cache rebuilds for the now-empty set instead
@@ -790,6 +798,26 @@ fn default_db_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `reset_ingest_counters` must zero exactly the four scan/ingest
+    /// progress counters, independent of any other state. This is the shared
+    /// helper both `reset_for_new_folder` (folder switch) and `submit_ingest`
+    /// (start of a new ingest wave, `active_ingests` 0→1) call.
+    #[test]
+    fn reset_ingest_counters_zeroes_all_four_fields() {
+        let mut s = AppState::for_test();
+        s.scanned = 56440;
+        s.indexed = 3320;
+        s.ingest_total = 3320;
+        s.ingest_done = 3320;
+
+        s.reset_ingest_counters();
+
+        assert_eq!(s.scanned, 0, "scanned must be zeroed");
+        assert_eq!(s.indexed, 0, "indexed must be zeroed");
+        assert_eq!(s.ingest_total, 0, "ingest_total must be zeroed");
+        assert_eq!(s.ingest_done, 0, "ingest_done must be zeroed");
+    }
 
     /// `reset_for_new_folder` must zero all per-folder counters, cancel the
     /// ingest handle, clear `images`, clear `selected`, and set the dirty flag.

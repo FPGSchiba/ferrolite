@@ -104,6 +104,8 @@ pub struct AppState {
     pub export_dest: Option<std::path::PathBuf>,
     /// Filename token template (spec §8.4). Default "{name}".
     pub export_template: String,
+    /// Whether the filename-template token help modal is open.
+    pub export_help_open: bool,
 
     /// Active filter state (search text, rating, flags, tags, etc.).
     pub filter: FilterState,
@@ -199,6 +201,7 @@ impl AppState {
             export_settings: ferrolite_export::ExportOptions::default(),
             export_dest: None,
             export_template: "{name}".to_string(),
+            export_help_open: false,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),
@@ -624,6 +627,7 @@ impl AppState {
             export_settings: ferrolite_export::ExportOptions::default(),
             export_dest: None,
             export_template: "{name}".to_string(),
+            export_help_open: false,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),

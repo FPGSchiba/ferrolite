@@ -24,11 +24,48 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> Option<ExportModuleActio
                 .hint_text("{name}")
                 .desired_width(220.0),
         );
-        ui.colored_label(
-            crate::theme::TEXT_FAINT,
-            "tokens: {name} {seq:03} {date} {camera}",
-        );
+        if ui
+            .small_button("?")
+            .on_hover_text("Filename tokens")
+            .clicked()
+        {
+            state.export_help_open = true;
+        }
     });
+
+    let mut help_open = state.export_help_open;
+    egui::Window::new("Filename tokens")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut help_open)
+        .show(ui.ctx(), |ui| {
+            egui::Grid::new("export_filename_tokens_grid")
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    ui.monospace("{name}");
+                    ui.label("Original file basename");
+                    ui.end_row();
+
+                    ui.monospace("{seq}");
+                    ui.label("Sequence number (1, 2, 3, …)");
+                    ui.end_row();
+
+                    ui.monospace("{seq:03}");
+                    ui.label("Zero-padded sequence (001, 002, …; any width N via {seq:0N})");
+                    ui.end_row();
+
+                    ui.monospace("{date}");
+                    ui.label("Capture date (YYYY-MM-DD)");
+                    ui.end_row();
+                });
+            ui.separator();
+            ui.colored_label(
+                crate::theme::TEXT_FAINT,
+                "Any other text is kept literally.",
+            );
+        });
+    state.export_help_open = help_open;
     ui.horizontal(|ui| {
         let running = state.batch.as_ref().is_some_and(|b| !b.is_done());
         let can_start = !running

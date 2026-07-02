@@ -541,6 +541,7 @@ impl FerroliteApp {
     fn apply_full_decoded(
         &mut self,
         frame: &eframe::Frame,
+        ctx: &egui::Context,
         image_id: i64,
         image: &ferrolite_image::LinearRgbaF32,
         color_profile: &ferrolite_decode::ColorProfile,
@@ -712,6 +713,72 @@ impl FerroliteApp {
                 }
             }
         }
+
+        // Preview-cache write-back (Task 5): on a qualifying RAW open, cache the
+        // identity (unedited) color-managed render so a later open of the same
+        // file can reveal instantly from disk (Task 6's read path).
+        //
+        // CORRECTNESS GUARD: `preview_cache::key_for` hashes the ACTUAL op stack,
+        // but the payload encoded here is the IDENTITY (camera→working→display)
+        // render computed on the CPU from `image` — never the GPU op-stack
+        // result. Caching an identity render under an *edited* key would later
+        // reveal the wrong (unedited) image, so `should_write_back` gates on the
+        // stack being `OpStack::default()`. Edited images are a deliberate cache
+        // miss until a later task reads back the real GPU render.
+        //
+        // TASK 6 will thread a real "cache miss" flag through the read; for now
+        // every qualifying RAW open is treated as a miss (always write-back when
+        // RAW + identity). All encode/JPEG/disk I/O runs inside the job — the
+        // only UI-thread work here is `key_for` (a small `fs::metadata`) and
+        // cloning the render/matrix into the job (CLAUDE.md threading rule 1).
+        if full_installed {
+            // Snapshot the viewer inputs, then release the borrow before the
+            // job submit (which borrows other `self.state` fields).
+            let write_back = self.state.viewer.as_ref().and_then(|v| {
+                if v.image_id != image_id {
+                    return None;
+                }
+                crate::develop::preview_cache::should_write_back(is_raw, &v.op_stack)
+                    .then(|| (v.path.clone(), v.op_stack.clone()))
+            });
+            if let Some((path, op_stack)) = write_back {
+                match crate::develop::preview_cache::key_for(
+                    &path,
+                    &op_stack,
+                    self.state.working_space,
+                    color_profile,
+                ) {
+                    Ok(key) => {
+                        // Identity display pipeline: camera→working (`cam`) then
+                        // working→display. `mul_mat3(a, b)` = a·b, so this applies
+                        // `cam` first, matching the identity reveal (minus 8-bit
+                        // quantization). The op stack is NOT applied here — the
+                        // guard above ensures we only reach this when it is
+                        // identity anyway.
+                        let display_matrix = ferrolite_color::mul_mat3(
+                            &ferrolite_color::working_to_display(self.state.working_space),
+                            &cam,
+                        );
+                        crate::develop::preview_cache::spawn_cache_write(
+                            &self.state.jobs,
+                            std::sync::Arc::clone(&self.state.preview_store),
+                            &self.state.tx,
+                            ctx,
+                            key,
+                            image.clone(),
+                            display_matrix,
+                            ferrolite_previews::DEFAULT_CACHE_CAP_BYTES,
+                            image_id,
+                        );
+                    }
+                    Err(err) => {
+                        // A cache failure must never disturb the viewer.
+                        eprintln!("preview cache: key_for failed for #{image_id}: {err}");
+                    }
+                }
+            }
+        }
+
         self.mark_histogram_dirty();
     }
 
@@ -1358,7 +1425,7 @@ impl eframe::App for FerroliteApp {
                     image,
                     color_profile,
                 } => {
-                    self.apply_full_decoded(frame, *image_id, image, color_profile);
+                    self.apply_full_decoded(frame, ctx, *image_id, image, color_profile);
                     self.state.dirty = true;
                     continue;
                 }

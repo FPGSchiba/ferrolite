@@ -66,6 +66,15 @@ pub enum AppEvent {
     /// (256 × {R,G,B,luma}). Handled in `app.rs` (stores into the viewer); the
     /// `apply` fold ignores it.
     HistogramReady { image_id: i64, bins: Vec<u32> },
+    /// An off-thread preview-cache write-back finished (the identity render for
+    /// `image_id` was encoded + stored). Emitted for metrics/tests; the `apply`
+    /// fold is a no-op (the job already requested a repaint). `image_id` is
+    /// reserved for a future per-image cache indicator (same pattern as
+    /// `OpsLoaded`/`ExportFinished`).
+    PreviewCacheWritten {
+        #[allow(dead_code)]
+        image_id: i64,
+    },
     /// Tile progress for the running single-file export.
     ExportProgress {
         image_id: i64,
@@ -165,6 +174,8 @@ impl AppState {
                 None
             }
             AppEvent::HistogramReady { .. } => None,
+            // Metrics/tests only; the write-back job already requested a repaint.
+            AppEvent::PreviewCacheWritten { .. } => None,
             // Handled in `app.rs` (needs GPU-independent status-bar update, but
             // routed there alongside the other viewer-scoped events); nothing to
             // fold here.

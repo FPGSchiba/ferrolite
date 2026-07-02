@@ -52,6 +52,9 @@ pub struct AppState {
 
     /// LRU cache of decoded thumbnail textures (cap 512).
     pub textures: crate::library::texture_cache::TextureCache,
+    /// Session-only CPU cache of decoded thumbnail pixels so re-revealed cells
+    /// re-upload without a new job / DB read / JPEG decode (Bug B).
+    pub thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache,
     /// IDs visible in the grid on the last frame (for delta reprioritization).
     pub last_visible: HashSet<i64>,
 
@@ -155,6 +158,10 @@ pub struct AppState {
     pub working_space: ferrolite_color::WorkingSpace,
 }
 
+/// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
+/// worst case at this cap; covers many screens of scroll on large libraries.
+const THUMB_PIXEL_CACHE_CAP: usize = 1024;
+
 impl AppState {
     /// Open (or create) the catalog at the OS data dir and wire the job system.
     pub fn new() -> Result<Self, ferrolite_catalog::CatalogError> {
@@ -184,6 +191,9 @@ impl AppState {
             thumb_jobs: HashMap::new(),
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
+            thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
+                THUMB_PIXEL_CACHE_CAP,
+            ),
             last_visible: HashSet::new(),
             thumb_pending: HashSet::new(),
             pending_uploads: Vec::new(),
@@ -238,6 +248,7 @@ impl AppState {
         if rgba.len() != (w as usize) * (h as usize) * 4 {
             return;
         }
+        self.thumb_pixels.insert(image_id, rgba.clone(), w, h);
         let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
         let tex = ctx.load_texture(
             format!("thumb-{image_id}"),
@@ -254,6 +265,14 @@ impl AppState {
     /// `ThumbFailed`) over the app event channel.
     pub fn request_thumbnail(&mut self, ctx: &egui::Context, image_id: i64) {
         if self.textures.contains(image_id) || self.thumb_pending.contains(&image_id) {
+            return;
+        }
+        // Fast path: pixels already decoded this session → re-upload directly,
+        // no job / DB read / JPEG decode (Bug B). Routed through the same
+        // per-frame upload budget as ThumbReady via `pending_uploads`.
+        if let Some((rgba, w, h)) = self.thumb_pixels.get(image_id) {
+            self.pending_uploads.push((image_id, rgba, w, h));
+            ctx.request_repaint();
             return;
         }
         self.thumb_pending.insert(image_id);
@@ -638,6 +657,9 @@ impl AppState {
             thumb_jobs: HashMap::new(),
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
+            thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
+                THUMB_PIXEL_CACHE_CAP,
+            ),
             last_visible: HashSet::new(),
             thumb_pending: HashSet::new(),
             pending_uploads: Vec::new(),

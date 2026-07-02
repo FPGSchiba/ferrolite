@@ -14,4 +14,5 @@ pub mod icons;
 pub mod image_context_menu;
 pub mod panel;
 pub mod texture_cache;
+pub mod thumb_pixel_cache;
 pub mod toolbar;

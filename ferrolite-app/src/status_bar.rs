@@ -4,12 +4,17 @@ use crate::state::AppState;
 
 /// Pure formatter for the right-hand activity string, so it is unit-testable.
 pub fn activity_text(
-    active: usize,
-    pending: usize,
+    _active: usize,
+    _pending: usize,
     thumb_done: usize,
     thumb_total: usize,
 ) -> String {
-    if active + pending == 0 {
+    // `active`/`pending` are kept in the signature for call-site context but no
+    // longer drive the branch below. Only show generation progress while an
+    // ingest is actually generating thumbnails (thumb_total > 0): lazy-load
+    // scroll jobs keep `active`/`pending` non-zero but are not generation
+    // progress, so showing "N/0" would mislead.
+    if thumb_total == 0 || thumb_done >= thumb_total {
         "Idle".to_string()
     } else {
         format!("Thumbnails {thumb_done}/{thumb_total}")
@@ -75,5 +80,12 @@ mod tests {
     #[test]
     fn activity_shows_progress_when_busy() {
         assert_eq!(activity_text(1, 5, 12, 40), "Thumbnails 12/40");
+    }
+
+    #[test]
+    fn activity_idle_when_total_is_zero_even_if_jobs_active() {
+        // Lazy-load scroll jobs are active but no ingest generation is tracked
+        // (thumb_total == 0): must NOT show a misleading "Thumbnails N/0".
+        assert_eq!(activity_text(2, 3, 17, 0), "Idle");
     }
 }

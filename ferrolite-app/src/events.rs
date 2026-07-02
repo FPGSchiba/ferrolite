@@ -116,14 +116,19 @@ impl AppState {
                 w,
                 h,
             } => {
-                self.thumb_done += 1;
-                self.thumb_jobs.remove(&image_id);
+                // Only ingest-generated (tracked) thumbnails count toward the
+                // generation progress; lazy-load scroll re-decodes must not
+                // inflate it (Bug A).
+                if self.thumb_jobs.remove(&image_id).is_some() {
+                    self.thumb_done += 1;
+                }
                 self.thumb_pending.remove(&image_id);
                 Some((image_id, rgba, w, h))
             }
             AppEvent::ThumbFailed { image_id } => {
-                self.thumb_done += 1;
-                self.thumb_jobs.remove(&image_id);
+                if self.thumb_jobs.remove(&image_id).is_some() {
+                    self.thumb_done += 1;
+                }
                 self.thumb_pending.remove(&image_id);
                 None
             }
@@ -204,10 +209,11 @@ mod tests {
     }
 
     #[test]
-    fn thumb_ready_returns_pixels_and_advances_done() {
+    fn thumb_ready_returns_pixels_and_advances_done_for_tracked_ingest() {
         let mut s = AppState::for_test();
         s.thumb_total = 2;
         s.thumb_pending.insert(7);
+        s.thumb_jobs.insert(7, ferrolite_jobs::JobId(1));
         // 1x1 RGBA pixel (4 bytes).
         let out = s.apply(AppEvent::ThumbReady {
             image_id: 7,
@@ -221,18 +227,60 @@ mod tests {
             !s.thumb_pending.contains(&7),
             "ThumbReady must clear the pending marker"
         );
+        assert!(
+            !s.thumb_jobs.contains_key(&7),
+            "ThumbReady must clear the tracked job entry"
+        );
     }
 
     #[test]
-    fn thumb_failed_advances_done_without_bytes() {
+    fn thumb_ready_does_not_advance_done_for_untracked_lazy_load() {
+        // Lazy-load scroll re-decodes complete without ever being registered
+        // via ThumbRegistered (Bug A): they must not inflate thumb_done.
+        let mut s = AppState::for_test();
+        s.thumb_pending.insert(7);
+        let out = s.apply(AppEvent::ThumbReady {
+            image_id: 7,
+            rgba: vec![10, 20, 30, 255],
+            w: 1,
+            h: 1,
+        });
+        assert_eq!(out, Some((7, vec![10, 20, 30, 255], 1, 1)));
+        assert_eq!(s.thumb_done, 0);
+        assert!(
+            !s.thumb_pending.contains(&7),
+            "ThumbReady must clear the pending marker even when untracked"
+        );
+    }
+
+    #[test]
+    fn thumb_failed_advances_done_without_bytes_for_tracked_ingest() {
         let mut s = AppState::for_test();
         s.thumb_pending.insert(9);
+        s.thumb_jobs.insert(9, ferrolite_jobs::JobId(2));
         let out = s.apply(AppEvent::ThumbFailed { image_id: 9 });
         assert_eq!(out, None);
         assert_eq!(s.thumb_done, 1);
         assert!(
             !s.thumb_pending.contains(&9),
             "ThumbFailed must clear the pending marker"
+        );
+        assert!(
+            !s.thumb_jobs.contains_key(&9),
+            "ThumbFailed must clear the tracked job entry"
+        );
+    }
+
+    #[test]
+    fn thumb_failed_does_not_advance_done_for_untracked_lazy_load() {
+        let mut s = AppState::for_test();
+        s.thumb_pending.insert(9);
+        let out = s.apply(AppEvent::ThumbFailed { image_id: 9 });
+        assert_eq!(out, None);
+        assert_eq!(s.thumb_done, 0);
+        assert!(
+            !s.thumb_pending.contains(&9),
+            "ThumbFailed must clear the pending marker even when untracked"
         );
     }
 

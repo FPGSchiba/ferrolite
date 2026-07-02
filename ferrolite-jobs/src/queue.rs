@@ -43,10 +43,23 @@ impl Queue {
         }
     }
 
-    /// Drop a still-pending job (its bucket entry becomes stale). Jobs already
-    /// dequeued/running are unaffected — cancel those via their `CancelToken`.
-    pub fn cancel(&mut self, id: JobId) {
-        self.jobs.remove(&id);
+    /// Drop a still-pending job (its bucket entry becomes stale). Returns true
+    /// iff the job was present (i.e. actually removed); false if it had already
+    /// been dequeued/run/cancelled. Jobs already running are unaffected — cancel
+    /// those via their `CancelToken`.
+    pub fn cancel(&mut self, id: JobId) -> bool {
+        self.jobs.remove(&id).is_some()
+    }
+
+    /// Count of live (non-stale) queued jobs per priority index
+    /// (Background=0, Visible=1, Interactive=2). O(pending); called only at the
+    /// ~1/sec diagnostic tick.
+    pub fn pending_by_priority(&self) -> [u64; 3] {
+        let mut out = [0u64; 3];
+        for job in self.jobs.values() {
+            out[job.priority.index()] += 1;
+        }
+        out
     }
 
     /// Remove and return the highest-priority live job, or `None` if empty.

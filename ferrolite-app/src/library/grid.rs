@@ -54,6 +54,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     // Built once per frame (not per cell) so membership checks stay O(1) instead
     // of O(queue length) per cell.
     let queued: HashSet<i64> = state.export_queue.iter().copied().collect();
+    // Computed once per frame, not per cell — cells with no texture render a
+    // "generating" affordance instead of a flat placeholder while an ingest is
+    // active (see `cell_state::CellState::Generating`).
+    let is_ingesting = state.active_ingests > 0;
 
     let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
     let mut opened: Option<i64> = None;
@@ -91,7 +95,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
                     egui::pos2(img_x, cell_y),
                     egui::vec2(item.img_width, row.img_height),
                 );
-                if let Some(id) = paint_cell(ui, state, &rec, img_rect, queued.contains(&rec.id)) {
+                if let Some(id) = paint_cell(
+                    ui,
+                    state,
+                    &rec,
+                    img_rect,
+                    queued.contains(&rec.id),
+                    is_ingesting,
+                ) {
                     opened = Some(id);
                 }
                 let label_rect = egui::Rect::from_min_size(
@@ -208,6 +219,7 @@ fn paint_cell(
     rec: &ferrolite_catalog::ImageRecord,
     rect: egui::Rect,
     queued: bool,
+    is_ingesting: bool,
 ) -> Option<i64> {
     // Determine selection state early so we can adjust the thumbnail rect.
     let selected = state.selection.contains(&rec.id) || state.selected == Some(rec.id);
@@ -231,7 +243,7 @@ fn paint_cell(
     // Round the thumbnail corners to match the selection border so a square
     // corner never pokes outside the rounded border. Unselected cells stay square.
     let img_round = if selected { SEL_ROUND } else { 0.0 };
-    match cell_state(rec, has_tex) {
+    match cell_state(rec, has_tex, is_ingesting) {
         CellState::Ready => {
             if let Some(tex) = state.textures.get(rec.id) {
                 let img = egui::Image::new(tex)
@@ -242,6 +254,30 @@ fn paint_cell(
         }
         CellState::Placeholder => {
             painter.rect_filled(img_rect, img_round.max(2.0), theme::BG_PANEL);
+        }
+        CellState::Generating => {
+            // Same base fill as the idle placeholder, plus a small centered
+            // spinner so a not-yet-generated cell reads as "working" instead
+            // of "untouched" during ingest. `egui::Spinner` paints one arc
+            // (O(1) geometry, same widget used by the viewer's loading state)
+            // and animates via the shared egui animation clock, so this stays
+            // O(visible cells) per frame — no per-cell timers or extra state.
+            painter.rect_filled(img_rect, img_round.max(2.0), theme::BG_PANEL);
+            let spinner_size = 16.0_f32
+                .min(img_rect.width() * 0.5)
+                .min(img_rect.height() * 0.5);
+            if spinner_size >= 4.0 {
+                let spinner_rect = egui::Rect::from_center_size(
+                    img_rect.center(),
+                    egui::Vec2::splat(spinner_size),
+                );
+                ui.put(spinner_rect, egui::Spinner::new().size(spinner_size));
+            }
+            // Keep the spinner animating only while there's actually an
+            // ingest running — an idle grid must not burn CPU on continuous
+            // repaint (Placeholder cells never reach this branch when idle,
+            // so this call site is gated by construction, not just by `if`).
+            ui.ctx().request_repaint();
         }
         CellState::Failed => {
             painter.rect_filled(img_rect, img_round.max(2.0), theme::BG_PANEL);

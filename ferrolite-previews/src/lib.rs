@@ -9,9 +9,11 @@
 
 mod codec;
 mod key;
+mod store;
 
 pub use codec::{decode_srgb_jpeg, encode_srgb_jpeg, PreviewCodecError};
 pub use key::{fnv1a_64, hash_serde, PreviewKey};
+pub use store::PreviewStore;
 
 /// Long edge (in pixels) that cached previews are downscaled to.
 pub const PREVIEW_LONG_EDGE: u32 = 2048;

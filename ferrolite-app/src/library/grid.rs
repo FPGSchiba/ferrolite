@@ -81,6 +81,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         }
         // Fetch tag associations for the visible window (only missing ids queried).
         state.ensure_tags_for(&now_visible);
+        // Cancel any lazy-load thumbnail fetches for cells scrolled out of view
+        // this frame, so a big scroll doesn't leave a stale backlog blocking the
+        // now-visible cells (Round 4 fix).
+        state.retain_visible_thumbnail_jobs(&now_visible);
 
         let origin = ui.min_rect().left_top() + egui::vec2(MARGIN, MARGIN);
         for ri in rows {

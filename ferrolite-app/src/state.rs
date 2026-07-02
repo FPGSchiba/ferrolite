@@ -64,6 +64,12 @@ pub struct AppState {
     /// Dedups repeated `request_thumbnail` calls while the job is running;
     /// cleared on `ThumbReady`/`ThumbFailed`/`ThumbMissing`.
     pub thumb_pending: HashSet<i64>,
+    /// In-flight lazy-load fetch handles, keyed by image_id. Lets the grid
+    /// cancel off-screen fetches each frame (`retain_visible_thumbnail_jobs`)
+    /// and drain them at shutdown (`cancel_pending_jobs`) so a big scroll
+    /// doesn't leave a stale backlog that blocks now-visible cells or stalls
+    /// close.
+    pub thumb_handles: HashMap<i64, JobHandle>,
     /// Image ids whose lazy-load job found no thumbnail blob yet (`Ok(None)`
     /// from `get_thumbnail`) — distinct from a hard decode failure. Sticky
     /// guard against a per-frame re-spawn storm: `request_thumbnail` skips ids
@@ -202,6 +208,7 @@ impl AppState {
                 THUMB_PIXEL_CACHE_CAP,
             ),
             thumb_pending: HashSet::new(),
+            thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
@@ -289,7 +296,8 @@ impl AppState {
         let reads = Arc::clone(&self.reads);
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        self.jobs
+        let handle = self
+            .jobs
             .submit(ferrolite_jobs::Priority::Visible, move |cancel| {
                 if cancel.is_cancelled() {
                     let _ = tx.send(AppEvent::ThumbFailed { image_id });
@@ -325,6 +333,7 @@ impl AppState {
                 }
                 ctx.request_repaint();
             });
+        self.thumb_handles.insert(image_id, handle);
     }
 
     /// Build a `LibraryQuery` from the current source + filter state.
@@ -486,6 +495,35 @@ impl AppState {
             // balanced. If the job was already running it will still emit
             // IngestDone; the extra decrement is absorbed by saturating_sub.
             self.active_ingests = self.active_ingests.saturating_sub(1);
+        }
+        // Drain and cancel every in-flight lazy-load thumbnail fetch too, so a
+        // close right after a big scroll doesn't wait on a backlog of `Visible`
+        // jobs (`on_exit` calls this fn).
+        for (_id, handle) in self.thumb_handles.drain() {
+            self.jobs.cancel(handle.id());
+            handle.cancel();
+        }
+        self.thumb_pending.clear();
+    }
+
+    /// Cancel and drop lazy-load thumbnail fetches whose cells are no longer
+    /// visible, so a big scroll doesn't leave a stale backlog that blocks the
+    /// now-visible cells (and saturates the UI at close). Cancelled ids are
+    /// removed from the in-flight guards so they can be re-requested if scrolled
+    /// back into view; they are NOT marked missing.
+    pub fn retain_visible_thumbnail_jobs(&mut self, visible: &HashSet<i64>) {
+        let offscreen: Vec<i64> = self
+            .thumb_handles
+            .keys()
+            .copied()
+            .filter(|id| !visible.contains(id))
+            .collect();
+        for id in offscreen {
+            if let Some(handle) = self.thumb_handles.remove(&id) {
+                self.jobs.cancel(handle.id()); // drop it from the queue if still pending
+                handle.cancel(); // signal it if already running
+            }
+            self.thumb_pending.remove(&id);
         }
     }
 
@@ -695,6 +733,7 @@ impl AppState {
                 THUMB_PIXEL_CACHE_CAP,
             ),
             thumb_pending: HashSet::new(),
+            thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
@@ -1030,6 +1069,93 @@ mod tests {
         assert!(s.ingest_handle.is_none(), "ingest_handle cleared");
         assert_eq!(s.current_folder, Some(7), "view preserved");
         assert_eq!(s.selected, Some(3), "selection preserved");
+    }
+
+    /// Round 4: `retain_visible_thumbnail_jobs` must cancel + drop tracked
+    /// lazy-load fetches for ids that scrolled off-screen, while leaving
+    /// still-visible ids' handles and pending markers untouched.
+    #[test]
+    fn retain_visible_thumbnail_jobs_cancels_offscreen_only() {
+        let mut s = AppState::for_test();
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        // Occupy the single worker so subsequently submitted jobs stay queued
+        // (so `pending_count` reflects the cancellation below).
+        s.jobs
+            .submit(ferrolite_jobs::Priority::Background, move |_| {
+                let _ = gate_rx.recv();
+            });
+
+        for id in [1_i64, 2, 3] {
+            s.thumb_pending.insert(id);
+            let handle = s
+                .jobs
+                .submit(ferrolite_jobs::Priority::Visible, |_cancel| {});
+            s.thumb_handles.insert(id, handle);
+        }
+        let before_pending = s.jobs.pending_count();
+
+        let visible: HashSet<i64> = [2_i64].into_iter().collect();
+        s.retain_visible_thumbnail_jobs(&visible);
+
+        assert!(
+            !s.thumb_handles.contains_key(&1) && !s.thumb_handles.contains_key(&3),
+            "offscreen ids removed from thumb_handles"
+        );
+        assert!(
+            !s.thumb_pending.contains(&1) && !s.thumb_pending.contains(&3),
+            "offscreen ids removed from thumb_pending"
+        );
+        assert!(
+            !s.thumb_missing.contains(&1) && !s.thumb_missing.contains(&3),
+            "offscreen ids must NOT be marked missing (must be re-requestable)"
+        );
+        assert!(
+            s.thumb_handles.contains_key(&2),
+            "still-visible id keeps its handle"
+        );
+        assert!(
+            s.thumb_pending.contains(&2),
+            "still-visible id stays marked pending"
+        );
+        assert!(
+            s.jobs.pending_count() < before_pending,
+            "cancelled offscreen jobs must be dropped from the queue"
+        );
+
+        let _ = gate_tx.send(()); // release the occupying job
+    }
+
+    /// `cancel_pending_jobs` (called by `on_exit`) must also drain and cancel
+    /// every in-flight lazy-load handle so a close right after a big scroll
+    /// doesn't wait on a backlog of `Visible` fetches.
+    #[test]
+    fn cancel_pending_jobs_drains_thumb_handles() {
+        let mut s = AppState::for_test();
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        s.jobs
+            .submit(ferrolite_jobs::Priority::Background, move |_| {
+                let _ = gate_rx.recv();
+            });
+
+        for id in [1_i64, 2] {
+            s.thumb_pending.insert(id);
+            let handle = s
+                .jobs
+                .submit(ferrolite_jobs::Priority::Visible, |_cancel| {});
+            s.thumb_handles.insert(id, handle);
+        }
+        let before_pending = s.jobs.pending_count();
+
+        s.cancel_pending_jobs();
+
+        assert!(s.thumb_handles.is_empty(), "all thumb handles drained");
+        assert!(s.thumb_pending.is_empty(), "thumb_pending cleared");
+        assert!(
+            s.jobs.pending_count() < before_pending,
+            "queued lazy-load jobs must be dropped from the queue at shutdown"
+        );
+
+        let _ = gate_tx.send(());
     }
 
     #[test]

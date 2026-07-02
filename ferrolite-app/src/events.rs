@@ -131,6 +131,7 @@ impl AppState {
                 // marker and hand the decoded pixels up for upload. Touches no
                 // ingest counter (both ingest and lazy-load paths emit this).
                 self.thumb_pending.remove(&image_id);
+                self.thumb_handles.remove(&image_id);
                 // A thumbnail actually arrived, so any prior "missing" verdict
                 // for this id is stale — clear it so a later refresh/scroll
                 // that finds the texture gone (e.g. evicted from the LRU cache)
@@ -140,10 +141,12 @@ impl AppState {
             }
             AppEvent::ThumbFailed { image_id } => {
                 self.thumb_pending.remove(&image_id);
+                self.thumb_handles.remove(&image_id);
                 None
             }
             AppEvent::ThumbMissing { image_id } => {
                 self.thumb_pending.remove(&image_id);
+                self.thumb_handles.remove(&image_id);
                 self.thumb_missing.insert(image_id);
                 None
             }

@@ -19,6 +19,8 @@ pub struct FerroliteApp {
     /// Instead we defer the clear to the top of the next frame, before anything
     /// paints, so the grid/filmstrip re-upload fresh textures on the frame after.
     pending_texture_clear: bool,
+    /// Per-frame diagnostics state (env-gated via `FERROLITE_DIAG`); see `diag.rs`.
+    diag: crate::diag::DiagState,
 }
 
 impl FerroliteApp {
@@ -51,6 +53,7 @@ impl FerroliteApp {
             state,
             crop_active_prev: false,
             pending_texture_clear: false,
+            diag: crate::diag::DiagState::new(),
         }
     }
 }
@@ -1173,6 +1176,8 @@ impl eframe::App for FerroliteApp {
         // this frame's paint jobs.
         self.state.textures.begin_frame();
 
+        let diag_t0 = crate::diag::enabled().then(std::time::Instant::now);
+
         // Deferred from a previous Develop→Library switch: clearing thumbnail
         // textures must happen BEFORE anything paints this frame, never in the same
         // frame they were painted (egui frees dropped textures before queue.submit).
@@ -1213,7 +1218,9 @@ impl eframe::App for FerroliteApp {
             }
         }
         let mut ingest_done = false;
+        let mut events_this_frame = 0usize;
         while let Ok(event) = self.state.rx.try_recv() {
+            events_this_frame += 1;
             match &event {
                 crate::events::AppEvent::PreviewReady { image_id, linear } => {
                     self.apply_preview_ready(frame, *image_id, linear);
@@ -1313,6 +1320,9 @@ impl eframe::App for FerroliteApp {
         if !self.state.pending_uploads.is_empty() {
             ctx.request_repaint();
         }
+        let repaint_forced = !self.state.pending_uploads.is_empty();
+        crate::diag::add_events(events_this_frame);
+        crate::diag::add_uploads(uploads_this_frame);
         // Refresh toolbar metadata-filter caches once per completed ingest (bounded).
         if ingest_done {
             self.state.reload_vocab();
@@ -2002,6 +2012,32 @@ impl eframe::App for FerroliteApp {
         );
 
         window_resize(ctx);
+
+        if let Some(t0) = diag_t0 {
+            let frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
+            let gauges = crate::diag::Gauges {
+                thumb_pending: self.state.thumb_pending.len(),
+                thumb_missing: self.state.thumb_missing.len(),
+                thumb_handles: self.state.thumb_handles.len(),
+                pending_uploads: self.state.pending_uploads.len(),
+                active_ingests: self.state.active_ingests,
+                ingest_done: self.state.ingest_done,
+                ingest_total: self.state.ingest_total,
+                uploads_cap: MAX_THUMB_UPLOADS_PER_FRAME,
+            };
+            let stats = self.state.jobs.stats();
+            if let Some(snap) = self.diag.tick(
+                std::time::Instant::now(),
+                stats,
+                gauges,
+                frame_ms,
+                repaint_forced,
+            ) {
+                if crate::diag::log_enabled() {
+                    crate::diag::write_log(&crate::diag::format_log(&snap));
+                }
+            }
+        }
     }
 
     /// Prevent the UI thread from blocking unboundedly on worker joins at close

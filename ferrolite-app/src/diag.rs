@@ -6,8 +6,10 @@
 //! `FERROLITE_DIAG` = unset→off | `1`/`both`→log+overlay | `log` | `overlay`.
 //! `FERROLITE_DIAG_FILE` overrides the session-log path.
 
+use ferrolite_jobs::JobStats;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagMode {
@@ -44,13 +46,11 @@ pub fn log_enabled() -> bool {
     matches!(mode(), DiagMode::Log | DiagMode::Both)
 }
 
-#[allow(dead_code)]
 pub fn overlay_enabled() -> bool {
     matches!(mode(), DiagMode::Overlay | DiagMode::Both)
 }
 
 /// Per-second rate of a cumulative delta over `dt_secs` (guards dt→0).
-#[allow(dead_code)]
 pub fn compute_rate(delta: u64, dt_secs: f64) -> f64 {
     if dt_secs <= 0.0 {
         0.0
@@ -110,7 +110,6 @@ pub fn init() {
 
 /// Best-effort write of a (multi-line) diagnostic block to stderr and, if open,
 /// the session file. Never blocks meaningfully and never propagates errors.
-#[allow(dead_code)]
 pub fn write_log(block: &str) {
     eprintln!("{block}");
     if let Some(lock) = log_file() {
@@ -167,13 +166,9 @@ pub fn pix_evict(n: usize) {
 pub fn retain_cancels(n: usize) {
     add(&RETAIN_CANCELS, n as u64);
 }
-/// Wired in Task 4 (event-loop drain instrumentation).
-#[allow(dead_code)]
 pub fn add_events(n: usize) {
     add(&EVENTS_DRAINED, n as u64);
 }
-/// Wired in Task 4 (per-frame upload-budget instrumentation).
-#[allow(dead_code)]
 pub fn add_uploads(n: usize) {
     add(&UPLOADS_APPLIED, n as u64);
 }
@@ -223,7 +218,6 @@ pub fn record_request(outcome: ReqOutcome) {
 
 /// Immutable snapshot of the app-side cumulative counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(dead_code)] // Consumed by the diag overlay/log, wired in Task 4.
 pub struct AppCounters {
     pub tex_hit: u64,
     pub tex_miss: u64,
@@ -242,8 +236,6 @@ pub struct AppCounters {
     pub uploads_applied: u64,
 }
 
-/// Wired in Task 4 (diag overlay/log snapshot source).
-#[allow(dead_code)]
 pub fn app_counters() -> AppCounters {
     let l = |c: &AtomicU64| c.load(Ordering::Relaxed);
     AppCounters {
@@ -262,6 +254,239 @@ pub fn app_counters() -> AppCounters {
         retain_cancels: l(&RETAIN_CANCELS),
         events_drained: l(&EVENTS_DRAINED),
         uploads_applied: l(&UPLOADS_APPLIED),
+    }
+}
+
+/// Live sizes read straight off `AppState` at tick time (not counters).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Gauges {
+    pub thumb_pending: usize,
+    pub thumb_missing: usize,
+    pub thumb_handles: usize,
+    pub pending_uploads: usize,
+    pub active_ingests: usize,
+    pub ingest_done: usize,
+    pub ingest_total: usize,
+    pub uploads_cap: usize,
+}
+
+/// Everything the log/overlay render, precomputed once per tick.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    pub dt: f64,
+    pub frame_ms: f64,
+    pub max_frame_ms: f64,
+    pub repaint_forced: bool,
+    pub jobs: JobStats,
+    pub g: Gauges,
+    // Per-second rates.
+    pub tex_hit_per_s: f64,
+    pub tex_miss_per_s: f64,
+    pub tex_evict_per_s: f64,
+    pub pix_hit_per_s: f64,
+    pub pix_miss_per_s: f64,
+    pub pix_evict_per_s: f64,
+    // Per-frame counts (last frame).
+    pub ev_per_frame: u64,
+    pub req_per_frame: u64,
+    pub uploads_per_frame: u64,
+    // Last-frame request breakdown (deltas vs previous frame).
+    pub req_new_f: u64,
+    pub req_fast_f: u64,
+    pub req_dedup_tex_f: u64,
+    pub req_dedup_pending_f: u64,
+    pub req_dedup_missing_f: u64,
+    // Cache sizes (caps are fixed constants, shown for context).
+    pub cur: AppCounters,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_snapshot(
+    dt: f64,
+    prev: &AppCounters,
+    cur: &AppCounters,
+    prev_frame: &AppCounters,
+    jobs: JobStats,
+    g: Gauges,
+    frame_ms: f64,
+    max_frame_ms: f64,
+    repaint_forced: bool,
+) -> Snapshot {
+    let d = |a: u64, b: u64| a.saturating_sub(b);
+    Snapshot {
+        dt,
+        frame_ms,
+        max_frame_ms,
+        repaint_forced,
+        jobs,
+        g,
+        tex_hit_per_s: compute_rate(d(cur.tex_hit, prev.tex_hit), dt),
+        tex_miss_per_s: compute_rate(d(cur.tex_miss, prev.tex_miss), dt),
+        tex_evict_per_s: compute_rate(d(cur.tex_evict, prev.tex_evict), dt),
+        pix_hit_per_s: compute_rate(d(cur.pix_hit, prev.pix_hit), dt),
+        pix_miss_per_s: compute_rate(d(cur.pix_miss, prev.pix_miss), dt),
+        pix_evict_per_s: compute_rate(d(cur.pix_evict, prev.pix_evict), dt),
+        ev_per_frame: d(cur.events_drained, prev_frame.events_drained),
+        req_per_frame: d(cur.req_calls, prev_frame.req_calls),
+        uploads_per_frame: d(cur.uploads_applied, prev_frame.uploads_applied),
+        req_new_f: d(cur.req_new, prev_frame.req_new),
+        req_fast_f: d(cur.req_fast, prev_frame.req_fast),
+        req_dedup_tex_f: d(cur.req_dedup_tex, prev_frame.req_dedup_tex),
+        req_dedup_pending_f: d(cur.req_dedup_pending, prev_frame.req_dedup_pending),
+        req_dedup_missing_f: d(cur.req_dedup_missing, prev_frame.req_dedup_missing),
+        cur: *cur,
+    }
+}
+
+/// Render the multi-line ~1/sec log block (also reused, compacted, by the overlay).
+pub fn format_log(s: &Snapshot) -> String {
+    let j = &s.jobs;
+    let g = &s.g;
+    let dedup = s.req_dedup_tex_f + s.req_dedup_pending_f + s.req_dedup_missing_f;
+    format!(
+        "[diag +{dt:.1}s] frame {fms:.1}ms(max {mx:.1}) ev/f {ev} repaint {rp}\n\
+         \x20jobs  sub I/V/B {si}/{sv}/{sb}  disp {disp}  done {done}  cxl(pre){cxp}  panic {pan}\n\
+         \x20      active {act}  pending I/V/B {pi}/{pv}/{pb}  cancel removed {crem}/absent {cabs}\n\
+         \x20thumb req/f {req} = new {rn} + fast {rf} + dedup {dd} (tex {rt}/pend {rpd}/miss {rms})\n\
+         \x20      pending {tp}  handles {th}  missing {tm}  retain cxl {rc}\n\
+         \x20cache tex h/s {thh:.0} m/s {thm:.0} ev/s {the:.0} | pix h/s {pxh:.0} m/s {pxm:.0} ev/s {pxe:.0}\n\
+         \x20uploads {up}/{cap} cap  backlog {bk}\n\
+         \x20ingest active {ai}  done {idn}/{itot}",
+        dt = s.dt,
+        fms = s.frame_ms,
+        mx = s.max_frame_ms,
+        ev = s.ev_per_frame,
+        rp = if s.repaint_forced { "forced" } else { "no" },
+        si = j.submitted[ferrolite_jobs::Priority::Interactive.index()],
+        sv = j.submitted[ferrolite_jobs::Priority::Visible.index()],
+        sb = j.submitted[ferrolite_jobs::Priority::Background.index()],
+        disp = j.dispatched,
+        done = j.completed,
+        cxp = j.cancelled_before_dispatch,
+        pan = j.panicked,
+        act = j.active,
+        pi = j.pending[ferrolite_jobs::Priority::Interactive.index()],
+        pv = j.pending[ferrolite_jobs::Priority::Visible.index()],
+        pb = j.pending[ferrolite_jobs::Priority::Background.index()],
+        crem = j.cancel_removed,
+        cabs = j.cancel_absent,
+        req = s.req_per_frame,
+        rn = s.req_new_f,
+        rf = s.req_fast_f,
+        dd = dedup,
+        rt = s.req_dedup_tex_f,
+        rpd = s.req_dedup_pending_f,
+        rms = s.req_dedup_missing_f,
+        tp = g.thumb_pending,
+        th = g.thumb_handles,
+        tm = g.thumb_missing,
+        rc = s.cur.retain_cancels,
+        thh = s.tex_hit_per_s,
+        thm = s.tex_miss_per_s,
+        the = s.tex_evict_per_s,
+        pxh = s.pix_hit_per_s,
+        pxm = s.pix_miss_per_s,
+        pxe = s.pix_evict_per_s,
+        up = s.uploads_per_frame,
+        cap = g.uploads_cap,
+        bk = g.pending_uploads,
+        ai = g.active_ingests,
+        idn = g.ingest_done,
+        itot = g.ingest_total,
+    )
+}
+
+/// Per-frame diagnostic state held on `FerroliteApp`. Drives the ~1/sec tick,
+/// per-frame deltas, and the overlay toggle. Cheap to hold when diag is off
+/// (it is simply never ticked).
+pub struct DiagState {
+    last_tick: Option<Instant>,
+    prev_tick: AppCounters,
+    prev_frame: AppCounters,
+    max_frame_ms: f64,
+    /// Wired to a toggle keybinding + the overlay panel in Task 5.
+    #[allow(dead_code)]
+    pub overlay_visible: bool,
+    last_snapshot: Option<Snapshot>,
+}
+
+impl DiagState {
+    pub fn new() -> Self {
+        Self {
+            last_tick: None,
+            prev_tick: AppCounters::default(),
+            prev_frame: AppCounters::default(),
+            max_frame_ms: 0.0,
+            overlay_visible: overlay_enabled(),
+            last_snapshot: None,
+        }
+    }
+
+    /// Wired to a toggle keybinding in Task 5.
+    #[allow(dead_code)]
+    pub fn toggle_overlay(&mut self) {
+        self.overlay_visible = !self.overlay_visible;
+    }
+
+    /// Read by the overlay panel in Task 5.
+    #[allow(dead_code)]
+    pub fn last_snapshot(&self) -> Option<&Snapshot> {
+        self.last_snapshot.as_ref()
+    }
+
+    /// Call once at the end of every `update()`. Tracks per-frame deltas and the
+    /// running max frame time; emits (and caches) a `Snapshot` at most ~1×/sec.
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        jobs: JobStats,
+        g: Gauges,
+        frame_ms: f64,
+        repaint_forced: bool,
+    ) -> Option<Snapshot> {
+        if frame_ms > self.max_frame_ms {
+            self.max_frame_ms = frame_ms;
+        }
+        let cur = app_counters();
+        let out = match self.last_tick {
+            None => {
+                // Establish baselines; no emit on the very first frame.
+                self.last_tick = Some(now);
+                None
+            }
+            Some(last) => {
+                let dt = now.duration_since(last).as_secs_f64();
+                if dt < 1.0 {
+                    None
+                } else {
+                    let snap = build_snapshot(
+                        dt,
+                        &self.prev_tick,
+                        &cur,
+                        &self.prev_frame,
+                        jobs,
+                        g,
+                        frame_ms,
+                        self.max_frame_ms,
+                        repaint_forced,
+                    );
+                    self.last_tick = Some(now);
+                    self.prev_tick = cur;
+                    self.max_frame_ms = 0.0;
+                    self.last_snapshot = Some(snap.clone());
+                    Some(snap)
+                }
+            }
+        };
+        // Per-frame delta baseline advances every frame.
+        self.prev_frame = cur;
+        out
+    }
+}
+
+impl Default for DiagState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -317,5 +542,110 @@ mod tests {
             classify_request(true, true, true),
             ReqOutcome::DedupTextured
         );
+    }
+
+    fn sample_gauges() -> Gauges {
+        Gauges {
+            thumb_pending: 640,
+            thumb_missing: 0,
+            thumb_handles: 640,
+            pending_uploads: 210,
+            active_ingests: 0,
+            ingest_done: 3320,
+            ingest_total: 3320,
+            uploads_cap: 16,
+        }
+    }
+
+    #[test]
+    fn build_snapshot_computes_per_second_rates() {
+        let prev = AppCounters {
+            tex_hit: 100,
+            ..Default::default()
+        };
+        let cur = AppCounters {
+            tex_hit: 140,
+            ..Default::default()
+        };
+        let jobs = ferrolite_jobs::JobStats::default();
+        let s = build_snapshot(
+            2.0,
+            &prev,
+            &cur,
+            &prev,
+            jobs,
+            sample_gauges(),
+            6.2,
+            11.0,
+            true,
+        );
+        // 40 hits over 2s = 20/s.
+        assert!((s.tex_hit_per_s - 20.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn format_log_contains_key_fields() {
+        let cur = AppCounters {
+            req_calls: 44,
+            req_new: 2,
+            req_fast: 1,
+            req_dedup_tex: 30,
+            req_dedup_pending: 11,
+            ..Default::default()
+        };
+        let mut jobs = ferrolite_jobs::JobStats::default();
+        jobs.submitted[ferrolite_jobs::Priority::Visible.index()] = 812;
+        jobs.active = 6;
+        jobs.pending[ferrolite_jobs::Priority::Visible.index()] = 634;
+        let s = build_snapshot(
+            1.0,
+            &AppCounters::default(),
+            &cur,
+            &cur,
+            jobs,
+            sample_gauges(),
+            6.2,
+            11.0,
+            true,
+        );
+        let out = format_log(&s);
+        assert!(out.contains("[diag"), "has the diag prefix");
+        assert!(out.contains("frame 6.2ms"), "shows frame time");
+        assert!(
+            out.contains("sub I/V/B 0/812/0"),
+            "shows per-priority submits"
+        );
+        assert!(out.contains("pending 640"), "shows lazy-load pending gauge");
+        assert!(out.contains("uploads"), "shows uploads line");
+    }
+
+    #[test]
+    fn tick_emits_at_most_once_per_second() {
+        use std::time::{Duration, Instant};
+        let mut d = DiagState::new();
+        let t0 = Instant::now();
+        let jobs = ferrolite_jobs::JobStats::default();
+        // First tick establishes the baseline (no emit).
+        assert!(d.tick(t0, jobs, sample_gauges(), 5.0, false).is_none());
+        // 100ms later: below the 1s threshold → no emit.
+        assert!(d
+            .tick(
+                t0 + Duration::from_millis(100),
+                jobs,
+                sample_gauges(),
+                5.0,
+                false
+            )
+            .is_none());
+        // 1.1s after baseline → emit.
+        assert!(d
+            .tick(
+                t0 + Duration::from_millis(1100),
+                jobs,
+                sample_gauges(),
+                5.0,
+                false
+            )
+            .is_some());
     }
 }

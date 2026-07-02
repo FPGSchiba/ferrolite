@@ -1133,6 +1133,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "rawler",
+ "rayon",
  "thiserror 2.0.18",
 ]
 

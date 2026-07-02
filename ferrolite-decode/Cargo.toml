@@ -14,3 +14,4 @@ rawler = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "tiff", "webp", "bmp", "gif"] }
 exif = { workspace = true }
 thiserror = { workspace = true }
+rayon = { workspace = true }

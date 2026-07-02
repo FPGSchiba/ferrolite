@@ -1448,6 +1448,31 @@ impl VirtualTexture {
         self.sparse.as_ref().map(|s| s.in_flight.len())
     }
 
+    /// Rung 4 (producer-drive): how many currently-needed tiles are not yet
+    /// produced at the active op-stack version. `0` means the visible view is
+    /// fully produced (converged). The drive loop uses this to know when to stop
+    /// repainting, since `sparse_pending` (CPU load jobs) stays `0` in producer
+    /// mode. `None` on a non-sparse VT.
+    ///
+    /// `last_needed` is empty until the sparse shader has painted at least once
+    /// (feedback is one frame latent), so a caller must also treat "needed set
+    /// not yet established" as not-converged — see `needed_established`.
+    pub fn produce_pending(&self) -> Option<usize> {
+        self.sparse
+            .as_ref()
+            .map(|s| s.versions.to_produce(&s.last_needed).len())
+    }
+
+    /// Rung 4: whether the GPU-truth needed set has been established yet (the
+    /// sparse shader has painted and its feedback been read back at least once).
+    /// `false` on a non-sparse VT. Pairs with `produce_pending` to catch the
+    /// producer bootstrap frame (needed empty ⇒ not yet converged).
+    pub fn needed_established(&self) -> bool {
+        self.sparse
+            .as_ref()
+            .is_some_and(|s| !s.last_needed.is_empty())
+    }
+
     /// Rung 4: cancel every in-flight tile-load job. Called on navigation so a
     /// superseded image's tile jobs stop competing with the newly-opened one.
     /// Idempotent; a no-op on a non-sparse VT. Mirrors `cancel_streaming`.

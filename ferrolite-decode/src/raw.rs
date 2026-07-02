@@ -1,5 +1,6 @@
 use crate::color::ColorProfile;
 use crate::error::{rawler as rawler_err, DecodeError};
+use ferrolite_image::Orientation;
 use rawler::decoders::RawDecodeParams;
 use rawler::rawimage::{RawImageData, RawPhotometricInterpretation};
 use rawler::rawsource::RawSource;
@@ -28,6 +29,10 @@ pub struct RawDecoded {
     /// Camera color calibration (XYZ→camera matrix + reference white). Additive
     /// decode product; consumed by `ferrolite-pipeline` via `ferrolite-color`.
     pub color_profile: ColorProfile,
+    /// EXIF orientation of the sensor frame. The demosaic output is sensor-
+    /// native; the consumer applies this to upright the full-res tier so it
+    /// matches the already-uprighted embedded preview.
+    pub orientation: Orientation,
 }
 
 pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
@@ -37,6 +42,15 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
     let img = decoder
         .raw_image(&src, &params, false)
         .map_err(rawler_err)?;
+
+    // EXIF orientation of the sensor frame (RAW pixels are stored sensor-native).
+    // Read cheaply from metadata; default to Normal when absent/unreadable.
+    let orientation = decoder
+        .raw_metadata(&src, &params)
+        .ok()
+        .and_then(|m| m.exif.orientation)
+        .map(Orientation::from_exif)
+        .unwrap_or(Orientation::Normal);
 
     // RawImageData is Integer(Vec<u16>) for almost all formats; a few DNGs are
     // Float — quantize to u16 for this plan's display-only consumer.
@@ -96,6 +110,7 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
         white_level,
         wb_coeffs,
         color_profile: ColorProfile::from_color_matrix(&img.color_matrix),
+        orientation,
     })
 }
 

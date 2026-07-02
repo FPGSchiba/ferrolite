@@ -104,7 +104,13 @@ pub fn spawn_full(
                     return;
                 }
                 let color_profile = raw.color_profile.clone();
-                let image = QuadBin.to_linear_rgba_f32(&raw);
+                // Demosaic is sensor-native; upright it to match the already-
+                // oriented embedded preview (the RAW path has no image-crate
+                // DynamicImage to run `apply_orientation` on).
+                let image = ferrolite_decode::apply_orientation_linear(
+                    QuadBin.to_linear_rgba_f32(&raw),
+                    raw.orientation,
+                );
                 let _ = tx.send(AppEvent::FullDecoded {
                     image_id,
                     image,

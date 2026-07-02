@@ -347,13 +347,16 @@ impl FerroliteApp {
 
         let mut items: Vec<crate::export::batch::BatchItem> = Vec::new();
         let mut seq = 0usize;
+        let mut skipped = 0usize;
         for &id in &ids {
             let Some(rec) = recs.iter().find(|r| r.id == id) else {
+                skipped += 1;
                 continue;
             };
             // Skip images whose folder can't be resolved (moved/deleted on disk);
             // the batch proceeds with the remaining queued images.
             let Some(path) = self.state.image_path(rec) else {
+                skipped += 1;
                 continue;
             };
             seq += 1;
@@ -365,13 +368,10 @@ impl FerroliteApp {
                 name: stem,
                 seq,
                 date: ferrolite_export::format_capture_date(rec.capture_time.as_deref()),
-                // `ImageRecord` does not carry make/model (only `NewImage` does at
-                // ingest time), so `{camera}` resolves to empty until the catalog
-                // read model exposes it.
-                camera: String::new(),
             };
             let expanded = ferrolite_export::expand_filename(&template, &fctx);
-            let filename = ferrolite_export::resolve_collision(&expanded, ext, &mut taken);
+            let safe = ferrolite_export::sanitize_component(&expanded);
+            let filename = ferrolite_export::resolve_collision(&safe, ext, &mut taken);
             items.push(crate::export::batch::BatchItem {
                 image_id: id,
                 path,
@@ -381,8 +381,13 @@ impl FerroliteApp {
         }
 
         if items.is_empty() {
-            self.state.warning =
-                Some("No queued images could be resolved to a file on disk.".to_string());
+            self.state.warning = if skipped > 0 {
+                Some(format!(
+                    "No images could be resolved for export ({skipped} skipped)."
+                ))
+            } else {
+                Some("No queued images could be resolved to a file on disk.".to_string())
+            };
             return;
         }
 
@@ -399,7 +404,11 @@ impl FerroliteApp {
         let mut bs = crate::export::batch::BatchExportState::new(total);
         bs.handles = handles;
         self.state.batch = Some(bs);
-        self.state.warning = Some(format!("Exporting {total} image(s)…"));
+        self.state.warning = Some(if skipped > 0 {
+            format!("Exporting {total} image(s)… (skipped {skipped} with unresolved paths)")
+        } else {
+            format!("Exporting {total} image(s)…")
+        });
     }
 
     /// sRGB→working for the preview tier: the embedded preview and Standard images

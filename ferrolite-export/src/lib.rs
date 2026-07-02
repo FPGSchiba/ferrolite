@@ -16,7 +16,8 @@ mod resize;
 
 pub use error::ExportError;
 pub use filename::{
-    expand as expand_filename, format_capture_date, resolve_collision, FilenameCtx,
+    expand as expand_filename, format_capture_date, resolve_collision, sanitize_component,
+    FilenameCtx,
 };
 pub use job::{run_export, ExportOutcome, ExportRequest};
 pub use options::{BitDepth, ExportFormat, ExportOptions, ResizeSpec};

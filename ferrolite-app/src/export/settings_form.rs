@@ -30,6 +30,7 @@ pub fn settings_form(ui: &mut egui::Ui, o: &mut ExportOptions) {
             ui.selectable_value(&mut o.bit_depth, BitDepth::Sixteen, "16-bit");
         });
     });
+    // 16-bit only for TIFF/PNG; force back to 8-bit otherwise.
     if !o.format.supports_16bit() {
         o.bit_depth = BitDepth::Eight;
     }

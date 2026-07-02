@@ -13,12 +13,10 @@ pub struct FilenameCtx {
     pub seq: usize,
     /// Preformatted date string for `{date}` (e.g. "2026-06-29"); may be empty.
     pub date: String,
-    /// Camera make+model for `{camera}`; may be empty.
-    pub camera: String,
 }
 
 /// Expand `template` against `ctx`. Recognised tokens: `{name}`, `{seq}`,
-/// `{seq:0N}` (zero-padded to width N), `{date}`, `{camera}`. Any other
+/// `{seq:0N}` (zero-padded to width N), `{date}`. Any other
 /// `{...}` run is emitted verbatim (braces included). Literal text passes through.
 pub fn expand(template: &str, ctx: &FilenameCtx) -> String {
     let mut out = String::with_capacity(template.len() + 8);
@@ -53,7 +51,6 @@ fn resolve_token(token: &str, ctx: &FilenameCtx) -> Option<String> {
         "name" => Some(ctx.name.clone()),
         "seq" => Some(ctx.seq.to_string()),
         "date" => Some(ctx.date.clone()),
-        "camera" => Some(ctx.camera.clone()),
         _ => {
             // {seq:0N} zero-padded sequence.
             if let Some(width) = token.strip_prefix("seq:0") {
@@ -64,6 +61,27 @@ fn resolve_token(token: &str, ctx: &FilenameCtx) -> Option<String> {
             None
         }
     }
+}
+
+/// Make a filename component safe across OS filesystems: replace characters
+/// illegal on Windows (`< > : " / \ | ? *`) and ASCII control chars with `_`,
+/// then trim trailing dots/spaces (illegal on Windows). Empty result → "export".
+pub fn sanitize_component(name: &str) -> String {
+    let mut out: String = name
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if (c as u32) < 0x20 => '_',
+            c => c,
+        })
+        .collect();
+    while out.ends_with('.') || out.ends_with(' ') {
+        out.pop();
+    }
+    if out.is_empty() {
+        out.push_str("export");
+    }
+    out
 }
 
 /// Return a filename `"{stem}.{ext}"` unique within `taken`, appending `_1`,
@@ -107,15 +125,20 @@ mod tests {
             name: "DSC_0001".into(),
             seq: 7,
             date: "2026-06-29".into(),
-            camera: "Nikon Z f".into(),
         }
     }
 
     #[test]
     fn substitutes_known_tokens_and_literals() {
         assert_eq!(expand("{name}_{date}", &ctx()), "DSC_0001_2026-06-29");
-        assert_eq!(expand("edit-{camera}", &ctx()), "edit-Nikon Z f");
         assert_eq!(expand("{name}", &ctx()), "DSC_0001");
+    }
+
+    #[test]
+    fn camera_token_is_now_unknown_and_passes_through_verbatim() {
+        // {camera} was removed (no source data on ImageRecord); it now falls
+        // through the unknown-token verbatim path.
+        assert_eq!(expand("edit-{camera}", &ctx()), "edit-{camera}");
     }
 
     #[test]
@@ -148,6 +171,42 @@ mod tests {
         );
         assert_eq!(format_capture_date(Some("garbage")), "");
         assert_eq!(format_capture_date(None), "");
+    }
+
+    #[test]
+    fn sanitize_replaces_illegal_windows_chars() {
+        assert_eq!(sanitize_component("a/b:c*d"), "a_b_c_d");
+        assert_eq!(sanitize_component("<>\"|?\\"), "______");
+    }
+
+    #[test]
+    fn sanitize_replaces_control_chars() {
+        assert_eq!(sanitize_component("a\u{0}b\tc"), "a_b_c");
+    }
+
+    #[test]
+    fn sanitize_trims_trailing_dots_and_spaces() {
+        assert_eq!(sanitize_component("name. "), "name");
+        assert_eq!(sanitize_component("name..."), "name");
+        assert_eq!(sanitize_component("name   "), "name");
+    }
+
+    #[test]
+    fn sanitize_all_illegal_or_empty_becomes_export() {
+        assert_eq!(sanitize_component(""), "export");
+        assert_eq!(sanitize_component("..."), "export");
+        // '/' is replaced with '_' (not trimmed), so this is not empty.
+        assert_eq!(sanitize_component("///"), "___");
+    }
+
+    #[test]
+    fn sanitize_normal_name_passes_through_unchanged() {
+        assert_eq!(sanitize_component("DSC_0001"), "DSC_0001");
+    }
+
+    #[test]
+    fn sanitize_unicode_name_passes_through_unchanged() {
+        assert_eq!(sanitize_component("café"), "café");
     }
 
     #[test]

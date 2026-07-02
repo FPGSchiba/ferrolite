@@ -7,7 +7,9 @@
 //! `FERROLITE_DIAG_FILE` overrides the session-log path.
 
 use ferrolite_jobs::JobStats;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -39,15 +41,28 @@ pub fn mode() -> DiagMode {
     *M.get_or_init(|| parse_mode(std::env::var("FERROLITE_DIAG").ok().as_deref()))
 }
 
+/// Check if a mode enables logging.
+fn mode_logs(m: DiagMode) -> bool {
+    matches!(m, DiagMode::Log | DiagMode::Both)
+}
+
+/// Check if a mode enables the overlay.
+fn mode_overlays(m: DiagMode) -> bool {
+    matches!(m, DiagMode::Overlay | DiagMode::Both)
+}
+
 pub fn enabled() -> bool {
     !matches!(mode(), DiagMode::Off)
 }
+
+/// Logging is enabled if the mode includes log output.
 pub fn log_enabled() -> bool {
-    matches!(mode(), DiagMode::Log | DiagMode::Both)
+    mode_logs(mode())
 }
 
+/// Overlay is enabled if the mode includes on-screen display.
 pub fn overlay_enabled() -> bool {
-    matches!(mode(), DiagMode::Overlay | DiagMode::Both)
+    mode_overlays(mode())
 }
 
 /// Per-second rate of a cumulative delta over `dt_secs` (guards dt→0).
@@ -58,9 +73,6 @@ pub fn compute_rate(delta: u64, dt_secs: f64) -> f64 {
         delta as f64 / dt_secs
     }
 }
-
-use std::io::Write;
-use std::sync::Mutex;
 
 /// Lazily-opened session log file (only when logging is enabled). `None` if
 /// logging is off or the file could not be opened (writes then go to stderr
@@ -348,7 +360,7 @@ pub fn format_log(s: &Snapshot) -> String {
          \x20jobs  sub I/V/B {si}/{sv}/{sb}  disp {disp}  done {done}  cxl(pre){cxp}  panic {pan}\n\
          \x20      active {act}  pending I/V/B {pi}/{pv}/{pb}  cancel removed {crem}/absent {cabs}\n\
          \x20thumb req/f {req} = new {rn} + fast {rf} + dedup {dd} (tex {rt}/pend {rpd}/miss {rms})\n\
-         \x20      pending {tp}  handles {th}  missing {tm}  retain cxl {rc}\n\
+         \x20      pending {tp}  handles {th}  missing {tm}  retain req {rc}\n\
          \x20cache tex h/s {thh:.0} m/s {thm:.0} ev/s {the:.0} | pix h/s {pxh:.0} m/s {pxm:.0} ev/s {pxe:.0}\n\
          \x20uploads {up}/{cap} cap  backlog {bk}\n\
          \x20ingest active {ai}  done {idn}/{itot}",
@@ -595,10 +607,15 @@ mod tests {
     }
 
     #[test]
-    fn mode_flags_are_consistent() {
-        assert!(!DiagMode::Off.eq(&DiagMode::Both));
-        assert_eq!(parse_mode(Some("log")), DiagMode::Log);
-        assert!(matches!(DiagMode::Log, DiagMode::Log));
+    fn mode_flags_map_each_variant_correctly() {
+        // Off: neither log nor overlay.
+        assert!(!mode_logs(DiagMode::Off) && !mode_overlays(DiagMode::Off));
+        // Log: log only.
+        assert!(mode_logs(DiagMode::Log) && !mode_overlays(DiagMode::Log));
+        // Overlay: overlay only.
+        assert!(!mode_logs(DiagMode::Overlay) && mode_overlays(DiagMode::Overlay));
+        // Both: log and overlay.
+        assert!(mode_logs(DiagMode::Both) && mode_overlays(DiagMode::Both));
     }
 
     #[test]

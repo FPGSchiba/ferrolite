@@ -270,6 +270,10 @@ impl AppState {
         if rgba.len() != (w as usize) * (h as usize) * 4 {
             return;
         }
+        // The pixels are being uploaded now → the id leaves the awaiting-upload
+        // stage and (below) enters `textures`. Harmless no-op for ids uploaded
+        // inline that were never queued.
+        self.thumb_uploading.remove(&image_id);
         self.thumb_pixels.insert(image_id, rgba.clone(), w, h);
         let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
         let tex = ctx.load_texture(
@@ -290,7 +294,7 @@ impl AppState {
         let pending = self.thumb_pending.contains(&image_id);
         let missing = self.thumb_missing.contains(&image_id);
         let uploading = self.thumb_uploading.contains(&image_id);
-        if textured || pending || missing {
+        if textured || pending || missing || uploading {
             crate::diag::record_request(crate::diag::classify_request(
                 textured, pending, missing, uploading,
             ));
@@ -298,9 +302,12 @@ impl AppState {
         }
         // Fast path: pixels already decoded this session → re-upload directly,
         // no job / DB read / JPEG decode (Bug B). Routed through the same
-        // per-frame upload budget as ThumbReady via `pending_uploads`.
+        // per-frame upload budget as ThumbReady via `pending_uploads`. Mark the
+        // id `thumb_uploading` so a repeat request while it waits in the queue
+        // does not push another copy (re-submit storm guard).
         if let Some((rgba, w, h)) = self.thumb_pixels.get(image_id) {
             crate::diag::record_request(crate::diag::ReqOutcome::FastPath);
+            self.thumb_uploading.insert(image_id);
             self.pending_uploads.push((image_id, rgba, w, h));
             ctx.request_repaint();
             return;
@@ -518,6 +525,11 @@ impl AppState {
             handle.cancel();
         }
         self.thumb_pending.clear();
+        // Drop any decoded-but-not-yet-uploaded thumbnails and their guard so a
+        // folder switch / shutdown leaves no stale upload queue (and keeps the
+        // `thumb_uploading == pending_uploads ids` invariant).
+        self.pending_uploads.clear();
+        self.thumb_uploading.clear();
     }
 
     /// Cancel and drop lazy-load thumbnail fetches whose cells are no longer
@@ -1189,6 +1201,85 @@ mod tests {
         );
 
         let _ = gate_tx.send(());
+    }
+
+    /// A cell whose pixels are already queued for upload (`thumb_uploading`)
+    /// must NOT submit a new job or push another copy to `pending_uploads`.
+    #[test]
+    fn request_thumbnail_dedups_ids_awaiting_upload() {
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+        s.thumb_uploading.insert(42);
+        let jobs_before = s.jobs.pending_count();
+        let uploads_before = s.pending_uploads.len();
+
+        s.request_thumbnail(&ctx, 42);
+
+        assert_eq!(
+            s.jobs.pending_count(),
+            jobs_before,
+            "no job submitted for an id already awaiting upload"
+        );
+        assert_eq!(
+            s.pending_uploads.len(),
+            uploads_before,
+            "no extra pending_uploads push for an id already awaiting upload"
+        );
+        assert!(
+            !s.thumb_pending.contains(&42),
+            "awaiting-upload id must not enter thumb_pending"
+        );
+    }
+
+    /// FastPath (pixels cached, texture absent) queues the upload once and marks
+    /// the id `thumb_uploading`; a repeated request is then a dedup no-op.
+    #[test]
+    fn request_thumbnail_fastpath_marks_uploading_once() {
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+        // Seed the CPU pixel cache (1x1 RGBA) without a live texture.
+        s.thumb_pixels.insert(7, vec![1, 2, 3, 255], 1, 1);
+
+        s.request_thumbnail(&ctx, 7);
+        assert_eq!(s.pending_uploads.len(), 1, "fast path queued one upload");
+        assert!(s.thumb_uploading.contains(&7), "id marked awaiting upload");
+
+        // Second request while still awaiting upload: dedup no-op.
+        s.request_thumbnail(&ctx, 7);
+        assert_eq!(
+            s.pending_uploads.len(),
+            1,
+            "no duplicate push while awaiting upload"
+        );
+    }
+
+    /// Uploading an id clears its `thumb_uploading` marker (it is now textured).
+    #[test]
+    fn upload_thumbnail_clears_uploading_marker() {
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+        s.thumb_uploading.insert(9);
+
+        s.upload_thumbnail(&ctx, 9, vec![1, 2, 3, 255], 1, 1);
+
+        assert!(
+            !s.thumb_uploading.contains(&9),
+            "upload must clear the awaiting-upload marker"
+        );
+        assert!(s.textures.contains(9), "id is now textured");
+    }
+
+    /// `cancel_pending_jobs` clears both the upload queue and its guard set.
+    #[test]
+    fn cancel_pending_jobs_clears_uploads_and_uploading() {
+        let mut s = AppState::for_test();
+        s.pending_uploads.push((1, vec![0; 4], 1, 1));
+        s.thumb_uploading.insert(1);
+
+        s.cancel_pending_jobs();
+
+        assert!(s.pending_uploads.is_empty(), "pending_uploads cleared");
+        assert!(s.thumb_uploading.is_empty(), "thumb_uploading cleared");
     }
 
     #[test]

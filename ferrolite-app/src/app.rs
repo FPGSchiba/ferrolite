@@ -1313,7 +1313,10 @@ impl eframe::App for FerroliteApp {
                     self.state.upload_thumbnail(ctx, id, rgba, w, h);
                     uploads_this_frame += 1;
                 } else {
-                    // Over budget this frame — stash for a subsequent frame.
+                    // Over budget this frame — stash for a subsequent frame and
+                    // mark the id awaiting upload so a re-request while it waits
+                    // does not re-submit/re-push (re-submit storm guard).
+                    self.state.thumb_uploading.insert(id);
                     self.state.pending_uploads.push((id, rgba, w, h));
                 }
             }

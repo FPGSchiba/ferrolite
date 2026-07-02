@@ -49,6 +49,28 @@ pub fn draw_drag_chip(ctx: &egui::Context, count: usize) {
     painter.galley(anchor + pad, galley, crate::theme::TEXT_PRIMARY);
 }
 
+/// Manual drop-target hit test for a left-panel row (egui 0.29.1 has no
+/// `dnd_drop_zone`). While a `DraggedImages` drag hovers `row_rect`, paints a
+/// highlight; on pointer release over the row, takes the payload and returns
+/// the dragged ids. Returns `None` otherwise. Caller performs the action.
+pub fn row_drop_target(ui: &egui::Ui, row_rect: egui::Rect) -> Option<Vec<i64>> {
+    let _dragged = egui::DragAndDrop::payload::<DraggedImages>(ui.ctx())?;
+    let pointer = ui.ctx().pointer_interact_pos()?;
+    if !row_rect.contains(pointer) {
+        return None;
+    }
+    // Highlight the row as a valid drop target (before any state mutation by caller).
+    ui.painter().rect_filled(
+        row_rect.expand2(egui::vec2(4.0, 1.0)),
+        3.0,
+        crate::theme::ACCENT_BG_SEL,
+    );
+    if ui.input(|i| i.pointer.any_released()) {
+        return egui::DragAndDrop::take_payload::<DraggedImages>(ui.ctx()).map(|p| p.0.clone());
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -404,8 +404,7 @@ pub struct DiagState {
     prev_tick: AppCounters,
     prev_frame: AppCounters,
     max_frame_ms: f64,
-    /// Wired to a toggle keybinding + the overlay panel in Task 5.
-    #[allow(dead_code)]
+    /// Wired to a toggle keybinding + the overlay panel.
     pub overlay_visible: bool,
     last_snapshot: Option<Snapshot>,
 }
@@ -422,14 +421,12 @@ impl DiagState {
         }
     }
 
-    /// Wired to a toggle keybinding in Task 5.
-    #[allow(dead_code)]
+    /// Wired to a toggle keybinding (F9 in `update`).
     pub fn toggle_overlay(&mut self) {
         self.overlay_visible = !self.overlay_visible;
     }
 
-    /// Read by the overlay panel in Task 5.
-    #[allow(dead_code)]
+    /// Read by the overlay panel.
     pub fn last_snapshot(&self) -> Option<&Snapshot> {
         self.last_snapshot.as_ref()
     }
@@ -488,6 +485,79 @@ impl Default for DiagState {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Compact multi-line text for the on-screen overlay (a denser view of the same
+/// snapshot the log formats).
+pub fn format_overlay(s: &Snapshot) -> String {
+    let j = &s.jobs;
+    let g = &s.g;
+    format!(
+        "frame {fms:.1}ms (max {mx:.1})  ev/f {ev}\n\
+         jobs sub I/V/B {si}/{sv}/{sb}  active {act}\n\
+         pending I/V/B {pi}/{pv}/{pb}\n\
+         cancel removed {crem}/absent {cabs}  cxl(pre) {cxp}  panic {pan}\n\
+         req/f {req} new {rn} fast {rf} dedup {dd}\n\
+         thumb pending {tp} handles {th} missing {tm}\n\
+         tex h/s {thh:.0} ev/s {the:.0} | pix h/s {pxh:.0} ev/s {pxe:.0}\n\
+         uploads/f {up}/{cap}  backlog {bk}\n\
+         ingest {idn}/{itot} active {ai}",
+        fms = s.frame_ms,
+        mx = s.max_frame_ms,
+        ev = s.ev_per_frame,
+        si = j.submitted[ferrolite_jobs::Priority::Interactive.index()],
+        sv = j.submitted[ferrolite_jobs::Priority::Visible.index()],
+        sb = j.submitted[ferrolite_jobs::Priority::Background.index()],
+        act = j.active,
+        pi = j.pending[ferrolite_jobs::Priority::Interactive.index()],
+        pv = j.pending[ferrolite_jobs::Priority::Visible.index()],
+        pb = j.pending[ferrolite_jobs::Priority::Background.index()],
+        crem = j.cancel_removed,
+        cabs = j.cancel_absent,
+        cxp = j.cancelled_before_dispatch,
+        pan = j.panicked,
+        req = s.req_per_frame,
+        rn = s.req_new_f,
+        rf = s.req_fast_f,
+        dd = s.req_dedup_tex_f + s.req_dedup_pending_f + s.req_dedup_missing_f,
+        tp = g.thumb_pending,
+        th = g.thumb_handles,
+        tm = g.thumb_missing,
+        thh = s.tex_hit_per_s,
+        the = s.tex_evict_per_s,
+        pxh = s.pix_hit_per_s,
+        pxe = s.pix_evict_per_s,
+        up = s.uploads_per_frame,
+        cap = g.uploads_cap,
+        bk = g.pending_uploads,
+        idn = g.ingest_done,
+        itot = g.ingest_total,
+        ai = g.active_ingests,
+    )
+}
+
+/// Paint the diagnostics overlay: a non-interactive, top-right, monospace panel
+/// drawn on the tooltip layer so it floats above the app. Call at the end of
+/// `update()` only when the overlay is enabled AND visible.
+pub fn draw_overlay(ctx: &egui::Context, s: &Snapshot) {
+    egui::Area::new(egui::Id::new("ferrolite-diag-overlay"))
+        .order(egui::Order::Tooltip)
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(egui::Color32::from_black_alpha(200))
+                .inner_margin(egui::Margin::same(8.0))
+                .rounding(egui::Rounding::same(4.0))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(format_overlay(s))
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(120, 255, 120)),
+                    );
+                });
+        });
 }
 
 #[cfg(test)]
@@ -617,6 +687,28 @@ mod tests {
         );
         assert!(out.contains("pending 640"), "shows lazy-load pending gauge");
         assert!(out.contains("uploads"), "shows uploads line");
+    }
+
+    #[test]
+    fn format_overlay_contains_core_gauges() {
+        let mut jobs = ferrolite_jobs::JobStats::default();
+        jobs.pending[ferrolite_jobs::Priority::Visible.index()] = 634;
+        jobs.active = 6;
+        let s = build_snapshot(
+            1.0,
+            &AppCounters::default(),
+            &AppCounters::default(),
+            &AppCounters::default(),
+            jobs,
+            sample_gauges(),
+            6.2,
+            11.0,
+            false,
+        );
+        let out = format_overlay(&s);
+        assert!(out.contains("frame"), "overlay shows frame time");
+        assert!(out.contains("active 6"), "overlay shows active jobs");
+        assert!(out.contains("pending"), "overlay shows a pending gauge");
     }
 
     #[test]

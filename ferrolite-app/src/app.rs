@@ -1178,6 +1178,10 @@ impl eframe::App for FerroliteApp {
 
         let diag_t0 = crate::diag::enabled().then(std::time::Instant::now);
 
+        if crate::diag::enabled() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
+            self.diag.toggle_overlay();
+        }
+
         // Deferred from a previous Develop→Library switch: clearing thumbnail
         // textures must happen BEFORE anything paints this frame, never in the same
         // frame they were painted (egui frees dropped textures before queue.submit).
@@ -2035,6 +2039,11 @@ impl eframe::App for FerroliteApp {
             ) {
                 if crate::diag::log_enabled() {
                     crate::diag::write_log(&crate::diag::format_log(&snap));
+                }
+            }
+            if crate::diag::overlay_enabled() && self.diag.overlay_visible {
+                if let Some(snap) = self.diag.last_snapshot() {
+                    crate::diag::draw_overlay(ctx, snap);
                 }
             }
         }

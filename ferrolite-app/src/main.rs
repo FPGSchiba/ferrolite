@@ -2,6 +2,7 @@ mod app;
 mod canvas;
 mod chrome;
 mod develop;
+mod diag;
 mod events;
 mod export;
 mod export_module;
@@ -17,6 +18,7 @@ mod viewer;
 mod widgets;
 
 fn main() -> eframe::Result<()> {
+    diag::init();
     let icon = egui::IconData {
         rgba: chrome::icon::icon_rgba(256),
         width: 256,

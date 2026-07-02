@@ -8,7 +8,7 @@ use image::ExtendedColorType;
 
 pub const THUMB_MAX_EDGE: u32 = 256;
 pub const THUMB_QUALITY: u8 = 85;
-const THUMB_LEVEL: i64 = 0;
+pub(crate) const THUMB_LEVEL: i64 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Thumbnail {

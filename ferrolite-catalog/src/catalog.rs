@@ -1,6 +1,7 @@
 use crate::error::CatalogError;
 use crate::model::{DecodeStatus, ImageRecord, NewImage};
 use crate::schema;
+use crate::thumbnail::{Thumbnail, THUMB_LEVEL};
 use ferrolite_image::{Color, TagId};
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -96,6 +97,82 @@ impl Catalog {
             |row| row.get(0),
         )?;
         Ok(id)
+    }
+
+    /// Batched ingest write: upsert every `(NewImage, Option<Thumbnail>)` pair
+    /// and persist its thumbnail (if any) under ONE transaction, instead of one
+    /// autocommit INSERT per row. Reduces writer-lock hold time + per-INSERT
+    /// commit overhead during ingest (RC-PERF-3) while keeping the exact same
+    /// `INSERT ... ON CONFLICT` semantics as the per-row `upsert_image` /
+    /// `put_thumbnail` (this method reuses their SQL verbatim, just against the
+    /// transaction handle instead of `self.conn()` directly).
+    ///
+    /// Returns each row's image id in input order, so the caller can still emit
+    /// a per-row `Indexed`/`ThumbReady` event after the batch commits. On error,
+    /// the transaction is dropped (rolled back) and no partial batch is visible —
+    /// callers should retry or drop the batch, matching the crash-safety of the
+    /// old per-row autocommit path (a mid-batch failure loses at most the
+    /// in-flight batch, never previously committed rows).
+    pub fn upsert_images_with_thumbnails_batch(
+        &self,
+        rows: &[(NewImage, Option<Thumbnail>)],
+    ) -> Result<Vec<i64>, CatalogError> {
+        let tx = self.conn().unchecked_transaction()?;
+        let mut ids = Vec::with_capacity(rows.len());
+        for (img, thumb) in rows {
+            tx.execute(
+                "INSERT INTO images
+                   (folder_id, filename, mtime, size, camera_make, camera_model,
+                    width, height, orientation, capture_time, iso, decode_status, kind,
+                    rating, added_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                 ON CONFLICT(folder_id, filename) DO UPDATE SET
+                    mtime=?3, size=?4, camera_make=?5, camera_model=?6, width=?7,
+                    height=?8, orientation=?9, capture_time=?10, iso=?11,
+                    decode_status=?12, kind=?13, rating=?14",
+                rusqlite::params![
+                    img.folder_id,
+                    img.filename,
+                    img.mtime,
+                    img.size,
+                    img.make,
+                    img.model,
+                    img.width,
+                    img.height,
+                    img.orientation.to_exif(),
+                    img.capture_time,
+                    img.iso,
+                    img.decode_status.as_i64(),
+                    img.kind.as_i64(),
+                    img.rating.as_i64(),
+                    img.added_at,
+                ],
+            )?;
+            let id: i64 = tx.query_row(
+                "SELECT id FROM images WHERE folder_id = ?1 AND filename = ?2",
+                rusqlite::params![img.folder_id, img.filename],
+                |row| row.get(0),
+            )?;
+            if let Some(thumb) = thumb {
+                tx.execute(
+                    "INSERT INTO thumbnails (image_id, level, w, h, format, blob)
+                     VALUES (?1,?2,?3,?4,?5,?6)
+                     ON CONFLICT(image_id) DO UPDATE SET
+                        level=?2, w=?3, h=?4, format=?5, blob=?6",
+                    rusqlite::params![
+                        id,
+                        THUMB_LEVEL,
+                        thumb.width as i64,
+                        thumb.height as i64,
+                        thumb.format,
+                        thumb.bytes,
+                    ],
+                )?;
+            }
+            ids.push(id);
+        }
+        tx.commit()?;
+        Ok(ids)
     }
 
     /// Insert a stat-only `Pending` row for the instant index pass, leaving any
@@ -760,5 +837,85 @@ mod export_queue_tests {
             cat.list_export_queue().unwrap().is_empty(),
             "FK cascade removes queue row"
         );
+    }
+}
+
+#[cfg(test)]
+mod ingest_batch_tests {
+    use super::*;
+    use crate::model::NewImage;
+    use crate::thumbnail::{Thumbnail, ThumbnailStore};
+    use ferrolite_image::FileKind;
+
+    fn thumb() -> Thumbnail {
+        Thumbnail {
+            width: 4,
+            height: 4,
+            format: "jpeg".to_string(),
+            bytes: vec![0xFF; 16],
+        }
+    }
+
+    #[test]
+    fn batch_of_n_rows_commits_and_returns_n_ids_in_order() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let rows: Vec<(NewImage, Option<Thumbnail>)> = (0..10)
+            .map(|i| {
+                (
+                    NewImage::failed(f, format!("img{i}.nef"), 1, 1, FileKind::Raw, 0),
+                    if i % 2 == 0 { Some(thumb()) } else { None },
+                )
+            })
+            .collect();
+
+        let ids = cat.upsert_images_with_thumbnails_batch(&rows).unwrap();
+        assert_eq!(ids.len(), 10);
+
+        // ids preserve input order and each row landed under its own filename.
+        for (i, &id) in ids.iter().enumerate() {
+            let rec = cat.image_by_name(f, &format!("img{i}.nef")).unwrap();
+            assert_eq!(rec.map(|r| r.id), Some(id));
+        }
+
+        // Thumbnails were persisted for even rows only.
+        for (i, &id) in ids.iter().enumerate() {
+            let has_thumb = cat.get_thumbnail(id).unwrap().is_some();
+            assert_eq!(has_thumb, i % 2 == 0, "row {i} thumbnail presence");
+        }
+    }
+
+    #[test]
+    fn batch_upsert_on_conflict_updates_existing_row_and_thumbnail() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+
+        let first = vec![(
+            NewImage::failed(f, "a.nef".into(), 1, 100, FileKind::Raw, 0),
+            Some(thumb()),
+        )];
+        let ids1 = cat.upsert_images_with_thumbnails_batch(&first).unwrap();
+
+        let second = vec![(
+            NewImage::failed(f, "a.nef".into(), 2, 200, FileKind::Raw, 0),
+            Some(Thumbnail {
+                width: 8,
+                height: 8,
+                format: "jpeg".to_string(),
+                bytes: vec![0xAA; 32],
+            }),
+        )];
+        let ids2 = cat.upsert_images_with_thumbnails_batch(&second).unwrap();
+
+        assert_eq!(ids1, ids2, "same (folder_id, filename) reuses the row id");
+        let updated = cat.get_thumbnail(ids2[0]).unwrap().unwrap();
+        assert_eq!(updated.width, 8, "thumbnail refreshed on conflict");
+    }
+
+    #[test]
+    fn empty_batch_is_a_noop() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let ids = cat.upsert_images_with_thumbnails_batch(&[]).unwrap();
+        assert!(ids.is_empty());
     }
 }

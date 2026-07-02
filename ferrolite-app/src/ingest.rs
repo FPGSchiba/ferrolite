@@ -26,6 +26,11 @@ pub(crate) fn now_epoch_secs() -> i64 {
 /// How often the background watcher polls the selected folder for new files.
 pub const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Ingest consumer batch size: rows are accumulated and committed in one
+/// transaction every this-many rows (plus a final partial flush at channel
+/// close/cancel), instead of one autocommit INSERT per row (RC-PERF-3).
+const INGEST_WRITE_BATCH: usize = 128;
+
 /// Pure predicate: should the periodic watcher fire this frame? True iff a
 /// folder is selected, no ingest is in flight, and at least `interval` has
 /// elapsed since `last_check` (or there has been no check yet).
@@ -171,6 +176,83 @@ pub fn spawn_startup_rescan(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
+/// Commit `pending` (draining it) in ONE transaction via
+/// [`Catalog::upsert_images_with_thumbnails_batch`], then emit the per-row
+/// `Indexed`/`ThumbReady` events using the ids the batch returns (in the same
+/// order the rows were pushed). A no-op on an empty batch, so callers can call
+/// it unconditionally as a "final flush" without checking emptiness first.
+///
+/// The writer lock is held only for the duration of the batch commit, not
+/// across the channel `recv` — the caller accumulates `pending` outside the
+/// lock and this function is the sole place that takes it.
+fn flush_batch(
+    writer: &Arc<Mutex<Catalog>>,
+    tx: &Sender<AppEvent>,
+    ctx: &egui::Context,
+    force: bool,
+    pending: &mut Vec<(NewImage, Option<(Thumbnail, DecodedThumb)>)>,
+    kept: &mut HashSet<i64>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let rows = std::mem::take(pending);
+    let t_batch = crate::thumb_profile::enabled().then(std::time::Instant::now);
+
+    // Split each row into the (NewImage, Option<Thumbnail>) the batch write
+    // needs and the DecodedThumb kept aside for the post-commit texture-upload
+    // event — moved, not cloned, since NewImage/Thumbnail aren't cheap to copy.
+    let mut decoded_thumbs: Vec<Option<DecodedThumb>> = Vec::with_capacity(rows.len());
+    let batch_input: Vec<(NewImage, Option<Thumbnail>)> = rows
+        .into_iter()
+        .map(|(img, thumb)| match thumb {
+            Some((t, decoded)) => {
+                decoded_thumbs.push(Some(decoded));
+                (img, Some(t))
+            }
+            None => {
+                decoded_thumbs.push(None);
+                (img, None)
+            }
+        })
+        .collect();
+
+    let ids = match writer
+        .lock()
+        .expect("writer")
+        .upsert_images_with_thumbnails_batch(&batch_input)
+    {
+        Ok(ids) => ids,
+        Err(e) => {
+            eprintln!(
+                "ferrolite: batched ingest write failed ({} rows): {e}",
+                batch_input.len()
+            );
+            return;
+        }
+    };
+    if let Some(t) = t_batch {
+        crate::thumb_profile::record_upsert(t.elapsed().as_micros() as u64);
+    }
+
+    for (id, decoded) in ids.into_iter().zip(decoded_thumbs.into_iter()) {
+        if force {
+            kept.insert(id);
+        }
+        // One ingested row == one thumbnail (when the decode succeeded).
+        let _ = tx.send(AppEvent::Indexed { added: 1 });
+        if let Some(decoded) = decoded {
+            let _ = tx.send(AppEvent::ThumbReady {
+                image_id: id,
+                rgba: decoded.rgba,
+                w: decoded.w,
+                h: decoded.h,
+            });
+        }
+    }
+    ctx.request_repaint();
+}
+
 fn ingest_job(
     folder: PathBuf,
     mode: ReindexMode,
@@ -250,68 +332,45 @@ fn ingest_job(
     // Streaming ingest. The expensive part — one decode per file yielding BOTH
     // metadata AND the embedded preview, then resize/encode into a thumbnail —
     // runs in parallel in the producer below and feeds finished rows (each with
-    // its already-generated thumbnail) over a channel. A single consumer performs
-    // the serial row upsert + thumbnail persist under the writer lock and emits an
-    // `Indexed` event per row, so the grid fills in progressively (the app
-    // re-queries on each event) instead of staying empty behind a whole-folder
-    // `.collect()` barrier. Because the thumbnail is generated inline, the file is
-    // opened ONCE — the old separate re-opening Background thumbnail job is gone.
-    type Row = (
-        NewImage,
-        Option<(Thumbnail, DecodedThumb)>,
-        PathBuf,
-        FileKind,
-    );
+    // its already-generated thumbnail) over a channel. A single consumer batches
+    // the row upsert + thumbnail persist into one transaction every
+    // `INGEST_WRITE_BATCH` rows (RC-PERF-3: this replaces two autocommit INSERTs
+    // per row — `upsert_image` then `put_thumbnail` — each of which took the
+    // writer lock and committed individually). `Indexed`/`ThumbReady` are still
+    // emitted per row, right after its batch commits, so the grid fills in
+    // progressively instead of staying empty behind a whole-folder barrier.
+    // Because the thumbnail is generated inline, the file is opened ONCE — the
+    // old separate re-opening Background thumbnail job is gone.
+    type Row = (NewImage, Option<(Thumbnail, DecodedThumb)>);
     let (row_tx, row_rx) = std::sync::mpsc::channel::<Row>();
     let mut kept_image_ids: HashSet<i64> = HashSet::new();
 
     std::thread::scope(|scope| {
-        // Consumer: serial DB writes + thumbnail persist. Clones the shareable
-        // handles so the originals remain usable for the prune/IngestDone below.
+        // Consumer: batches row upsert + thumbnail persist into one transaction
+        // per `INGEST_WRITE_BATCH` rows. Clones the shareable handles so the
+        // originals remain usable for the prune/IngestDone below.
         let consumer = {
             let writer = Arc::clone(&writer);
             let tx = tx.clone();
             let ctx = ctx.clone();
             scope.spawn(move || {
-                use ferrolite_catalog::ThumbnailStore;
                 // For Full, collect every present file's id so prune can delete the rest.
                 let mut kept: HashSet<i64> = HashSet::new();
-                for (new_image, thumb, _path, _kind) in row_rx {
+                let mut pending: Vec<Row> = Vec::with_capacity(INGEST_WRITE_BATCH);
+
+                for row in row_rx {
                     if cancel.is_cancelled() {
                         break;
                     }
-                    let t_up = crate::thumb_profile::enabled().then(std::time::Instant::now);
-                    let id = match writer.lock().expect("writer").upsert_image(&new_image) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            eprintln!("ferrolite: upsert_image failed: {e}");
-                            continue;
-                        }
-                    };
-                    if let Some(t) = t_up {
-                        crate::thumb_profile::record_upsert(t.elapsed().as_micros() as u64);
+                    pending.push(row);
+                    if pending.len() >= INGEST_WRITE_BATCH {
+                        flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
                     }
-                    if force {
-                        kept.insert(id);
-                    }
-                    // One ingested row == one thumbnail (when the decode succeeded).
-                    let _ = tx.send(AppEvent::Indexed { added: 1 });
-                    if let Some((thumb, decoded)) = thumb {
-                        // Persist the JPEG BLOB, then hand the already-decoded RGBA
-                        // to the UI thread for a direct texture upload (no re-decode).
-                        if let Err(e) = writer.lock().expect("writer").put_thumbnail(id, &thumb) {
-                            eprintln!("ferrolite: put_thumbnail failed for #{id}: {e}");
-                        } else {
-                            let _ = tx.send(AppEvent::ThumbReady {
-                                image_id: id,
-                                rgba: decoded.rgba,
-                                w: decoded.w,
-                                h: decoded.h,
-                            });
-                        }
-                    }
-                    ctx.request_repaint();
                 }
+                // Final flush: whatever is left when the channel closes (producer
+                // finished) or the loop broke on cancel — either way, already-decoded
+                // rows in `pending` must not be silently dropped.
+                flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
                 kept
             })
         };
@@ -387,7 +446,7 @@ fn ingest_job(
                         if let Some(t) = t_enc {
                             crate::thumb_profile::record_encode(t.elapsed().as_micros() as u64);
                         }
-                        let _ = sender.send((new_image, thumb, f.path.clone(), f.kind));
+                        let _ = sender.send((new_image, thumb));
                     }
                     Err(_) => {
                         let new_image = NewImage::failed(
@@ -398,7 +457,7 @@ fn ingest_job(
                             f.kind,
                             added_at,
                         );
-                        let _ = sender.send((new_image, None, f.path.clone(), f.kind));
+                        let _ = sender.send((new_image, None));
                     }
                 }
             });

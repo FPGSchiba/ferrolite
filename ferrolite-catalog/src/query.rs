@@ -369,4 +369,28 @@ mod tests {
         assert!(sql.contains("LIMIT ?"));
         assert_eq!(params, vec![Value::Integer(50)]);
     }
+
+    /// A normal (unlimited) `Folder` scope must be able to sort by
+    /// `added_at DESC` too — used when a folder is freshly opened so newly
+    /// ingested thumbnails surface at the top, without going through the
+    /// limited `RecentlyAdded` scope.
+    #[test]
+    fn folder_scope_can_sort_by_added_at_desc() {
+        let q = LibraryQuery {
+            scope: Scope::Folder {
+                id: 7,
+                recursive: false,
+            },
+            sort: Sort {
+                key: SortKey::AddedAt,
+                desc: true,
+            },
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("folder_id = ?"), "sql: {sql}");
+        assert!(sql.contains("ORDER BY added_at DESC"), "sql: {sql}");
+        assert!(!sql.contains("LIMIT"), "folder scope must not be limited");
+        assert_eq!(params, vec![Value::Integer(7)]);
+    }
 }

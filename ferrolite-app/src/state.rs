@@ -5,7 +5,7 @@ use crate::events::AppEvent;
 use crate::library::filter::{FilterState, ViewSource};
 use crate::metadata::MetaEdit;
 use ferrolite_catalog::{
-    Catalog, CollectionRecord, ImageRecord, LibraryQuery, ReadPool, TagRecord,
+    Catalog, CollectionRecord, ImageRecord, LibraryQuery, ReadPool, SortKey, TagRecord,
 };
 use ferrolite_image::TagId;
 use ferrolite_jobs::{JobHandle, JobSystem};
@@ -488,10 +488,20 @@ impl AppState {
     }
 
     /// Switch the browsed folder (from the folder list) and reset state.
+    ///
+    /// Sets the view sort to `added_at DESC` (newest-added first) so freshly
+    /// ingested thumbnails appear at the top of the grid, where the user is
+    /// watching, rather than wherever their `CaptureTime` happens to land.
+    /// This is a deliberate view-state change on open, not a dynamic re-sort
+    /// keyed on ingest activity — it persists until the user changes it, and
+    /// leaves `FilterState::default()` (CaptureTime ASC) unchanged for every
+    /// other entry point (`All`, `Collection`, `RecentlyAdded`, app startup).
     pub fn select_folder(&mut self, folder_id: i64) {
         self.reset_for_new_folder();
         self.current_folder = Some(folder_id);
         self.source = ViewSource::Folder(folder_id);
+        self.filter.sort_key = SortKey::AddedAt;
+        self.filter.sort_desc = true;
     }
 
     /// Remove a folder subtree from the catalog (cache only). If the current
@@ -805,6 +815,25 @@ mod tests {
         assert_eq!(s.ingest_total, 0);
         assert_eq!(s.ingest_done, 0);
         assert!(s.dirty);
+    }
+
+    /// Opening a folder must set the view sort to `added_at DESC` (newest
+    /// first) so freshly ingested thumbnails surface where the user is
+    /// looking, without touching `FilterState::default()` for other views.
+    #[test]
+    fn select_folder_sorts_by_added_at_desc() {
+        let mut s = AppState::for_test();
+        assert_eq!(
+            FilterState::default().sort_key,
+            SortKey::CaptureTime,
+            "global default sort must remain CaptureTime"
+        );
+        assert!(!FilterState::default().sort_desc);
+
+        s.select_folder(42);
+
+        assert_eq!(s.filter.sort_key, SortKey::AddedAt);
+        assert!(s.filter.sort_desc);
     }
 
     #[test]

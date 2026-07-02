@@ -241,4 +241,26 @@ mod tests {
         let q = FilterState::default().to_query(ViewSource::RecentlyAdded, true);
         assert!(matches!(q.scope, Scope::RecentlyAdded { limit } if limit > 0));
     }
+
+    /// A folder view sorted by `AddedAt`/desc (set on folder-open, see
+    /// `AppState::select_folder`) must compile to a normal `Folder` scope
+    /// with an `added_at DESC` sort — not the limited `RecentlyAdded` scope.
+    #[test]
+    fn folder_source_with_added_at_desc_sorts_newest_first() {
+        let fs = FilterState {
+            sort_key: SortKey::AddedAt,
+            sort_desc: true,
+            ..Default::default()
+        };
+        let q = fs.to_query(ViewSource::Folder(7), true);
+        assert_eq!(
+            q.scope,
+            Scope::Folder {
+                id: 7,
+                recursive: true
+            }
+        );
+        assert_eq!(q.sort.key, SortKey::AddedAt);
+        assert!(q.sort.desc);
+    }
 }

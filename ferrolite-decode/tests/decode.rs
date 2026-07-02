@@ -36,6 +36,20 @@ fn decode_preview_returns_nonempty_rgb8() {
 }
 
 #[test]
+fn combined_matches_separate_paths() {
+    let (m, p) =
+        ferrolite_decode::decode_meta_and_preview(&fixture(), FileKind::Raw).expect("combined");
+    let m2 = ferrolite_decode::read_metadata(&fixture(), FileKind::Raw).expect("metadata");
+    let p2 = ferrolite_decode::decode_preview(&fixture(), FileKind::Raw).expect("preview");
+    assert_eq!(
+        m, m2,
+        "combined metadata should match separate read_metadata"
+    );
+    assert_eq!((p.width, p.height), (p2.width, p2.height));
+    assert_eq!(p.pixels, p2.pixels, "preview pixels should be identical");
+}
+
+#[test]
 fn decode_full_matches_metadata_dimensions_and_buffer() {
     let meta = ferrolite_decode::read_metadata(&fixture(), FileKind::Raw).expect("metadata");
     let full = ferrolite_decode::decode_full(&fixture()).expect("full decode");

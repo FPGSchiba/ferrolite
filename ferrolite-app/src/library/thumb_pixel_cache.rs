@@ -44,10 +44,12 @@ impl ThumbPixelCache {
 
     pub fn get(&mut self, id: i64) -> Option<(Vec<u8>, u32, u32)> {
         if self.map.contains_key(&id) {
+            crate::diag::pix_hit();
             self.touch(id);
             let e = self.map.get(&id)?;
             Some((e.rgba.clone(), e.w, e.h))
         } else {
+            crate::diag::pix_miss();
             None
         }
     }
@@ -58,6 +60,7 @@ impl ThumbPixelCache {
         while self.order.len() > self.capacity {
             let evict = self.order.remove(0);
             self.map.remove(&evict);
+            crate::diag::pix_evict(1);
         }
     }
 }

@@ -63,15 +63,18 @@ impl TextureCache {
     }
     pub fn get(&mut self, id: i64) -> Option<&egui::TextureHandle> {
         if self.textures.contains_key(&id) {
+            crate::diag::tex_hit();
             self.lru.touch(id);
             self.textures.get(&id)
         } else {
+            crate::diag::tex_miss();
             None
         }
     }
     pub fn insert(&mut self, id: i64, tex: egui::TextureHandle) {
         if let Some(evict) = self.lru.insert(id) {
             if let Some(old) = self.textures.remove(&evict) {
+                crate::diag::tex_evict(1);
                 self.retiring.push(old);
             }
         }
@@ -86,6 +89,7 @@ impl TextureCache {
     /// on the following frame's `begin_frame` call, same as evicted/replaced
     /// handles, so they are never freed in a frame that still paints them.
     pub fn clear(&mut self) {
+        crate::diag::tex_evict(self.textures.len());
         self.retiring.extend(self.textures.drain().map(|(_, h)| h));
         self.lru.clear();
     }

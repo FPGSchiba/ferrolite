@@ -6,6 +6,7 @@
 //! `FERROLITE_DIAG` = unset→off | `1`/`both`→log+overlay | `log` | `overlay`.
 //! `FERROLITE_DIAG_FILE` overrides the session-log path.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +121,150 @@ pub fn write_log(block: &str) {
     }
 }
 
+// ── App-side cumulative counters (process-global, like thumb_profile's statics).
+// UI-thread-written in practice; Relaxed atomics keep them cheap and sound.
+static TEX_HIT: AtomicU64 = AtomicU64::new(0);
+static TEX_MISS: AtomicU64 = AtomicU64::new(0);
+static TEX_EVICT: AtomicU64 = AtomicU64::new(0);
+static PIX_HIT: AtomicU64 = AtomicU64::new(0);
+static PIX_MISS: AtomicU64 = AtomicU64::new(0);
+static PIX_EVICT: AtomicU64 = AtomicU64::new(0);
+static REQ_CALLS: AtomicU64 = AtomicU64::new(0);
+static REQ_NEW: AtomicU64 = AtomicU64::new(0);
+static REQ_FAST: AtomicU64 = AtomicU64::new(0);
+static REQ_DEDUP_TEX: AtomicU64 = AtomicU64::new(0);
+static REQ_DEDUP_PENDING: AtomicU64 = AtomicU64::new(0);
+static REQ_DEDUP_MISSING: AtomicU64 = AtomicU64::new(0);
+static RETAIN_CANCELS: AtomicU64 = AtomicU64::new(0);
+static EVENTS_DRAINED: AtomicU64 = AtomicU64::new(0);
+static UPLOADS_APPLIED: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn add(c: &AtomicU64, n: u64) {
+    if enabled() {
+        c.fetch_add(n, Ordering::Relaxed);
+    }
+}
+
+pub fn tex_hit() {
+    add(&TEX_HIT, 1);
+}
+pub fn tex_miss() {
+    add(&TEX_MISS, 1);
+}
+pub fn tex_evict(n: usize) {
+    add(&TEX_EVICT, n as u64);
+}
+pub fn pix_hit() {
+    add(&PIX_HIT, 1);
+}
+pub fn pix_miss() {
+    add(&PIX_MISS, 1);
+}
+pub fn pix_evict(n: usize) {
+    add(&PIX_EVICT, n as u64);
+}
+pub fn retain_cancels(n: usize) {
+    add(&RETAIN_CANCELS, n as u64);
+}
+/// Wired in Task 4 (event-loop drain instrumentation).
+#[allow(dead_code)]
+pub fn add_events(n: usize) {
+    add(&EVENTS_DRAINED, n as u64);
+}
+/// Wired in Task 4 (per-frame upload-budget instrumentation).
+#[allow(dead_code)]
+pub fn add_uploads(n: usize) {
+    add(&UPLOADS_APPLIED, n as u64);
+}
+
+/// How a `request_thumbnail` call was resolved (see `state::request_thumbnail`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReqOutcome {
+    NewSubmit,
+    FastPath,
+    DedupTextured,
+    DedupPending,
+    DedupMissing,
+}
+
+/// Classify the outcome from the three dedup guards, in `request_thumbnail`'s
+/// own precedence order (textured > pending > missing). `NewSubmit` is used
+/// when none of the guards hit and there is no pixel-cache fast path — the
+/// caller records `FastPath` explicitly for the pixel-cache branch.
+pub fn classify_request(textured: bool, pending: bool, missing: bool) -> ReqOutcome {
+    if textured {
+        ReqOutcome::DedupTextured
+    } else if pending {
+        ReqOutcome::DedupPending
+    } else if missing {
+        ReqOutcome::DedupMissing
+    } else {
+        ReqOutcome::NewSubmit
+    }
+}
+
+/// Record one classified `request_thumbnail` call (bumps the call total plus
+/// the per-outcome counter). Gated internally.
+pub fn record_request(outcome: ReqOutcome) {
+    if !enabled() {
+        return;
+    }
+    REQ_CALLS.fetch_add(1, Ordering::Relaxed);
+    let c = match outcome {
+        ReqOutcome::NewSubmit => &REQ_NEW,
+        ReqOutcome::FastPath => &REQ_FAST,
+        ReqOutcome::DedupTextured => &REQ_DEDUP_TEX,
+        ReqOutcome::DedupPending => &REQ_DEDUP_PENDING,
+        ReqOutcome::DedupMissing => &REQ_DEDUP_MISSING,
+    };
+    c.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Immutable snapshot of the app-side cumulative counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(dead_code)] // Consumed by the diag overlay/log, wired in Task 4.
+pub struct AppCounters {
+    pub tex_hit: u64,
+    pub tex_miss: u64,
+    pub tex_evict: u64,
+    pub pix_hit: u64,
+    pub pix_miss: u64,
+    pub pix_evict: u64,
+    pub req_calls: u64,
+    pub req_new: u64,
+    pub req_fast: u64,
+    pub req_dedup_tex: u64,
+    pub req_dedup_pending: u64,
+    pub req_dedup_missing: u64,
+    pub retain_cancels: u64,
+    pub events_drained: u64,
+    pub uploads_applied: u64,
+}
+
+/// Wired in Task 4 (diag overlay/log snapshot source).
+#[allow(dead_code)]
+pub fn app_counters() -> AppCounters {
+    let l = |c: &AtomicU64| c.load(Ordering::Relaxed);
+    AppCounters {
+        tex_hit: l(&TEX_HIT),
+        tex_miss: l(&TEX_MISS),
+        tex_evict: l(&TEX_EVICT),
+        pix_hit: l(&PIX_HIT),
+        pix_miss: l(&PIX_MISS),
+        pix_evict: l(&PIX_EVICT),
+        req_calls: l(&REQ_CALLS),
+        req_new: l(&REQ_NEW),
+        req_fast: l(&REQ_FAST),
+        req_dedup_tex: l(&REQ_DEDUP_TEX),
+        req_dedup_pending: l(&REQ_DEDUP_PENDING),
+        req_dedup_missing: l(&REQ_DEDUP_MISSING),
+        retain_cancels: l(&RETAIN_CANCELS),
+        events_drained: l(&EVENTS_DRAINED),
+        uploads_applied: l(&UPLOADS_APPLIED),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +294,28 @@ mod tests {
         assert_eq!(compute_rate(100, 0.0), 0.0);
         assert_eq!(compute_rate(100, 2.0), 50.0);
         assert_eq!(compute_rate(0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn classify_request_prioritises_textured_then_pending_then_missing() {
+        assert_eq!(classify_request(false, false, false), ReqOutcome::NewSubmit);
+        assert_eq!(
+            classify_request(true, false, false),
+            ReqOutcome::DedupTextured
+        );
+        assert_eq!(
+            classify_request(false, true, false),
+            ReqOutcome::DedupPending
+        );
+        assert_eq!(
+            classify_request(false, false, true),
+            ReqOutcome::DedupMissing
+        );
+        // Textured wins when multiple guards are true (matches request_thumbnail
+        // guard order: textures, then pending, then missing).
+        assert_eq!(
+            classify_request(true, true, true),
+            ReqOutcome::DedupTextured
+        );
     }
 }

@@ -3,6 +3,7 @@
 // Only the modules the bench actually needs are declared here; the full
 // UI module tree (app, chrome, canvas, etc.) lives in main.rs only.
 pub mod develop;
+pub mod diag;
 pub mod events;
 pub mod export;
 pub mod ingest;

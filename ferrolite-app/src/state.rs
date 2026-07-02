@@ -278,20 +278,23 @@ impl AppState {
     /// JPEG → RGBA8 OFF the UI thread, then delivers `ThumbReady` (or
     /// `ThumbFailed`) over the app event channel.
     pub fn request_thumbnail(&mut self, ctx: &egui::Context, image_id: i64) {
-        if self.textures.contains(image_id)
-            || self.thumb_pending.contains(&image_id)
-            || self.thumb_missing.contains(&image_id)
-        {
+        let textured = self.textures.contains(image_id);
+        let pending = self.thumb_pending.contains(&image_id);
+        let missing = self.thumb_missing.contains(&image_id);
+        if textured || pending || missing {
+            crate::diag::record_request(crate::diag::classify_request(textured, pending, missing));
             return;
         }
         // Fast path: pixels already decoded this session → re-upload directly,
         // no job / DB read / JPEG decode (Bug B). Routed through the same
         // per-frame upload budget as ThumbReady via `pending_uploads`.
         if let Some((rgba, w, h)) = self.thumb_pixels.get(image_id) {
+            crate::diag::record_request(crate::diag::ReqOutcome::FastPath);
             self.pending_uploads.push((image_id, rgba, w, h));
             ctx.request_repaint();
             return;
         }
+        crate::diag::record_request(crate::diag::ReqOutcome::NewSubmit);
         self.thumb_pending.insert(image_id);
         let reads = Arc::clone(&self.reads);
         let tx = self.tx.clone();
@@ -518,6 +521,7 @@ impl AppState {
             .copied()
             .filter(|id| !visible.contains(id))
             .collect();
+        crate::diag::retain_cancels(offscreen.len());
         for id in offscreen {
             if let Some(handle) = self.thumb_handles.remove(&id) {
                 self.jobs.cancel(handle.id()); // drop it from the queue if still pending

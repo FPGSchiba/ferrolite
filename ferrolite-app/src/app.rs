@@ -1522,6 +1522,17 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
+        // Library grid only (no viewer, no modal, no text field focused).
+        if self.module.is_library()
+            && self.state.viewer.is_none()
+            && self.state.pending_remove.is_none()
+            && !ctx.wants_keyboard_input()
+            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+        {
+            self.state.toggle_select_all();
+        }
+
         // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
         // toggles. In Library (no viewer) they apply to the grid selection; in
         // Develop or Library+viewer they apply to the open viewer image.

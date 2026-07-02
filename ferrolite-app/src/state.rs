@@ -771,6 +771,23 @@ impl AppState {
         }
     }
 
+    /// Toggle select-all over the current (already-filtered) grid rows.
+    ///
+    /// If `images` is non-empty and every row is already selected, clear the
+    /// selection; otherwise select every row. Leaves the single `selected`
+    /// cursor (status bar / Enter-to-open) untouched.
+    pub fn toggle_select_all(&mut self) {
+        let all_selected =
+            !self.images.is_empty() && self.images.iter().all(|r| self.selection.contains(&r.id));
+        if all_selected {
+            self.selection.clear();
+            self.selection_anchor = None;
+        } else {
+            self.selection = self.images.iter().map(|r| r.id).collect();
+            self.selection_anchor = self.images.first().map(|r| r.id);
+        }
+    }
+
     /// Add all selected images (or the single `selected` fallback) to a collection.
     pub fn add_selection_to_collection(&mut self, coll_id: i64) {
         let mut targets: Vec<i64> = self.selection.iter().copied().collect();
@@ -1462,5 +1479,88 @@ mod tests {
         assert_eq!(s.export_queue, vec![40, 20, 10, 30]);
         s.queue_reorder(1, 1); // no-op (same slot)
         assert_eq!(s.export_queue, vec![40, 20, 10, 30]);
+    }
+
+    /// Seed `n` grid rows (ids 1..=n) for select-all tests.
+    #[cfg(test)]
+    fn seed_grid_rows(s: &mut AppState, n: i64) {
+        use ferrolite_catalog::{DecodeStatus, FileKind};
+        use ferrolite_image::{Flag, Orientation, Rating};
+        s.images = (1..=n)
+            .map(|id| ferrolite_catalog::ImageRecord {
+                id,
+                folder_id: 99,
+                filename: format!("img{id}.nef"),
+                width: None,
+                height: None,
+                orientation: Orientation::Normal,
+                capture_time: None,
+                iso: None,
+                decode_status: DecodeStatus::Done,
+                kind: FileKind::Raw,
+                rating: Rating::default(),
+                flag: Flag::None,
+                has_edits: false,
+            })
+            .collect();
+    }
+
+    #[test]
+    fn toggle_select_all_selects_every_row_from_empty() {
+        let mut s = AppState::for_test();
+        seed_grid_rows(&mut s, 3);
+
+        s.toggle_select_all();
+
+        assert_eq!(
+            s.selection,
+            [1, 2, 3].into_iter().collect(),
+            "all rows selected"
+        );
+        assert_eq!(
+            s.selection_anchor,
+            Some(1),
+            "anchor set to the first row on select-all"
+        );
+    }
+
+    #[test]
+    fn toggle_select_all_clears_when_all_already_selected() {
+        let mut s = AppState::for_test();
+        seed_grid_rows(&mut s, 3);
+        s.selection = [1, 2, 3].into_iter().collect();
+        s.selection_anchor = Some(2);
+
+        s.toggle_select_all();
+
+        assert!(s.selection.is_empty(), "selection cleared on second toggle");
+        assert_eq!(s.selection_anchor, None, "anchor cleared on deselect");
+    }
+
+    #[test]
+    fn toggle_select_all_reselects_from_partial_selection() {
+        let mut s = AppState::for_test();
+        seed_grid_rows(&mut s, 3);
+        s.selection = [2].into_iter().collect();
+
+        s.toggle_select_all();
+
+        assert_eq!(
+            s.selection,
+            [1, 2, 3].into_iter().collect(),
+            "partial selection expands to all rows, not cleared"
+        );
+    }
+
+    #[test]
+    fn toggle_select_all_noop_on_empty_grid() {
+        let mut s = AppState::for_test();
+        // No rows seeded.
+        s.toggle_select_all();
+        assert!(
+            s.selection.is_empty(),
+            "empty grid leaves selection empty (no all-selected clear path)"
+        );
+        assert_eq!(s.selection_anchor, None);
     }
 }

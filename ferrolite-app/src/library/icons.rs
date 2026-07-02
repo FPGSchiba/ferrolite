@@ -159,6 +159,26 @@ pub fn caret(painter: &Painter, center: Pos2, half_w: f32, color: Color32, down:
     ));
 }
 
+/// Draw a small "in export queue" badge: an accent-filled rounded square with
+/// a "Q" glyph, anchored by its top-right corner at `top_right`.
+///
+/// Used by the Library grid and the Develop filmstrip to mark thumbnails that
+/// are currently queued for export. `size` is the badge's edge length.
+pub fn queued_badge(painter: &Painter, top_right: Pos2, size: f32, fg: Color32, bg: Color32) {
+    let rect = Rect::from_min_size(
+        Pos2::new(top_right.x - size, top_right.y),
+        Vec2::splat(size),
+    );
+    painter.rect_filled(rect, size * 0.25, bg);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "Q",
+        egui::FontId::proportional(size * 0.65),
+        fg,
+    );
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -23,7 +23,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
     // Snapshot the ids/decode-status/aspect/rating/flag up front so we don't
     // hold an immutable borrow of `state.images` while mutably borrowing
     // `state` for thumbnails.
-    let cells: Vec<(i64, bool, f32, u8, ferrolite_image::Flag, bool)> = state
+    let queued_ids: std::collections::HashSet<i64> = state.export_queue.iter().copied().collect();
+    let cells: Vec<(i64, bool, f32, u8, ferrolite_image::Flag, bool, bool)> = state
         .images
         .iter()
         .map(|r| {
@@ -34,6 +35,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                 r.rating.get(),
                 r.flag,
                 r.has_edits,
+                queued_ids.contains(&r.id),
             )
         })
         .collect();
@@ -43,7 +45,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = GAP;
-                for (id, decodable, aspect, rating, flag, has_edits) in cells {
+                for (id, decodable, aspect, rating, flag, has_edits, queued) in cells {
                     // Always reserve the cell's space so the scroll extent and
                     // `scroll_to_rect` stay correct, but only do the expensive
                     // thumbnail work (DB read + JPEG decode + GPU upload + paint)
@@ -108,6 +110,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                             let c = rect.right_top() + egui::vec2(-7.0, 7.0);
                             ui.painter()
                                 .circle_filled(c, 3.0, crate::theme::ACCENT_BRIGHT);
+                        }
+                        // Export-queue badge (bottom-right): the other three
+                        // corners are already used by flag/edited/rating.
+                        if queued {
+                            crate::library::icons::queued_badge(
+                                ui.painter(),
+                                rect.right_bottom() + egui::vec2(-2.0, -10.0),
+                                10.0,
+                                theme::TEXT_PRIMARY,
+                                theme::ACCENT,
+                            );
                         }
                     }
                     // Keep the current image centered in the strip. egui clamps

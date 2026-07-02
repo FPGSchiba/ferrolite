@@ -562,6 +562,20 @@ impl AppState {
         self.persist_queue(|cat| cat.remove_from_export_queue(image_id));
     }
 
+    /// Whether `image_id` is currently in the export queue.
+    pub fn queue_contains(&self, image_id: i64) -> bool {
+        self.export_queue.contains(&image_id)
+    }
+
+    /// Toggle membership: remove if present, else add. Persists (cache-safe).
+    pub fn queue_toggle(&mut self, image_id: i64) {
+        if self.queue_contains(image_id) {
+            self.queue_remove(image_id);
+        } else {
+            self.queue_add(image_id);
+        }
+    }
+
     /// Empty the export queue and persist the change.
     pub fn queue_clear(&mut self) {
         self.export_queue.clear();
@@ -1157,5 +1171,15 @@ mod tests {
         assert_eq!(s.export_queue, vec![1, 3]);
         s.queue_clear();
         assert!(s.export_queue.is_empty());
+    }
+
+    #[test]
+    fn queue_toggle_adds_then_removes() {
+        let mut s = AppState::for_test();
+        assert!(!s.queue_contains(7));
+        s.queue_toggle(7);
+        assert!(s.queue_contains(7));
+        s.queue_toggle(7);
+        assert!(!s.queue_contains(7));
     }
 }

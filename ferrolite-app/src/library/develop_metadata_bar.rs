@@ -53,6 +53,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
             }
         }
 
+        // Export queue: toggle membership for the open image. `selectable_label`
+        // renders the accent "selected" fill when queued, doubling as the
+        // in-queue indicator.
+        let queued = state.queue_contains(image_id);
+        if ui
+            .selectable_label(queued, "Queue")
+            .on_hover_text("Toggle export queue (Q)")
+            .clicked()
+        {
+            state.queue_toggle(image_id);
+        }
+
         // Tags dropdown: toggle tags on the open image.
         let tags = state.tags.clone();
         egui::ComboBox::from_id_salt("develop_tags")

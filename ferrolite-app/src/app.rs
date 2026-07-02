@@ -1547,6 +1547,28 @@ impl eframe::App for FerroliteApp {
                     }
                 }
             }
+
+            // Q toggles export-queue membership for the same target image used
+            // by the rating/flag intents above (grid selection in Library-no-
+            // viewer, else the open viewer image). Kept as a parallel check
+            // rather than folded into `KeyIntent` so the rating/flag toggle
+            // logic above is untouched.
+            if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
+                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                    self.state.selected
+                } else {
+                    self.state.viewer.as_ref().map(|v| v.image_id)
+                };
+                if let Some(target_id) = target_id {
+                    let was_queued = self.state.queue_contains(target_id);
+                    self.state.queue_toggle(target_id);
+                    self.state.warning = Some(if was_queued {
+                        "Removed from export queue.".to_string()
+                    } else {
+                        "Added to export queue.".to_string()
+                    });
+                }
+            }
         }
 
         // Left/Right move between images while viewing (Develop), non-cyclic.

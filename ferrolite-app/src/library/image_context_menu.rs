@@ -90,9 +90,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image
     if ui.button("Add to export queue").clicked() {
         if use_selection {
             let ids: Vec<i64> = state.selection.iter().copied().collect();
+            let n = ids.len();
             state.queue_add_many(&ids);
+            state.warning = Some(format!("Added {n} to export queue."));
         } else {
             state.queue_add(image_id);
+            state.warning = Some("Added to export queue.".to_string());
         }
         ui.close_menu();
     }

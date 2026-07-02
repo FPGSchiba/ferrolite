@@ -319,6 +319,98 @@ impl FerroliteApp {
         self.state.warning = Some("Exporting…".to_string());
     }
 
+    /// Resolve output filenames and spawn one Background export job per queued
+    /// image (spec §8.4). Filenames are expanded + collision-resolved up front on
+    /// the UI thread so {seq} is deterministic and disk collisions are avoided.
+    fn start_batch(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(dest_dir) = self.state.export_dest.clone() else {
+            self.state.warning = Some("Choose a destination folder first.".to_string());
+            return;
+        };
+        let ids = self.state.export_queue.clone();
+        if ids.is_empty() {
+            return;
+        }
+        // Metadata for {name}/{date}.
+        let recs = self.state.reads.images_by_ids(&ids).unwrap_or_default();
+        let options = self.state.export_settings;
+        let template = self.state.export_template.clone();
+        let ext = options.format.extension();
+
+        // Seed collision set with files already on disk in the destination.
+        let mut taken: std::collections::HashSet<String> = std::fs::read_dir(&dest_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut items: Vec<crate::export::batch::BatchItem> = Vec::new();
+        let mut seq = 0usize;
+        let mut skipped = 0usize;
+        for &id in &ids {
+            let Some(rec) = recs.iter().find(|r| r.id == id) else {
+                skipped += 1;
+                continue;
+            };
+            // Skip images whose folder can't be resolved (moved/deleted on disk);
+            // the batch proceeds with the remaining queued images.
+            let Some(path) = self.state.image_path(rec) else {
+                skipped += 1;
+                continue;
+            };
+            seq += 1;
+            let stem = std::path::Path::new(&rec.filename)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| rec.filename.clone());
+            let fctx = ferrolite_export::FilenameCtx {
+                name: stem,
+                seq,
+                date: ferrolite_export::format_capture_date(rec.capture_time.as_deref()),
+            };
+            let expanded = ferrolite_export::expand_filename(&template, &fctx);
+            let safe = ferrolite_export::sanitize_component(&expanded);
+            let filename = ferrolite_export::resolve_collision(&safe, ext, &mut taken);
+            items.push(crate::export::batch::BatchItem {
+                image_id: id,
+                path,
+                kind: rec.kind,
+                dest: dest_dir.join(&filename),
+            });
+        }
+
+        if items.is_empty() {
+            self.state.warning = if skipped > 0 {
+                Some(format!(
+                    "No images could be resolved for export ({skipped} skipped)."
+                ))
+            } else {
+                Some("No queued images could be resolved to a file on disk.".to_string())
+            };
+            return;
+        }
+
+        let Some(rs) = frame.wgpu_render_state() else {
+            self.state.warning = Some("No GPU render state; cannot export.".to_string());
+            return;
+        };
+        let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let working_space = self.state.working_space;
+
+        let handles =
+            crate::export::batch::spawn_batch(&self.state, ctx, gpu, items, working_space, options);
+        let total = handles.len();
+        let mut bs = crate::export::batch::BatchExportState::new(total);
+        bs.handles = handles;
+        self.state.batch = Some(bs);
+        self.state.warning = Some(if skipped > 0 {
+            format!("Exporting {total} image(s)… (skipped {skipped} with unresolved paths)")
+        } else {
+            format!("Exporting {total} image(s)…")
+        });
+    }
+
     /// sRGB→working for the preview tier: the embedded preview and Standard images
     /// are sRGB-primaries, so they convert via the sRGB fallback profile.
     fn preview_to_working(&self) -> [[f32; 3]; 3] {
@@ -1203,6 +1295,7 @@ impl eframe::App for FerroliteApp {
         if !self.state.startup_rescan_done {
             crate::ingest::spawn_startup_rescan(&mut self.state, ctx);
             self.state.reload_vocab();
+            self.state.load_export_queue();
             self.state.startup_rescan_done = true;
         }
 
@@ -1234,51 +1327,77 @@ impl eframe::App for FerroliteApp {
                 });
                 let menu_action =
                     crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1", export_enabled);
-                if menu_action == Some(crate::chrome::MenuAction::ExportImage) {
-                    self.open_export_dialog();
+                match menu_action {
+                    Some(crate::chrome::MenuAction::ExportImage) => self.open_export_dialog(),
+                    Some(crate::chrome::MenuAction::AddToQueue) => {
+                        if let Some(id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                            self.state.queue_add(id);
+                            self.state.warning = Some("Added to export queue.".to_string());
+                        }
+                    }
+                    None => {}
                 }
             });
 
         let mut film_clicked: Option<i64> = None;
-        if self.module.is_library() {
-            egui::TopBottomPanel::top("toolbar")
-                .exact_height(40.0)
-                .frame(
-                    egui::Frame::none()
-                        .fill(theme::BG_TOOLBAR)
-                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
-                )
-                .show(ctx, |ui| {
-                    let changed =
-                        crate::library::toolbar::show(ui, &mut self.thumb_size, &mut self.state);
-                    if changed {
-                        self.state.dirty = true;
-                    }
-                });
-        } else {
-            egui::TopBottomPanel::top("develop_filter")
-                .exact_height(36.0)
-                .frame(
-                    egui::Frame::none()
-                        .fill(theme::BG_TOOLBAR)
-                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
-                )
-                .show(ctx, |ui| {
-                    if crate::library::develop_filter_bar::show(ui, &mut self.state) {
-                        self.state.dirty = true;
-                    }
-                });
-            egui::TopBottomPanel::top("develop_filmstrip")
-                .exact_height(80.0)
-                .frame(
-                    egui::Frame::none()
-                        .fill(theme::BG_TOOLBAR)
-                        .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
-                )
-                .show(ctx, |ui| {
-                    let current = self.state.viewer.as_ref().map(|v| v.image_id);
-                    film_clicked = crate::library::filmstrip::show(ui, &mut self.state, current);
-                });
+        match self.module {
+            crate::module::Module::Library => {
+                egui::TopBottomPanel::top("toolbar")
+                    .exact_height(40.0)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::BG_TOOLBAR)
+                            .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                    )
+                    .show(ctx, |ui| {
+                        let changed = crate::library::toolbar::show(
+                            ui,
+                            &mut self.thumb_size,
+                            &mut self.state,
+                        );
+                        if changed {
+                            self.state.dirty = true;
+                        }
+                    });
+            }
+            crate::module::Module::Develop => {
+                egui::TopBottomPanel::top("develop_filter")
+                    .exact_height(36.0)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::BG_TOOLBAR)
+                            .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                    )
+                    .show(ctx, |ui| {
+                        if crate::library::develop_filter_bar::show(ui, &mut self.state) {
+                            self.state.dirty = true;
+                        }
+                    });
+                egui::TopBottomPanel::top("develop_filmstrip")
+                    .exact_height(80.0)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::BG_TOOLBAR)
+                            .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                    )
+                    .show(ctx, |ui| {
+                        let current = self.state.viewer.as_ref().map(|v| v.image_id);
+                        film_clicked =
+                            crate::library::filmstrip::show(ui, &mut self.state, current);
+                    });
+            }
+            crate::module::Module::Export => {
+                egui::TopBottomPanel::top("export_toolbar")
+                    .exact_height(40.0)
+                    .frame(
+                        egui::Frame::none()
+                            .fill(theme::BG_TOOLBAR)
+                            .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
+                    )
+                    .show(ctx, |ui| {
+                        crate::export_module::toolbar(ui, &mut self.state);
+                    });
+            }
         }
         if let Some(id) = film_clicked {
             if let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() {
@@ -1426,6 +1545,28 @@ impl eframe::App for FerroliteApp {
                         self.state
                             .apply_metadata_edit_to_image(ctx, target_id, edit);
                     }
+                }
+            }
+
+            // Q toggles export-queue membership for the same target image used
+            // by the rating/flag intents above (grid selection in Library-no-
+            // viewer, else the open viewer image). Kept as a parallel check
+            // rather than folded into `KeyIntent` so the rating/flag toggle
+            // logic above is untouched.
+            if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
+                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                    self.state.selected
+                } else {
+                    self.state.viewer.as_ref().map(|v| v.image_id)
+                };
+                if let Some(target_id) = target_id {
+                    let was_queued = self.state.queue_contains(target_id);
+                    self.state.queue_toggle(target_id);
+                    self.state.warning = Some(if was_queued {
+                        "Removed from export queue.".to_string()
+                    } else {
+                        "Added to export queue.".to_string()
+                    });
                 }
             }
         }
@@ -1598,89 +1739,143 @@ impl eframe::App for FerroliteApp {
             self.pending_texture_clear = true;
         }
 
+        if self.module == crate::module::Module::Export {
+            egui::TopBottomPanel::bottom("export_bottom")
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_TOOLBAR)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
+                .show(ctx, |ui| {
+                    if let Some(a) = crate::export_module::bottom_bar::show(ui, &mut self.state) {
+                        match a {
+                            crate::export_module::ExportModuleAction::Start => {
+                                self.start_batch(ctx, frame)
+                            }
+                            crate::export_module::ExportModuleAction::Cancel => {
+                                if let Some(b) = self.state.batch.as_ref() {
+                                    b.cancel_all();
+                                }
+                            }
+                        }
+                    }
+                });
+            egui::SidePanel::right("export_settings")
+                .resizable(true)
+                .default_width(296.0)
+                .width_range(250.0..=400.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(theme::BG_APP)
+                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                )
+                .show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new("EXPORT SETTINGS")
+                            .small()
+                            .color(theme::TEXT_FAINT),
+                    );
+                    ui.add_space(6.0);
+                    crate::export::settings_form::settings_form(
+                        ui,
+                        &mut self.state.export_settings,
+                    );
+                });
+        }
+
         let mut opened: Option<i64> = None;
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG_CANVAS))
-            .show(ctx, |ui| {
-                if self.module.is_library() {
+            .show(ctx, |ui| match self.module {
+                crate::module::Module::Library => {
                     // Grid; capture a double-clicked id to open after the panel closes.
                     opened =
                         crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
-                } else if self.state.viewer.is_some() {
-                    // FIX C: crop mode enter/exit transition. `crop_active` was
-                    // (re)armed above by the Geometry section this frame; if it
-                    // just changed, re-evaluate the preview NOW (before paint) so
-                    // entering shows crop=full+angle and exiting applies the real
-                    // crop — neither transition otherwise triggers a re-render.
-                    // Gather the op_stack into a local first (borrow discipline:
-                    // `set_preview_and_full(&mut self, …)` needs an exclusive
-                    // borrow, so no live `&self.state.viewer` may overlap it).
-                    let crop_active = self
-                        .state
-                        .viewer
-                        .as_ref()
-                        .map(|v| v.crop_active)
-                        .unwrap_or(false);
-                    if crop_active != self.crop_active_prev {
-                        let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
-                        if let Some(stack) = stack {
-                            self.set_preview_and_full(frame, stack);
+                }
+                crate::module::Module::Develop => {
+                    if self.state.viewer.is_some() {
+                        // FIX C: crop mode enter/exit transition. `crop_active` was
+                        // (re)armed above by the Geometry section this frame; if it
+                        // just changed, re-evaluate the preview NOW (before paint) so
+                        // entering shows crop=full+angle and exiting applies the real
+                        // crop — neither transition otherwise triggers a re-render.
+                        // Gather the op_stack into a local first (borrow discipline:
+                        // `set_preview_and_full(&mut self, …)` needs an exclusive
+                        // borrow, so no live `&self.state.viewer` may overlap it).
+                        let crop_active = self
+                            .state
+                            .viewer
+                            .as_ref()
+                            .map(|v| v.crop_active)
+                            .unwrap_or(false);
+                        if crop_active != self.crop_active_prev {
+                            let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
+                            if let Some(stack) = stack {
+                                self.set_preview_and_full(frame, stack);
+                            }
+                            self.crop_active_prev = crop_active;
                         }
-                        self.crop_active_prev = crop_active;
-                    }
-                    self.drive_viewer(ui, frame);
-                    // Crop overlay: shown while the Geometry section is open.
-                    // Gather all viewer data into locals BEFORE calling apply_edit
-                    // (which needs &mut self) — mirrors the panel-outcome pattern.
-                    if self
-                        .state
-                        .viewer
-                        .as_ref()
-                        .map(|v| v.crop_active)
-                        .unwrap_or(false)
-                    {
-                        let (stack, dims, view, viewport) = {
-                            let v = self.state.viewer.as_ref().unwrap();
-                            (
-                                v.op_stack.clone(),
-                                v.image_dims.unwrap_or((1, 1)),
-                                v.view,
-                                v.viewport,
-                            )
-                        };
-                        let image_rect =
-                            crate::viewer::image_screen_rect(ui.min_rect(), dims, view, viewport);
-                        if let Some(o) =
-                            crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)
+                        self.drive_viewer(ui, frame);
+                        // Crop overlay: shown while the Geometry section is open.
+                        // Gather all viewer data into locals BEFORE calling apply_edit
+                        // (which needs &mut self) — mirrors the panel-outcome pattern.
+                        if self
+                            .state
+                            .viewer
+                            .as_ref()
+                            .map(|v| v.crop_active)
+                            .unwrap_or(false)
                         {
-                            self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
-                        }
-                    }
-                    // Loupe context-menu widget covers the whole canvas; while
-                    // cropping it must NOT be registered, or it competes with the
-                    // crop overlay for input. Gate it on `!crop_active`.
-                    let ctx_menu_id = self
-                        .state
-                        .viewer
-                        .as_ref()
-                        .filter(|v| !v.crop_active)
-                        .map(|v| v.image_id);
-                    if let Some(image_id) = ctx_menu_id {
-                        let rect = ui.min_rect();
-                        let resp =
-                            ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());
-                        resp.context_menu(|ui| {
-                            crate::library::image_context_menu::show(
-                                ui,
-                                &mut self.state,
-                                image_id,
-                                true,
+                            let (stack, dims, view, viewport) = {
+                                let v = self.state.viewer.as_ref().unwrap();
+                                (
+                                    v.op_stack.clone(),
+                                    v.image_dims.unwrap_or((1, 1)),
+                                    v.view,
+                                    v.viewport,
+                                )
+                            };
+                            let image_rect = crate::viewer::image_screen_rect(
+                                ui.min_rect(),
+                                dims,
+                                view,
+                                viewport,
                             );
-                        });
+                            if let Some(o) =
+                                crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)
+                            {
+                                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                            }
+                        }
+                        // Loupe context-menu widget covers the whole canvas; while
+                        // cropping it must NOT be registered, or it competes with the
+                        // crop overlay for input. Gate it on `!crop_active`.
+                        let ctx_menu_id = self
+                            .state
+                            .viewer
+                            .as_ref()
+                            .filter(|v| !v.crop_active)
+                            .map(|v| v.image_id);
+                        if let Some(image_id) = ctx_menu_id {
+                            let rect = ui.min_rect();
+                            let resp =
+                                ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());
+                            resp.context_menu(|ui| {
+                                crate::library::image_context_menu::show(
+                                    ui,
+                                    &mut self.state,
+                                    image_id,
+                                    true,
+                                );
+                            });
+                        }
+                    } else {
+                        let rect = ui.available_rect_before_wrap();
+                        canvas::paint(ui, rect); // Develop with no image open: stub canvas
                     }
-                } else {
-                    let rect = ui.available_rect_before_wrap();
-                    canvas::paint(ui, rect); // Develop with no image open: stub canvas
+                }
+                crate::module::Module::Export => {
+                    crate::export_module::queue_list::show(ui, &mut self.state);
                 }
             });
         if let Some(id) = opened {

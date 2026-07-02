@@ -51,6 +51,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     }
     let cache = cache.expect("layout built above");
 
+    // Built once per frame (not per cell) so membership checks stay O(1) instead
+    // of O(queue length) per cell.
+    let queued: HashSet<i64> = state.export_queue.iter().copied().collect();
+
     let scroll = egui::ScrollArea::vertical().auto_shrink([false, false]);
     let mut opened: Option<i64> = None;
     scroll.show_viewport(ui, |ui, viewport| {
@@ -88,7 +92,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
                     egui::pos2(img_x, cell_y),
                     egui::vec2(item.img_width, row.img_height),
                 );
-                if let Some(id) = paint_cell(ui, state, &rec, img_rect) {
+                if let Some(id) = paint_cell(ui, state, &rec, img_rect, queued.contains(&rec.id)) {
                     opened = Some(id);
                 }
                 let label_rect = egui::Rect::from_min_size(
@@ -212,6 +216,7 @@ fn paint_cell(
     state: &mut AppState,
     rec: &ferrolite_catalog::ImageRecord,
     rect: egui::Rect,
+    queued: bool,
 ) -> Option<i64> {
     // Determine selection state early so we can adjust the thumbnail rect.
     let selected = state.selection.contains(&rec.id) || state.selected == Some(rec.id);
@@ -305,6 +310,19 @@ fn paint_cell(
             );
         }
         Flag::None => {}
+    }
+
+    // Export-queue badge (top-right): small accent square with a "Q" glyph.
+    // Top-right is otherwise unused by the flag (top-left) and rating/tag
+    // (bottom) overlays.
+    if queued {
+        icons::queued_badge(
+            &painter,
+            egui::pos2(img_rect.right() - 4.0, img_rect.top() + 4.0),
+            14.0,
+            theme::TEXT_PRIMARY,
+            theme::ACCENT,
+        );
     }
 
     // Tag colour dots (bottom-right), looked up from the loaded vocabulary.

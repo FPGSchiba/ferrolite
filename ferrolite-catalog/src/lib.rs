@@ -15,7 +15,10 @@ mod xmp;
 pub use catalog::Catalog;
 pub use error::CatalogError;
 pub use ferrolite_image::{Color, FileKind, Flag, Rating, TagId};
-pub use model::{CollectionRecord, DecodeStatus, ImageRecord, IngestSummary, NewImage, TagRecord};
+pub use model::{
+    CollectionRecord, DecodeStatus, ExportQueueEntry, ImageRecord, IngestSummary, NewImage,
+    TagRecord,
+};
 pub use query::{LibraryQuery, RatingFilter, Scope, Sort, SortKey, TagFilter, TagMode};
 pub use read_pool::ReadPool;
 pub use scan::{classify, collect_dirs, is_raw, scan_raw_files, scan_tree, ScannedFile};

@@ -250,6 +250,32 @@ pub(crate) fn iso_bounds(conn: &Connection) -> Result<Option<(u32, u32)>, Catalo
     })
 }
 
+pub(crate) fn list_export_queue(conn: &Connection) -> Result<Vec<i64>, CatalogError> {
+    let mut stmt = conn.prepare("SELECT image_id FROM export_queue ORDER BY position ASC")?;
+    let rows = stmt.query_map([], |r| r.get::<_, i64>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+pub(crate) fn images_by_ids(
+    conn: &Connection,
+    ids: &[i64],
+) -> Result<Vec<ImageRecord>, CatalogError> {
+    // Preserve the input order; skip ids that no longer exist.
+    let mut out = Vec::with_capacity(ids.len());
+    let mut stmt = conn.prepare(&format!("SELECT {IMAGE_COLS} FROM images WHERE id = ?1"))?;
+    for &id in ids {
+        let mut rows = stmt.query_map(rusqlite::params![id], row_to_record)?;
+        if let Some(r) = rows.next() {
+            out.push(r?);
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn date_bounds(conn: &Connection) -> Result<Option<(String, String)>, CatalogError> {
     let row: (Option<String>, Option<String>) = conn.query_row(
         "SELECT MIN(capture_time), MAX(capture_time) FROM images WHERE capture_time IS NOT NULL",

@@ -4,6 +4,7 @@ mod chrome;
 mod develop;
 mod events;
 mod export;
+mod export_module;
 mod ingest;
 mod library;
 mod metadata;

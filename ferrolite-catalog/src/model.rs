@@ -81,6 +81,14 @@ pub struct CollectionRecord {
     pub sort_order: i64,
 }
 
+/// A row of the persisted export queue (spec §8.4). Ordered by `position`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportQueueEntry {
+    pub image_id: i64,
+    pub position: i64,
+    pub added_at: i64,
+}
+
 /// Result of an ingest pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct IngestSummary {

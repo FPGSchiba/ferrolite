@@ -91,6 +91,22 @@ pub struct AppState {
     /// open (spec §8.3).
     pub export_dialog: Option<crate::export::ExportDialogState>,
 
+    /// Aggregate progress + cancel handles for a running batch export (spec §8.4).
+    /// `None` when no batch is active.
+    pub batch: Option<crate::export::batch::BatchExportState>,
+
+    /// Persisted export queue: ordered image_ids. Authoritative in-memory copy
+    /// (the DB table is a cache — its loss never loses photos). Loaded at startup.
+    pub export_queue: Vec<i64>,
+    /// Shared batch export settings (spec §8.2).
+    pub export_settings: ferrolite_export::ExportOptions,
+    /// Batch destination folder (spec §8.4). `None` until picked.
+    pub export_dest: Option<std::path::PathBuf>,
+    /// Filename token template (spec §8.4). Default "{name}".
+    pub export_template: String,
+    /// Whether the filename-template token help modal is open.
+    pub export_help_open: bool,
+
     /// Active filter state (search text, rating, flags, tags, etc.).
     pub filter: FilterState,
     /// Which set of images is shown (folder, all, collection, recently added).
@@ -180,6 +196,12 @@ impl AppState {
             pending_remove: None,
             viewer: None,
             export_dialog: None,
+            batch: None,
+            export_queue: Vec::new(),
+            export_settings: ferrolite_export::ExportOptions::default(),
+            export_dest: None,
+            export_template: "{name}".to_string(),
+            export_help_open: false,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),
@@ -396,6 +418,16 @@ impl AppState {
         }
     }
 
+    /// Absolute path of an image: its folder path + filename. `None` if the
+    /// folder can't be resolved. Mirrors `open_image_in_viewer`'s path build.
+    pub fn image_path(&self, rec: &ferrolite_catalog::ImageRecord) -> Option<PathBuf> {
+        self.reads
+            .folder_path(rec.folder_id)
+            .ok()
+            .flatten()
+            .map(|fp| PathBuf::from(fp).join(&rec.filename))
+    }
+
     /// Cancel any in-flight ingest + pending thumbnail jobs, without touching the
     /// view (images/current_folder/selection) or counters. Used by reindex.
     pub fn cancel_pending_jobs(&mut self) {
@@ -472,6 +504,104 @@ impl AppState {
         out
     }
 
+    /// Load the persisted export queue (spec §8.4). Cache contract: on DB error
+    /// keep an empty in-memory queue and surface a warning; never panic.
+    pub fn load_export_queue(&mut self) {
+        match self.reads.list_export_queue() {
+            Ok(ids) => self.export_queue = ids,
+            Err(e) => {
+                eprintln!("ferrolite: export queue load failed: {e}");
+                self.export_queue = Vec::new();
+                self.warning = Some("Could not load export queue.".to_string());
+            }
+        }
+    }
+
+    fn now_unix() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Persist a queue write; on error surface a warning but keep the in-memory
+    /// queue authoritative (cache contract §5).
+    fn persist_queue<F>(&mut self, op: F)
+    where
+        F: FnOnce(&ferrolite_catalog::Catalog) -> Result<(), ferrolite_catalog::CatalogError>,
+    {
+        if let Ok(cat) = self.writer.lock() {
+            if let Err(e) = op(&cat) {
+                eprintln!("ferrolite: export queue persist failed: {e}");
+                self.warning = Some("Export queue not saved (kept for this session).".to_string());
+            }
+        }
+    }
+
+    /// Add `image_id` to the export queue (dedup, in-memory authoritative), then
+    /// persist to the catalog cache table.
+    pub fn queue_add(&mut self, image_id: i64) {
+        if self.export_queue.contains(&image_id) {
+            return;
+        }
+        self.export_queue.push(image_id);
+        let at = Self::now_unix();
+        self.persist_queue(|cat| cat.add_to_export_queue(image_id, at));
+    }
+
+    /// Add several image ids to the export queue in order (dedup per-id).
+    pub fn queue_add_many(&mut self, ids: &[i64]) {
+        for &id in ids {
+            self.queue_add(id);
+        }
+    }
+
+    /// Remove `image_id` from the export queue and persist the change.
+    pub fn queue_remove(&mut self, image_id: i64) {
+        self.export_queue.retain(|&id| id != image_id);
+        self.persist_queue(|cat| cat.remove_from_export_queue(image_id));
+    }
+
+    /// Whether `image_id` is currently in the export queue.
+    pub fn queue_contains(&self, image_id: i64) -> bool {
+        self.export_queue.contains(&image_id)
+    }
+
+    /// Toggle membership: remove if present, else add. Persists (cache-safe).
+    pub fn queue_toggle(&mut self, image_id: i64) {
+        if self.queue_contains(image_id) {
+            self.queue_remove(image_id);
+        } else {
+            self.queue_add(image_id);
+        }
+    }
+
+    /// Empty the export queue and persist the change.
+    pub fn queue_clear(&mut self) {
+        self.export_queue.clear();
+        self.persist_queue(|cat| cat.clear_export_queue());
+    }
+
+    /// Move the queued item at `from` to insertion index `insert_at` (0..=len,
+    /// as returned by the grid drop-index math), then persist the new order.
+    /// Cache-safe (persist errors are swallowed to a warning by persist_queue).
+    pub fn queue_reorder(&mut self, from: usize, insert_at: usize) {
+        if from >= self.export_queue.len() {
+            return;
+        }
+        let id = self.export_queue.remove(from);
+        // After removing `from`, an insert index past it shifts left by one.
+        let dest = if insert_at > from {
+            insert_at - 1
+        } else {
+            insert_at
+        };
+        let dest = dest.min(self.export_queue.len());
+        self.export_queue.insert(dest, id);
+        let ordered = self.export_queue.clone();
+        self.persist_queue(|cat| cat.reorder_export_queue(&ordered));
+    }
+
     #[cfg(test)]
     pub fn for_test() -> Self {
         // Use a unique ID per test (thread + process) to avoid concurrent collision.
@@ -510,6 +640,12 @@ impl AppState {
             pending_remove: None,
             viewer: None,
             export_dialog: None,
+            batch: None,
+            export_queue: Vec::new(),
+            export_settings: ferrolite_export::ExportOptions::default(),
+            export_dest: None,
+            export_template: "{name}".to_string(),
+            export_help_open: false,
             filter: FilterState::default(),
             source: ViewSource::All,
             tags: Vec::new(),
@@ -1008,5 +1144,46 @@ mod tests {
         let r2 = s.images.iter().find(|r| r.id == 2).unwrap().rating;
         assert_eq!(r1, Rating::new(4), "explicit target updated");
         assert_eq!(r2, Rating::default(), "selection NOT touched");
+    }
+
+    #[test]
+    fn queue_add_dedups_and_preserves_order() {
+        let mut s = AppState::for_test();
+        s.queue_add(1);
+        s.queue_add(2);
+        s.queue_add(1); // dup ignored
+        assert_eq!(s.export_queue, vec![1, 2]);
+    }
+
+    #[test]
+    fn queue_remove_and_clear() {
+        let mut s = AppState::for_test();
+        s.export_queue = vec![1, 2, 3];
+        s.queue_remove(2);
+        assert_eq!(s.export_queue, vec![1, 3]);
+        s.queue_clear();
+        assert!(s.export_queue.is_empty());
+    }
+
+    #[test]
+    fn queue_toggle_adds_then_removes() {
+        let mut s = AppState::for_test();
+        assert!(!s.queue_contains(7));
+        s.queue_toggle(7);
+        assert!(s.queue_contains(7));
+        s.queue_toggle(7);
+        assert!(!s.queue_contains(7));
+    }
+
+    #[test]
+    fn queue_reorder_moves_item() {
+        let mut s = AppState::for_test();
+        s.export_queue = vec![10, 20, 30, 40];
+        s.queue_reorder(0, 2); // move 10 into gap-before-index-2 → after 20
+        assert_eq!(s.export_queue, vec![20, 10, 30, 40]);
+        s.queue_reorder(3, 0); // move 40 to front
+        assert_eq!(s.export_queue, vec![40, 20, 10, 30]);
+        s.queue_reorder(1, 1); // no-op (same slot)
+        assert_eq!(s.export_queue, vec![40, 20, 10, 30]);
     }
 }

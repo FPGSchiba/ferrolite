@@ -265,15 +265,17 @@ impl AppState {
         w: u32,
         h: u32,
     ) {
+        // The pixels are leaving the awaiting-upload stage regardless of whether
+        // they upload successfully — always clear the guard so a malformed buffer
+        // can never strand an id in `thumb_uploading` (which would stop its cell
+        // from ever being re-requested). Harmless no-op for ids uploaded inline
+        // that were never queued.
+        self.thumb_uploading.remove(&image_id);
         // Guard against a malformed buffer so `from_rgba_unmultiplied` never
         // panics on a length mismatch.
         if rgba.len() != (w as usize) * (h as usize) * 4 {
             return;
         }
-        // The pixels are being uploaded now → the id leaves the awaiting-upload
-        // stage and (below) enters `textures`. Harmless no-op for ids uploaded
-        // inline that were never queued.
-        self.thumb_uploading.remove(&image_id);
         self.thumb_pixels.insert(image_id, rgba.clone(), w, h);
         let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
         let tex = ctx.load_texture(
@@ -1267,6 +1269,26 @@ mod tests {
             "upload must clear the awaiting-upload marker"
         );
         assert!(s.textures.contains(9), "id is now textured");
+    }
+
+    /// Even a malformed (wrong-length) buffer must clear the `thumb_uploading`
+    /// guard, so a bad upload can never strand an id (which would stop its cell
+    /// from ever reloading). The texture is NOT created for the bad buffer.
+    #[test]
+    fn upload_thumbnail_malformed_buffer_still_clears_uploading() {
+        let mut s = AppState::for_test();
+        let ctx = egui::Context::default();
+        s.thumb_uploading.insert(5);
+        // Claims 2x2 (needs 16 bytes) but provides 4 → malformed.
+        s.upload_thumbnail(&ctx, 5, vec![0u8; 4], 2, 2);
+        assert!(
+            !s.thumb_uploading.contains(&5),
+            "malformed buffer must still clear the awaiting-upload guard"
+        );
+        assert!(
+            !s.textures.contains(5),
+            "no texture created for a malformed buffer"
+        );
     }
 
     /// `cancel_pending_jobs` clears both the upload queue and its guard set.

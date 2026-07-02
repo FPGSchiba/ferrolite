@@ -70,24 +70,53 @@ impl FerroliteApp {
         image_id: i64,
         linear: &ferrolite_image::LinearRgbaF32,
     ) {
-        let pw = self.preview_to_working();
-        let w2d = ferrolite_color::working_to_display(self.state.working_space);
         let Some(v) = self.state.viewer.as_mut() else {
             return; // viewer closed while decoding
         };
         if v.image_id != image_id {
             return; // stale: a different image is now open
         }
+        // Retain the sRGB-linear source. For Standard it is displayed and feeds
+        // the lazy preview `EditPipeline`; for RAW it is kept ONLY as the
+        // full-decode-failure fallback (`FullFailed`) and is never shown on the
+        // happy path.
+        let is_raw = v.kind == ferrolite_image::FileKind::Raw;
+        v.preview_source = Some(std::sync::Arc::new(linear.clone()));
+
+        // RAW: do NOT reveal the embedded JPEG. Keep the spinner up until the
+        // color-managed raw render is built at full-decode (`apply_full_decoded`),
+        // so the reveal comes from the same pipeline as the sparse full — a
+        // sharpness-only ramp with no color/tone shift.
+        if is_raw {
+            return;
+        }
+
+        // Standard: the preview IS the full-resolution image — reveal it now.
+        self.reveal_srgb_preview(frame, image_id);
+    }
+
+    /// Build the rung-1 preview `VirtualTexture` from the retained sRGB
+    /// `preview_source` via one `sRGB→working` color pass, install the holder,
+    /// fit the view, and mark the viewer `loaded` + `idle`. Shared by the
+    /// Standard preview reveal (`apply_preview_ready`) and the RAW
+    /// full-decode-failure fallback (`FullFailed`). Returns `true` on success,
+    /// `false` if a prerequisite (GPU / viewer / source) is missing.
+    fn reveal_srgb_preview(&mut self, frame: &eframe::Frame, image_id: i64) -> bool {
+        let pw = self.preview_to_working();
+        let w2d = ferrolite_color::working_to_display(self.state.working_space);
         let Some(rs) = frame.wgpu_render_state() else {
-            return; // no wgpu backend (should not happen in this build)
+            return false; // no wgpu backend (should not happen in this build)
+        };
+        let src = match self.state.viewer.as_ref() {
+            Some(v) if v.image_id == image_id => match v.preview_source.clone() {
+                Some(src) => src,
+                None => return false,
+            },
+            _ => return false,
         };
 
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-        let dims = (linear.width, linear.height);
-        // Retain the sRGB-linear source so the full preview EditPipeline can be
-        // built lazily on the first edit (built once, reused via set_stack).
-        let src = std::sync::Arc::new(linear.clone());
-        v.preview_source = Some(src.clone());
+        let dims = (src.width, src.height);
         // Initial preview: ONE sRGB→working color pass (not a full 9-node
         // pipeline). Display its working-space output directly.
         let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
@@ -108,6 +137,12 @@ impl FerroliteApp {
             )
         };
 
+        let Some(v) = self.state.viewer.as_mut() else {
+            return false;
+        };
+        if v.image_id != image_id {
+            return false;
+        }
         // Fit to the last-known viewport; fall back to the image's own size when
         // the canvas has not painted yet (zoom is normalized away by fit anyway).
         let viewport = if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
@@ -118,12 +153,10 @@ impl FerroliteApp {
         v.view = ferrolite_vt::ViewTransform::fit(dims, viewport);
         v.image_dims = Some(dims);
         v.loaded = true;
-        // A Standard image's preview IS the full-resolution image, so there is no
-        // tier-2 to wait for — go idle once the preview is up so the repaint loop
-        // does not spin.
-        if v.kind != ferrolite_image::FileKind::Raw {
-            v.idle = true;
-        }
+        // This tier has no tier-2 to wait for (Standard preview IS full-res, and
+        // the RAW fallback has given up on the full) — go idle so the repaint
+        // loop does not spin.
+        v.idle = true;
 
         rs.renderer
             .write()
@@ -136,6 +169,7 @@ impl FerroliteApp {
                 image_id,
             });
         self.mark_histogram_dirty();
+        true
     }
 
     /// Flag the histogram stale so the next frame recomputes it (debounced).
@@ -423,25 +457,31 @@ impl FerroliteApp {
         self.source_to_working(&ferrolite_decode::ColorProfile::srgb_fallback())
     }
 
-    /// Ensure `ViewerGpu.preview_before` holds the unedited (identity stack,
-    /// `sRGB→working`) rung-1 preview while split-compare is active. Built from the
-    /// retained `preview_source` via one `color_convert` pass (no upload of a new
-    /// image beyond that). Rebuilt only when missing (invalidated on WS change /
-    /// image open), so edits do not recompute it — the before never changes.
+    /// Ensure `ViewerGpu.preview_before` holds the unedited (identity stack)
+    /// rung-1 preview while split-compare is active. For Standard it is built from
+    /// the retained sRGB `preview_source` via one `color_convert` pass; for RAW it
+    /// is built from the demosaic `raw_preview_source` through an identity op stack
+    /// with the camera→working matrix (`cam`) — the SAME color path as the RAW
+    /// after-view, so the split compares like-with-like (no color/tone shift).
+    /// Rebuilt only when missing (invalidated on WS change / image open), so edits
+    /// do not recompute it — the before never changes.
     fn ensure_before_view(&mut self, frame: &eframe::Frame) {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
-        let (active, image_id, src) = match self.state.viewer.as_ref() {
-            Some(v) => (v.split_compare, v.image_id, v.preview_source.clone()),
+        let (active, image_id, is_raw, srgb_src, raw_src) = match self.state.viewer.as_ref() {
+            Some(v) => (
+                v.split_compare,
+                v.image_id,
+                v.kind == ferrolite_image::FileKind::Raw,
+                v.preview_source.clone(),
+                v.raw_preview_source.clone(),
+            ),
             None => return,
         };
         if !active {
             return;
         }
-        let Some(src) = src else {
-            return;
-        };
         // Already built for this image? Nothing to do.
         {
             let renderer = rs.renderer.read();
@@ -451,21 +491,40 @@ impl FerroliteApp {
                 }
             }
         }
-        let pw = self.preview_to_working();
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-        let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+        // Compute the unedited "before" texture on the same color path as the
+        // after-view: RAW via the raw pipeline (demosaic + identity + `cam`),
+        // Standard via the sRGB `color_convert`.
+        let (tex, dims) = if is_raw {
+            // `cam` borrows the viewer immutably; compute before the write below.
+            let cam = self.camera_to_working();
+            let Some(src) = raw_src else {
+                return; // RAW before-view not available until the full decode.
+            };
+            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+            let mut ep = ferrolite_pipeline::EditPipeline::new(
+                ctx_arc,
+                &src,
+                ferrolite_pipeline::OpStack::default(),
+                cam,
+            );
+            let out = ep.evaluate();
+            (out.texture.clone(), (out.width, out.height))
+        } else {
+            let pw = self.preview_to_working();
+            let Some(src) = srgb_src else {
+                return;
+            };
+            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+            let out = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+            (out.texture.clone(), (out.width, out.height))
+        };
         let vt = {
             let renderer = rs.renderer.read();
             let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
                 return;
             };
-            ferrolite_vt::VirtualTexture::single_from_texture(
-                &gpu,
-                converted.texture.clone(),
-                (converted.width, converted.height),
-                &vp.pipelines,
-            )
+            ferrolite_vt::VirtualTexture::single_from_texture(&gpu, tex, dims, &vp.pipelines)
         };
         let mut renderer = rs.renderer.write();
         if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -493,6 +552,7 @@ impl FerroliteApp {
             return; // stale: a different image is now open
         }
         v.color_profile = color_profile.clone();
+        let is_raw = v.kind == ferrolite_image::FileKind::Raw;
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -502,12 +562,49 @@ impl FerroliteApp {
         // do not alias.)
         let _ = v;
 
+        // Compute camera→working BEFORE any exclusive `viewer` borrow below:
+        // `camera_to_working` itself borrows `self.state.viewer` immutably.
+        let cam = self.camera_to_working();
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+
+        // RAW rung-1 reveal render (Approach A): run the demosaiced camera-native
+        // `image` through the op stack with the SAME camera→working matrix + op
+        // stack as the sparse full below, so the preview→full swap is a
+        // sharpness-only ramp with no color/tone shift. Build the preview
+        // `EditPipeline` ONCE here and retain it (`v.preview_edit`) for reuse by
+        // `set_preview_and_full` — never compiled per edit (CLAUDE.md rule 2).
+        // Standard images never reach `apply_full_decoded`.
+        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if is_raw {
+            let src = std::sync::Arc::new(image.clone());
+            match self.state.viewer.as_mut() {
+                Some(v) if v.image_id == image_id => {
+                    v.raw_preview_source = Some(std::sync::Arc::clone(&src));
+                    let ctx_arc =
+                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let mut ep = ferrolite_pipeline::EditPipeline::new(
+                        ctx_arc,
+                        &src,
+                        v.op_stack.clone(),
+                        cam,
+                    );
+                    let out = ep.evaluate();
+                    let tex = out.texture.clone();
+                    let dims = (out.width, out.height);
+                    v.preview_edit = Some(ep);
+                    Some((tex, dims))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
             std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
-        // Fetch the pre-warmed pipelines, build the sparse VT while borrowing them,
-        // then release the read lock before the write scope that installs it.
-        let full = {
+        // Fetch the pre-warmed pipelines, build the sparse full VT (and, for RAW,
+        // the rung-1 preview VT wrapping the reveal render) while borrowing them,
+        // then release the read lock before the write scope that installs them.
+        let (preview_vt, full) = {
             let renderer = rs.renderer.read();
             let vp = renderer
                 .callback_resources
@@ -517,24 +614,44 @@ impl FerroliteApp {
                 &gpu.queue,
                 ferrolite_color::working_to_display(self.state.working_space),
             );
-            ferrolite_vt::VirtualTexture::sparse(
+            let full = ferrolite_vt::VirtualTexture::sparse(
                 &gpu,
                 source,
                 std::sync::Arc::clone(&self.state.jobs),
                 VIEWER_TILE_BUDGET,
                 &vp.pipelines,
-            )
+            );
+            let preview_vt = raw_preview.as_ref().map(|(tex, dims)| {
+                ferrolite_vt::VirtualTexture::single_from_texture(
+                    &gpu,
+                    std::sync::Arc::clone(tex),
+                    *dims,
+                    &vp.pipelines,
+                )
+            });
+            (preview_vt, full)
         };
 
-        // Store the full VT into the existing holder (keep the preview around so
-        // the crossfade can keep showing it until the full tiles are resident).
-        // Only flip `full_ready` / start the crossfade if the holder was actually
-        // updated for THIS image — otherwise (stale holder) the viewer would
-        // permanently idle on the preview with no full VT to swap to.
+        // Install the full VT. For RAW the rung-1 preview IS the reveal render, so
+        // install a fresh holder (there is no JPEG holder — `apply_preview_ready`
+        // kept the spinner up). Replaces any stale holder from a superseded image.
+        // Only flip `full_ready` / start the crossfade if the holder is for THIS
+        // image — otherwise (stale) the viewer would permanently idle with no full
+        // VT to swap to.
         let mut full_installed = false;
         {
             let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+            if let Some(preview) = preview_vt {
+                renderer.callback_resources.insert(viewer::ViewerGpu {
+                    ctx: ferrolite_gpu::GpuContext::from_render_state(rs),
+                    preview,
+                    full: Some(full),
+                    preview_before: None,
+                    image_id,
+                });
+                full_installed = true;
+            } else if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                // Non-RAW defensive path (Standard never submits a tier-2 decode).
                 if g.image_id == image_id {
                     g.full = Some(full);
                     full_installed = true;
@@ -543,23 +660,26 @@ impl FerroliteApp {
         }
 
         if full_installed {
-            // Compute before taking the exclusive `viewer` borrow below:
-            // `camera_to_working` itself borrows `self.state.viewer` immutably.
-            let cam = self.camera_to_working();
             if let Some(v) = self.state.viewer.as_mut() {
                 if v.image_id == image_id {
+                    // Step 3 reveal: the rung-1 raw render is now on screen, so
+                    // drop the spinner. (For RAW `loaded` was held false in
+                    // `apply_preview_ready` until this color-correct reveal.)
+                    v.loaded = true;
                     v.full_ready = true;
                     v.begin_crossfade();
                     // The full tier's dimensions (uprighted, half-res demosaic)
-                    // differ from the embedded preview's, so the view fit
-                    // computed for the preview would appear zoomed/cropped once
-                    // the full VT swaps in. Refit to the full dims (the user has
-                    // not interacted yet at open time).
+                    // are the reveal render's dims too. Fit to them; fall back to
+                    // the image's own size if the canvas has not painted yet (the
+                    // user has not interacted at open time).
                     let full_dims = (image.width, image.height);
                     v.image_dims = Some(full_dims);
-                    if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
-                        v.view = ferrolite_vt::ViewTransform::fit(full_dims, v.viewport);
-                    }
+                    let viewport = if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
+                        v.viewport
+                    } else {
+                        (full_dims.0 as f32, full_dims.1 as f32)
+                    };
+                    v.view = ferrolite_vt::ViewTransform::fit(full_dims, viewport);
                     // Build the GPU-resident pyramid UNCONDITIONALLY so the
                     // full-res edit producer can be created on the first edit even
                     // for an image that opened unedited (identity stack).
@@ -638,15 +758,26 @@ impl FerroliteApp {
             }
         }
 
-        // Preview tier (built once per image, reused).
+        // Preview tier (built once per image, reused). For RAW this pipeline was
+        // already built at full-decode (`apply_full_decoded`) from the demosaic
+        // source with `cam`; this rebuild branch is the Standard/lazy fallback.
+        // Source + matrix must match the tier the image is displayed on: RAW =
+        // demosaic + camera→working (`cam`); Standard = sRGB source + sRGB→working
+        // (`pw`). Sourcing RAW from the sRGB JPEG here would reintroduce the color
+        // shift this task removes.
         if v.preview_edit.is_none() {
-            if let Some(src) = v.preview_source.clone() {
+            let (src, matrix) = if v.kind == ferrolite_image::FileKind::Raw {
+                (v.raw_preview_source.clone(), cam)
+            } else {
+                (v.preview_source.clone(), pw)
+            };
+            if let Some(src) = src {
                 let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
                 v.preview_edit = Some(ferrolite_pipeline::EditPipeline::new(
                     ctx_arc,
                     &src,
                     shown.clone(),
-                    pw,
+                    matrix,
                 ));
             }
         }
@@ -841,7 +972,7 @@ const MAX_THUMB_UPLOADS_PER_FRAME: usize = 16;
 /// arrow-navigation cancel each superseded viewer's full decode WHILE IT IS
 /// STILL QUEUED (or never submit it at all), instead of piling up one
 /// `Visible`-priority full decode per image flipped through.
-const FULL_DECODE_DEBOUNCE: f32 = 0.15;
+const FULL_DECODE_DEBOUNCE: f32 = 0.05;
 
 impl FerroliteApp {
     /// Per-frame viewer drive: advance the crossfade, drive the sparse VT
@@ -1230,10 +1361,28 @@ impl eframe::App for FerroliteApp {
                     continue;
                 }
                 crate::events::AppEvent::FullFailed { image_id } => {
-                    // Keep the preview; mark the viewer idle so the repaint loop
-                    // can stop (the error was already logged on the job thread).
+                    let image_id = *image_id;
+                    // For RAW: if we never revealed (the color-managed raw render
+                    // never built because the full decode failed), fall back to the
+                    // embedded JPEG so an undecodable-full still shows *something*.
+                    // This is the ONE place the JPEG may reach the screen for RAW.
+                    let need_fallback = matches!(
+                        self.state.viewer.as_ref(),
+                        Some(v) if v.image_id == image_id
+                            && v.kind == ferrolite_image::FileKind::Raw
+                            && !v.loaded
+                    );
+                    if need_fallback && self.reveal_srgb_preview(frame, image_id) {
+                        eprintln!(
+                            "ferrolite: full decode failed for #{image_id}; showing embedded JPEG fallback"
+                        );
+                    }
+                    // Mark the viewer idle so the repaint loop can stop (the decode
+                    // error was already logged on the job thread). On the fallback
+                    // path `reveal_srgb_preview` already set `idle`; this covers the
+                    // already-loaded / no-fallback cases too.
                     if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_id == *image_id {
+                        if v.image_id == image_id {
                             v.idle = true;
                         }
                     }

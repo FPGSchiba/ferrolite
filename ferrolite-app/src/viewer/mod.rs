@@ -119,8 +119,20 @@ pub struct ViewerState {
 
     // ── Edit state (Task 8 / Plan 4) — read by Tasks 9+ ────────────────────
     /// The full-res linear source retained for re-evaluation when the op stack
-    /// changes (built from the tier-2 full decode).
+    /// changes (built from the tier-2 full decode). For a Standard image this is
+    /// the decoded sRGB image; for a RAW image this holds the embedded JPEG
+    /// linear buffer, retained ONLY as the full-decode-failure fallback source
+    /// (`FullFailed`) — never displayed on the happy path.
     pub preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+    /// RAW preview-tier source: the demosaiced, camera-native, half-res
+    /// `LinearRgbaF32` from the tier-2 full decode. For RAW everything displayed
+    /// and measured on the preview tier (the rung-1 reveal render, the
+    /// interactive `preview_edit`, the before-view, and thus the histogram) is
+    /// sourced from THIS buffer through the camera→working matrix — the same
+    /// color path as the sparse full — so the preview→full swap is a
+    /// sharpness-only ramp with no color/tone shift. `None` for Standard images
+    /// and for RAW before the full decode arrives.
+    pub raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
     /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
     /// `edit_producer`). Rebuilt when geometry / halo radius changes.
     pub preview_edit: Option<EditPipeline>,
@@ -184,6 +196,7 @@ impl ViewerState {
             preview_handle: None,
             full_handle: None,
             preview_source: None,
+            raw_preview_source: None,
             preview_edit: None,
             pyramid: None,
             color_profile: ferrolite_decode::ColorProfile::srgb_fallback(),
@@ -438,6 +451,19 @@ pub fn image_screen_rect(
 mod tests {
     use super::*;
     use ferrolite_vt::ViewTransform;
+
+    #[test]
+    fn new_viewer_has_no_raw_preview_source() {
+        // The RAW preview-tier source only exists after the tier-2 full decode
+        // (`apply_full_decoded`); a freshly-opened viewer must start without it so
+        // the RAW path shows the spinner until the color-managed reveal is built.
+        let v = ViewerState::open(1, std::path::PathBuf::from("x"), FileKind::Raw);
+        assert!(v.raw_preview_source.is_none());
+        assert!(
+            !v.loaded,
+            "RAW opens unrevealed (spinner) until full decode"
+        );
+    }
 
     #[test]
     fn crossfade_ramps_zero_to_one_then_clamps() {

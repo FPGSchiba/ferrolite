@@ -146,6 +146,7 @@ static REQ_FAST: AtomicU64 = AtomicU64::new(0);
 static REQ_DEDUP_TEX: AtomicU64 = AtomicU64::new(0);
 static REQ_DEDUP_PENDING: AtomicU64 = AtomicU64::new(0);
 static REQ_DEDUP_MISSING: AtomicU64 = AtomicU64::new(0);
+static REQ_DEDUP_UPLOADING: AtomicU64 = AtomicU64::new(0);
 static RETAIN_CANCELS: AtomicU64 = AtomicU64::new(0);
 static EVENTS_DRAINED: AtomicU64 = AtomicU64::new(0);
 static UPLOADS_APPLIED: AtomicU64 = AtomicU64::new(0);
@@ -193,19 +194,27 @@ pub enum ReqOutcome {
     DedupTextured,
     DedupPending,
     DedupMissing,
+    DedupUploading,
 }
 
-/// Classify the outcome from the three dedup guards, in `request_thumbnail`'s
-/// own precedence order (textured > pending > missing). `NewSubmit` is used
-/// when none of the guards hit and there is no pixel-cache fast path — the
+/// Classify the outcome from the dedup guards, in `request_thumbnail`'s own
+/// precedence order (textured > pending > missing > uploading). `NewSubmit` is
+/// used when none of the guards hit and there is no pixel-cache fast path — the
 /// caller records `FastPath` explicitly for the pixel-cache branch.
-pub fn classify_request(textured: bool, pending: bool, missing: bool) -> ReqOutcome {
+pub fn classify_request(
+    textured: bool,
+    pending: bool,
+    missing: bool,
+    uploading: bool,
+) -> ReqOutcome {
     if textured {
         ReqOutcome::DedupTextured
     } else if pending {
         ReqOutcome::DedupPending
     } else if missing {
         ReqOutcome::DedupMissing
+    } else if uploading {
+        ReqOutcome::DedupUploading
     } else {
         ReqOutcome::NewSubmit
     }
@@ -224,6 +233,7 @@ pub fn record_request(outcome: ReqOutcome) {
         ReqOutcome::DedupTextured => &REQ_DEDUP_TEX,
         ReqOutcome::DedupPending => &REQ_DEDUP_PENDING,
         ReqOutcome::DedupMissing => &REQ_DEDUP_MISSING,
+        ReqOutcome::DedupUploading => &REQ_DEDUP_UPLOADING,
     };
     c.fetch_add(1, Ordering::Relaxed);
 }
@@ -243,6 +253,7 @@ pub struct AppCounters {
     pub req_dedup_tex: u64,
     pub req_dedup_pending: u64,
     pub req_dedup_missing: u64,
+    pub req_dedup_uploading: u64,
     pub retain_cancels: u64,
     pub events_drained: u64,
     pub uploads_applied: u64,
@@ -263,6 +274,7 @@ pub fn app_counters() -> AppCounters {
         req_dedup_tex: l(&REQ_DEDUP_TEX),
         req_dedup_pending: l(&REQ_DEDUP_PENDING),
         req_dedup_missing: l(&REQ_DEDUP_MISSING),
+        req_dedup_uploading: l(&REQ_DEDUP_UPLOADING),
         retain_cancels: l(&RETAIN_CANCELS),
         events_drained: l(&EVENTS_DRAINED),
         uploads_applied: l(&UPLOADS_APPLIED),
@@ -275,6 +287,7 @@ pub struct Gauges {
     pub thumb_pending: usize,
     pub thumb_missing: usize,
     pub thumb_handles: usize,
+    pub thumb_uploading: usize,
     pub pending_uploads: usize,
     pub active_ingests: usize,
     pub ingest_done: usize,
@@ -308,6 +321,7 @@ pub struct Snapshot {
     pub req_dedup_tex_f: u64,
     pub req_dedup_pending_f: u64,
     pub req_dedup_missing_f: u64,
+    pub req_dedup_uploading_f: u64,
     // Cache sizes (caps are fixed constants, shown for context).
     pub cur: AppCounters,
 }
@@ -346,6 +360,7 @@ pub fn build_snapshot(
         req_dedup_tex_f: d(cur.req_dedup_tex, prev_frame.req_dedup_tex),
         req_dedup_pending_f: d(cur.req_dedup_pending, prev_frame.req_dedup_pending),
         req_dedup_missing_f: d(cur.req_dedup_missing, prev_frame.req_dedup_missing),
+        req_dedup_uploading_f: d(cur.req_dedup_uploading, prev_frame.req_dedup_uploading),
         cur: *cur,
     }
 }
@@ -354,13 +369,14 @@ pub fn build_snapshot(
 pub fn format_log(s: &Snapshot) -> String {
     let j = &s.jobs;
     let g = &s.g;
-    let dedup = s.req_dedup_tex_f + s.req_dedup_pending_f + s.req_dedup_missing_f;
+    let dedup =
+        s.req_dedup_tex_f + s.req_dedup_pending_f + s.req_dedup_missing_f + s.req_dedup_uploading_f;
     format!(
         "[diag +{dt:.1}s] frame {fms:.1}ms(max {mx:.1}) ev/f {ev} repaint {rp}\n\
          \x20jobs  sub I/V/B {si}/{sv}/{sb}  disp {disp}  done {done}  cxl(pre){cxp}  panic {pan}\n\
          \x20      active {act}  pending I/V/B {pi}/{pv}/{pb}  cancel removed {crem}/absent {cabs}\n\
-         \x20thumb req/f {req} = new {rn} + fast {rf} + dedup {dd} (tex {rt}/pend {rpd}/miss {rms})\n\
-         \x20      pending {tp}  handles {th}  missing {tm}  retain req {rc}\n\
+         \x20thumb req/f {req} = new {rn} + fast {rf} + dedup {dd} (tex {rt}/pend {rpd}/miss {rms}/upl {rup})\n\
+         \x20      pending {tp}  uploading {tu}  handles {th}  missing {tm}  retain req {rc}\n\
          \x20cache tex h/s {thh:.0} m/s {thm:.0} ev/s {the:.0} | pix h/s {pxh:.0} m/s {pxm:.0} ev/s {pxe:.0}\n\
          \x20uploads {up}/{cap} cap  backlog {bk}\n\
          \x20ingest active {ai}  done {idn}/{itot}",
@@ -389,7 +405,9 @@ pub fn format_log(s: &Snapshot) -> String {
         rt = s.req_dedup_tex_f,
         rpd = s.req_dedup_pending_f,
         rms = s.req_dedup_missing_f,
+        rup = s.req_dedup_uploading_f,
         tp = g.thumb_pending,
+        tu = g.thumb_uploading,
         th = g.thumb_handles,
         tm = g.thumb_missing,
         rc = s.cur.retain_cancels,
@@ -510,7 +528,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
          pending I/V/B {pi}/{pv}/{pb}\n\
          cancel removed {crem}/absent {cabs}  cxl(pre) {cxp}  panic {pan}\n\
          req/f {req} new {rn} fast {rf} dedup {dd}\n\
-         thumb pending {tp} handles {th} missing {tm}\n\
+         thumb pending {tp} uploading {tu} handles {th} missing {tm}\n\
          tex h/s {thh:.0} ev/s {the:.0} | pix h/s {pxh:.0} ev/s {pxe:.0}\n\
          uploads/f {up}/{cap}  backlog {bk}\n\
          ingest {idn}/{itot} active {ai}",
@@ -531,8 +549,12 @@ pub fn format_overlay(s: &Snapshot) -> String {
         req = s.req_per_frame,
         rn = s.req_new_f,
         rf = s.req_fast_f,
-        dd = s.req_dedup_tex_f + s.req_dedup_pending_f + s.req_dedup_missing_f,
+        dd = s.req_dedup_tex_f
+            + s.req_dedup_pending_f
+            + s.req_dedup_missing_f
+            + s.req_dedup_uploading_f,
         tp = g.thumb_pending,
+        tu = g.thumb_uploading,
         th = g.thumb_handles,
         tm = g.thumb_missing,
         thh = s.tex_hit_per_s,
@@ -627,24 +649,51 @@ mod tests {
 
     #[test]
     fn classify_request_prioritises_textured_then_pending_then_missing() {
-        assert_eq!(classify_request(false, false, false), ReqOutcome::NewSubmit);
         assert_eq!(
-            classify_request(true, false, false),
+            classify_request(false, false, false, false),
+            ReqOutcome::NewSubmit
+        );
+        assert_eq!(
+            classify_request(true, false, false, false),
             ReqOutcome::DedupTextured
         );
         assert_eq!(
-            classify_request(false, true, false),
+            classify_request(false, true, false, false),
             ReqOutcome::DedupPending
         );
         assert_eq!(
-            classify_request(false, false, true),
+            classify_request(false, false, true, false),
             ReqOutcome::DedupMissing
         );
         // Textured wins when multiple guards are true (matches request_thumbnail
         // guard order: textures, then pending, then missing).
         assert_eq!(
-            classify_request(true, true, true),
+            classify_request(true, true, true, false),
             ReqOutcome::DedupTextured
+        );
+    }
+
+    #[test]
+    fn classify_request_ranks_uploading_after_missing_before_new() {
+        // uploading-only hit → DedupUploading
+        assert_eq!(
+            classify_request(false, false, false, true),
+            ReqOutcome::DedupUploading
+        );
+        // none set → NewSubmit
+        assert_eq!(
+            classify_request(false, false, false, false),
+            ReqOutcome::NewSubmit
+        );
+        // precedence: textured wins over uploading
+        assert_eq!(
+            classify_request(true, false, false, true),
+            ReqOutcome::DedupTextured
+        );
+        // missing wins over uploading
+        assert_eq!(
+            classify_request(false, false, true, true),
+            ReqOutcome::DedupMissing
         );
     }
 
@@ -653,6 +702,7 @@ mod tests {
             thumb_pending: 640,
             thumb_missing: 0,
             thumb_handles: 640,
+            thumb_uploading: 0,
             pending_uploads: 210,
             active_ingests: 0,
             ingest_done: 3320,

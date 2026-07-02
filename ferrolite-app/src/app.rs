@@ -2023,6 +2023,7 @@ impl eframe::App for FerroliteApp {
                 thumb_pending: self.state.thumb_pending.len(),
                 thumb_missing: self.state.thumb_missing.len(),
                 thumb_handles: self.state.thumb_handles.len(),
+                thumb_uploading: self.state.thumb_uploading.len(),
                 pending_uploads: self.state.pending_uploads.len(),
                 active_ingests: self.state.active_ingests,
                 ingest_done: self.state.ingest_done,

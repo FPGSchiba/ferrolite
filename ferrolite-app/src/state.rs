@@ -76,6 +76,13 @@ pub struct AppState {
     /// in this set until ingest finishes (`IngestDone` clears it) or the
     /// thumbnail actually arrives (`ThumbReady` removes the id).
     pub thumb_missing: HashSet<i64>,
+    /// Image ids whose decoded pixels are queued in `pending_uploads`, awaiting
+    /// GPU upload — the lifecycle bridge between a finished job (`thumb_pending`
+    /// cleared on `ThumbReady`) and a live texture (`textures`). Dedups
+    /// `request_thumbnail` so a cell whose pixels are already queued does not
+    /// re-submit a job or re-push another copy every frame. Invariant: this set
+    /// equals the ids currently in `pending_uploads`.
+    pub thumb_uploading: HashSet<i64>,
     /// Decoded thumbnails pulled from the event channel but not yet uploaded this
     /// frame (per-frame upload cap overflow). Drained first each frame.
     pub pending_uploads: Vec<(i64, Vec<u8>, u32, u32)>,
@@ -210,6 +217,7 @@ impl AppState {
             thumb_pending: HashSet::new(),
             thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),
+            thumb_uploading: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,
@@ -281,8 +289,11 @@ impl AppState {
         let textured = self.textures.contains(image_id);
         let pending = self.thumb_pending.contains(&image_id);
         let missing = self.thumb_missing.contains(&image_id);
+        let uploading = self.thumb_uploading.contains(&image_id);
         if textured || pending || missing {
-            crate::diag::record_request(crate::diag::classify_request(textured, pending, missing));
+            crate::diag::record_request(crate::diag::classify_request(
+                textured, pending, missing, uploading,
+            ));
             return;
         }
         // Fast path: pixels already decoded this session → re-upload directly,
@@ -739,6 +750,7 @@ impl AppState {
             thumb_pending: HashSet::new(),
             thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),
+            thumb_uploading: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,

@@ -13,6 +13,17 @@ const CELL_GAP: f32 = 10.0;
 const ICON_BTN: f32 = 18.0;
 const ICON_R: f32 = 5.0;
 
+/// Height of the single-line filename label below the thumbnail. A couple of
+/// px of slack over the `.small()` line height so the label can never exceed
+/// its budget and re-introduce cross-axis drift in `horizontal_wrapped`.
+const CELL_LABEL_H: f32 = 16.0;
+/// Intra-cell vertical gap between thumbnail/label/remove-row.
+const CELL_PAD: f32 = 4.0;
+/// Exact, uniform cell height: every queue cell allocates this same box
+/// (thumb + 2 gaps + label + remove-row), so `horizontal_wrapped` never sees
+/// a taller-than-allocated cell and cannot drift rows out of alignment.
+const CELL_H: f32 = THUMB_H + CELL_PAD + CELL_LABEL_H + CELL_PAD + ICON_BTN;
+
 /// DnD payload id for the export-queue drag source (see [`egui::DragAndDrop`]).
 /// Kept a plain `i64` image id — a future Library drag-to-collections feature
 /// can reuse this same `dnd_drag_source`/`DragAndDrop::take_payload` pattern
@@ -53,8 +64,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                             .map(|r| r.filename.clone())
                             .unwrap_or_else(|| format!("#{id}"));
 
-                        ui.allocate_ui(egui::vec2(THUMB_W, THUMB_H + 46.0), |ui| {
-                            ui.vertical(|ui| {
+                        // Exact-size, explicit top-down allocation: every cell
+                        // reports an identical (THUMB_W, CELL_H) footprint
+                        // regardless of content, so `horizontal_wrapped`'s
+                        // cross-axis cursor advances uniformly and rows stay
+                        // aligned (no more per-cell overflow drift).
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(THUMB_W, CELL_H),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(THUMB_W, CELL_H));
+                                ui.spacing_mut().item_spacing.y = CELL_PAD;
+
                                 // The thumbnail itself is the drag source (not the
                                 // whole cell), so the ✕ button below stays a plain
                                 // click target unaffected by the drag sense. While
@@ -72,11 +93,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                 };
                                 cell_rects.push(thumb_rect);
 
-                                ui.set_width(THUMB_W);
-                                ui.label(
-                                    egui::RichText::new(&filename)
-                                        .small()
-                                        .color(theme::TEXT_DIM),
+                                // Single-line, non-wrapping, truncated filename:
+                                // removes the 2nd-line height variance that fed
+                                // the staircase. Full name still on hover.
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&filename)
+                                            .small()
+                                            .color(theme::TEXT_DIM),
+                                    )
+                                    .truncate(),
                                 )
                                 .on_hover_text(&filename);
 
@@ -90,8 +116,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                         do_remove = Some(id);
                                     }
                                 });
-                            });
-                        });
+                            },
+                        );
                     }
                 });
             });

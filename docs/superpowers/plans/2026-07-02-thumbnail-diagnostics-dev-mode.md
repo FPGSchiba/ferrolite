@@ -1527,12 +1527,11 @@ Extend the end-of-`update` diag block (added in Task 4) so the overlay is drawn 
             if crate::diag::overlay_enabled() && self.diag.overlay_visible {
                 if let Some(snap) = self.diag.last_snapshot() {
                     crate::diag::draw_overlay(ctx, snap);
-                    ctx.request_repaint(); // keep the live view refreshing
                 }
             }
 ```
 
-> The overlay's `request_repaint` is intentional and applies ONLY when the overlay is enabled+visible (dev-mode); it never runs when diag is off, preserving the idle-frame guarantee for normal builds.
+> The overlay renders the last cached snapshot on whatever frames occur naturally — it does NOT call `request_repaint`, honoring the "never force a repaint" Global Constraint. During the scroll/close repro, scrolling and ingest already generate frequent repaints so the overlay updates smoothly; when fully idle it refreshes only on the app's natural wake (the existing `request_repaint_after(WATCH_INTERVAL)`). For the least-perturbed frame-time/idle measurement, use `FERROLITE_DIAG=log` (no overlay).
 
 - [ ] **Step 6: Build + gate**
 

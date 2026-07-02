@@ -766,11 +766,7 @@ impl FerroliteApp {
         // (`pw`). Sourcing RAW from the sRGB JPEG here would reintroduce the color
         // shift this task removes.
         if v.preview_edit.is_none() {
-            let (src, matrix) = if v.kind == ferrolite_image::FileKind::Raw {
-                (v.raw_preview_source.clone(), cam)
-            } else {
-                (v.preview_source.clone(), pw)
-            };
+            let (src, matrix) = v.preview_tier_source(cam, pw);
             if let Some(src) = src {
                 let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
                 v.preview_edit = Some(ferrolite_pipeline::EditPipeline::new(
@@ -901,10 +897,15 @@ impl FerroliteApp {
         };
 
         // Preview tier: update the matrix, re-evaluate, swap the displayed texture.
-        // The preview source is sRGB (embedded thumbnail / Standard image), so this
-        // always uses `pw` (sRGB→working), never `cam` (camera→working, full-res only).
+        // Source + matrix must match the tier the image is displayed on (the same
+        // choice `set_preview_and_full`/`apply_full_decoded` make): RAW = demosaic
+        // camera-native `raw_preview_source` + camera→working (`cam`); Standard =
+        // sRGB `preview_source` + sRGB→working (`pw`). Applying `pw` to a RAW
+        // preview would diverge it (and the histogram that reads it) from the full
+        // tier and reintroduce the RAW color/tone shift progressive reveal removes.
+        let (pv_src, pv_matrix) = v.preview_tier_source(cam, pw);
         if let Some(ep) = v.preview_edit.as_mut() {
-            ep.set_color_matrix(pw);
+            ep.set_color_matrix(pv_matrix);
             let img = ep.evaluate();
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -913,10 +914,11 @@ impl FerroliteApp {
                         .update_single_from_texture(img.texture.clone(), (img.width, img.height));
                 }
             }
-        } else if let Some(src) = v.preview_source.clone() {
-            // No edit yet: re-run the one-shot color pass with the new matrix.
+        } else if let Some(src) = pv_src {
+            // No edit yet: re-run the one-shot color pass from the kind-correct
+            // source (RAW demosaic / sRGB) with its matrix.
             let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-            let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
+            let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pv_matrix);
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == v.image_id {

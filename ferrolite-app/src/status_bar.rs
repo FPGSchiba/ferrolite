@@ -6,18 +6,18 @@ use crate::state::AppState;
 pub fn activity_text(
     _active: usize,
     _pending: usize,
-    thumb_done: usize,
-    thumb_total: usize,
+    ingest_done: usize,
+    ingest_total: usize,
 ) -> String {
     // `active`/`pending` are kept in the signature for call-site context but no
-    // longer drive the branch below. Only show generation progress while an
-    // ingest is actually generating thumbnails (thumb_total > 0): lazy-load
-    // scroll jobs keep `active`/`pending` non-zero but are not generation
-    // progress, so showing "N/0" would mislead.
-    if thumb_total == 0 || thumb_done >= thumb_total {
+    // longer drive the branch below. Only show ingest progress while a pass is
+    // actually running (ingest_total > 0): lazy-load scroll jobs keep
+    // `active`/`pending` non-zero but are not ingest progress, so showing "N/0"
+    // would mislead.
+    if ingest_total == 0 || ingest_done >= ingest_total {
         "Idle".to_string()
     } else {
-        format!("Thumbnails {thumb_done}/{thumb_total}")
+        format!("Ingesting {ingest_done}/{ingest_total}")
     }
 }
 
@@ -36,8 +36,8 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
             ui.monospace(activity_text(
                 active,
                 pending,
-                state.thumb_done,
-                state.thumb_total,
+                state.ingest_done,
+                state.ingest_total,
             ));
         });
         if let Some(w) = &state.warning {
@@ -79,13 +79,13 @@ mod tests {
 
     #[test]
     fn activity_shows_progress_when_busy() {
-        assert_eq!(activity_text(1, 5, 12, 40), "Thumbnails 12/40");
+        assert_eq!(activity_text(1, 5, 12, 40), "Ingesting 12/40");
     }
 
     #[test]
     fn activity_idle_when_total_is_zero_even_if_jobs_active() {
-        // Lazy-load scroll jobs are active but no ingest generation is tracked
-        // (thumb_total == 0): must NOT show a misleading "Thumbnails N/0".
+        // Lazy-load scroll jobs are active but no ingest pass is tracked
+        // (ingest_total == 0): must NOT show a misleading "Ingesting N/0".
         assert_eq!(activity_text(2, 3, 17, 0), "Idle");
     }
 }

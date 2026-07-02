@@ -1,6 +1,7 @@
-//! Virtualized thumbnail grid. Realizes only the visible window of cells, pulls
-//! ready thumbnails from the read pool on demand, and promotes the visible
-//! window's pending thumbnail jobs to `Visible` priority.
+//! Virtualized thumbnail grid. Realizes only the visible window of cells and
+//! pulls ready thumbnails from the read pool on demand (lazy-load). Ingest
+//! thumbnails are generated inline during ingest, so there are no separate
+//! per-image thumbnail jobs for the grid to reprioritize by visibility.
 
 use crate::library::cell_state::{cell_state, CellState};
 use crate::library::grid_layout::{layout, CachedGridLayout, LayoutSig};
@@ -9,7 +10,6 @@ use crate::state::AppState;
 use crate::theme;
 use ferrolite_catalog::ImageRecord;
 use ferrolite_image::Flag;
-use ferrolite_jobs::Priority;
 use std::collections::HashSet;
 
 const GAP: f32 = 8.0;
@@ -65,19 +65,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         let vh = viewport.height() + MARGIN;
         let rows = cache.layout.visible_rows(scroll_top, vh);
 
-        // Promote visible pending thumbnail jobs; demote ones that scrolled away.
-        // Compute visible set immutably first (borrow checker: reprioritize borrows
-        // state immutably; the mut paint loop comes after).
+        // Compute the visible id set (used to fetch tag associations for the
+        // window). Ingest thumbnails are now generated inline within the ingest
+        // job — there are no separate per-image thumbnail jobs to reprioritize by
+        // visibility, so the old promote/demote pass is gone.
         let mut now_visible: HashSet<i64> = HashSet::new();
         for ri in rows.clone() {
             for item in &cache.layout.rows[ri].items {
                 now_visible.insert(state.images[item.index].id);
             }
         }
-        reprioritize(state, &now_visible);
         // Fetch tag associations for the visible window (only missing ids queried).
         state.ensure_tags_for(&now_visible);
-        state.last_visible = now_visible;
 
         let origin = ui.min_rect().left_top() + egui::vec2(MARGIN, MARGIN);
         for ri in rows {
@@ -195,19 +194,6 @@ fn format_capture_date(raw: Option<&str>) -> Option<String> {
         })
         .collect();
     Some(out)
-}
-
-fn reprioritize(state: &AppState, now_visible: &HashSet<i64>) {
-    for id in now_visible.difference(&state.last_visible) {
-        if let Some(job_id) = state.thumb_jobs.get(id) {
-            state.jobs.reprioritize(*job_id, Priority::Visible);
-        }
-    }
-    for id in state.last_visible.difference(now_visible) {
-        if let Some(job_id) = state.thumb_jobs.get(id) {
-            state.jobs.reprioritize(*job_id, Priority::Background);
-        }
-    }
 }
 
 /// Compute the inclusive range of image indices between `anchor_idx` and

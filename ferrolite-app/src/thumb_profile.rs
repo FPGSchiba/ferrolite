@@ -14,32 +14,60 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+// The `measure_read`/`record` per-thumbnail profiling below (and the statics it
+// uses) instruments `ingest::thumbnail_blocking`, which since the inline-ingest
+// change is only exercised by the `bench_browse` binary and the integration test
+// (via the lib target). The main `ferrolite-app` binary no longer calls it, so
+// the compiler sees these as dead there; `#[allow(dead_code)]` keeps them for the
+// bench/test path without a false warning. The live ingest path uses
+// `record_meta`/`record_encode`/`record_upsert` + `diag` instead.
+
 /// Bytes pre-read to force (and time) the disk IO a preview decode needs. The
 /// embedded preview rawler reads sits within the first ~1 MB for the cameras
 /// tested; 2 MiB gives headroom without reading pixel data.
+#[allow(dead_code)]
 const PROBE_READ_BYTES: usize = 2 << 20;
 /// Emit a running summary every this many profiled thumbnails.
+#[allow(dead_code)]
 const SUMMARY_EVERY: u64 = 2;
 
+#[allow(dead_code)]
 static COUNT: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
 static IO_US: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
 static DECODE_US: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
 static ENCODE_US: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
 static WRITE_US: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
 static READ_BYTES: AtomicU64 = AtomicU64::new(0);
 
-// Ingest-producer instrumentation: per-file metadata-read and row-upsert cost.
+// Ingest-producer instrumentation: per-file decode (meta+preview), resize/encode,
+// and row-upsert cost.
 static META_COUNT: AtomicU64 = AtomicU64::new(0);
 static META_READ_US: AtomicU64 = AtomicU64::new(0);
+static PROD_ENCODE_US: AtomicU64 = AtomicU64::new(0);
 static UPSERT_US: AtomicU64 = AtomicU64::new(0);
 
-/// Record one file's metadata-read cost (producer side, parallel), microseconds.
+/// Record one file's combined metadata+preview decode cost (producer side,
+/// parallel), microseconds.
 pub fn record_meta(meta_read_us: u64) {
     if !enabled() {
         return;
     }
     META_COUNT.fetch_add(1, Ordering::Relaxed);
     META_READ_US.fetch_add(meta_read_us, Ordering::Relaxed);
+}
+
+/// Record one file's inline thumbnail resize/encode cost (producer side,
+/// parallel), microseconds.
+pub fn record_encode(encode_us: u64) {
+    if !enabled() {
+        return;
+    }
+    PROD_ENCODE_US.fetch_add(encode_us, Ordering::Relaxed);
 }
 
 /// Record one row's upsert cost (consumer side, serial under the writer lock),
@@ -61,14 +89,14 @@ pub fn enabled() -> bool {
 /// and job-pool occupancy. Reveals whether throughput is gated by job spawning
 /// (indexing) or by workers being saturated with other (ingest) jobs. No-op when
 /// profiling is off.
-pub fn diag(indexed: u64, thumb_done: u64, thumb_total: u64, active: usize, pending: usize) {
+pub fn diag(indexed: u64, ingest_done: u64, ingest_total: u64, active: usize, pending: usize) {
     if !enabled() {
         return;
     }
     static START: OnceLock<Instant> = OnceLock::new();
     static LAST_MS: AtomicU64 = AtomicU64::new(0);
     static LAST_INDEXED: AtomicU64 = AtomicU64::new(0);
-    static LAST_THUMB: AtomicU64 = AtomicU64::new(0);
+    static LAST_DONE: AtomicU64 = AtomicU64::new(0);
 
     let start = START.get_or_init(Instant::now);
     let now_ms = start.elapsed().as_millis() as u64;
@@ -80,21 +108,23 @@ pub fn diag(indexed: u64, thumb_done: u64, thumb_total: u64, active: usize, pend
     LAST_MS.store(now_ms, Ordering::Relaxed);
     let dt = now_ms.saturating_sub(last).max(1) as f64 / 1000.0;
     let d_idx = indexed.saturating_sub(LAST_INDEXED.swap(indexed, Ordering::Relaxed));
-    let d_thumb = thumb_done.saturating_sub(LAST_THUMB.swap(thumb_done, Ordering::Relaxed));
+    let d_done = ingest_done.saturating_sub(LAST_DONE.swap(ingest_done, Ordering::Relaxed));
     let mc = META_COUNT.load(Ordering::Relaxed).max(1);
-    let avg_meta = META_READ_US.load(Ordering::Relaxed) as f64 / 1000.0 / mc as f64;
+    let avg_decode = META_READ_US.load(Ordering::Relaxed) as f64 / 1000.0 / mc as f64;
+    let avg_encode = PROD_ENCODE_US.load(Ordering::Relaxed) as f64 / 1000.0 / mc as f64;
     let avg_upsert = UPSERT_US.load(Ordering::Relaxed) as f64 / 1000.0 / mc as f64;
     eprintln!(
-        "[ingest-diag] indexed={indexed} (+{:.0}/s)  thumbs={thumb_done}/{thumb_total} (+{:.0}/s)  \
-         jobs(active={active} pending={pending})  avg meta_read={avg_meta:.1}ms upsert={avg_upsert:.1}ms",
+        "[ingest-diag] indexed={indexed} (+{:.0}/s)  ingest={ingest_done}/{ingest_total} (+{:.0}/s)  \
+         jobs(active={active} pending={pending})  avg decode={avg_decode:.1}ms encode={avg_encode:.1}ms upsert={avg_upsert:.1}ms",
         d_idx as f64 / dt,
-        d_thumb as f64 / dt,
+        d_done as f64 / dt,
     );
 }
 
 /// Force + time the cold disk read for `path` (the bytes a preview decode pages
 /// in). Also warms the OS cache so the decode timed next reflects CPU only.
 /// Returns the read duration in microseconds.
+#[allow(dead_code)] // bench/test-only path (see note above); dead in the app bin
 pub fn measure_read(path: &Path) -> u64 {
     use std::io::Read;
     let t = Instant::now();
@@ -111,6 +141,7 @@ pub fn measure_read(path: &Path) -> u64 {
 /// cumulative summary every `SUMMARY_EVERY` files. `write_us` covers acquiring
 /// the shared writer lock **and** the SQLite `put_thumbnail` commit, so lock
 /// contention and DB-write cost are visible separately from disk read + CPU.
+#[allow(dead_code)] // bench/test-only path (see note above); dead in the app bin
 pub fn record(io_us: u64, decode_us: u64, encode_us: u64, write_us: u64) {
     let n = COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     let io = IO_US.fetch_add(io_us, Ordering::Relaxed) + io_us;

@@ -1323,8 +1323,8 @@ impl eframe::App for FerroliteApp {
         // workers being saturated with ingest jobs.
         crate::thumb_profile::diag(
             self.state.indexed,
-            self.state.thumb_done as u64,
-            self.state.thumb_total as u64,
+            self.state.ingest_done as u64,
+            self.state.ingest_total as u64,
             self.state.jobs.active_count(),
             self.state.jobs.pending_count(),
         );

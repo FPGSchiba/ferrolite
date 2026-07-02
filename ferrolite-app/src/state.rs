@@ -8,7 +8,7 @@ use ferrolite_catalog::{
     Catalog, CollectionRecord, ImageRecord, LibraryQuery, ReadPool, TagRecord,
 };
 use ferrolite_image::TagId;
-use ferrolite_jobs::{JobHandle, JobId, JobSystem};
+use ferrolite_jobs::{JobHandle, JobSystem};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
@@ -43,11 +43,15 @@ pub struct AppState {
     /// Stat-only placeholder rows inserted by the instant index pass (Phase A).
     pub scanned: u64,
     pub indexed: u64,
-    pub thumb_total: usize,
-    pub thumb_done: usize,
+    /// Total files the current/last ingest pass will process (set once per pass
+    /// via `IngestPlanned`, after the needs-reingest filter). Denominator for the
+    /// status-bar ingest-progress readout.
+    pub ingest_total: usize,
+    /// Files processed so far by the current/last ingest pass. Advanced per
+    /// consumer row (`Indexed`), which in the inline-thumbnail model equals one
+    /// decoded file + generated thumbnail.
+    pub ingest_done: usize,
 
-    /// image_id → its pending/running thumbnail job (for reprioritization/cancel).
-    pub thumb_jobs: HashMap<i64, JobId>,
     pub ingest_handle: Option<JobHandle>,
 
     /// LRU cache of decoded thumbnail textures (cap 512).
@@ -55,8 +59,6 @@ pub struct AppState {
     /// Session-only CPU cache of decoded thumbnail pixels so re-revealed cells
     /// re-upload without a new job / DB read / JPEG decode (Bug B).
     pub thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache,
-    /// IDs visible in the grid on the last frame (for delta reprioritization).
-    pub last_visible: HashSet<i64>,
 
     /// Image ids with an in-flight off-thread thumbnail decode (lazy-load path).
     /// Dedups repeated `request_thumbnail` calls while the job is running;
@@ -186,15 +188,13 @@ impl AppState {
             selected: None,
             scanned: 0,
             indexed: 0,
-            thumb_total: 0,
-            thumb_done: 0,
-            thumb_jobs: HashMap::new(),
+            ingest_total: 0,
+            ingest_done: 0,
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,
             ),
-            last_visible: HashSet::new(),
             thumb_pending: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
@@ -457,8 +457,10 @@ impl AppState {
             .map(|fp| PathBuf::from(fp).join(&rec.filename))
     }
 
-    /// Cancel any in-flight ingest + pending thumbnail jobs, without touching the
-    /// view (images/current_folder/selection) or counters. Used by reindex.
+    /// Cancel any in-flight ingest job, without touching the view
+    /// (images/current_folder/selection) or counters. Used by reindex.
+    /// Thumbnails are now generated inline within the ingest job (no separate
+    /// per-image jobs to cancel), so cancelling the ingest handle is sufficient.
     pub fn cancel_pending_jobs(&mut self) {
         if let Some(h) = self.ingest_handle.take() {
             h.cancel();
@@ -468,9 +470,6 @@ impl AppState {
             // IngestDone; the extra decrement is absorbed by saturating_sub.
             self.active_ingests = self.active_ingests.saturating_sub(1);
         }
-        for (_image_id, job_id) in self.thumb_jobs.drain() {
-            self.jobs.cancel(job_id);
-        }
     }
 
     /// Reset per-folder job + counter state when switching folders.
@@ -478,8 +477,8 @@ impl AppState {
         self.cancel_pending_jobs();
         self.scanned = 0;
         self.indexed = 0;
-        self.thumb_total = 0;
-        self.thumb_done = 0;
+        self.ingest_total = 0;
+        self.ingest_done = 0;
         self.images.clear();
         // Bump so the grid's layout cache rebuilds for the now-empty set instead
         // of indexing the previous folder's rows (stale-index panic otherwise).
@@ -652,15 +651,13 @@ impl AppState {
             selected: None,
             scanned: 0,
             indexed: 0,
-            thumb_total: 0,
-            thumb_done: 0,
-            thumb_jobs: HashMap::new(),
+            ingest_total: 0,
+            ingest_done: 0,
             ingest_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,
             ),
-            last_visible: HashSet::new(),
             thumb_pending: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
@@ -765,27 +762,24 @@ fn default_db_path() -> PathBuf {
 mod tests {
     use super::*;
 
-    /// `reset_for_new_folder` must zero all per-folder counters, drain `thumb_jobs`,
-    /// clear `images`, clear `selected`, and set the dirty flag.
+    /// `reset_for_new_folder` must zero all per-folder counters, cancel the
+    /// ingest handle, clear `images`, clear `selected`, and set the dirty flag.
     #[test]
     fn reset_for_new_folder_zeroes_counters_and_clears_jobs() {
         let mut s = AppState::for_test();
         // Seed some prior state.
         s.indexed = 42;
-        s.thumb_total = 10;
-        s.thumb_done = 7;
-        s.thumb_jobs.insert(1, ferrolite_jobs::JobId(100));
-        s.thumb_jobs.insert(2, ferrolite_jobs::JobId(101));
+        s.ingest_total = 10;
+        s.ingest_done = 7;
         s.selected = Some(1);
         s.dirty = false; // simulate an idle frame that already cleared the flag
         let rev_before = s.images_rev;
 
         s.reset_for_new_folder();
 
-        assert_eq!(s.thumb_total, 0, "thumb_total must be zeroed");
-        assert_eq!(s.thumb_done, 0, "thumb_done must be zeroed");
+        assert_eq!(s.ingest_total, 0, "ingest_total must be zeroed");
+        assert_eq!(s.ingest_done, 0, "ingest_done must be zeroed");
         assert_eq!(s.indexed, 0, "indexed must be zeroed");
-        assert!(s.thumb_jobs.is_empty(), "thumb_jobs must be drained");
         assert!(s.images.is_empty(), "images must be cleared");
         assert_eq!(s.selected, None, "selected must be cleared");
         assert!(s.dirty, "dirty flag must be set after reset");
@@ -801,17 +795,15 @@ mod tests {
     fn select_folder_resets_and_sets_folder() {
         let mut s = AppState::for_test();
         s.current_folder = Some(99);
-        s.thumb_total = 5;
-        s.thumb_done = 3;
-        s.thumb_jobs.insert(7, ferrolite_jobs::JobId(200));
+        s.ingest_total = 5;
+        s.ingest_done = 3;
         s.dirty = false;
 
         s.select_folder(42);
 
         assert_eq!(s.current_folder, Some(42));
-        assert_eq!(s.thumb_total, 0);
-        assert_eq!(s.thumb_done, 0);
-        assert!(s.thumb_jobs.is_empty());
+        assert_eq!(s.ingest_total, 0);
+        assert_eq!(s.ingest_done, 0);
         assert!(s.dirty);
     }
 
@@ -907,21 +899,22 @@ mod tests {
     }
 
     #[test]
-    fn cancel_pending_jobs_keeps_view_but_drains_jobs() {
+    fn cancel_pending_jobs_keeps_view_and_counters() {
         let mut s = AppState::for_test();
         s.current_folder = Some(7);
         s.images = vec![]; // (kept as-is; view not cleared)
         s.selected = Some(3);
         s.indexed = 5;
-        s.thumb_jobs.insert(1, ferrolite_jobs::JobId(100));
-        s.thumb_jobs.insert(2, ferrolite_jobs::JobId(101));
+        s.ingest_total = 8;
+        s.ingest_done = 5;
 
         s.cancel_pending_jobs();
 
-        assert!(s.thumb_jobs.is_empty(), "thumb jobs drained");
         assert_eq!(s.current_folder, Some(7), "current folder preserved");
         assert_eq!(s.selected, Some(3), "selection preserved");
         assert_eq!(s.indexed, 5, "counters not zeroed by cancel_pending_jobs");
+        assert_eq!(s.ingest_total, 8, "ingest_total not zeroed");
+        assert_eq!(s.ingest_done, 5, "ingest_done not zeroed");
     }
 
     #[test]

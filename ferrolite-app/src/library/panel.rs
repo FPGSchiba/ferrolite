@@ -290,85 +290,96 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             Some((RenameKind::Tag, id, _)) if *id == t.id.0
         );
 
-        ui.horizontal(|ui| {
-            let mut col = [
-                t.color.r as f32 / 255.0,
-                t.color.g as f32 / 255.0,
-                t.color.b as f32 / 255.0,
-            ];
-            if ui.color_edit_button_rgb(&mut col).changed() {
-                let c = ferrolite_image::Color {
-                    r: (col[0] * 255.0) as u8,
-                    g: (col[1] * 255.0) as u8,
-                    b: (col[2] * 255.0) as u8,
-                };
-                let _ = state.writer.lock().expect("writer").set_tag_color(t.id, c);
-                state.reload_vocab();
-            }
+        let row_resp = ui
+            .horizontal(|ui| {
+                let mut col = [
+                    t.color.r as f32 / 255.0,
+                    t.color.g as f32 / 255.0,
+                    t.color.b as f32 / 255.0,
+                ];
+                if ui.color_edit_button_rgb(&mut col).changed() {
+                    let c = ferrolite_image::Color {
+                        r: (col[0] * 255.0) as u8,
+                        g: (col[1] * 255.0) as u8,
+                        b: (col[2] * 255.0) as u8,
+                    };
+                    let _ = state.writer.lock().expect("writer").set_tag_color(t.id, c);
+                    state.reload_vocab();
+                }
 
-            if is_renaming {
-                // Inline rename TextEdit for tag.
-                let buf = match &mut state.renaming {
-                    Some((RenameKind::Tag, id, buf)) if *id == t.id.0 => buf,
-                    _ => unreachable!(),
-                };
-                let edit_resp = ui.add(
-                    egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 20.0),
-                );
-                edit_resp.request_focus();
-                let commit =
-                    edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if commit {
-                    if let Some((RenameKind::Tag, _, buf)) = state.renaming.take() {
-                        if !buf.is_empty() {
-                            let _ = state.writer.lock().expect("writer").rename_tag(t.id, &buf);
-                            state.reload_vocab();
+                if is_renaming {
+                    // Inline rename TextEdit for tag.
+                    let buf = match &mut state.renaming {
+                        Some((RenameKind::Tag, id, buf)) if *id == t.id.0 => buf,
+                        _ => unreachable!(),
+                    };
+                    let edit_resp = ui.add(
+                        egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 20.0),
+                    );
+                    edit_resp.request_focus();
+                    let commit =
+                        edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if commit {
+                        if let Some((RenameKind::Tag, _, buf)) = state.renaming.take() {
+                            if !buf.is_empty() {
+                                let _ = state.writer.lock().expect("writer").rename_tag(t.id, &buf);
+                                state.reload_vocab();
+                            }
                         }
                     }
-                }
-            } else {
-                // Normal label + context menu + painted delete ✕.
-                let name_resp = ui.label(&t.name);
-                if name_resp.double_clicked() {
-                    state.renaming = Some((RenameKind::Tag, t.id.0, t.name.clone()));
-                }
-                name_resp.context_menu(|ui| {
-                    if ui.button("Rename").clicked() {
+                } else {
+                    // Normal label + context menu + painted delete ✕.
+                    let name_resp = ui.label(&t.name);
+                    if name_resp.double_clicked() {
                         state.renaming = Some((RenameKind::Tag, t.id.0, t.name.clone()));
-                        ui.close_menu();
                     }
-                    ui.separator();
-                    if ui.button("Delete").clicked() {
+                    name_resp.context_menu(|ui| {
+                        if ui.button("Rename").clicked() {
+                            state.renaming = Some((RenameKind::Tag, t.id.0, t.name.clone()));
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        if ui.button("Delete").clicked() {
+                            let _ = state.writer.lock().expect("writer").delete_tag(t.id);
+                            state.filter.tag_ids.retain(|x| *x != t.id);
+                            state.reload_vocab();
+                            state.dirty = true;
+                            ui.close_menu();
+                        }
+                    });
+
+                    // Delete ✕ affordance — two line segments, consistent with folder rows.
+                    let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                    if name_resp.hovered() || x_slot.hovered() {
+                        let r = x_slot.rect.shrink(4.0);
+                        let color = if x_slot.hovered() {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_DIM
+                        };
+                        let stroke = egui::Stroke::new(1.2, color);
+                        let p = ui.painter();
+                        p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                        p.line_segment([r.left_bottom(), r.right_top()], stroke);
+                    }
+                    if x_slot.clicked() {
                         let _ = state.writer.lock().expect("writer").delete_tag(t.id);
                         state.filter.tag_ids.retain(|x| *x != t.id);
                         state.reload_vocab();
                         state.dirty = true;
-                        ui.close_menu();
                     }
-                });
+                }
+            })
+            .response;
 
-                // Delete ✕ affordance — two line segments, consistent with folder rows.
-                let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
-                if name_resp.hovered() || x_slot.hovered() {
-                    let r = x_slot.rect.shrink(4.0);
-                    let color = if x_slot.hovered() {
-                        theme::TEXT_PRIMARY
-                    } else {
-                        theme::TEXT_DIM
-                    };
-                    let stroke = egui::Stroke::new(1.2, color);
-                    let p = ui.painter();
-                    p.line_segment([r.left_top(), r.right_bottom()], stroke);
-                    p.line_segment([r.left_bottom(), r.right_top()], stroke);
-                }
-                if x_slot.clicked() {
-                    let _ = state.writer.lock().expect("writer").delete_tag(t.id);
-                    state.filter.tag_ids.retain(|x| *x != t.id);
-                    state.reload_vocab();
-                    state.dirty = true;
-                }
-            }
-        });
+        // Drop target: dragging images from the grid onto a tag row applies
+        // the tag (add-only — never removes it from images that already have it).
+        if let Some(ids) = crate::library::drag::row_drop_target(ui, row_resp.rect) {
+            // Copy id/clone name before the `&mut state` call to satisfy the borrow checker.
+            let (tid, tname) = (t.id, t.name.clone());
+            state.add_tag_to_images(ctx, &ids, tid);
+            state.warning = Some(format!("Tagged {} image(s) with \"{}\".", ids.len(), tname));
+        }
     }
 }
 

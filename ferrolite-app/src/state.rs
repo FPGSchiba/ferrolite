@@ -62,8 +62,14 @@ pub struct AppState {
 
     /// Image ids with an in-flight off-thread thumbnail decode (lazy-load path).
     /// Dedups repeated `request_thumbnail` calls while the job is running;
-    /// cleared on `ThumbReady`/`ThumbFailed`.
+    /// cleared on `ThumbReady`/`ThumbFailed`/`ThumbMissing`.
     pub thumb_pending: HashSet<i64>,
+    /// Image ids whose lazy-load job found no thumbnail blob yet (`Ok(None)`
+    /// from `get_thumbnail`) — distinct from a hard decode failure. Sticky
+    /// guard against a per-frame re-spawn storm: `request_thumbnail` skips ids
+    /// in this set until ingest finishes (`IngestDone` clears it) or the
+    /// thumbnail actually arrives (`ThumbReady` removes the id).
+    pub thumb_missing: HashSet<i64>,
     /// Decoded thumbnails pulled from the event channel but not yet uploaded this
     /// frame (per-frame upload cap overflow). Drained first each frame.
     pub pending_uploads: Vec<(i64, Vec<u8>, u32, u32)>,
@@ -196,6 +202,7 @@ impl AppState {
                 THUMB_PIXEL_CACHE_CAP,
             ),
             thumb_pending: HashSet::new(),
+            thumb_missing: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,
@@ -264,7 +271,10 @@ impl AppState {
     /// JPEG → RGBA8 OFF the UI thread, then delivers `ThumbReady` (or
     /// `ThumbFailed`) over the app event channel.
     pub fn request_thumbnail(&mut self, ctx: &egui::Context, image_id: i64) {
-        if self.textures.contains(image_id) || self.thumb_pending.contains(&image_id) {
+        if self.textures.contains(image_id)
+            || self.thumb_pending.contains(&image_id)
+            || self.thumb_missing.contains(&image_id)
+        {
             return;
         }
         // Fast path: pixels already decoded this session → re-upload directly,
@@ -302,7 +312,14 @@ impl AppState {
                             let _ = tx.send(AppEvent::ThumbFailed { image_id });
                         }
                     },
-                    _ => {
+                    // No blob yet (e.g. a status race) — distinct from a hard
+                    // decode failure so the sticky `thumb_missing` guard (not
+                    // `Failed`-cell UI) applies and this id stops re-spawning a
+                    // job every frame.
+                    Ok(None) => {
+                        let _ = tx.send(AppEvent::ThumbMissing { image_id });
+                    }
+                    Err(_) => {
                         let _ = tx.send(AppEvent::ThumbFailed { image_id });
                     }
                 }
@@ -479,6 +496,7 @@ impl AppState {
         self.indexed = 0;
         self.ingest_total = 0;
         self.ingest_done = 0;
+        self.thumb_missing.clear();
         self.images.clear();
         // Bump so the grid's layout cache rebuilds for the now-empty set instead
         // of indexing the previous folder's rows (stale-index panic otherwise).
@@ -669,6 +687,7 @@ impl AppState {
                 THUMB_PIXEL_CACHE_CAP,
             ),
             thumb_pending: HashSet::new(),
+            thumb_missing: HashSet::new(),
             pending_uploads: Vec::new(),
             dirty: true,
             active_ingests: 0,
@@ -796,6 +815,22 @@ mod tests {
         assert_ne!(
             s.images_rev, rev_before,
             "images_rev must bump so the grid layout cache rebuilds for the empty set"
+        );
+    }
+
+    /// A folder switch must also clear `thumb_missing` — a sticky-missing id
+    /// from the previous folder must not suppress a lazy-load request for the
+    /// (unrelated) image with the same id under the new folder view.
+    #[test]
+    fn reset_for_new_folder_clears_thumb_missing() {
+        let mut s = AppState::for_test();
+        s.thumb_missing.insert(5);
+
+        s.reset_for_new_folder();
+
+        assert!(
+            s.thumb_missing.is_empty(),
+            "thumb_missing must be cleared on folder switch"
         );
     }
 

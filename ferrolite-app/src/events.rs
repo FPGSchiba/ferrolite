@@ -21,6 +21,12 @@ pub enum AppEvent {
     },
     /// A thumbnail (or its decode) failed; the cell shows a broken placeholder.
     ThumbFailed { image_id: i64 },
+    /// A lazy-load job found no thumbnail blob yet (`Ok(None)`), distinct from
+    /// a hard decode failure. Sticky guard: `request_thumbnail` will not
+    /// re-spawn a job for this id until `ThumbReady` (generated) or
+    /// `IngestDone` (retry once) clears it — prevents a per-frame re-spawn
+    /// storm for not-yet-ingested cells.
+    ThumbMissing { image_id: i64 },
     /// The producer has determined how many files this ingest pass will actually
     /// process (after the needs-reingest filter). Sets the ingest-progress
     /// denominator once; the consumer advances `ingest_done` per completed row.
@@ -125,10 +131,20 @@ impl AppState {
                 // marker and hand the decoded pixels up for upload. Touches no
                 // ingest counter (both ingest and lazy-load paths emit this).
                 self.thumb_pending.remove(&image_id);
+                // A thumbnail actually arrived, so any prior "missing" verdict
+                // for this id is stale — clear it so a later refresh/scroll
+                // that finds the texture gone (e.g. evicted from the LRU cache)
+                // can request it again instead of being stuck sticky-missing.
+                self.thumb_missing.remove(&image_id);
                 Some((image_id, rgba, w, h))
             }
             AppEvent::ThumbFailed { image_id } => {
                 self.thumb_pending.remove(&image_id);
+                None
+            }
+            AppEvent::ThumbMissing { image_id } => {
+                self.thumb_pending.remove(&image_id);
+                self.thumb_missing.insert(image_id);
                 None
             }
             AppEvent::IngestPlanned { total } => {
@@ -137,6 +153,9 @@ impl AppState {
             }
             AppEvent::IngestDone => {
                 self.active_ingests = self.active_ingests.saturating_sub(1);
+                // Let any cell still marked "missing" retry once now that this
+                // ingest pass has finished (it may have since been generated).
+                self.thumb_missing.clear();
                 None
             }
             // Handled in `app.rs` (needs GPU state) before reaching `apply`.
@@ -268,6 +287,73 @@ mod tests {
         assert!(
             !s.thumb_pending.contains(&9),
             "ThumbFailed must clear the pending marker"
+        );
+    }
+
+    /// Anti-storm invariant (Task 1): folding `ThumbMissing` must clear
+    /// `thumb_pending` and mark the id sticky-missing so `request_thumbnail`'s
+    /// guard skips it on every subsequent frame instead of re-spawning a
+    /// `Visible` job for a cell whose blob simply isn't there yet.
+    #[test]
+    fn thumb_missing_clears_pending_and_marks_sticky_missing() {
+        let mut s = AppState::for_test();
+        s.thumb_pending.insert(11);
+        let out = s.apply(AppEvent::ThumbMissing { image_id: 11 });
+        assert_eq!(out, None);
+        assert!(
+            !s.thumb_pending.contains(&11),
+            "ThumbMissing must clear the pending marker"
+        );
+        assert!(
+            s.thumb_missing.contains(&11),
+            "ThumbMissing must mark the id sticky-missing"
+        );
+
+        // The anti-storm guard: request_thumbnail must now short-circuit for
+        // this id (no job submitted) since it's neither textured nor merely
+        // in-flight — it's known-missing.
+        let ctx = egui::Context::default();
+        let before = s.jobs.pending_count();
+        s.request_thumbnail(&ctx, 11);
+        assert_eq!(
+            s.jobs.pending_count(),
+            before,
+            "request_thumbnail must not submit a job for a sticky-missing id"
+        );
+    }
+
+    /// Once a thumbnail actually arrives, a stale sticky-missing marker for
+    /// that id must be cleared (so a future eviction + rescroll can re-request
+    /// it rather than being stuck skipped forever).
+    #[test]
+    fn thumb_ready_clears_sticky_missing() {
+        let mut s = AppState::for_test();
+        s.thumb_missing.insert(13);
+        s.apply(AppEvent::ThumbReady {
+            image_id: 13,
+            rgba: vec![1, 2, 3, 255],
+            w: 1,
+            h: 1,
+        });
+        assert!(
+            !s.thumb_missing.contains(&13),
+            "ThumbReady must clear the sticky-missing marker"
+        );
+    }
+
+    /// A completed ingest pass lets any still-missing cells retry once, in
+    /// case generation reached them after their lazy-load job observed
+    /// `Ok(None)`.
+    #[test]
+    fn ingest_done_clears_thumb_missing() {
+        let mut s = AppState::for_test();
+        s.active_ingests = 1;
+        s.thumb_missing.insert(21);
+        s.thumb_missing.insert(22);
+        s.apply(AppEvent::IngestDone);
+        assert!(
+            s.thumb_missing.is_empty(),
+            "IngestDone must clear thumb_missing so retries can happen"
         );
     }
 

@@ -228,8 +228,17 @@ fn paint_cell(
     // DB read + JPEG decode happen in a `Visible`-priority job; the decoded
     // pixels arrive over the event channel and are uploaded there. NO UI-thread
     // decode here.
+    //
+    // Gated on `Done` (not just `!= Failed`): a `Done` row's thumbnail blob is
+    // written in the same atomic batch as its row, so `Done` implies the blob
+    // is present. A `Pending` row (not yet reached by ingest) has no blob yet —
+    // requesting one would submit a `Visible` job that immediately finds
+    // nothing and re-spawns every frame (the lazy-load re-spawn storm). A
+    // `Pending` cell instead shows the `Generating` spinner while ingesting and
+    // gets its texture from the ingest `ThumbReady` path once generation
+    // reaches it (unchanged).
     if !state.textures.contains(rec.id)
-        && rec.decode_status != ferrolite_catalog::DecodeStatus::Failed
+        && rec.decode_status == ferrolite_catalog::DecodeStatus::Done
     {
         state.request_thumbnail(ui.ctx(), rec.id);
     }

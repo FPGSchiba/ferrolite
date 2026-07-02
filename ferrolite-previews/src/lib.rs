@@ -2,12 +2,15 @@
 //! previews, keyed by a stable digest of the inputs that affect the
 //! rendered pixels (source file identity + edit stack + color pipeline).
 //!
-//! This crate is intentionally dependency-free beyond `serde`/`serde_json`
-//! for the key/digest layer implemented here (Task 1). Later tasks add the
-//! JPEG codec, the on-disk store, and LRU eviction.
+//! The key/digest layer (Task 1) is dependency-free beyond `serde`/
+//! `serde_json`; the 8-bit sRGB JPEG codec (Task 2) additionally depends on
+//! `ferrolite-image`, `ferrolite-color`, and `image`. Later tasks add the
+//! on-disk store and LRU eviction.
 
+mod codec;
 mod key;
 
+pub use codec::{decode_srgb_jpeg, encode_srgb_jpeg, PreviewCodecError};
 pub use key::{fnv1a_64, hash_serde, PreviewKey};
 
 /// Long edge (in pixels) that cached previews are downscaled to.

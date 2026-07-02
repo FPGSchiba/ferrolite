@@ -11,3 +11,7 @@ workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+ferrolite-image = { workspace = true }
+ferrolite-color = { workspace = true }
+image = { workspace = true, features = ["jpeg"] }
+thiserror = { workspace = true }

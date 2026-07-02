@@ -1194,8 +1194,12 @@ dependencies = [
 name = "ferrolite-previews"
 version = "0.0.1"
 dependencies = [
+ "ferrolite-color",
+ "ferrolite-image",
+ "image",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

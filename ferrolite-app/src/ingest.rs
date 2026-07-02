@@ -31,6 +31,13 @@ pub const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 /// close/cancel), instead of one autocommit INSERT per row (RC-PERF-3).
 const INGEST_WRITE_BATCH: usize = 128;
 
+/// Max time a decoded-but-uncommitted row waits before the consumer flushes a
+/// partial batch. Caps grid-visibility latency at ~this under slow per-file
+/// generation, where 128 rows would otherwise take seconds to accumulate. Small
+/// enough to feel live, large enough to keep flushes to a few per second so the
+/// batching win is preserved.
+const FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Pure predicate: should the periodic watcher fire this frame? True iff a
 /// folder is selected, no ingest is in flight, and at least `interval` has
 /// elapsed since `last_check` (or there has been no check yet).
@@ -354,22 +361,41 @@ fn ingest_job(
             let tx = tx.clone();
             let ctx = ctx.clone();
             scope.spawn(move || {
+                use std::sync::mpsc::RecvTimeoutError;
                 // For Full, collect every present file's id so prune can delete the rest.
                 let mut kept: HashSet<i64> = HashSet::new();
                 let mut pending: Vec<Row> = Vec::with_capacity(INGEST_WRITE_BATCH);
 
-                for row in row_rx {
+                // Flush when the batch fills OR when `FLUSH_INTERVAL` elapses,
+                // whichever comes first. The time trigger bounds worst-case
+                // visibility latency: without it, slow per-file generation (large
+                // RAW / slow disk) could leave rows uncommitted — and invisible
+                // in the grid — for seconds until 128 accumulate, violating the
+                // load-bearing progressive-fill rule. `recv_timeout` lets the
+                // loop wake to flush a partial batch instead of blocking forever.
+                loop {
                     if cancel.is_cancelled() {
                         break;
                     }
-                    pending.push(row);
-                    if pending.len() >= INGEST_WRITE_BATCH {
-                        flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
+                    match row_rx.recv_timeout(FLUSH_INTERVAL) {
+                        Ok(row) => {
+                            pending.push(row);
+                            if pending.len() >= INGEST_WRITE_BATCH {
+                                flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
+                            }
+                        }
+                        Err(RecvTimeoutError::Timeout) => {
+                            // No new row within the interval: commit whatever has
+                            // accumulated so the grid keeps filling smoothly.
+                            flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
                 // Final flush: whatever is left when the channel closes (producer
                 // finished) or the loop broke on cancel — either way, already-decoded
-                // rows in `pending` must not be silently dropped.
+                // rows in `pending` must not be silently dropped. `flush_batch` is a
+                // no-op on an empty batch, so this is always safe.
                 flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
                 kept
             })

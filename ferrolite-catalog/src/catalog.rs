@@ -918,4 +918,46 @@ mod ingest_batch_tests {
         let ids = cat.upsert_images_with_thumbnails_batch(&[]).unwrap();
         assert!(ids.is_empty());
     }
+
+    #[test]
+    fn mid_batch_failure_rolls_back_the_whole_batch() {
+        // `open_in_memory` enables `foreign_keys=ON`, and `images.folder_id`
+        // has `NOT NULL REFERENCES folders(id)`, so a row pointing at a
+        // nonexistent folder fails with a FK constraint violation. Placing a
+        // good row *before* the bad one proves the transaction is dropped
+        // without commit on error — the good row must NOT be visible after.
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let bogus_folder = f + 999; // no such folder row
+
+        let rows: Vec<(NewImage, Option<Thumbnail>)> = vec![
+            (
+                NewImage::failed(f, "good.nef".into(), 1, 1, FileKind::Raw, 0),
+                Some(thumb()),
+            ),
+            (
+                NewImage::failed(bogus_folder, "bad.nef".into(), 1, 1, FileKind::Raw, 0),
+                None,
+            ),
+        ];
+
+        let result = cat.upsert_images_with_thumbnails_batch(&rows);
+        assert!(result.is_err(), "batch with a bad FK row must return Err");
+
+        // Rollback proof: the good row that inserted before the failure is gone,
+        // and no thumbnail leaked either.
+        assert_eq!(
+            cat.list_images(f).unwrap().len(),
+            0,
+            "the entire batch rolled back — no partial rows visible"
+        );
+        let thumb_count: i64 = cat
+            .conn()
+            .query_row("SELECT COUNT(*) FROM thumbnails", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            thumb_count, 0,
+            "no thumbnail persisted from the rolled-back batch"
+        );
+    }
 }

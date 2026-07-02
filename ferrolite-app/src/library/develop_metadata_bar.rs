@@ -53,15 +53,33 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
             }
         }
 
-        // Export queue: toggle membership for the open image. `selectable_label`
-        // renders the accent "selected" fill when queued, doubling as the
-        // in-queue indicator.
+        // Export queue: toggle membership for the open image. Drawn as a
+        // bordered icon button (not `selectable_label`, which loses its
+        // frame with IBM Plex Sans's missing glyph metrics) so it clearly
+        // reads as clickable.
         let queued = state.queue_contains(image_id);
-        if ui
-            .selectable_label(queued, "Queue")
-            .on_hover_text("Toggle export queue (Q)")
-            .clicked()
-        {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(26.0, 22.0), egui::Sense::click());
+        let hovered = resp.hovered();
+        let fill = if queued {
+            crate::theme::ACCENT_BG_SEL
+        } else if hovered {
+            crate::theme::BORDER_STRONG
+        } else {
+            crate::theme::BG_TOOLBAR
+        };
+        let icon_color = if queued {
+            crate::theme::ACCENT
+        } else {
+            crate::theme::TEXT_DIM
+        };
+        ui.painter().rect_filled(rect, 4.0, fill);
+        ui.painter().rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(1.0, crate::theme::BORDER_STRONG),
+        );
+        icons::export_tray(ui.painter(), rect.center(), 14.0, icon_color);
+        if resp.on_hover_text("Toggle export queue (Q)").clicked() {
             state.queue_toggle(image_id);
         }
 

@@ -3,6 +3,7 @@
 pub mod cell_state;
 pub mod develop_filter_bar;
 pub mod develop_metadata_bar;
+pub mod drag;
 pub mod filmstrip;
 pub mod filter;
 pub mod filter_widgets;

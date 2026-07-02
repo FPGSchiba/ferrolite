@@ -104,6 +104,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         }
     });
     state.grid_layout = Some(cache);
+
+    if let Some(p) = egui::DragAndDrop::payload::<crate::library::drag::DraggedImages>(ui.ctx()) {
+        crate::library::drag::draw_drag_chip(ui.ctx(), p.0.len());
+    }
+
     opened
 }
 
@@ -340,7 +345,18 @@ fn paint_cell(
     // Selection: ctrl/cmd-click toggles; shift-click range-select; plain click replaces.
     // Context menu on right-click.
     // Hit area remains the full rect (unchanged).
-    let resp = ui.interact(rect, ui.id().with(("cell", rec.id)), egui::Sense::click());
+    let resp = ui.interact(
+        rect,
+        ui.id().with(("cell", rec.id)),
+        egui::Sense::click_and_drag(),
+    );
+
+    // Begin a drag carrying the selection (or just this image).
+    if resp.drag_started() {
+        let ids = crate::library::drag::ids_for_drag(rec.id, &state.selection);
+        egui::DragAndDrop::set_payload(ui.ctx(), crate::library::drag::DraggedImages(ids));
+    }
+
     if resp.clicked() {
         let (shift, multi) =
             ui.input(|i| (i.modifiers.shift, i.modifiers.command || i.modifiers.ctrl));

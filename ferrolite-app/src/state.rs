@@ -369,6 +369,16 @@ impl AppState {
         self.apply_metadata_edit_to_ids(ctx, &[image_id], edit);
     }
 
+    /// Add `tag_id` to every image in `ids` that doesn't already have it
+    /// (add-only; reuses the toggle path so persistence is unchanged).
+    pub fn add_tag_to_images(&mut self, ctx: &egui::Context, ids: &[i64], tag_id: TagId) {
+        let missing = ids_missing_tag(ids, tag_id, &self.visible_tags);
+        if missing.is_empty() {
+            return;
+        }
+        self.apply_metadata_edit_to_ids(ctx, &missing, MetaEdit::ToggleTag(tag_id));
+    }
+
     /// Fetch tag associations for any visible image ids not yet cached (virtualised).
     pub fn ensure_tags_for(&mut self, ids: &HashSet<i64>) {
         let missing: Vec<i64> = ids
@@ -698,6 +708,24 @@ impl AppState {
     pub fn add_image_to_collection_now(&mut self, image_id: i64, coll_id: i64) {
         self.add_images_to_collection(&[image_id], coll_id);
     }
+}
+
+/// Images (in input order) that do NOT already carry `tag_id`. Images absent
+/// from `visible_tags` are treated as missing the tag (so they get it).
+pub(crate) fn ids_missing_tag(
+    ids: &[i64],
+    tag_id: TagId,
+    visible_tags: &HashMap<i64, Vec<TagId>>,
+) -> Vec<i64> {
+    ids.iter()
+        .copied()
+        .filter(|id| {
+            visible_tags
+                .get(id)
+                .map(|tags| !tags.contains(&tag_id))
+                .unwrap_or(true)
+        })
+        .collect()
 }
 
 fn default_db_path() -> PathBuf {
@@ -1035,6 +1063,22 @@ mod tests {
             s.visible_tags.get(&2).map(|v| v.is_empty()).unwrap_or(true),
             "image 2 unchanged when not selected"
         );
+    }
+
+    /// `ids_missing_tag` keeps ids that do NOT already carry the tag; an id
+    /// absent from `visible_tags` is treated as missing it (so it's kept).
+    #[test]
+    fn ids_missing_tag_filters_those_already_tagged() {
+        use ferrolite_image::TagId;
+        let t = TagId(7);
+        let other = TagId(9);
+        let mut vt: std::collections::HashMap<i64, Vec<TagId>> = std::collections::HashMap::new();
+        vt.insert(1, vec![t]); // already has t
+        vt.insert(2, vec![other]); // has a different tag
+        vt.insert(3, vec![]); // untagged
+                              // id 4 absent from the map → treated as missing the tag
+        let got = super::ids_missing_tag(&[1, 2, 3, 4], t, &vt);
+        assert_eq!(got, vec![2, 3, 4]);
     }
 
     /// `add_selection_to_collection` adds each selected image to the collection and

@@ -1999,15 +1999,32 @@ impl eframe::App for FerroliteApp {
     /// so the later implicit `Drop for JobSystem` finds workers already stopped
     /// and returns instantly.
     ///
+    /// `on_exit` runs synchronously on the UI thread, so the join bound must
+    /// stay short enough that Windows/the OS never flags the app as
+    /// "Not Responding" during close. A prior version waited up to 500ms here,
+    /// which — combined with in-flight thumbnailing having no mid-file cancel
+    /// checkpoint — was long enough to trip the hang detector. With the
+    /// producer's per-file and mid-file `cancel.is_cancelled()` checkpoints
+    /// (see `ingest_job` in ingest.rs) workers now observe cancellation almost
+    /// immediately, so a short bounded wait (~75ms) is a graceful-but-quick
+    /// compromise rather than an instant kill. `join_with_timeout` still
+    /// detaches on timeout, so close always stays bounded even if a worker
+    /// doesn't stop in time.
+    ///
     /// This build has `default-features = false, features = ["wgpu", ...]`
     /// (no `glow`), so `App::on_exit` takes no `gl` parameter — see
     /// eframe-0.29.1 src/epi.rs `#[cfg(not(feature = "glow"))] fn on_exit(&mut self)`.
     fn on_exit(&mut self) {
         self.state.cancel_pending_jobs();
         self.state.jobs.request_shutdown();
-        let _ = self
+        if !self
             .state
             .jobs
-            .join_with_timeout(std::time::Duration::from_millis(500));
+            .join_with_timeout(std::time::Duration::from_millis(75))
+        {
+            eprintln!(
+                "ferrolite: worker(s) still running at close after 75ms; detaching so the app can exit"
+            );
+        }
     }
 }

@@ -457,6 +457,14 @@ fn ingest_job(
                             rating,
                             added_at,
                         );
+                        // Mid-file checkpoint: a slow decode (large/RAW file) can by
+                        // itself exceed the bounded shutdown wait in `App::on_exit`.
+                        // Re-check cancellation here so a shutdown/reindex request
+                        // skips the CPU-heavy resize/encode below instead of paying
+                        // for it after the result is already unwanted.
+                        if cancel.is_cancelled() {
+                            return;
+                        }
                         // Resize + JPEG-encode the preview into a thumbnail inline.
                         let t_enc = profile.then(std::time::Instant::now);
                         let thumb = match ferrolite_catalog::generate_thumbnail(&preview) {

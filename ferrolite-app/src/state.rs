@@ -582,18 +582,22 @@ impl AppState {
         self.persist_queue(|cat| cat.clear_export_queue());
     }
 
-    /// Move the row at `index` by `delta` (clamped), then persist the new order.
-    pub fn queue_move(&mut self, index: usize, delta: isize) {
-        let len = self.export_queue.len();
-        if index >= len {
+    /// Move the queued item at `from` to insertion index `insert_at` (0..=len,
+    /// as returned by the grid drop-index math), then persist the new order.
+    /// Cache-safe (persist errors are swallowed to a warning by persist_queue).
+    pub fn queue_reorder(&mut self, from: usize, insert_at: usize) {
+        if from >= self.export_queue.len() {
             return;
         }
-        let target = (index as isize + delta).clamp(0, len as isize - 1) as usize;
-        if target == index {
-            return;
-        }
-        let id = self.export_queue.remove(index);
-        self.export_queue.insert(target, id);
+        let id = self.export_queue.remove(from);
+        // After removing `from`, an insert index past it shifts left by one.
+        let dest = if insert_at > from {
+            insert_at - 1
+        } else {
+            insert_at
+        };
+        let dest = dest.min(self.export_queue.len());
+        self.export_queue.insert(dest, id);
         let ordered = self.export_queue.clone();
         self.persist_queue(|cat| cat.reorder_export_queue(&ordered));
     }
@@ -1152,18 +1156,6 @@ mod tests {
     }
 
     #[test]
-    fn queue_move_reorders_and_clamps() {
-        let mut s = AppState::for_test();
-        s.export_queue = vec![10, 20, 30];
-        s.queue_move(0, 1); // 10 down one
-        assert_eq!(s.export_queue, vec![20, 10, 30]);
-        s.queue_move(0, -5); // clamp: no-op at top
-        assert_eq!(s.export_queue, vec![20, 10, 30]);
-        s.queue_move(2, 1); // clamp: no-op at bottom
-        assert_eq!(s.export_queue, vec![20, 10, 30]);
-    }
-
-    #[test]
     fn queue_remove_and_clear() {
         let mut s = AppState::for_test();
         s.export_queue = vec![1, 2, 3];
@@ -1181,5 +1173,17 @@ mod tests {
         assert!(s.queue_contains(7));
         s.queue_toggle(7);
         assert!(!s.queue_contains(7));
+    }
+
+    #[test]
+    fn queue_reorder_moves_item() {
+        let mut s = AppState::for_test();
+        s.export_queue = vec![10, 20, 30, 40];
+        s.queue_reorder(0, 2); // move 10 into gap-before-index-2 → after 20
+        assert_eq!(s.export_queue, vec![20, 10, 30, 40]);
+        s.queue_reorder(3, 0); // move 40 to front
+        assert_eq!(s.export_queue, vec![40, 20, 10, 30]);
+        s.queue_reorder(1, 1); // no-op (same slot)
+        assert_eq!(s.export_queue, vec![40, 20, 10, 30]);
     }
 }

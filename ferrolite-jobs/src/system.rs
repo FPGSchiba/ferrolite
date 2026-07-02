@@ -20,7 +20,7 @@ struct Shared {
 
 pub struct JobSystem {
     shared: Arc<Shared>,
-    workers: Vec<JoinHandle<()>>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 /// Handle to a submitted job: lets the caller cancel it (cooperatively) and
@@ -58,7 +58,7 @@ impl JobSystem {
         }
         Self {
             shared,
-            workers: handles,
+            workers: Mutex::new(handles),
         }
     }
 
@@ -101,14 +101,57 @@ impl JobSystem {
     pub fn cancel(&self, id: JobId) {
         self.shared.queue.lock().expect("queue mutex").cancel(id);
     }
+
+    /// Signal all workers to stop pulling new jobs. Idempotent. In-flight jobs
+    /// keep running until they return (or observe cancellation cooperatively).
+    pub fn request_shutdown(&self) {
+        self.shared.shutdown.store(true, Ordering::SeqCst);
+        self.shared.cvar.notify_all();
+    }
+
+    /// True once shutdown has been requested (or the pool is being dropped).
+    /// Long job bodies poll this at checkpoints to bail promptly at exit.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shared.shutdown.load(Ordering::SeqCst)
+    }
+
+    /// Join all workers off the calling thread, waiting at most `timeout`.
+    /// Returns true if every worker exited in time; false on timeout, in which
+    /// case the still-running workers are detached (reclaimed at process exit)
+    /// so the caller (e.g. the UI thread at close) never blocks unboundedly.
+    pub fn join_with_timeout(&self, timeout: std::time::Duration) -> bool {
+        let handles: Vec<JoinHandle<()>> = {
+            let mut w = self.workers.lock().expect("workers mutex");
+            w.drain(..).collect()
+        };
+        if handles.is_empty() {
+            return true;
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // Detached joiner thread: owns the handles, so if we time out they are
+        // simply reclaimed when the process exits rather than joined here.
+        std::thread::spawn(move || {
+            for h in handles {
+                let _ = h.join();
+            }
+            let _ = done_tx.send(());
+        });
+        done_rx.recv_timeout(timeout).is_ok()
+    }
 }
 
 impl Drop for JobSystem {
     fn drop(&mut self) {
-        self.shared.shutdown.store(true, Ordering::SeqCst);
-        self.shared.cvar.notify_all();
-        for w in self.workers.drain(..) {
-            let _ = w.join();
+        self.request_shutdown();
+        // If join_with_timeout already drained the handles (normal exit path),
+        // this is empty and returns immediately. Otherwise join here.
+        let handles: Vec<JoinHandle<()>> = self
+            .workers
+            .get_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        for h in handles {
+            let _ = h.join();
         }
     }
 }
@@ -188,5 +231,38 @@ mod tests {
         gate_tx.send(()).unwrap(); // release the worker
                                    // Cancelled-before-dispatch jobs are skipped, so we never receive.
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err());
+    }
+
+    #[test]
+    fn join_with_timeout_returns_true_when_idle() {
+        let sys = JobSystem::new(2);
+        sys.request_shutdown();
+        assert!(sys.join_with_timeout(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn join_with_timeout_returns_false_when_a_worker_is_busy() {
+        let sys = JobSystem::new(1);
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        // Occupy the single worker with a job that blocks until released.
+        sys.submit(Priority::Background, move |_| {
+            let _ = gate_rx.recv(); // never released within the test window
+        });
+        // Give the worker a moment to pick up the job, then ask to shut down.
+        std::thread::sleep(Duration::from_millis(50));
+        sys.request_shutdown();
+        // The busy worker can't be joined; we must NOT hang — bounded false.
+        assert!(!sys.join_with_timeout(Duration::from_millis(200)));
+        let _ = gate_tx; // keep the sender alive until here
+    }
+
+    #[test]
+    fn no_new_jobs_dispatch_after_request_shutdown() {
+        let sys = JobSystem::new(1);
+        sys.request_shutdown();
+        let (tx, rx) = mpsc::channel();
+        sys.submit(Priority::Background, move |_| tx.send(()).unwrap());
+        // Shutdown flag is set, so the worker returns instead of running it.
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
     }
 }

@@ -1992,4 +1992,22 @@ impl eframe::App for FerroliteApp {
 
         window_resize(ctx);
     }
+
+    /// Prevent the UI thread from blocking unboundedly on worker joins at close
+    /// (docs/superpowers/investigations/2026-07-02-thumbnail-and-shutdown-bugs.md
+    /// §C). Cancel in-flight tracked work, stop new dispatch, then bounded-join
+    /// so the later implicit `Drop for JobSystem` finds workers already stopped
+    /// and returns instantly.
+    ///
+    /// This build has `default-features = false, features = ["wgpu", ...]`
+    /// (no `glow`), so `App::on_exit` takes no `gl` parameter — see
+    /// eframe-0.29.1 src/epi.rs `#[cfg(not(feature = "glow"))] fn on_exit(&mut self)`.
+    fn on_exit(&mut self) {
+        self.state.cancel_pending_jobs();
+        self.state.jobs.request_shutdown();
+        let _ = self
+            .state
+            .jobs
+            .join_with_timeout(std::time::Duration::from_millis(500));
+    }
 }

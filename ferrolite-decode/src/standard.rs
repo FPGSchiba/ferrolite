@@ -171,6 +171,8 @@ fn decode_thumb_jpeg(path: &Path, target_edge: u32) -> Result<StdThumbDecode, De
 
     // Ask for target on both axes; jpeg-decoder picks the smallest supported DCT
     // factor (1/8,1/4,1/2,1) yielding >= requested on at least one axis.
+    // Clamp is intentional and safe: jpeg-decoder's `scale` takes u16, and no
+    // realistic thumbnail edge size approaches u16::MAX.
     let te = target_edge.min(u16::MAX as u32) as u16;
     let (sw, sh) = dec
         .scale(te, te)
@@ -214,8 +216,8 @@ fn decode_thumb_jpeg(path: &Path, target_edge: u32) -> Result<StdThumbDecode, De
     Ok(StdThumbDecode {
         image,
         dct_scale,
-        decoded_w: ow,
-        decoded_h: oh,
+        decoded_w: dw,
+        decoded_h: dh,
     })
 }
 
@@ -308,7 +310,7 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(
-            max_diff <= 4,
+            max_diff <= 3,
             "scale-1 pixels should closely match full decode (max diff {max_diff})"
         );
         let _ = std::fs::remove_file(&path);

@@ -195,8 +195,17 @@ fn entry_u32_values(prefix: &[u8], endian: Endian, entry: &RawEntry) -> Vec<u32>
         u64::from(off)
     };
 
-    let mut out = Vec::with_capacity(entry.count as usize);
-    for i in 0..count {
+    // Never trust `entry.count` (raw untrusted u32) as an allocation size: a
+    // crafted entry with count = 0xFFFF_FFFF would request a multi-GB
+    // allocation, and a failed allocation aborts the process via
+    // `handle_alloc_error`. Bound both the reservation and the loop trip
+    // count by how many `elem_size`-sized elements `prefix` could possibly
+    // hold — no valid read can ever exceed that, so this cannot truncate a
+    // legitimate result.
+    let max_possible_elems = prefix.len() as u64 / elem_size;
+    let bounded_count = count.min(max_possible_elems);
+    let mut out = Vec::with_capacity(bounded_count as usize);
+    for i in 0..bounded_count {
         let Some(elem_offset) = data_offset.checked_add(match i.checked_mul(elem_size) {
             Some(v) => v,
             None => return out,
@@ -300,6 +309,39 @@ mod tests {
         b.extend_from_slice(&2000u32.to_be_bytes());
         b.extend_from_slice(&0u32.to_be_bytes());
         // No length tag -> span falls back to header-declared? Expect None (need both).
+        assert!(preview_span_end(&b).is_none());
+    }
+
+    // Regression test for a Critical finding: entry_u32_values must never use
+    // an untrusted, unbounded `count` field as a `Vec::with_capacity` size.
+    // A crafted StripOffsets (273) entry with count = 0xFFFF_FFFF would
+    // otherwise request a ~17 GB allocation; the failed allocation aborts the
+    // process via `handle_alloc_error`, violating the parser's "never
+    // panic/abort on any input" contract. This must return `None` promptly.
+    #[test]
+    fn huge_entry_count_does_not_allocate_or_panic() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II"); // little-endian
+        b.extend_from_slice(&42u16.to_le_bytes()); // magic
+        b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+                                                  // IFD0 at offset 8: entry count = 2 (StripOffsets + StripByteCounts)
+        b.extend_from_slice(&2u16.to_le_bytes());
+        // entry: tag 273 (StripOffsets), type LONG(4), count = u32::MAX,
+        // value/offset = an out-of-file data pointer so no element can ever
+        // resolve (exercises the external-data-offset branch, not the
+        // degenerate offset-0-in-header case).
+        b.extend_from_slice(&273u16.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+        b.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        // entry: tag 279 (StripByteCounts), type LONG(4), count = u32::MAX, same out-of-file offset
+        b.extend_from_slice(&279u16.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+        b.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+
+        // Must return None (no pair could be resolved), not abort/hang/OOM.
         assert!(preview_span_end(&b).is_none());
     }
 }

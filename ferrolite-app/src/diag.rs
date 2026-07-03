@@ -832,9 +832,9 @@ pub fn format_ingest_summary(s: &IngestSummary) -> String {
     format!(
         "[ingest-summary] {files} files in {wall:.1}s\n\
          \x20phases  scan {scan:.1}s  phaseA {pa:.1}s  filter {flt:.1}s  decode(par) {dec:.1}s\n\
-         \x20decode  \u{03a3} {dsum:.0}s / {cores} cores \u{2192} {sp:.1}x | p50 {p50:.0}ms p95 {p95:.0}ms max {mx:.0}ms\n\
-         \x20encode  \u{03a3} {esum:.1}s  avg {eavg:.0}ms\n\
-         \x20upsert  {ub} batches  avg {uavg:.0}ms (\u{03a3} {usum:.1}s)\n\
+         \x20decode  sum {dsum:.0}s / {cores} cores -> {sp:.1}x | p50 {p50:.0}ms p95 {p95:.0}ms max {mx:.0}ms\n\
+         \x20encode  sum {esum:.1}s  avg {eavg:.0}ms\n\
+         \x20upsert  {ub} batches  avg {uavg:.0}ms (sum {usum:.1}s)\n\
          \x20channel max depth {chan}  | producer done@{pd:.1}s  consumer done@{cd:.1}s  (tail {tail:.1}s)\n\
          \x20by kind  RAW {rawn} (decode p50 {rawp50:.0}ms) | std {stdn} (decode p50 {stdp50:.0}ms)",
         files = s.files,
@@ -1172,6 +1172,23 @@ mod tests {
         assert_eq!(p.upsert_sum_us(), 380_000);
         assert_eq!(p.upsert_batches(), 1);
         assert_eq!(p.chan_depth_max(), 2, "peak inflight was 2 before the recv");
+    }
+
+    #[test]
+    fn format_ingest_summary_is_ascii_only() {
+        let s = IngestSummary {
+            files: 3320,
+            wall_s: 251.1,
+            decode_sum_s: 2438.0,
+            decode_par_s: 250.9,
+            cores: 10,
+            ..Default::default()
+        };
+        let out = format_ingest_summary(&s);
+        assert!(
+            out.is_ascii(),
+            "ingest summary must be ASCII (no mojibake on Windows); got: {out}"
+        );
     }
 
     #[test]

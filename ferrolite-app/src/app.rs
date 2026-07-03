@@ -2070,7 +2070,11 @@ impl eframe::App for FerroliteApp {
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(24.0)
-            .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::BG_TITLEBAR)
+                    .inner_margin(egui::Margin::symmetric(12.0, 0.0)),
+            )
             .show(ctx, |ui| {
                 crate::status_bar::show(ui, &self.state);
             });

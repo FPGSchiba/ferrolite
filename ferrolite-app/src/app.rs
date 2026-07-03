@@ -51,9 +51,10 @@ impl FerroliteApp {
             ferrolite_pipeline::prewarm_shaders(&gpu);
         }
         let state = crate::state::AppState::new().expect("open catalog");
+        let thumb_size = state.settings.grid_size;
         Self {
             module: Module::default(),
-            thumb_size: 46.0,
+            thumb_size,
             state,
             crop_active_prev: false,
             pending_texture_clear: false,
@@ -1077,6 +1078,9 @@ impl FerroliteApp {
             return;
         }
         self.state.working_space = ws;
+        self.state.settings.working_space =
+            crate::settings::dto::PersistedWorkingSpace::from_ws(ws);
+        self.mark_settings_dirty();
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -1817,6 +1821,7 @@ impl eframe::App for FerroliteApp {
                             .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
                     )
                     .show(ctx, |ui| {
+                        let thumb_size_before = self.thumb_size;
                         let changed = crate::library::toolbar::show(
                             ui,
                             &mut self.thumb_size,
@@ -1824,6 +1829,16 @@ impl eframe::App for FerroliteApp {
                         );
                         if changed {
                             self.state.dirty = true;
+                            let mut pf = crate::settings::dto::PersistedFilter::from_filter(
+                                &self.state.filter,
+                            );
+                            pf.include_subfolders = self.state.include_subfolders;
+                            self.state.settings.filter = pf;
+                            self.mark_settings_dirty();
+                        }
+                        if self.thumb_size != thumb_size_before {
+                            self.state.settings.grid_size = self.thumb_size;
+                            self.mark_settings_dirty();
                         }
                     });
             }
@@ -1838,6 +1853,12 @@ impl eframe::App for FerroliteApp {
                     .show(ctx, |ui| {
                         if crate::library::develop_filter_bar::show(ui, &mut self.state) {
                             self.state.dirty = true;
+                            let mut pf = crate::settings::dto::PersistedFilter::from_filter(
+                                &self.state.filter,
+                            );
+                            pf.include_subfolders = self.state.include_subfolders;
+                            self.state.settings.filter = pf;
+                            self.mark_settings_dirty();
                         }
                     });
                 egui::TopBottomPanel::top("develop_filmstrip")

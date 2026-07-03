@@ -31,6 +31,9 @@ pub struct FerroliteApp {
     /// Whether the Help modal (`crate::help::show`) is open. Opened by
     /// `Action::OpenHelp` (F1, global) or the Help menu.
     show_help: bool,
+    /// Whether the Settings window (`crate::settings::ui::show`) is open.
+    /// Opened by `Action::OpenSettings` (Ctrl+, global) or the File menu.
+    show_settings: bool,
 }
 
 impl FerroliteApp {
@@ -68,6 +71,7 @@ impl FerroliteApp {
             settings_dirty: false,
             did_restore: false,
             show_help: false,
+            show_settings: false,
         }
     }
 
@@ -374,14 +378,14 @@ impl FerroliteApp {
         }
     }
 
-    /// True while any modal overlay is on screen (Help, the remove-folder
-    /// confirmation, and — later — Settings). Used to suppress the app's
-    /// global keyboard shortcuts underneath the modal so its own input
-    /// handling (e.g. Esc) is the only thing that reacts, and so shortcuts
-    /// like Enter/Ctrl+A don't leak through to the grid/viewer while a modal
-    /// is up. Extend this with new modals as they're added.
+    /// True while any modal overlay is on screen (Help, Settings, the
+    /// remove-folder confirmation). Used to suppress the app's global
+    /// keyboard shortcuts underneath the modal so its own input handling
+    /// (e.g. Esc) is the only thing that reacts, and so shortcuts like
+    /// Enter/Ctrl+A don't leak through to the grid/viewer while a modal is
+    /// up. Extend this with new modals as they're added.
     fn modal_active(&self) -> bool {
-        self.show_help || self.state.pending_remove.is_some()
+        self.show_help || self.show_settings || self.state.pending_remove.is_some()
     }
 
     /// If the current viewer's edit stack changed this session, spawn a
@@ -2000,6 +2004,9 @@ impl eframe::App for FerroliteApp {
                     Some(crate::chrome::MenuAction::OpenHelp) => {
                         self.show_help = true;
                     }
+                    Some(crate::chrome::MenuAction::OpenSettings) => {
+                        self.show_settings = true;
+                    }
                     None => {}
                 }
             });
@@ -2194,6 +2201,21 @@ impl eframe::App for FerroliteApp {
                     .pressed(ctx, crate::settings::keymap::Action::OpenHelp)
             {
                 self.show_help = true;
+            }
+
+            // Ctrl+, opens the Settings window. Global, same gating as Help
+            // above. Since this whole region is gated on `!self.modal_active()`
+            // (which now includes `show_settings`), the shortcut only opens
+            // Settings when no modal is already up — acceptable, since a
+            // modal already on screen has its own dismissal path.
+            if !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::OpenSettings)
+            {
+                self.show_settings = true;
             }
 
             // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
@@ -2752,6 +2774,16 @@ impl eframe::App for FerroliteApp {
             let mut open = self.show_help;
             crate::help::show(ctx, &mut open, &self.state.settings.keymap);
             self.show_help = open;
+        }
+
+        // Settings window (General + Keyboard rebinding tabs). Opened by
+        // Ctrl+, (`Action::OpenSettings`) or the File menu.
+        {
+            let mut open = self.show_settings;
+            if crate::settings::ui::show(ctx, &mut open, &mut self.state.settings) {
+                self.mark_settings_dirty();
+            }
+            self.show_settings = open;
         }
 
         // Single-file export dialog (spec §8.3). Non-modal (see

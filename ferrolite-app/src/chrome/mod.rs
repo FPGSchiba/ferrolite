@@ -28,6 +28,7 @@ pub enum MenuAction {
     ZoomActual,
     ToggleHistogram,
     OpenHelp,
+    OpenSettings,
 }
 
 /// Build a menu `Button` labeled `text`, with the bound shortcut for `action`
@@ -116,6 +117,11 @@ pub fn title_bar(
             ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
             ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
             ui.menu_button("File", |ui| {
+                if menu_button(ui, keymap, "Settings…", Action::OpenSettings, true).clicked() {
+                    action = Some(MenuAction::OpenSettings);
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button("Purge preview cache").clicked() {
                     action = Some(MenuAction::PurgePreviews);
                     ui.close_menu();

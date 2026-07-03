@@ -14,6 +14,7 @@
 pub mod dto;
 pub mod keymap;
 pub mod persist;
+pub mod ui;
 
 use serde::{Deserialize, Serialize};
 

@@ -1921,7 +1921,12 @@ impl eframe::App for FerroliteApp {
 
         // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
         // closed image's work stops competing with whatever is opened next.
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if self
+            .state
+            .settings
+            .keymap
+            .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
+        {
             self.maybe_regen_on_leave(ctx, frame);
             if let Some(v) = self.state.viewer.take() {
                 v.cancel_loads();
@@ -1938,7 +1943,11 @@ impl eframe::App for FerroliteApp {
             && self.state.viewer.is_none()
             && self.state.pending_remove.is_none()
             && !ctx.wants_keyboard_input()
-            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
+            && self
+                .state
+                .settings
+                .keymap
+                .pressed(ctx, crate::settings::keymap::Action::OpenImage)
         {
             if let Some(sel_id) = self.state.selected {
                 if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
@@ -1953,7 +1962,11 @@ impl eframe::App for FerroliteApp {
             && self.state.viewer.is_none()
             && self.state.pending_remove.is_none()
             && !ctx.wants_keyboard_input()
-            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
+            && self
+                .state
+                .settings
+                .keymap
+                .pressed(ctx, crate::settings::keymap::Action::SelectAll)
         {
             self.state.toggle_select_all();
         }
@@ -1969,23 +1982,30 @@ impl eframe::App for FerroliteApp {
                 Rating(u8),
                 Flag(Flag),
             }
-            let intent = ctx.input(|i| {
-                for n in 0..=5u8 {
-                    let key = match n {
-                        0 => egui::Key::Num0,
-                        1 => egui::Key::Num1,
-                        2 => egui::Key::Num2,
-                        3 => egui::Key::Num3,
-                        4 => egui::Key::Num4,
-                        _ => egui::Key::Num5,
-                    };
-                    if i.key_pressed(key) {
-                        return Some(KeyIntent::Rating(n));
-                    }
+            // Routed through the keymap (one lookup per Action, each its own
+            // `ctx.input` call inside `Keymap::pressed`); priority order (ratings
+            // 0..5, then Pick, then Reject) and "one intent per frame" preserved.
+            use crate::settings::keymap::Action;
+            let km = &self.state.settings.keymap;
+            let rating_actions = [
+                Action::Rating0,
+                Action::Rating1,
+                Action::Rating2,
+                Action::Rating3,
+                Action::Rating4,
+                Action::Rating5,
+            ];
+            let mut intent = None;
+            for (n, action) in rating_actions.into_iter().enumerate() {
+                if km.pressed(ctx, action) {
+                    intent = Some(KeyIntent::Rating(n as u8));
+                    break;
                 }
-                if i.key_pressed(egui::Key::I) {
+            }
+            let intent = intent.or_else(|| {
+                if km.pressed(ctx, Action::FlagPick) {
                     Some(KeyIntent::Flag(Flag::Pick))
-                } else if i.key_pressed(egui::Key::O) {
+                } else if km.pressed(ctx, Action::FlagReject) {
                     Some(KeyIntent::Flag(Flag::Reject))
                 } else {
                     None
@@ -2031,7 +2051,12 @@ impl eframe::App for FerroliteApp {
             // viewer, else the open viewer image). Kept as a parallel check
             // rather than folded into `KeyIntent` so the rating/flag toggle
             // logic above is untouched.
-            if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
+            if self
+                .state
+                .settings
+                .keymap
+                .pressed(ctx, crate::settings::keymap::Action::AddToQueue)
+            {
                 let target_id = if self.module.is_library() && self.state.viewer.is_none() {
                     self.state.selected
                 } else {
@@ -2054,15 +2079,14 @@ impl eframe::App for FerroliteApp {
             && self.state.viewer.is_some()
             && !ctx.wants_keyboard_input()
         {
-            let dir = ctx.input(|i| {
-                if i.key_pressed(egui::Key::ArrowRight) {
-                    Some(crate::viewer::nav::Step::Next)
-                } else if i.key_pressed(egui::Key::ArrowLeft) {
-                    Some(crate::viewer::nav::Step::Prev)
-                } else {
-                    None
-                }
-            });
+            let km = &self.state.settings.keymap;
+            let dir = if km.pressed(ctx, crate::settings::keymap::Action::NextImage) {
+                Some(crate::viewer::nav::Step::Next)
+            } else if km.pressed(ctx, crate::settings::keymap::Action::PrevImage) {
+                Some(crate::viewer::nav::Step::Prev)
+            } else {
+                None
+            };
             if let Some(dir) = dir {
                 let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
                 if let Some(cur_id) = cur_id {
@@ -2077,23 +2101,46 @@ impl eframe::App for FerroliteApp {
                 }
             }
 
-            // Before/After: `\` toggles showing the empty stack vs the live stack.
-            if ctx.input(|i| i.key_pressed(egui::Key::Backslash)) {
+            // Before/After: `\` shows the empty (before) stack while held, and
+            // reverts to the live stack on release.
+            //
+            // NOTE (Task 2.3 keymap routing, deliberate behavior change): the
+            // dispatch for this refactor explicitly routes `HoldBeforePeek`
+            // through `Keymap::held` (level-triggered), matching the keymap's
+            // own design — `Action::HoldBeforePeek` is documented as "Hold to
+            // show original (before)" and `held()` exists specifically for this
+            // action. The pre-refactor code actually toggled `before_after` on
+            // each `key_pressed` (an edge-triggered latch), which contradicted
+            // its own doc comment in `viewer/mod.rs` calling it "momentary".
+            // This routes it to the momentary/hold behavior the naming always
+            // implied: `before_after` now directly mirrors "is the chord held",
+            // only re-evaluating the preview on an actual state transition
+            // (press or release), not every frame it's held.
+            let hold_before = self
+                .state
+                .settings
+                .keymap
+                .held(ctx, crate::settings::keymap::Action::HoldBeforePeek);
+            let before_after_changed = self
+                .state
+                .viewer
+                .as_ref()
+                .is_some_and(|v| v.before_after != hold_before);
+            if before_after_changed {
                 if let Some(v) = self.state.viewer.as_mut() {
-                    v.before_after = !v.before_after;
+                    v.before_after = hold_before;
                 }
                 let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
                 self.set_preview_and_full(frame, stack); // re-evaluates with before_after
             }
 
-            // Undo / Redo.
-            let (undo, redo) = ctx.input(|i| {
-                let z = i.key_pressed(egui::Key::Z);
-                let y = i.key_pressed(egui::Key::Y);
-                let cmd = i.modifiers.command;
-                let shift = i.modifiers.shift;
-                ((cmd && z && !shift), (cmd && y) || (cmd && z && shift))
-            });
+            // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
+            // keymap's bound chord (defaults to Ctrl+Shift+Z) — kept for users
+            // used to the common Ctrl+Y redo convention.
+            let km = &self.state.settings.keymap;
+            let undo = km.pressed(ctx, crate::settings::keymap::Action::Undo);
+            let ctrl_y = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y));
+            let redo = km.pressed(ctx, crate::settings::keymap::Action::Redo) || ctrl_y;
             if undo || redo {
                 let result = self.state.viewer.as_mut().and_then(|v| {
                     if undo {
@@ -2115,6 +2162,25 @@ impl eframe::App for FerroliteApp {
                             rec.has_edits = !stack.is_identity();
                         }
                         self.persist_ops(ctx, image_id, path, stack);
+                    }
+                }
+            }
+
+            // Toggle before/after SPLIT-compare (draggable divider), mirroring
+            // the `develop_filter_bar` toggle button's click handling exactly:
+            // flips `split_compare` and, only when turning it on, resets
+            // `split_pos` to center. (Auto-fit-at-1:1 is a later task — not
+            // added here.)
+            if self
+                .state
+                .settings
+                .keymap
+                .pressed(ctx, crate::settings::keymap::Action::ToggleSplitCompare)
+            {
+                if let Some(v) = self.state.viewer.as_mut() {
+                    v.split_compare = !v.split_compare;
+                    if v.split_compare {
+                        v.split_pos = 0.5;
                     }
                 }
             }

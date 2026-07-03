@@ -1666,6 +1666,21 @@ impl eframe::App for FerroliteApp {
                             self.state.warning = Some("Added to export queue.".to_string());
                         }
                     }
+                    Some(crate::chrome::MenuAction::PurgePreviews) => {
+                        // The purge (dir walk + deletes) is I/O and must never run
+                        // on the UI thread; only the button click + warning text
+                        // happen here.
+                        let store = std::sync::Arc::clone(&self.state.preview_store);
+                        self.state.jobs.submit(
+                            ferrolite_jobs::Priority::Background,
+                            move |_cancel| {
+                                if let Err(err) = store.purge_all() {
+                                    eprintln!("preview cache: purge_all failed: {err}");
+                                }
+                            },
+                        );
+                        self.state.warning = Some("Preview cache purged.".to_string());
+                    }
                     None => {}
                 }
             });
@@ -2045,6 +2060,50 @@ impl eframe::App for FerroliteApp {
                     v.path.clone(),
                 );
                 v.ops_read_handle = Some(h);
+            }
+        }
+
+        // Task 7: once the current image has revealed, fire ONE low-priority
+        // prefetch pass for its nearest filmstrip neighbors (radius 2, RAW
+        // only) so scrubbing to them later reveals instantly from the preview
+        // cache. Gathered as scalars/locals BEFORE borrowing `self.state.jobs`/
+        // `preview_store` for the spawn, since `self.state.viewer` cannot stay
+        // borrowed across that call (borrow discipline used elsewhere in this
+        // loop, e.g. the persist-ops block above).
+        if self
+            .state
+            .viewer
+            .as_ref()
+            .is_some_and(|v| v.loaded && !v.prefetch_requested)
+        {
+            if let Some(current_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
+                let targets = crate::develop::preview_cache::prefetch_targets(&ids, current_id, 2);
+                let neighbors: Vec<(i64, std::path::PathBuf)> = targets
+                    .into_iter()
+                    .filter_map(|id| {
+                        let rec = self.state.images.iter().find(|r| r.id == id)?;
+                        if rec.kind != ferrolite_image::FileKind::Raw {
+                            return None; // Standard images are never prefetch-cached
+                        }
+                        let path = self.state.image_path(rec)?;
+                        Some((id, path))
+                    })
+                    .collect();
+                let handles = crate::develop::preview_cache::spawn_prefetch(
+                    &self.state.jobs,
+                    std::sync::Arc::clone(&self.state.preview_store),
+                    ctx,
+                    &neighbors,
+                    self.state.working_space,
+                    ferrolite_previews::DEFAULT_CACHE_CAP_BYTES,
+                );
+                if let Some(v) = self.state.viewer.as_mut() {
+                    if v.image_id == current_id {
+                        v.prefetch_handles = handles;
+                        v.prefetch_requested = true;
+                    }
+                }
             }
         }
 

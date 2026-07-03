@@ -183,6 +183,15 @@ pub struct ViewerState {
     pub ops_read_handle: Option<JobHandle>,
     /// Live GPU histogram of the on-screen preview (spec §7.1).
     pub histogram: HistogramState,
+
+    // ── Neighbor prefetch (Task 7) ──────────────────────────────────────────
+    /// True once the low-priority neighbor-prefetch pass has been submitted
+    /// for this open (one-shot — fires only after `loaded`, never re-fires).
+    pub prefetch_requested: bool,
+    /// Handles for the in-flight prefetch jobs; cancelled on navigation
+    /// alongside the other load handles so scrubbing past this image doesn't
+    /// leave stale background decodes racing the newly-opened one.
+    pub prefetch_handles: Vec<JobHandle>,
 }
 
 impl ViewerState {
@@ -231,6 +240,8 @@ impl ViewerState {
             ops_loaded: false,
             ops_read_handle: None,
             histogram: HistogramState::new(),
+            prefetch_requested: false,
+            prefetch_handles: Vec::new(),
         }
     }
 
@@ -297,6 +308,9 @@ impl ViewerState {
             h.cancel();
         }
         if let Some(h) = self.cache_read_handle.as_ref() {
+            h.cancel();
+        }
+        for h in &self.prefetch_handles {
             h.cancel();
         }
     }

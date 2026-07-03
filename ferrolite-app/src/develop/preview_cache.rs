@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use ferrolite_color::{Mat3, WorkingSpace};
-use ferrolite_decode::{decode_color_profile, ColorProfile};
+use ferrolite_decode::{decode_color_profile, ColorProfile, DemosaicToRgb16f, QuadBin};
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_jobs::{JobHandle, JobSystem, Priority};
 use ferrolite_pipeline::OpStack;
@@ -207,6 +207,120 @@ pub fn spawn_cache_write(
     });
 }
 
+/// The ordered neighbor image ids within `radius` of `current` in `ids` (both
+/// directions), excluding `current`, clamped at the list ends.
+///
+/// Finds `current`'s position and returns the positional (left-to-right)
+/// window `[pos-radius, pos+radius]` intersected with `[0, len)`, minus `pos`
+/// itself. If `current` is absent from `ids` (or `ids` is empty) the window
+/// has no anchor, so the result is empty — there is nothing meaningful to
+/// prefetch around a selection that isn't in the list.
+pub fn prefetch_targets(ids: &[i64], current: i64, radius: usize) -> Vec<i64> {
+    let Some(pos) = ids.iter().position(|id| *id == current) else {
+        return Vec::new();
+    };
+    let start = pos.saturating_sub(radius);
+    let end = (pos + radius).min(ids.len() - 1);
+    (start..=end)
+        .filter(|&i| i != pos)
+        .map(|i| ids[i])
+        .collect()
+}
+
+/// For each of `neighbors` (RAW images only, resolved by the caller) that is
+/// not already cached under its DEFAULT (identity) preview key, spawn ONE
+/// `Priority::Background` job that decodes + demosaics + color-manages +
+/// encodes the identity render and stores it, mirroring the on-open
+/// write-back chain (`apply_full_decoded` in `app.rs`) EXACTLY so a prefetched
+/// entry is byte-for-byte what that write-back would have produced.
+///
+/// Prefetch keys by the default op stack — it does NOT read each neighbor's
+/// edit sidecar, so an edited neighbor's default-keyed entry is simply never
+/// requested until reset (a deliberate, harmless miss; see the module docs).
+///
+/// Every failure (cancelled, profile-decode error, key error, already cached,
+/// full-decode error, encode error, store error) resolves to a silent early
+/// return — a prefetch must never disturb the viewer, so failures are only
+/// logged via `eprintln!`, never surfaced as an event. Returns the spawned
+/// handles so the caller can cancel them on navigation.
+pub fn spawn_prefetch(
+    jobs: &Arc<JobSystem>,
+    store: Arc<PreviewStore>,
+    ctx: &egui::Context,
+    neighbors: &[(i64, PathBuf)],
+    working_space: WorkingSpace,
+    cap: u64,
+) -> Vec<JobHandle> {
+    neighbors
+        .iter()
+        .map(|(image_id, path)| {
+            let store = Arc::clone(&store);
+            let ctx = ctx.clone();
+            let path = path.clone();
+            let image_id = *image_id;
+            jobs.submit(Priority::Background, move |cancel| {
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let Ok(profile) = decode_color_profile(&path) else {
+                    return;
+                };
+                let Ok(key) = key_for(&path, &OpStack::default(), working_space, &profile) else {
+                    return;
+                };
+                if store.contains(&key) {
+                    return; // already cached — skip the expensive decode
+                }
+                if cancel.is_cancelled() {
+                    return;
+                }
+                let Ok(raw) = ferrolite_decode::decode_full(&path) else {
+                    return;
+                };
+                // Demosaic + upright, exactly as `viewer/load.rs::spawn_full` does.
+                let image = ferrolite_decode::apply_orientation_linear(
+                    QuadBin.to_linear_rgba_f32(&raw),
+                    raw.orientation,
+                );
+                // Identity display matrix: camera→working then working→display,
+                // matching the write-back composition in `apply_full_decoded`.
+                let cam = ferrolite_color::normalize_neutral(ferrolite_color::camera_to_working(
+                    raw.color_profile.xyz_to_cam,
+                    ferrolite_color::Xy {
+                        x: raw.color_profile.white_xy[0],
+                        y: raw.color_profile.white_xy[1],
+                    },
+                    working_space,
+                ));
+                let display_matrix = ferrolite_color::mul_mat3(
+                    &ferrolite_color::working_to_display(working_space),
+                    &cam,
+                );
+                let jpeg = match encode_srgb_jpeg(
+                    &image,
+                    display_matrix,
+                    PREVIEW_LONG_EDGE,
+                    PREVIEW_JPEG_QUALITY,
+                ) {
+                    Ok(jpeg) => jpeg,
+                    Err(err) => {
+                        eprintln!("preview prefetch: encode failed for #{image_id}: {err}");
+                        return;
+                    }
+                };
+                if let Err(err) = store.put(&key, &jpeg) {
+                    eprintln!("preview prefetch: put failed for #{image_id}: {err}");
+                    return;
+                }
+                if let Err(err) = store.evict_to(cap) {
+                    eprintln!("preview prefetch: evict_to failed after #{image_id}: {err}");
+                }
+                ctx.request_repaint();
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,5 +495,48 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(&other_path);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prefetch_targets_middle_returns_both_sides_within_radius() {
+        let ids = [10, 20, 30, 40, 50];
+        // current = 30 (pos 2), radius 1 → neighbors at pos 1 and 3, excluding pos 2.
+        assert_eq!(prefetch_targets(&ids, 30, 1), vec![20, 40]);
+        // radius 2 → the full window minus current.
+        assert_eq!(prefetch_targets(&ids, 30, 2), vec![10, 20, 40, 50]);
+    }
+
+    #[test]
+    fn prefetch_targets_clamps_at_both_ends() {
+        let ids = [10, 20, 30, 40, 50];
+        // current = first element: no left side, clamp at 0.
+        assert_eq!(prefetch_targets(&ids, 10, 2), vec![20, 30]);
+        // current = last element: no right side, clamp at len-1.
+        assert_eq!(prefetch_targets(&ids, 50, 2), vec![30, 40]);
+    }
+
+    #[test]
+    fn prefetch_targets_radius_larger_than_remaining_clamps_without_panicking() {
+        let ids = [10, 20, 30];
+        // radius far exceeds the list length in both directions.
+        assert_eq!(prefetch_targets(&ids, 10, 100), vec![20, 30]);
+        assert_eq!(prefetch_targets(&ids, 30, 100), vec![10, 20]);
+    }
+
+    #[test]
+    fn prefetch_targets_current_absent_is_empty() {
+        let ids = [10, 20, 30];
+        assert!(prefetch_targets(&ids, 999, 2).is_empty());
+        assert!(prefetch_targets(&[], 1, 2).is_empty());
+    }
+
+    #[test]
+    fn prefetch_targets_excludes_current() {
+        let ids = [10, 20, 30, 40, 50];
+        let targets = prefetch_targets(&ids, 30, 2);
+        assert!(
+            !targets.contains(&30),
+            "current id must never be its own neighbor"
+        );
     }
 }

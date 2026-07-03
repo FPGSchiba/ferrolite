@@ -18,7 +18,7 @@ pub use error::DecodeError;
 pub use metadata::Metadata;
 pub use orient::apply_orientation_linear;
 pub use preview::PreviewSource;
-pub use raw::{decode_full, RawDecoded};
+pub use raw::{decode_color_profile, decode_full, RawDecoded};
 pub use source::SourceKind;
 pub use standard::{decode_preview_standard, read_metadata_standard};
 

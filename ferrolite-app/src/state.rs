@@ -177,6 +177,10 @@ pub struct AppState {
     /// Editing working space (spec §4.1, default Rec.2020). Global preference; the
     /// ColorMatrixNode + display tail are recomposed on change.
     pub working_space: ferrolite_color::WorkingSpace,
+
+    /// On-disk cache of downscaled, color-managed RAW previews (sits next to
+    /// `catalog.db`). Shared into `Background` write-back jobs via `Arc`.
+    pub preview_store: Arc<ferrolite_previews::PreviewStore>,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -251,6 +255,7 @@ impl AppState {
             images_rev: 0,
             grid_layout: None,
             working_space: ferrolite_color::WorkingSpace::default(),
+            preview_store: Arc::new(open_preview_store(&default_previews_dir())),
         })
     }
 
@@ -798,6 +803,11 @@ impl AppState {
             images_rev: 0,
             grid_layout: None,
             working_space: ferrolite_color::WorkingSpace::default(),
+            preview_store: Arc::new(open_preview_store(&std::env::temp_dir().join(format!(
+                "ferrolite-previews-test-{}-{}",
+                std::process::id(),
+                tid
+            )))),
         }
     }
 
@@ -879,6 +889,29 @@ fn default_db_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("ferrolite").join("catalog.db")
+}
+
+/// Cache dir for downscaled RAW previews, next to `catalog.db` (same base
+/// logic). `PreviewStore::new` creates it.
+fn default_previews_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_DATA_HOME"))
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("ferrolite").join("previews")
+}
+
+/// Open a `PreviewStore` at `dir`, never aborting startup. `PreviewStore::new`
+/// only fails if `create_dir_all` fails; on that (rare) error, fall back to a
+/// store rooted under the OS temp dir so the app still runs and the cache is
+/// simply best-effort. The final `expect` is on the temp dir, which is
+/// writable in every environment this app runs in.
+fn open_preview_store(dir: &std::path::Path) -> ferrolite_previews::PreviewStore {
+    ferrolite_previews::PreviewStore::new(dir).unwrap_or_else(|_| {
+        ferrolite_previews::PreviewStore::new(&std::env::temp_dir().join("ferrolite-previews"))
+            .expect("temp previews dir is creatable")
+    })
 }
 
 #[cfg(test)]

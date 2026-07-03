@@ -117,10 +117,38 @@ pub struct ViewerState {
     pub preview_handle: Option<JobHandle>,
     pub full_handle: Option<JobHandle>,
 
+    // ── Preview-cache read gating (Task 6) ─────────────────────────────────
+    /// Handle for the in-flight preview-cache read job; cancelled on navigation
+    /// so a scrubbed-past image's read coalesces with the rest.
+    pub cache_read_handle: Option<JobHandle>,
+    /// True once the debounced preview-cache read has been submitted (one-shot).
+    pub cache_read_requested: bool,
+    /// True once the cache read resolved (HIT or MISS). The RAW tier-2 full
+    /// decode is gated on this: the full decode fires only after the read
+    /// resolves, so a cache HIT reveals from disk and the full decode then
+    /// streams in zoom/sparse detail.
+    pub cache_resolved: bool,
+    /// Whether the eventual full-decode render should be written back to the
+    /// cache. Starts `true` (a fresh open is a miss until proven otherwise); set
+    /// `false` on a cache HIT (the entry already exists) and `true` on a MISS.
+    pub cache_write_back: bool,
+
     // ── Edit state (Task 8 / Plan 4) — read by Tasks 9+ ────────────────────
     /// The full-res linear source retained for re-evaluation when the op stack
-    /// changes (built from the tier-2 full decode).
+    /// changes (built from the tier-2 full decode). For a Standard image this is
+    /// the decoded sRGB image; for a RAW image this holds the embedded JPEG
+    /// linear buffer, retained ONLY as the full-decode-failure fallback source
+    /// (`FullFailed`) — never displayed on the happy path.
     pub preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+    /// RAW preview-tier source: the demosaiced, camera-native, half-res
+    /// `LinearRgbaF32` from the tier-2 full decode. For RAW everything displayed
+    /// and measured on the preview tier (the rung-1 reveal render, the
+    /// interactive `preview_edit`, the before-view, and thus the histogram) is
+    /// sourced from THIS buffer through the camera→working matrix — the same
+    /// color path as the sparse full — so the preview→full swap is a
+    /// sharpness-only ramp with no color/tone shift. `None` for Standard images
+    /// and for RAW before the full decode arrives.
+    pub raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
     /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
     /// `edit_producer`). Rebuilt when geometry / halo radius changes.
     pub preview_edit: Option<EditPipeline>,
@@ -155,6 +183,15 @@ pub struct ViewerState {
     pub ops_read_handle: Option<JobHandle>,
     /// Live GPU histogram of the on-screen preview (spec §7.1).
     pub histogram: HistogramState,
+
+    // ── Neighbor prefetch (Task 7) ──────────────────────────────────────────
+    /// True once the low-priority neighbor-prefetch pass has been submitted
+    /// for this open (one-shot — fires only after `loaded`, never re-fires).
+    pub prefetch_requested: bool,
+    /// Handles for the in-flight prefetch jobs; cancelled on navigation
+    /// alongside the other load handles so scrubbing past this image doesn't
+    /// leave stale background decodes racing the newly-opened one.
+    pub prefetch_handles: Vec<JobHandle>,
 }
 
 impl ViewerState {
@@ -183,7 +220,12 @@ impl ViewerState {
             image_dims: None,
             preview_handle: None,
             full_handle: None,
+            cache_read_handle: None,
+            cache_read_requested: false,
+            cache_resolved: false,
+            cache_write_back: true,
             preview_source: None,
+            raw_preview_source: None,
             preview_edit: None,
             pyramid: None,
             color_profile: ferrolite_decode::ColorProfile::srgb_fallback(),
@@ -198,6 +240,8 @@ impl ViewerState {
             ops_loaded: false,
             ops_read_handle: None,
             histogram: HistogramState::new(),
+            prefetch_requested: false,
+            prefetch_handles: Vec::new(),
         }
     }
 
@@ -223,6 +267,33 @@ impl ViewerState {
         factor
     }
 
+    /// Select the `(source buffer, color matrix)` the PREVIEW tier must use for
+    /// this image's kind. This is the single source of truth for the RAW-vs-Standard
+    /// preview color path, shared by `apply_full_decoded`, `set_preview_and_full`,
+    /// and `apply_working_space` so the three sites cannot drift apart.
+    ///
+    /// * RAW: the demosaiced, camera-native `raw_preview_source` through the
+    ///   camera→working matrix (`cam`) — the SAME color path as the sparse full,
+    ///   so the preview↔full swap is a sharpness-only ramp with no color/tone shift.
+    /// * Standard: the sRGB `preview_source` through sRGB→working (`pw`).
+    ///
+    /// Sourcing RAW from the sRGB JPEG (with `pw`), or Standard from a RAW buffer,
+    /// would reintroduce the exact color/tone shift the progressive-reveal path
+    /// exists to eliminate. Pure — no GPU, no side effects.
+    pub fn preview_tier_source(
+        &self,
+        cam: [[f32; 3]; 3],
+        pw: [[f32; 3]; 3],
+    ) -> (
+        Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+        [[f32; 3]; 3],
+    ) {
+        match self.kind {
+            FileKind::Raw => (self.raw_preview_source.clone(), cam),
+            FileKind::Standard => (self.preview_source.clone(), pw),
+        }
+    }
+
     /// Cancel the in-flight decode jobs for this viewer. The sparse tile jobs
     /// are cancelled separately (they live in the `ViewerGpu` holder, owned by
     /// `callback_resources`) when that holder is dropped/replaced.
@@ -234,6 +305,12 @@ impl ViewerState {
             h.cancel();
         }
         if let Some(h) = self.ops_read_handle.as_ref() {
+            h.cancel();
+        }
+        if let Some(h) = self.cache_read_handle.as_ref() {
+            h.cancel();
+        }
+        for h in &self.prefetch_handles {
             h.cancel();
         }
     }
@@ -438,6 +515,67 @@ pub fn image_screen_rect(
 mod tests {
     use super::*;
     use ferrolite_vt::ViewTransform;
+
+    #[test]
+    fn new_viewer_has_no_raw_preview_source() {
+        // The RAW preview-tier source only exists after the tier-2 full decode
+        // (`apply_full_decoded`); a freshly-opened viewer must start without it so
+        // the RAW path shows the spinner until the color-managed reveal is built.
+        let v = ViewerState::open(1, std::path::PathBuf::from("x"), FileKind::Raw);
+        assert!(v.raw_preview_source.is_none());
+        assert!(
+            !v.loaded,
+            "RAW opens unrevealed (spinner) until full decode"
+        );
+    }
+
+    /// Two clearly-distinct sentinel matrices so the selector's matrix choice is
+    /// unambiguous in assertions (identity-ish `cam` vs a scaled `pw`).
+    const CAM: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    const PW: [[f32; 3]; 3] = [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]];
+
+    fn dummy_linear() -> std::sync::Arc<ferrolite_image::LinearRgbaF32> {
+        std::sync::Arc::new(ferrolite_image::LinearRgbaF32::new(1, 1, vec![0.0; 4]).unwrap())
+    }
+
+    #[test]
+    fn preview_tier_source_raw_uses_raw_buffer_and_cam() {
+        // RAW: the preview tier must be sourced from the demosaic camera-native
+        // `raw_preview_source` through the camera→working matrix (`cam`) — NOT the
+        // sRGB JPEG through `pw`, which would reintroduce the RAW color/tone shift.
+        let mut v = ViewerState::open(1, std::path::PathBuf::from("x"), FileKind::Raw);
+        let raw = dummy_linear();
+        let srgb = dummy_linear();
+        v.raw_preview_source = Some(std::sync::Arc::clone(&raw));
+        v.preview_source = Some(std::sync::Arc::clone(&srgb));
+
+        let (src, matrix) = v.preview_tier_source(CAM, PW);
+        let src = src.expect("RAW selector returns the raw_preview_source");
+        assert!(
+            std::sync::Arc::ptr_eq(&src, &raw),
+            "RAW must select raw_preview_source, not the sRGB JPEG"
+        );
+        assert_eq!(matrix, CAM, "RAW must use the camera→working matrix");
+    }
+
+    #[test]
+    fn preview_tier_source_standard_uses_srgb_buffer_and_pw() {
+        // Standard: the preview tier is the sRGB `preview_source` through
+        // sRGB→working (`pw`). Byte-for-byte unchanged from prior behavior.
+        let mut v = ViewerState::open(2, std::path::PathBuf::from("y"), FileKind::Standard);
+        let raw = dummy_linear();
+        let srgb = dummy_linear();
+        v.raw_preview_source = Some(std::sync::Arc::clone(&raw));
+        v.preview_source = Some(std::sync::Arc::clone(&srgb));
+
+        let (src, matrix) = v.preview_tier_source(CAM, PW);
+        let src = src.expect("Standard selector returns the preview_source");
+        assert!(
+            std::sync::Arc::ptr_eq(&src, &srgb),
+            "Standard must select the sRGB preview_source"
+        );
+        assert_eq!(matrix, PW, "Standard must use the sRGB→working matrix");
+    }
 
     #[test]
     fn crossfade_ramps_zero_to_one_then_clamps() {

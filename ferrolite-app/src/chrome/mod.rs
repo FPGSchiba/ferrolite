@@ -13,6 +13,7 @@ use egui::{
 pub enum MenuAction {
     ExportImage,
     AddToQueue,
+    PurgePreviews,
 }
 
 /// Render the borderless title bar contents. `ui` is the 30px top panel's ui.
@@ -81,11 +82,15 @@ pub fn title_bar(
             // Frameless, dim menu buttons to match the old painted look.
             ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
             ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
-            for label in ["File", "Edit"] {
-                let _ = ui.menu_button(label, |ui| {
-                    ui.add_enabled(false, egui::Button::new("(no actions)"));
-                });
-            }
+            ui.menu_button("File", |ui| {
+                if ui.button("Purge preview cache").clicked() {
+                    action = Some(MenuAction::PurgePreviews);
+                    ui.close_menu();
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                ui.add_enabled(false, egui::Button::new("(no actions)"));
+            });
             ui.menu_button("Photo", |ui| {
                 if ui
                     .add_enabled(export_enabled, egui::Button::new("Export…"))

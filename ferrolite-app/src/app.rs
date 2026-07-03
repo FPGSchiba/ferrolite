@@ -347,15 +347,14 @@ impl FerroliteApp {
     }
 
     /// Open the single-file export dialog for the current viewer image, seeded
-    /// from `settings.export` (the same slot the Export module panel writes to
-    /// via `state.export_settings`). The dialog is a plain floating
-    /// `egui::Window` — NOT modal — so the titlebar/module tabs stay reachable
-    /// while it's open and the user could switch to the Export module panel
-    /// and change `state.export_settings` before coming back. That interleave
-    /// is handled at the draw site (see the single-file export dialog block in
-    /// `update()`), which re-syncs `dialog.options` from `state.export_settings`
-    /// every frame the dialog is open, so this initial seed only matters for
-    /// the moment the dialog first appears.
+    /// once from `settings.export` (the same slot the Export module panel
+    /// writes to via `state.export_settings`) at the moment it opens. The
+    /// dialog is a plain floating `egui::Window` — NOT modal — so the
+    /// titlebar/module tabs stay reachable while it's open and the user could
+    /// switch to the Export module panel and change `state.export_settings`
+    /// before coming back. If that happens, `confirm_export` persists
+    /// whatever the user leaves in the dialog: benign last-writer-wins on a
+    /// preference value, not a data-loss risk.
     fn open_export_dialog(&mut self) {
         if self.state.viewer.is_some() {
             self.state.export_dialog = Some(crate::export::ExportDialogState {
@@ -370,12 +369,13 @@ impl FerroliteApp {
             return;
         };
         let options = dialog.options;
-        // Guard the write: `dialog.options` is kept in sync with
-        // `state.export_settings` every frame the dialog is open (see the
-        // non-modal note at the draw site below), so by the time Confirm is
-        // clicked it already reflects any interleaved module-panel edit. Only
-        // mark dirty when the resolved value actually differs from what's
-        // persisted, so this can't become an unconditional per-frame write.
+        // Guard the write: persist `dialog.options` (whatever the user left
+        // it as) as the new `settings.export`, but only mark dirty when it
+        // actually differs from what's persisted, so this can't become an
+        // unconditional per-frame write. If the Export module panel changed
+        // `state.export_settings` while this dialog was open, this is a
+        // last-writer-wins overwrite of that — benign, since both are just a
+        // preference value with no data-loss risk.
         if self.state.settings.export.to_options() != options {
             self.state.settings.export =
                 crate::settings::dto::PersistedExport::from_options(&options);
@@ -2615,17 +2615,13 @@ impl eframe::App for FerroliteApp {
 
         // Single-file export dialog (spec §8.3). Non-modal (see
         // `open_export_dialog`): the Export module panel stays reachable while
-        // this is open and can mutate `state.export_settings` underneath it. If
-        // that happened since this dialog was opened (or last synced), pull the
-        // fresh value in before drawing so Confirm never overwrites a newer
-        // module-panel edit with stale in-dialog options.
+        // this is open. `dialog.options` is seeded once on open and edited
+        // in-place by the dialog widgets from then on — do NOT re-sync it from
+        // `state.export_settings` here, or every in-dialog edit gets reverted
+        // on the next frame (see the regression this comment replaced).
         if self.state.export_dialog.is_some() {
-            let fresh = self.state.export_settings;
             let outcome = {
                 let dialog = self.state.export_dialog.as_mut().unwrap();
-                if dialog.options != fresh {
-                    dialog.options = fresh;
-                }
                 crate::export::draw_dialog(ctx, dialog)
             };
             match outcome {

@@ -80,13 +80,17 @@ fn read_up_to(file: &mut File, buf: &mut Vec<u8>, target: usize) -> std::io::Res
 }
 
 /// Run the decode `f` against an in-memory `RawSource`, growing the buffer only
-/// as far as the decode needs: try after 1 MiB, then 8 MiB, then the whole file.
-/// The file is opened once and read sequentially (bytes are appended, never
-/// re-read). Returns the decode result plus a [`SourceProbe`] reporting which
-/// tier satisfied it (and, when `measure`, the read time + bytes read).
+/// as far as the decode needs: try the 1 MiB prefix; on a miss, if the embedded
+/// preview span can be parsed from the prefix, read exactly to that span
+/// ([`SourceKind::Directed`]); otherwise grow through the 2/4/8 MiB tiers, then
+/// the whole file. The file is opened once and read sequentially (bytes are
+/// appended, never re-read). Returns the decode result plus a [`SourceProbe`]
+/// reporting which tier satisfied it (and, when `measure`, the read time +
+/// bytes read).
 ///
-/// `f` may be called up to three times, so it must be side-effect-free on
-/// failure (all our uses are pure reads).
+/// `f` may be called several times (prefix, the optional directed read, then
+/// each remaining tier), so it must be side-effect-free on failure (all our
+/// uses are pure reads).
 pub(crate) fn with_ingest_source<T>(
     path: &Path,
     measure: bool,

@@ -84,6 +84,70 @@ impl FerroliteApp {
             self.settings_dirty = false;
         }
     }
+
+    /// Step the open viewer's edit history one step (undo when `undo`, else
+    /// redo), re-render the preview/full-res, mark the image dirty, and
+    /// persist the resulting op stack. Shared by the `Ctrl+Z`/`Ctrl+Shift+Z`/
+    /// `Ctrl+Y` keyboard path and the Edit menu's Undo/Redo items so both
+    /// route through the exact same logic.
+    fn apply_undo_redo(&mut self, ctx: &egui::Context, frame: &eframe::Frame, undo: bool) {
+        let result = self.state.viewer.as_mut().and_then(|v| {
+            if undo {
+                v.history.undo()
+            } else {
+                v.history.redo()
+            }
+        });
+        if let Some(stack) = result {
+            self.set_preview_and_full(frame, stack.clone());
+            if let Some(v) = self.state.viewer.as_mut() {
+                v.edits_dirty = true;
+            }
+            // Persist the resulting stack (undo/redo changes the on-disk state).
+            // Gather viewer scalars into locals before the iter_mut borrow.
+            if let Some(v) = self.state.viewer.as_ref() {
+                let (image_id, path) = (v.image_id, v.path.clone());
+                if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
+                    rec.has_edits = !stack.is_identity();
+                }
+                self.persist_ops(ctx, image_id, path, stack);
+            }
+        }
+    }
+
+    /// Move the open Develop viewer to the previous/next image in the current
+    /// image set, non-cyclic. Shared by the ←/→ keyboard path and the Photo
+    /// menu's Previous/Next image items.
+    fn navigate_step(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        dir: crate::viewer::nav::Step,
+    ) {
+        let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
+        if let Some(cur_id) = cur_id {
+            let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
+            if let Some(next_id) = crate::viewer::nav::neighbor_in_set(&ids, cur_id, dir) {
+                if let Some(rec) = self.state.images.iter().find(|r| r.id == next_id).cloned() {
+                    self.open_record(ctx, frame, &rec);
+                }
+            }
+        }
+    }
+
+    /// Toggle the open viewer's before/after SPLIT-compare (draggable
+    /// divider), mirroring the `develop_filter_bar` toggle button's click
+    /// handling exactly: flips `split_compare` and, only when turning it on,
+    /// resets `split_pos` to center. Shared by the `Y` keyboard shortcut and
+    /// the View menu's "Before/After split" item.
+    fn toggle_split_compare(&mut self) {
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.split_compare = !v.split_compare;
+            if v.split_compare {
+                v.split_pos = 0.5;
+            }
+        }
+    }
 }
 
 impl FerroliteApp {
@@ -1823,8 +1887,27 @@ impl eframe::App for FerroliteApp {
                         || (v.kind != ferrolite_image::FileKind::Raw && v.preview_source.is_some())
                 });
                 let module_before = self.module;
-                let menu_action =
-                    crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1", export_enabled);
+                let can_undo = self
+                    .state
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.history.can_undo());
+                let can_redo = self
+                    .state
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.history.can_redo());
+                let menu_action = crate::chrome::title_bar(
+                    ctx,
+                    ui,
+                    &mut self.module,
+                    "v0.0.1",
+                    export_enabled,
+                    &self.state.settings.keymap,
+                    can_undo,
+                    can_redo,
+                    self.state.settings.show_histogram,
+                );
                 if self.module != module_before {
                     self.state.settings.last_module =
                         crate::settings::dto::PersistedModule::from_module(self.module);
@@ -1852,6 +1935,51 @@ impl eframe::App for FerroliteApp {
                             },
                         );
                         self.state.warning = Some("Preview cache purged.".to_string());
+                    }
+                    Some(crate::chrome::MenuAction::Exit) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Some(crate::chrome::MenuAction::Undo) => {
+                        self.apply_undo_redo(ctx, frame, true);
+                    }
+                    Some(crate::chrome::MenuAction::Redo) => {
+                        self.apply_undo_redo(ctx, frame, false);
+                    }
+                    Some(crate::chrome::MenuAction::SelectAll) => {
+                        self.state.toggle_select_all();
+                    }
+                    Some(crate::chrome::MenuAction::PrevImage) => {
+                        self.navigate_step(ctx, frame, crate::viewer::nav::Step::Prev);
+                    }
+                    Some(crate::chrome::MenuAction::NextImage) => {
+                        self.navigate_step(ctx, frame, crate::viewer::nav::Step::Next);
+                    }
+                    Some(crate::chrome::MenuAction::SwitchModule(m)) => {
+                        self.module = m;
+                    }
+                    Some(crate::chrome::MenuAction::ToggleSplit) => {
+                        self.toggle_split_compare();
+                    }
+                    Some(crate::chrome::MenuAction::ZoomFit) => {
+                        if let Some(v) = self.state.viewer.as_mut() {
+                            if let Some(dims) = v.image_dims {
+                                v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
+                                v.idle = false;
+                            }
+                        }
+                    }
+                    Some(crate::chrome::MenuAction::ZoomActual) => {
+                        if let Some(v) = self.state.viewer.as_mut() {
+                            v.view = ferrolite_vt::ViewTransform {
+                                zoom: 1.0,
+                                pan: (0.0, 0.0),
+                            };
+                            v.idle = false;
+                        }
+                    }
+                    Some(crate::chrome::MenuAction::ToggleHistogram) => {
+                        self.state.settings.show_histogram = !self.state.settings.show_histogram;
+                        self.mark_settings_dirty();
                     }
                     None => {}
                 }
@@ -2159,17 +2287,7 @@ impl eframe::App for FerroliteApp {
                 None
             };
             if let Some(dir) = dir {
-                let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
-                if let Some(cur_id) = cur_id {
-                    let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
-                    if let Some(next_id) = crate::viewer::nav::neighbor_in_set(&ids, cur_id, dir) {
-                        if let Some(rec) =
-                            self.state.images.iter().find(|r| r.id == next_id).cloned()
-                        {
-                            self.open_record(ctx, frame, &rec);
-                        }
-                    }
-                }
+                self.navigate_step(ctx, frame, dir);
             }
 
             // Before/After: `\` shows the empty (before) stack while held, and
@@ -2213,28 +2331,7 @@ impl eframe::App for FerroliteApp {
             let ctrl_y = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y));
             let redo = km.pressed(ctx, crate::settings::keymap::Action::Redo) || ctrl_y;
             if undo || redo {
-                let result = self.state.viewer.as_mut().and_then(|v| {
-                    if undo {
-                        v.history.undo()
-                    } else {
-                        v.history.redo()
-                    }
-                });
-                if let Some(stack) = result {
-                    self.set_preview_and_full(frame, stack.clone());
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        v.edits_dirty = true;
-                    }
-                    // Persist the resulting stack (undo/redo changes the on-disk state).
-                    // Gather viewer scalars into locals before the iter_mut borrow.
-                    if let Some(v) = self.state.viewer.as_ref() {
-                        let (image_id, path) = (v.image_id, v.path.clone());
-                        if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
-                            rec.has_edits = !stack.is_identity();
-                        }
-                        self.persist_ops(ctx, image_id, path, stack);
-                    }
-                }
+                self.apply_undo_redo(ctx, frame, undo);
             }
 
             // Toggle before/after SPLIT-compare (draggable divider), mirroring
@@ -2248,12 +2345,7 @@ impl eframe::App for FerroliteApp {
                 .keymap
                 .pressed(ctx, crate::settings::keymap::Action::ToggleSplitCompare)
             {
-                if let Some(v) = self.state.viewer.as_mut() {
-                    v.split_compare = !v.split_compare;
-                    if v.split_compare {
-                        v.split_pos = 0.5;
-                    }
-                }
+                self.toggle_split_compare();
             }
         }
 

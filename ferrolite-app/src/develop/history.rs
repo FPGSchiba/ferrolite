@@ -27,16 +27,14 @@ impl History {
         &self.entries[self.cursor]
     }
 
-    /// Returns `true` if there is at least one undo step available.
-    // public API: undo button enable-state; not yet wired to UI
-    #[allow(dead_code)]
+    /// Returns `true` if there is at least one undo step available. Drives
+    /// the Edit menu's Undo item enable-state.
     pub fn can_undo(&self) -> bool {
         self.cursor > 0
     }
 
-    /// Returns `true` if there is at least one redo step available.
-    // public API: redo button enable-state; not yet wired to UI
-    #[allow(dead_code)]
+    /// Returns `true` if there is at least one redo step available. Drives
+    /// the Edit menu's Redo item enable-state.
     pub fn can_redo(&self) -> bool {
         self.cursor + 1 < self.entries.len()
     }

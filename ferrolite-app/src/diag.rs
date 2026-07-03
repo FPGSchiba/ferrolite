@@ -9,7 +9,7 @@
 use ferrolite_jobs::JobStats;
 use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -151,6 +151,68 @@ static REQ_DEDUP_UPLOADING: AtomicU64 = AtomicU64::new(0);
 static RETAIN_CANCELS: AtomicU64 = AtomicU64::new(0);
 static EVENTS_DRAINED: AtomicU64 = AtomicU64::new(0);
 static UPLOADS_APPLIED: AtomicU64 = AtomicU64::new(0);
+
+/// Current ingest phase, for the live `ingest:` line. `Idle` hides the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IngestPhase {
+    #[default]
+    Idle,
+    Scan,
+    PhaseA,
+    Filter,
+    Decode,
+    Done,
+}
+
+impl IngestPhase {
+    fn label(self) -> &'static str {
+        match self {
+            IngestPhase::Idle => "idle",
+            IngestPhase::Scan => "scan",
+            IngestPhase::PhaseA => "phaseA",
+            IngestPhase::Filter => "filter",
+            IngestPhase::Decode => "decode",
+            IngestPhase::Done => "done",
+        }
+    }
+    fn from_u8(v: u8) -> IngestPhase {
+        match v {
+            1 => IngestPhase::Scan,
+            2 => IngestPhase::PhaseA,
+            3 => IngestPhase::Filter,
+            4 => IngestPhase::Decode,
+            5 => IngestPhase::Done,
+            _ => IngestPhase::Idle,
+        }
+    }
+    fn as_u8(self) -> u8 {
+        match self {
+            IngestPhase::Idle => 0,
+            IngestPhase::Scan => 1,
+            IngestPhase::PhaseA => 2,
+            IngestPhase::Filter => 3,
+            IngestPhase::Decode => 4,
+            IngestPhase::Done => 5,
+        }
+    }
+}
+
+static INGEST_PHASE: AtomicU8 = AtomicU8::new(0);
+static INGEST_CHAN: AtomicU64 = AtomicU64::new(0);
+
+/// Best-effort live phase publish (last-writer-wins across concurrent jobs).
+pub fn set_ingest_phase(phase: IngestPhase) {
+    INGEST_PHASE.store(phase.as_u8(), Ordering::Relaxed);
+}
+pub fn note_ingest_chan(depth: u64) {
+    INGEST_CHAN.store(depth, Ordering::Relaxed);
+}
+pub fn ingest_phase() -> IngestPhase {
+    IngestPhase::from_u8(INGEST_PHASE.load(Ordering::Relaxed))
+}
+pub fn ingest_chan() -> u64 {
+    INGEST_CHAN.load(Ordering::Relaxed)
+}
 
 #[inline]
 fn add(c: &AtomicU64, n: u64) {
@@ -294,6 +356,8 @@ pub struct Gauges {
     pub ingest_done: usize,
     pub ingest_total: usize,
     pub uploads_cap: usize,
+    pub ingest_phase: IngestPhase,
+    pub ingest_chan: u64,
 }
 
 /// Everything the log/overlay render, precomputed once per tick.
@@ -372,6 +436,17 @@ pub fn format_log(s: &Snapshot) -> String {
     let g = &s.g;
     let dedup =
         s.req_dedup_tex_f + s.req_dedup_pending_f + s.req_dedup_missing_f + s.req_dedup_uploading_f;
+    let ingest_line = if g.ingest_phase != IngestPhase::Idle {
+        format!(
+            "\n ingest  phase {ph} {idn}/{itot}  chan {chan}",
+            ph = g.ingest_phase.label(),
+            idn = g.ingest_done,
+            itot = g.ingest_total,
+            chan = g.ingest_chan,
+        )
+    } else {
+        String::new()
+    };
     format!(
         "[diag +{dt:.1}s] frame {fms:.1}ms(max {mx:.1}) ev/f {ev} repaint {rp}\n\
          \x20jobs  sub I/V/B {si}/{sv}/{sb}  disp {disp}  done {done}  cxl(pre){cxp}  panic {pan}\n\
@@ -380,7 +455,7 @@ pub fn format_log(s: &Snapshot) -> String {
          \x20      pending {tp}  uploading {tu}  handles {th}  missing {tm}  retain req {rc}\n\
          \x20cache tex h/s {thh:.0} m/s {thm:.0} ev/s {the:.0} | pix h/s {pxh:.0} m/s {pxm:.0} ev/s {pxe:.0}\n\
          \x20uploads {up}/{cap} cap  backlog {bk}\n\
-         \x20ingest active {ai}  done {idn}/{itot}",
+         \x20ingest active {ai}  done {idn}/{itot}{ingest_line}",
         dt = s.dt,
         fms = s.frame_ms,
         mx = s.max_frame_ms,
@@ -424,6 +499,7 @@ pub fn format_log(s: &Snapshot) -> String {
         ai = g.active_ingests,
         idn = g.ingest_done,
         itot = g.ingest_total,
+        ingest_line = ingest_line,
     )
 }
 
@@ -523,6 +599,17 @@ impl Default for DiagState {
 pub fn format_overlay(s: &Snapshot) -> String {
     let j = &s.jobs;
     let g = &s.g;
+    let ingest_line = if g.ingest_phase != IngestPhase::Idle {
+        format!(
+            "\n ingest  phase {ph} {idn}/{itot}  chan {chan}",
+            ph = g.ingest_phase.label(),
+            idn = g.ingest_done,
+            itot = g.ingest_total,
+            chan = g.ingest_chan,
+        )
+    } else {
+        String::new()
+    };
     format!(
         "frame {fms:.1}ms (max {mx:.1})  ev/f {ev}\n\
          jobs sub I/V/B {si}/{sv}/{sb}  active {act}\n\
@@ -532,7 +619,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
          thumb pending {tp} uploading {tu} handles {th} missing {tm}\n\
          tex h/s {thh:.0} ev/s {the:.0} | pix h/s {pxh:.0} ev/s {pxe:.0}\n\
          uploads/f {up}/{cap}  backlog {bk}\n\
-         ingest {idn}/{itot} active {ai}",
+         ingest {idn}/{itot} active {ai}{ingest_line}",
         fms = s.frame_ms,
         mx = s.max_frame_ms,
         ev = s.ev_per_frame,
@@ -568,6 +655,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
         idn = g.ingest_done,
         itot = g.ingest_total,
         ai = g.active_ingests,
+        ingest_line = ingest_line,
     )
 }
 
@@ -678,6 +766,9 @@ impl IngestProfile {
     }
     pub fn chan_depth_max(&self) -> u64 {
         self.chan_depth_max.load(Ordering::Relaxed)
+    }
+    pub fn chan_inflight(&self) -> u64 {
+        self.chan_inflight.load(Ordering::Relaxed)
     }
     /// All per-file decode samples (RAW ∪ Standard), for overall percentiles.
     pub fn decode_samples(&self) -> Vec<u32> {
@@ -946,6 +1037,8 @@ mod tests {
             ingest_done: 3320,
             ingest_total: 3320,
             uploads_cap: 16,
+            ingest_phase: IngestPhase::Idle,
+            ingest_chan: 0,
         }
     }
 
@@ -1123,6 +1216,53 @@ mod tests {
         assert!(out.contains("tail 92.2s"), "consumer_done - producer_done");
         assert!(out.contains("RAW 2600"));
         assert!(out.contains("std 130"));
+    }
+
+    #[test]
+    fn format_log_shows_ingest_line_when_a_phase_is_active() {
+        let mut g = sample_gauges();
+        g.ingest_phase = IngestPhase::Decode;
+        g.ingest_chan = 512;
+        g.ingest_done = 1450;
+        g.ingest_total = 2730;
+        let s = build_snapshot(
+            1.0,
+            &AppCounters::default(),
+            &AppCounters::default(),
+            &AppCounters::default(),
+            ferrolite_jobs::JobStats::default(),
+            g,
+            5.0,
+            5.0,
+            false,
+        );
+        let out = format_log(&s);
+        assert!(
+            out.contains("ingest  phase decode 1450/2730"),
+            "shows phase + progress"
+        );
+        assert!(out.contains("chan 512"), "shows channel depth");
+    }
+
+    #[test]
+    fn format_log_hides_ingest_line_when_idle() {
+        let mut g = sample_gauges();
+        g.ingest_phase = IngestPhase::Idle;
+        let s = build_snapshot(
+            1.0,
+            &AppCounters::default(),
+            &AppCounters::default(),
+            &AppCounters::default(),
+            ferrolite_jobs::JobStats::default(),
+            g,
+            5.0,
+            5.0,
+            false,
+        );
+        assert!(
+            !format_log(&s).contains(" ingest  phase"),
+            "no ingest line when idle"
+        );
     }
 
     #[test]

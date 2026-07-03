@@ -294,6 +294,9 @@ fn ingest_job(
     let mut producer_done_s = 0.0f64;
     let mut producer_done_at_s = 0.0f64;
 
+    if profile.is_some() {
+        crate::diag::set_ingest_phase(crate::diag::IngestPhase::Scan);
+    }
     let t_scan = profile.as_ref().map(|_| std::time::Instant::now());
     let files = scan_tree(&folder);
     if let Some(t) = t_scan {
@@ -328,6 +331,9 @@ fn ingest_job(
     // instead of being gated by the ~metadata rate; dimensions and thumbnails
     // stream in during Phase B below. `insert_pending` leaves already-indexed rows
     // untouched, so re-opening a folder stays instant.
+    if profile.is_some() {
+        crate::diag::set_ingest_phase(crate::diag::IngestPhase::PhaseA);
+    }
     let t_phase_a = profile.as_ref().map(|_| std::time::Instant::now());
     {
         let added_at = now_epoch_secs();
@@ -416,6 +422,7 @@ fn ingest_job(
                         Ok(row) => {
                             if let Some(p) = &profile {
                                 p.on_recv();
+                                crate::diag::note_ingest_chan(p.chan_inflight());
                             }
                             pending.push(row);
                             if pending.len() >= INGEST_WRITE_BATCH {
@@ -467,6 +474,9 @@ fn ingest_job(
         // (Incremental skips unchanged files by (mtime,size); Full forces all), so
         // the status bar knows the true denominator. `to_process` pairs each file
         // with its resolved folder_id. Emit the planned total once.
+        if profile.is_some() {
+            crate::diag::set_ingest_phase(crate::diag::IngestPhase::Filter);
+        }
         let t_filter = profile.as_ref().map(|_| std::time::Instant::now());
         let to_process: Vec<(&ferrolite_catalog::ScannedFile, i64)> = files
             .iter()
@@ -495,6 +505,9 @@ fn ingest_job(
         // success, generates the thumbnail inline; the finished row + thumbnail is
         // streamed to the consumer. When the parallel pass ends, every cloned
         // sender drops and the channel closes, draining the consumer to completion.
+        if profile.is_some() {
+            crate::diag::set_ingest_phase(crate::diag::IngestPhase::Decode);
+        }
         let t_producer = profile.as_ref().map(|_| std::time::Instant::now());
         to_process
             .par_iter()
@@ -549,6 +562,7 @@ fn ingest_job(
                         }
                         if let Some(p) = profile.as_ref() {
                             p.on_send();
+                            crate::diag::note_ingest_chan(p.chan_inflight());
                         }
                         let _ = sender.send((new_image, thumb));
                     }
@@ -563,6 +577,7 @@ fn ingest_job(
                         );
                         if let Some(p) = profile.as_ref() {
                             p.on_send();
+                            crate::diag::note_ingest_chan(p.chan_inflight());
                         }
                         let _ = sender.send((new_image, None));
                     }
@@ -632,6 +647,9 @@ fn ingest_job(
         crate::diag::emit_ingest_summary(&summary);
     }
 
+    if profile.is_some() {
+        crate::diag::set_ingest_phase(crate::diag::IngestPhase::Idle);
+    }
     let _ = tx.send(AppEvent::IngestDone);
     ctx.request_repaint();
 }

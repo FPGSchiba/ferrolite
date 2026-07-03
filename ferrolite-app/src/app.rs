@@ -2022,6 +2022,8 @@ impl eframe::App for FerroliteApp {
                 ingest_done: self.state.ingest_done,
                 ingest_total: self.state.ingest_total,
                 uploads_cap: MAX_THUMB_UPLOADS_PER_FRAME,
+                ingest_phase: crate::diag::ingest_phase(),
+                ingest_chan: crate::diag::ingest_chan(),
             };
             let stats = self.state.jobs.stats();
             if let Some(snap) = self.diag.tick(

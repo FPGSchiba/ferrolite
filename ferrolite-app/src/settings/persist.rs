@@ -35,6 +35,24 @@ pub fn load() -> Settings {
     }
 }
 
+/// Persist settings off the UI thread. Serializes to a String on the caller
+/// (cheap, <ms) then writes the file on a Background job so the update thread
+/// never touches disk (CLAUDE.md). Creates the parent dir if needed. Mirrors
+/// `develop::ops_persist::spawn_ops_write`'s job-submission pattern: an
+/// `Arc<ferrolite_jobs::JobSystem>` handle, `Priority::Background` (lowest;
+/// preemptible by any thumbnail/decode/ops work), no cancellation token
+/// needed for a fire-and-forget settings write.
+pub fn save(jobs: &std::sync::Arc<ferrolite_jobs::JobSystem>, settings: &Settings) {
+    let text = to_json(settings);
+    let path = settings_path();
+    jobs.submit(ferrolite_jobs::Priority::Background, move |_cancel| {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&path, text.as_bytes());
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

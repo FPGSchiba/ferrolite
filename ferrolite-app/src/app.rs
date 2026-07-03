@@ -575,30 +575,36 @@ impl FerroliteApp {
         // `EditPipeline` ONCE here and retain it (`v.preview_edit`) for reuse by
         // `set_preview_and_full` — never compiled per edit (CLAUDE.md rule 2).
         // Standard images never reach `apply_full_decoded`.
-        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if is_raw {
-            let src = std::sync::Arc::new(image.clone());
-            match self.state.viewer.as_mut() {
-                Some(v) if v.image_id == image_id => {
-                    v.raw_preview_source = Some(std::sync::Arc::clone(&src));
-                    let ctx_arc =
-                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let mut ep = ferrolite_pipeline::EditPipeline::new(
-                        ctx_arc,
-                        &src,
-                        v.op_stack.clone(),
-                        cam,
-                    );
-                    let out = ep.evaluate();
-                    let tex = out.texture.clone();
-                    let dims = (out.width, out.height);
-                    v.preview_edit = Some(ep);
-                    Some((tex, dims))
+        // Build the camera-native reveal source ONCE for RAW. This same `Arc` is
+        // reused both as `v.raw_preview_source` (the rung-1 reveal render input)
+        // AND as the preview-cache write-back payload below — the demosaiced
+        // buffer is never memcpy'd a second time onto the UI thread.
+        let raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
+            is_raw.then(|| std::sync::Arc::new(image.clone()));
+        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> =
+            if let Some(src) = raw_preview_source.as_ref() {
+                match self.state.viewer.as_mut() {
+                    Some(v) if v.image_id == image_id => {
+                        v.raw_preview_source = Some(std::sync::Arc::clone(src));
+                        let ctx_arc =
+                            std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                        let mut ep = ferrolite_pipeline::EditPipeline::new(
+                            ctx_arc,
+                            src,
+                            v.op_stack.clone(),
+                            cam,
+                        );
+                        let out = ep.evaluate();
+                        let tex = out.texture.clone();
+                        let dims = (out.width, out.height);
+                        v.preview_edit = Some(ep);
+                        Some((tex, dims))
+                    }
+                    _ => None,
                 }
-                _ => None,
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
             std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
@@ -728,10 +734,11 @@ impl FerroliteApp {
         //
         // Task 6 threads the real "cache miss" flag through the read path:
         // `v.cache_write_back` is `false` after a cache HIT (the entry already
-        // exists) and `true` after a MISS, so a hit never re-encodes. All
-        // encode/JPEG/disk I/O runs inside the job — the
-        // only UI-thread work here is `key_for` (a small `fs::metadata`) and
-        // cloning the render/matrix into the job (CLAUDE.md threading rule 1).
+        // exists) and `true` after a MISS, so a hit never re-encodes. Key
+        // assembly (`key_for`'s `fs::metadata` stat), encode/JPEG, and disk I/O
+        // all run inside the Background job. The only UI-thread work here is the
+        // `should_write_back` guard plus cheap refcount bumps (the reveal render
+        // `Arc` is reused — no second full-buffer clone) (CLAUDE.md rule 1).
         if full_installed {
             // Snapshot the viewer inputs, then release the borrow before the
             // job submit (which borrows other `self.state` fields).
@@ -746,41 +753,37 @@ impl FerroliteApp {
                 )
                 .then(|| (v.path.clone(), v.op_stack.clone()))
             });
-            if let Some((path, op_stack)) = write_back {
-                match crate::develop::preview_cache::key_for(
-                    &path,
-                    &op_stack,
+            // `should_write_back` requires `is_raw`, so `raw_preview_source` is
+            // always `Some` here — but match defensively rather than unwrap.
+            if let (Some((path, op_stack)), Some(render)) =
+                (write_back, raw_preview_source.as_ref())
+            {
+                // Identity display pipeline: camera→working (`cam`) then
+                // working→display. `mul_mat3(a, b)` = a·b, so this applies
+                // `cam` first, matching the identity reveal (minus 8-bit
+                // quantization). The op stack is NOT applied here — the guard
+                // above ensures we only reach this when it is identity anyway.
+                let display_matrix = ferrolite_color::mul_mat3(
+                    &ferrolite_color::working_to_display(self.state.working_space),
+                    &cam,
+                );
+                // Reuse the reveal `Arc` (no second full-buffer clone) and let
+                // the job assemble the key off-thread (`key_for` does an
+                // `fs::metadata` stat — never on the UI thread).
+                crate::develop::preview_cache::spawn_cache_write(
+                    &self.state.jobs,
+                    std::sync::Arc::clone(&self.state.preview_store),
+                    &self.state.tx,
+                    ctx,
+                    path,
+                    op_stack,
                     self.state.working_space,
-                    color_profile,
-                ) {
-                    Ok(key) => {
-                        // Identity display pipeline: camera→working (`cam`) then
-                        // working→display. `mul_mat3(a, b)` = a·b, so this applies
-                        // `cam` first, matching the identity reveal (minus 8-bit
-                        // quantization). The op stack is NOT applied here — the
-                        // guard above ensures we only reach this when it is
-                        // identity anyway.
-                        let display_matrix = ferrolite_color::mul_mat3(
-                            &ferrolite_color::working_to_display(self.state.working_space),
-                            &cam,
-                        );
-                        crate::develop::preview_cache::spawn_cache_write(
-                            &self.state.jobs,
-                            std::sync::Arc::clone(&self.state.preview_store),
-                            &self.state.tx,
-                            ctx,
-                            key,
-                            image.clone(),
-                            display_matrix,
-                            ferrolite_previews::DEFAULT_CACHE_CAP_BYTES,
-                            image_id,
-                        );
-                    }
-                    Err(err) => {
-                        // A cache failure must never disturb the viewer.
-                        eprintln!("preview cache: key_for failed for #{image_id}: {err}");
-                    }
-                }
+                    color_profile.clone(),
+                    std::sync::Arc::clone(render),
+                    display_matrix,
+                    ferrolite_previews::DEFAULT_CACHE_CAP_BYTES,
+                    image_id,
+                );
             }
         }
 

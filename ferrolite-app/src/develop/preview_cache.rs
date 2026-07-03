@@ -160,21 +160,32 @@ pub fn spawn_cache_read(
     })
 }
 
-/// Spawn a `Background` job that encodes `render` (with `display_matrix`
-/// applied) to a 2048px sRGB JPEG, stores it under `key`, and evicts the cache
-/// down to `cap` bytes. All encode / disk I/O happens on the job thread — the
-/// UI thread only builds the key and clones the render/matrix in. A cache
+/// Spawn a `Background` job that assembles the [`PreviewKey`] off-thread,
+/// encodes `render` (with `display_matrix` applied) to a 2048px sRGB JPEG,
+/// stores it under that key, and evicts the cache down to `cap` bytes. The key
+/// assembly ([`key_for`], which does an `fs::metadata` stat) and all
+/// encode / disk I/O happen on the job thread — the UI thread only clones the
+/// key inputs (`path`/`op_stack`/`working_space`/`color_profile`) and the
+/// render `Arc` (a cheap refcount bump, no O(pixels) memcpy) in. A cache
 /// failure is logged and dropped: it must never disturb the viewer. On success
 /// a [`AppEvent::PreviewCacheWritten`] is emitted (for metrics/tests) and a
 /// repaint requested.
+///
+/// `render` is an [`Arc`] over the SAME camera-native buffer the reveal uses
+/// (`v.raw_preview_source`), so the write-back never copies the demosaic a
+/// second time. `key_for` here is the shared assembler used by the read and
+/// prefetch paths, so the write-back key is identical to what those produce.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_cache_write(
     jobs: &Arc<JobSystem>,
     store: Arc<PreviewStore>,
     tx: &std::sync::mpsc::Sender<AppEvent>,
     ctx: &egui::Context,
-    key: PreviewKey,
-    render: LinearRgbaF32,
+    path: PathBuf,
+    op_stack: OpStack,
+    working_space: WorkingSpace,
+    color_profile: ColorProfile,
+    render: Arc<LinearRgbaF32>,
     display_matrix: Mat3,
     cap: u64,
     image_id: i64,
@@ -182,6 +193,15 @@ pub fn spawn_cache_write(
     let tx = tx.clone();
     let ctx = ctx.clone();
     jobs.submit(Priority::Background, move |_cancel| {
+        // Assemble the key off-thread: `key_for` does an `fs::metadata` stat,
+        // which must never run on the UI thread (CLAUDE.md threading rule 1).
+        let key = match key_for(&path, &op_stack, working_space, &color_profile) {
+            Ok(key) => key,
+            Err(err) => {
+                eprintln!("preview cache: key_for failed for #{image_id}: {err}");
+                return;
+            }
+        };
         let jpeg = match encode_srgb_jpeg(
             &render,
             display_matrix,

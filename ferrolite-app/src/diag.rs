@@ -717,10 +717,12 @@ pub struct IngestProfile {
     raw_us: Mutex<Vec<u32>>,
     std_us: Mutex<Vec<u32>>,
     slow: Mutex<Vec<SlowSample>>,
-    // RAW byte-source tier counts across ALL files (not just slow): the confirming
-    // signal that the slow tail == the mmap-fallback population.
+    // RAW byte-source tier counts across ALL files (not just slow): how far the
+    // incremental read had to grow. `grown`+`full` are the files that missed the
+    // 1 MiB prefix (the former slow tail); `full` needed the whole file.
     prefix_hits: AtomicU64,
-    fallbacks: AtomicU64,
+    grown: AtomicU64,
+    full: AtomicU64,
 }
 
 impl IngestProfile {
@@ -791,19 +793,23 @@ impl IngestProfile {
     pub fn slow_samples(&self) -> Vec<SlowSample> {
         self.slow.lock().map(|v| v.clone()).unwrap_or_default()
     }
-    /// Count one RAW file's byte-source tier (prefix fast-path vs mmap fallback).
+    /// Count one RAW file's byte-source tier (how far the incremental read grew).
     pub fn record_source(&self, kind: ferrolite_decode::SourceKind) {
         match kind {
             ferrolite_decode::SourceKind::Prefix => &self.prefix_hits,
-            ferrolite_decode::SourceKind::Fallback => &self.fallbacks,
+            ferrolite_decode::SourceKind::Grown => &self.grown,
+            ferrolite_decode::SourceKind::Full => &self.full,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
     pub fn prefix_hits(&self) -> u64 {
         self.prefix_hits.load(Ordering::Relaxed)
     }
-    pub fn fallbacks(&self) -> u64 {
-        self.fallbacks.load(Ordering::Relaxed)
+    pub fn grown(&self) -> u64 {
+        self.grown.load(Ordering::Relaxed)
+    }
+    pub fn full(&self) -> u64 {
+        self.full.load(Ordering::Relaxed)
     }
 }
 
@@ -912,6 +918,8 @@ pub struct SlowSample {
     pub decode_ms: f64,
     /// Which byte-source tier the file used (`None` for non-RAW).
     pub source_kind: Option<ferrolite_decode::SourceKind>,
+    /// Bytes read to satisfy the decode (0 when unknown / non-RAW).
+    pub source_bytes: u64,
     // Per-stage sub-timings (ms); together with the residual `rest` they split
     // `decode_ms`. 0.0 when the stage was not measured / not applicable.
     pub source_acquire_ms: f64,
@@ -961,7 +969,8 @@ pub fn source_label(s: ferrolite_decode::PreviewSource) -> &'static str {
 pub fn source_kind_label(k: Option<ferrolite_decode::SourceKind>) -> &'static str {
     match k {
         Some(ferrolite_decode::SourceKind::Prefix) => "prefix",
-        Some(ferrolite_decode::SourceKind::Fallback) => "fallback",
+        Some(ferrolite_decode::SourceKind::Grown) => "grown",
+        Some(ferrolite_decode::SourceKind::Full) => "full",
         None => "n/a",
     }
 }
@@ -992,11 +1001,12 @@ fn ascii_quote(s: &str) -> String {
 /// extract / orient) plus the unattributed `rest`, and tags the byte-source tier.
 pub fn format_slow_line(s: &SlowSample) -> String {
     format!(
-        "[ingest-slow] {dec:.0}ms [{tier}] (acquire {acq:.0} / decoder {gd:.0} / meta {rm:.0} / \
+        "[ingest-slow] {dec:.0}ms [{tier} {smb:.1}MB] (acquire {acq:.0} / decoder {gd:.0} / meta {rm:.0} / \
          dims {rd:.0} / extract {ex:.0} / orient {or:.0} / rest {rest:.0}) \
          {kind} {w}x{h} {mp:.1}MP via {src} model={model} {path}",
         dec = s.decode_ms,
         tier = source_kind_label(s.source_kind),
+        smb = s.source_bytes as f64 / 1_048_576.0,
         acq = s.source_acquire_ms,
         gd = s.get_decoder_ms,
         rm = s.raw_metadata_ms,
@@ -1037,12 +1047,13 @@ pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> Stri
     let orient_sum_s = sum_s(|s| s.orient_ms);
     let rest_s = sum_s(|s| s.rest_ms());
 
-    // By byte-source tier: the confirming count — `fallback` should ≈ the slow set.
+    // By byte-source tier: how far the read had to grow to satisfy each slow file.
     let count_kind = |k: ferrolite_decode::SourceKind| {
         samples.iter().filter(|s| s.source_kind == Some(k)).count()
     };
     let prefix_n = count_kind(ferrolite_decode::SourceKind::Prefix);
-    let fallback_n = count_kind(ferrolite_decode::SourceKind::Fallback);
+    let grown_n = count_kind(ferrolite_decode::SourceKind::Grown);
+    let full_n = count_kind(ferrolite_decode::SourceKind::Full);
 
     let count_src = |src: PreviewSource| samples.iter().filter(|s| s.source == src).count();
     let by_source = format!(
@@ -1108,7 +1119,7 @@ pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> Stri
 
     format!(
         "[ingest-slow-summary] {n} slow files ({share:.1}% of {total_files})\n\
-         \x20by path    prefix {pfx} | fallback {fb}\n\
+         \x20by path    prefix {pfx} | grown {grn} | full {full}\n\
          \x20stage sums acquire {acq:.1}s / decoder {gd:.1}s / meta {rm:.1}s / dims {rd:.1}s / \
          extract {es:.1}s / orient {os:.1}s / rest {rest:.1}s\n\
          \x20by source  {by_source}\n\
@@ -1118,7 +1129,8 @@ pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> Stri
         share = share,
         total_files = total_files,
         pfx = prefix_n,
-        fb = fallback_n,
+        grn = grown_n,
+        full = full_n,
         acq = acquire_s,
         gd = decoder_s,
         rm = meta_s,
@@ -1141,28 +1153,29 @@ pub fn emit_slow_aggregate(samples: &[SlowSample], total_files: usize) {
     write_log(&format_slow_aggregate(samples, total_files));
 }
 
-/// One-line RAW byte-source tier split across ALL files: the fast 1 MiB prefix
-/// vs the full mmap fallback. `fallback` ≈ the slow-file count is the confirming
-/// signal that the seek-thrash fallback is the tail.
-pub fn format_source_split(prefix: u64, fallback: u64) -> String {
-    let total = prefix + fallback;
+/// One-line RAW byte-source tier split across ALL files: how far the incremental
+/// read had to grow. `prefix` = satisfied by the 1 MiB fast path; `grown`/`full`
+/// missed it (the former mmap-fallback tail); `full` needed the whole file.
+pub fn format_source_split(prefix: u64, grown: u64, full: u64) -> String {
+    let total = prefix + grown + full;
+    let non_prefix = grown + full;
     let pct = if total > 0 {
-        100.0 * fallback as f64 / total as f64
+        100.0 * non_prefix as f64 / total as f64
     } else {
         0.0
     };
     format!(
-        "[ingest-source] RAW byte-source: prefix {prefix} | fallback {fallback} \
-         ({pct:.1}% fallback of {total})"
+        "[ingest-source] RAW byte-source: prefix {prefix} | grown {grown} | full {full} \
+         ({pct:.1}% needed >1MiB of {total})"
     )
 }
 
 /// Emit the RAW byte-source split to the diag sink. No-op when diag is off.
-pub fn emit_source_split(prefix: u64, fallback: u64) {
+pub fn emit_source_split(prefix: u64, grown: u64, full: u64) {
     if !enabled() {
         return;
     }
-    write_log(&format_source_split(prefix, fallback));
+    write_log(&format_source_split(prefix, grown, full));
 }
 
 /// Bytes pre-read to force + time the disk IO a preview decode pages in (headless
@@ -1580,12 +1593,13 @@ mod tests {
         model: &str,
         path: &str,
     ) -> SlowSample {
-        // Default the new stage timings to 0 and the tier to Fallback, so the
+        // Default the new stage timings to 0 and the tier to Grown, so the
         // legacy `extract`/`orient`/`rest` assertions stay meaningful (rest =
         // decode - extract - orient when the other stages are zero).
         SlowSample {
             decode_ms,
-            source_kind: Some(ferrolite_decode::SourceKind::Fallback),
+            source_kind: Some(ferrolite_decode::SourceKind::Grown),
+            source_bytes: 8 << 20,
             source_acquire_ms: 0.0,
             get_decoder_ms: 0.0,
             raw_metadata_ms: 0.0,
@@ -1617,7 +1631,7 @@ mod tests {
         let out = format_slow_line(&s);
         assert!(out.starts_with("[ingest-slow]"));
         assert!(out.contains("5305ms"));
-        assert!(out.contains("[fallback]"), "shows the byte-source tier tag");
+        assert!(out.contains("[grown 8.0MB]"), "shows tier tag + bytes read");
         assert!(out.contains("acquire 0"));
         assert!(out.contains("extract 5100"));
         assert!(out.contains("orient 190"));
@@ -1631,11 +1645,12 @@ mod tests {
 
     #[test]
     fn format_source_split_reports_counts_and_pct() {
-        let out = format_source_split(2900, 386);
+        let out = format_source_split(2900, 350, 36);
         assert!(out.starts_with("[ingest-source]"));
         assert!(out.contains("prefix 2900"));
-        assert!(out.contains("fallback 386"));
-        assert!(out.contains("of 3286"));
+        assert!(out.contains("grown 350"));
+        assert!(out.contains("full 36"));
+        assert!(out.contains("of 3286")); // 2900 + 350 + 36
         assert!(out.is_ascii());
     }
 
@@ -1645,9 +1660,11 @@ mod tests {
         let p = IngestProfile::default();
         p.record_source(SourceKind::Prefix);
         p.record_source(SourceKind::Prefix);
-        p.record_source(SourceKind::Fallback);
+        p.record_source(SourceKind::Grown);
+        p.record_source(SourceKind::Full);
         assert_eq!(p.prefix_hits(), 2);
-        assert_eq!(p.fallbacks(), 1);
+        assert_eq!(p.grown(), 1);
+        assert_eq!(p.full(), 1);
     }
 
     #[test]
@@ -1714,8 +1731,8 @@ mod tests {
         assert!(out.contains("thumbnail 1"));
         assert!(out.contains("ILCE-7M4"));
         assert!(out.contains("NIKON Z 7"));
-        // by-path tier counts (all three samples default to Fallback).
-        assert!(out.contains("prefix 0 | fallback 3"));
+        // by-path tier counts (all three samples default to Grown).
+        assert!(out.contains("prefix 0 | grown 3 | full 0"));
         // stage-sum rollup line present.
         assert!(out.contains("stage sums"));
         // top-slowest section lists the 6000ms file first.

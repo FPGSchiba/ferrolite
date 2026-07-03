@@ -532,8 +532,8 @@ fn ingest_job(
                     Ok((meta, preview, info)) => {
                         if let Some(p) = profile.as_ref() {
                             // Count the byte-source tier for every RAW decode (not
-                            // just slow ones): `fallbacks` ≈ the slow-file count is
-                            // the signal that the mmap fallback is the tail.
+                            // just slow ones): grown+full are the files that missed
+                            // the 1 MiB prefix (the former slow tail).
                             if let Some(kind) = info.source_kind {
                                 p.record_source(kind);
                             }
@@ -546,6 +546,7 @@ fn ingest_job(
                                     let sample = crate::diag::SlowSample {
                                         decode_ms,
                                         source_kind: info.source_kind,
+                                        source_bytes: info.source_bytes.unwrap_or(0),
                                         source_acquire_ms: to_ms(info.source_acquire),
                                         get_decoder_ms: to_ms(info.get_decoder),
                                         raw_metadata_ms: to_ms(info.raw_metadata),
@@ -684,7 +685,7 @@ fn ingest_job(
         };
         crate::diag::emit_ingest_summary(&summary);
         crate::diag::emit_slow_aggregate(&p.slow_samples(), file_count);
-        crate::diag::emit_source_split(p.prefix_hits(), p.fallbacks());
+        crate::diag::emit_source_split(p.prefix_hits(), p.grown(), p.full());
     }
 
     if profile.is_some() {

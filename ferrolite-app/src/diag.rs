@@ -779,13 +779,11 @@ impl IngestProfile {
     pub fn std_samples(&self) -> Vec<u32> {
         self.std_us.lock().map(|v| v.clone()).unwrap_or_default()
     }
-    #[allow(dead_code)] // wired to ingest in Task 4
     pub fn record_slow(&self, s: SlowSample) {
         if let Ok(mut v) = self.slow.lock() {
             v.push(s);
         }
     }
-    #[allow(dead_code)] // wired to ingest in Task 4
     pub fn slow_samples(&self) -> Vec<SlowSample> {
         self.slow.lock().map(|v| v.clone()).unwrap_or_default()
     }
@@ -886,13 +884,11 @@ pub fn emit_ingest_summary(s: &IngestSummary) {
 }
 
 /// Max slowest files listed in the aggregate block.
-#[allow(dead_code)] // consumed by emit_slow_aggregate, wired to ingest in Task 4
 const SLOW_TOP_N: usize = 10;
 
 /// One slow-decode sample, recorded only when profiling is on and a file's total
-/// decode time crossed `slow_threshold_ms()`. Not yet constructed outside tests;
-/// `ingest.rs` records these via `IngestProfile::record_slow` in Task 4.
-#[allow(dead_code)]
+/// decode time crossed `slow_threshold_ms()`. Constructed by `ingest.rs` via
+/// `IngestProfile::record_slow`.
 #[derive(Debug, Clone)]
 pub struct SlowSample {
     pub decode_ms: f64,
@@ -907,14 +903,12 @@ pub struct SlowSample {
 }
 
 impl SlowSample {
-    #[allow(dead_code)] // used by format_slow_line, wired to ingest in Task 4
     fn megapixels(&self) -> f64 {
         (self.src_w as f64 * self.src_h as f64) / 1_000_000.0
     }
 }
 
 /// Short ASCII label for a preview source (used in logs).
-#[allow(dead_code)] // wired to ingest in Task 4
 pub fn source_label(s: ferrolite_decode::PreviewSource) -> &'static str {
     use ferrolite_decode::PreviewSource::*;
     match s {
@@ -926,7 +920,6 @@ pub fn source_label(s: ferrolite_decode::PreviewSource) -> &'static str {
 
 /// Slow-file logging threshold in ms: `FERROLITE_DIAG_SLOW_MS` if set and valid,
 /// else 500. Cached once.
-#[allow(dead_code)] // wired to ingest in Task 4
 pub fn slow_threshold_ms() -> f64 {
     static T: OnceLock<f64> = OnceLock::new();
     *T.get_or_init(|| {
@@ -938,13 +931,20 @@ pub fn slow_threshold_ms() -> f64 {
     })
 }
 
+/// Quote `s` for diagnostic output while guaranteeing the result is ASCII-only.
+/// `escape_default()` turns every non-ASCII/control char into a `\xNN`/`\u{...}`
+/// escape, so free-form fields (camera model, filesystem path) can never inject
+/// mojibake into the log even on non-ASCII Windows paths.
+fn ascii_quote(s: &str) -> String {
+    format!("\"{}\"", s.escape_default())
+}
+
 /// One-line slow-file record. ASCII-only.
-#[allow(dead_code)] // wired to ingest in Task 4
 pub fn format_slow_line(s: &SlowSample) -> String {
     let rest = (s.decode_ms - s.extract_ms - s.orient_ms).max(0.0);
     format!(
         "[ingest-slow] {dec:.0}ms (extract {ex:.0} / orient {or:.0} / rest {rest:.0}) \
-         {kind} {w}x{h} {mp:.1}MP via {src} model={model:?} {path:?}",
+         {kind} {w}x{h} {mp:.1}MP via {src} model={model} {path}",
         dec = s.decode_ms,
         ex = s.extract_ms,
         or = s.orient_ms,
@@ -954,13 +954,12 @@ pub fn format_slow_line(s: &SlowSample) -> String {
         h = s.src_h,
         mp = s.megapixels(),
         src = source_label(s.source),
-        model = s.model,
-        path = s.path,
+        model = ascii_quote(&s.model),
+        path = ascii_quote(&s.path),
     )
 }
 
 /// End-of-ingest aggregate over all slow samples. ASCII-only.
-#[allow(dead_code)] // wired to ingest in Task 4
 pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> String {
     use ferrolite_decode::PreviewSource;
     if samples.is_empty() {
@@ -997,7 +996,12 @@ pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> Stri
                 .collect();
             (
                 ms.len(),
-                format!("{m:?} {} (p50 {}ms)", ms.len(), percentile(&ms, 0.5)),
+                format!(
+                    "{} {} (p50 {}ms)",
+                    ascii_quote(m),
+                    ms.len(),
+                    percentile(&ms, 0.5)
+                ),
             )
         })
         .collect();
@@ -1021,12 +1025,12 @@ pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> Stri
         .take(SLOW_TOP_N)
         .map(|s| {
             format!(
-                "  {dec:.0}ms {w}x{h} via {src} {path:?}",
+                "  {dec:.0}ms {w}x{h} via {src} {path}",
                 dec = s.decode_ms,
                 w = s.src_w,
                 h = s.src_h,
                 src = source_label(s.source),
-                path = s.path,
+                path = ascii_quote(&s.path),
             )
         })
         .collect::<Vec<_>>()
@@ -1051,7 +1055,6 @@ pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> Stri
 }
 
 /// Emit the slow aggregate to the diag sink. No-op when diag is off.
-#[allow(dead_code)] // wired to ingest in Task 4
 pub fn emit_slow_aggregate(samples: &[SlowSample], total_files: usize) {
     if !enabled() {
         return;
@@ -1511,6 +1514,29 @@ mod tests {
         assert!(out.contains("via full_image"));
         assert!(out.contains("ILCE-7M4"));
         assert!(out.is_ascii());
+    }
+
+    #[test]
+    fn slow_formatters_are_ascii_even_with_non_ascii_model_and_path() {
+        use ferrolite_decode::PreviewSource;
+        let s = slow_sample(
+            600.0,
+            400.0,
+            50.0,
+            6048,
+            4032,
+            PreviewSource::FullImage,
+            "Canikón",
+            "C:/\u{dc}nsern/DSC.ARW",
+        );
+        assert!(
+            format_slow_line(&s).is_ascii(),
+            "format_slow_line must escape non-ASCII model/path"
+        );
+        assert!(
+            format_slow_aggregate(std::slice::from_ref(&s), 1).is_ascii(),
+            "format_slow_aggregate must escape non-ASCII model/path"
+        );
     }
 
     #[test]

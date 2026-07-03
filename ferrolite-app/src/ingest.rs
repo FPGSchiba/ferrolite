@@ -522,12 +522,35 @@ fn ingest_job(
                         .unwrap_or_default();
                 let is_raw = matches!(f.kind, ferrolite_catalog::FileKind::Raw);
                 let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
-                let decoded = ferrolite_decode::decode_meta_and_preview(&f.path, f.kind, false);
-                if let (Some(t), Some(p)) = (t_meta, profile.as_ref()) {
-                    p.record_decode(t.elapsed().as_micros() as u64, is_raw);
+                let measure = crate::diag::enabled();
+                let decoded = ferrolite_decode::decode_meta_and_preview(&f.path, f.kind, measure);
+                let decode_us = t_meta.map(|t| t.elapsed().as_micros() as u64);
+                if let (Some(us), Some(p)) = (decode_us, profile.as_ref()) {
+                    p.record_decode(us, is_raw);
                 }
                 match decoded {
-                    Ok((meta, preview, _info)) => {
+                    Ok((meta, preview, info)) => {
+                        if let (Some(p), Some(us)) = (profile.as_ref(), decode_us) {
+                            let decode_ms = us as f64 / 1000.0;
+                            if decode_ms >= crate::diag::slow_threshold_ms() {
+                                let to_ms = |d: Option<std::time::Duration>| {
+                                    d.map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+                                };
+                                let sample = crate::diag::SlowSample {
+                                    decode_ms,
+                                    extract_ms: to_ms(info.extract),
+                                    orient_ms: to_ms(info.orient),
+                                    is_raw,
+                                    src_w: info.src_w,
+                                    src_h: info.src_h,
+                                    source: info.source,
+                                    model: meta.model.clone(),
+                                    path: f.path.display().to_string(),
+                                };
+                                crate::diag::write_log(&crate::diag::format_slow_line(&sample));
+                                p.record_slow(sample);
+                            }
+                        }
                         let new_image = NewImage::from_metadata(
                             folder_id,
                             f.filename.clone(),
@@ -647,6 +670,7 @@ fn ingest_job(
             std_p50_ms: us_to_ms(crate::diag::percentile(&std_s, 0.5)),
         };
         crate::diag::emit_ingest_summary(&summary);
+        crate::diag::emit_slow_aggregate(&p.slow_samples(), file_count);
     }
 
     if profile.is_some() {

@@ -25,6 +25,9 @@ pub struct FerroliteApp {
     /// cleared by `save_settings_if_dirty()`, which coalesces any number of
     /// per-frame edits into a single off-thread write per frame.
     settings_dirty: bool,
+    /// One-shot restore-session guard: set `true` on the first `update()` frame,
+    /// whether or not a restore actually happened, so the check runs exactly once.
+    did_restore: bool,
 }
 
 impl FerroliteApp {
@@ -60,6 +63,7 @@ impl FerroliteApp {
             pending_texture_clear: false,
             diag: crate::diag::DiagState::new(),
             settings_dirty: false,
+            did_restore: false,
         }
     }
 
@@ -1552,6 +1556,27 @@ impl eframe::App for FerroliteApp {
         // this frame's paint jobs.
         self.state.textures.begin_frame();
 
+        // One-shot restore-session (opt-in via `settings.restore_session`), run on
+        // the very first frame. Reopens the last folder through the SAME job-based
+        // ingest path "Open folder…" uses (never a synchronous walk on the UI
+        // thread — CLAUDE.md) and then restores the last active module.
+        if !self.did_restore {
+            self.did_restore = true;
+            if self.state.settings.restore_session {
+                if let Some(folder) = self.state.settings.last_folder.clone() {
+                    if folder.is_dir() {
+                        crate::ingest::spawn_ingest(&mut self.state, ctx, folder);
+                        self.module = self.state.settings.last_module.to_module();
+                    } else {
+                        eprintln!(
+                            "ferrolite: restore-session skipped, folder missing: {}",
+                            folder.display()
+                        );
+                    }
+                }
+            }
+        }
+
         let diag_t0 = crate::diag::enabled().then(std::time::Instant::now);
 
         if crate::diag::enabled() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
@@ -1781,8 +1806,14 @@ impl eframe::App for FerroliteApp {
                     v.pyramid.is_some()
                         || (v.kind != ferrolite_image::FileKind::Raw && v.preview_source.is_some())
                 });
+                let module_before = self.module;
                 let menu_action =
                     crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1", export_enabled);
+                if self.module != module_before {
+                    self.state.settings.last_module =
+                        crate::settings::dto::PersistedModule::from_module(self.module);
+                    self.mark_settings_dirty();
+                }
                 match menu_action {
                     Some(crate::chrome::MenuAction::ExportImage) => self.open_export_dialog(),
                     Some(crate::chrome::MenuAction::AddToQueue) => {
@@ -1937,7 +1968,9 @@ impl eframe::App for FerroliteApp {
                         }),
                 )
                 .show(ctx, |ui| {
-                    crate::library::panel::show(ui, &mut self.state, ctx);
+                    if crate::library::panel::show(ui, &mut self.state, ctx) {
+                        self.mark_settings_dirty();
+                    }
                 });
         }
 

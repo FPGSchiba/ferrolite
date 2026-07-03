@@ -298,6 +298,19 @@ impl Keymap {
             .map(|(o, _)| *o)
     }
 
+    /// Fill any action missing from `map` with its default chord. Guards
+    /// against a hand-edited/partial settings file (e.g. an explicit `{}`
+    /// keymap object) deserializing to an incomplete map, which would
+    /// otherwise collapse every unbound action's `chord()` lookup to the
+    /// shared F1 fallback.
+    pub fn ensure_complete(&mut self) {
+        for a in Action::ALL {
+            self.map
+                .entry(a)
+                .or_insert_with(|| Keymap::defaults().chord(a));
+        }
+    }
+
     fn matches(ctx: &egui::Context, c: Chord) -> (bool, bool) {
         ctx.input(|i| {
             let mods = i.modifiers.command == c.ctrl

@@ -21,13 +21,15 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// Byte caps at which we pause the sequential read and retry the decode. 1 MiB
-/// covers ~88% of files (front-stored embedded preview); 8 MiB covers busier
-/// scenes whose preview crosses 1 MiB; past the last cap we read to EOF so any
-/// file still decodes correctly.
-const INGEST_READ_CAPS: [usize; 2] = [1 << 20, 8 << 20]; // 1 MiB, 8 MiB
+/// covers ~88% of files (front-stored embedded preview); the finer 2/4/8 MiB
+/// steps let a file whose preview crosses 1 MiB stop as soon as enough is read,
+/// instead of always pulling 8 MiB — on a slow SD card every extra MiB costs.
+/// Past the last cap we read to EOF so any file still decodes correctly.
+const INGEST_READ_CAPS: [usize; 4] = [1 << 20, 2 << 20, 4 << 20, 8 << 20];
 
-/// Chunk size for the sequential read.
-const READ_CHUNK: usize = 256 * 1024;
+/// Chunk size for the sequential read. Sized so the 1 MiB prefix is a single
+/// read syscall (a smaller chunk measurably slowed the fast path on the SD card).
+const READ_CHUNK: usize = 1 << 20;
 
 /// Which read tier satisfied the decode. Diagnostic-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

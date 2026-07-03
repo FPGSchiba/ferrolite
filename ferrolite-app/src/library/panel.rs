@@ -398,7 +398,10 @@ fn delete_collection(state: &mut AppState, collection_id: i64) {
     state.reload_vocab();
 }
 
-/// A leaf folder removes immediately; one with subfolders stages a confirm.
+/// A leaf folder removes immediately; one with subfolders stages a confirm —
+/// unless the user has turned off confirm-before-remove (`settings.confirm_remove`),
+/// in which case subtrees also remove immediately via the same cascade the
+/// modal's "Remove" button runs.
 fn request_remove(
     state: &mut AppState,
     folders: &[ferrolite_catalog::FolderRecord],
@@ -406,7 +409,7 @@ fn request_remove(
     name: &str,
 ) {
     let has_children = folders.iter().any(|f| f.parent_id == Some(id));
-    if has_children {
+    if has_children && state.settings.confirm_remove {
         state.pending_remove = Some(PendingRemove {
             id,
             name: name.to_string(),

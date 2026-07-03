@@ -53,21 +53,35 @@ pub fn show(ctx: &egui::Context, open: &mut bool, keymap: &Keymap) {
         return;
     }
 
+    let mut still_open = true;
+
     // Dimmed backdrop, consistent with other modal overlays in the app —
-    // painted first (background order) so the window draws on top of it.
+    // drawn in `Order::Middle` (below the `Order::Foreground` window added
+    // below) so the window content stays on top and clickable. The backdrop
+    // area is given a click `Sense` so it captures pointer input rather than
+    // letting it fall through to the app underneath, and a click on it
+    // (i.e. anywhere outside the Help window) closes the modal.
     egui::Area::new(egui::Id::new("help_modal_backdrop"))
-        .order(egui::Order::Background)
+        .order(egui::Order::Middle)
         .fixed_pos(egui::Pos2::ZERO)
         .show(ctx, |ui| {
             let screen = ctx.screen_rect();
             ui.painter()
                 .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(140));
+            let response = ui.interact(
+                screen,
+                ui.id().with("backdrop_click_catcher"),
+                egui::Sense::click(),
+            );
+            if response.clicked() {
+                still_open = false;
+            }
         });
 
-    let mut still_open = true;
     egui::Window::new("Help")
         .collapsible(false)
         .resizable(false)
+        .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .fixed_size(egui::vec2(480.0, 520.0))
         .show(ctx, |ui| {

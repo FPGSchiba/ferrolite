@@ -374,6 +374,16 @@ impl FerroliteApp {
         }
     }
 
+    /// True while any modal overlay is on screen (Help, the remove-folder
+    /// confirmation, and — later — Settings). Used to suppress the app's
+    /// global keyboard shortcuts underneath the modal so its own input
+    /// handling (e.g. Esc) is the only thing that reacts, and so shortcuts
+    /// like Enter/Ctrl+A don't leak through to the grid/viewer while a modal
+    /// is up. Extend this with new modals as they're added.
+    fn modal_active(&self) -> bool {
+        self.show_help || self.state.pending_remove.is_some()
+    }
+
     /// If the current viewer's edit stack changed this session, spawn a
     /// Background job to regenerate its Library thumbnail from the in-memory
     /// stack, then clear the flag so re-entrant frames do not double-spawn.
@@ -2131,249 +2141,252 @@ impl eframe::App for FerroliteApp {
                 });
         }
 
-        // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
-        // closed image's work stops competing with whatever is opened next.
-        if self
-            .state
-            .settings
-            .keymap
-            .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
-        {
-            self.maybe_regen_on_leave(ctx, frame);
-            if let Some(v) = self.state.viewer.take() {
-                v.cancel_loads();
-                self.cancel_viewer_tiles(frame, v.image_id);
-                self.module = crate::module::Module::Library;
-            }
-        }
-
-        // Enter opens the selected image in the viewer (library grid only, no
-        // viewer already open, exactly one image selected). Suppressed while the
-        // remove-confirmation modal is up or a text field holds focus (so a
-        // future search box's Enter won't pop the viewer).
-        if self.module.is_library()
-            && self.state.viewer.is_none()
-            && self.state.pending_remove.is_none()
-            && !ctx.wants_keyboard_input()
-            && self
+        // All app-level keyboard shortcuts below are suppressed while a modal
+        // (Help, remove-confirmation, ...) is on screen — see `modal_active`.
+        // This keeps a modal's own key handling (e.g. Help's Esc) as the only
+        // thing that reacts to a keypress, and stops shortcuts like Enter or
+        // Ctrl+A from leaking through to the grid/viewer underneath.
+        if !self.modal_active() {
+            // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
+            // closed image's work stops competing with whatever is opened next.
+            if self
                 .state
                 .settings
                 .keymap
-                .pressed(ctx, crate::settings::keymap::Action::OpenImage)
-        {
-            if let Some(sel_id) = self.state.selected {
-                if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
-                    self.open_record(ctx, frame, &rec);
+                .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
+            {
+                self.maybe_regen_on_leave(ctx, frame);
+                if let Some(v) = self.state.viewer.take() {
+                    v.cancel_loads();
+                    self.cancel_viewer_tiles(frame, v.image_id);
+                    self.module = crate::module::Module::Library;
                 }
             }
-        }
 
-        // F1 opens the Help modal. Global: works regardless of module/viewer
-        // state, but suppressed while a text field holds focus or the
-        // remove-confirmation modal is up (consistent with the neighboring
-        // shortcuts here).
-        if self.state.pending_remove.is_none()
-            && !ctx.wants_keyboard_input()
-            && self
-                .state
-                .settings
-                .keymap
-                .pressed(ctx, crate::settings::keymap::Action::OpenHelp)
-        {
-            self.show_help = true;
-        }
-
-        // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
-        // Library grid only (no viewer, no modal, no text field focused).
-        if self.module.is_library()
-            && self.state.viewer.is_none()
-            && self.state.pending_remove.is_none()
-            && !ctx.wants_keyboard_input()
-            && self
-                .state
-                .settings
-                .keymap
-                .pressed(ctx, crate::settings::keymap::Action::SelectAll)
-        {
-            self.state.toggle_select_all();
-        }
-
-        // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
-        // toggles. In Library (no viewer) they apply to the grid selection; in
-        // Develop or Library+viewer they apply to the open viewer image.
-        if self.state.pending_remove.is_none() && !ctx.wants_keyboard_input() {
-            use ferrolite_image::{Flag, Rating};
-
-            // --- 1. Read key intent ---
-            enum KeyIntent {
-                Rating(u8),
-                Flag(Flag),
-            }
-            // Routed through the keymap (one lookup per Action, each its own
-            // `ctx.input` call inside `Keymap::pressed`); priority order (ratings
-            // 0..5, then Pick, then Reject) and "one intent per frame" preserved.
-            use crate::settings::keymap::Action;
-            let km = &self.state.settings.keymap;
-            let rating_actions = [
-                Action::Rating0,
-                Action::Rating1,
-                Action::Rating2,
-                Action::Rating3,
-                Action::Rating4,
-                Action::Rating5,
-            ];
-            let mut intent = None;
-            for (n, action) in rating_actions.into_iter().enumerate() {
-                if km.pressed(ctx, action) {
-                    intent = Some(KeyIntent::Rating(n as u8));
-                    break;
-                }
-            }
-            let intent = intent.or_else(|| {
-                if km.pressed(ctx, Action::FlagPick) {
-                    Some(KeyIntent::Flag(Flag::Pick))
-                } else if km.pressed(ctx, Action::FlagReject) {
-                    Some(KeyIntent::Flag(Flag::Reject))
-                } else {
-                    None
-                }
-            });
-
-            if let Some(intent) = intent {
-                // --- 2. Resolve target image id ---
-                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                    self.state.selected
-                } else {
-                    self.state.viewer.as_ref().map(|v| v.image_id)
-                };
-
-                if let Some(target_id) = target_id {
-                    // --- 3. Look up current value ---
-                    let rec = self.state.images.iter().find(|r| r.id == target_id);
-                    let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
-                    let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
-
-                    // --- 4. Build toggled edit ---
-                    let edit = match intent {
-                        KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(Rating::new(
-                            crate::metadata::toggle_rating(cur_rating, n),
-                        )),
-                        KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
-                            crate::metadata::toggle_flag(cur_flag, f),
-                        ),
-                    };
-
-                    // --- 5. Apply ---
-                    if self.module.is_library() && self.state.viewer.is_none() {
-                        self.state.apply_metadata_edit(ctx, edit);
-                    } else {
-                        self.state
-                            .apply_metadata_edit_to_image(ctx, target_id, edit);
+            // Enter opens the selected image in the viewer (library grid only, no
+            // viewer already open, exactly one image selected). Suppressed while a
+            // modal is up or a text field holds focus (so a future search box's
+            // Enter won't pop the viewer).
+            if self.module.is_library()
+                && self.state.viewer.is_none()
+                && !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::OpenImage)
+            {
+                if let Some(sel_id) = self.state.selected {
+                    if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
+                        self.open_record(ctx, frame, &rec);
                     }
                 }
             }
 
-            // Q toggles export-queue membership for the same target image used
-            // by the rating/flag intents above (grid selection in Library-no-
-            // viewer, else the open viewer image). Kept as a parallel check
-            // rather than folded into `KeyIntent` so the rating/flag toggle
-            // logic above is untouched.
-            if self
-                .state
-                .settings
-                .keymap
-                .pressed(ctx, crate::settings::keymap::Action::AddToQueue)
+            // F1 opens the Help modal. Global: works regardless of module/viewer
+            // state, but suppressed while a text field holds focus or another
+            // modal is up (consistent with the neighboring shortcuts here).
+            if !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::OpenHelp)
             {
-                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                    self.state.selected
-                } else {
-                    self.state.viewer.as_ref().map(|v| v.image_id)
-                };
-                if let Some(target_id) = target_id {
-                    let was_queued = self.state.queue_contains(target_id);
-                    self.state.queue_toggle(target_id);
-                    self.state.warning = Some(if was_queued {
-                        "Removed from export queue.".to_string()
+                self.show_help = true;
+            }
+
+            // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
+            // Library grid only (no viewer, no modal, no text field focused).
+            if self.module.is_library()
+                && self.state.viewer.is_none()
+                && !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::SelectAll)
+            {
+                self.state.toggle_select_all();
+            }
+
+            // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
+            // toggles. In Library (no viewer) they apply to the grid selection; in
+            // Develop or Library+viewer they apply to the open viewer image.
+            if !ctx.wants_keyboard_input() {
+                use ferrolite_image::{Flag, Rating};
+
+                // --- 1. Read key intent ---
+                enum KeyIntent {
+                    Rating(u8),
+                    Flag(Flag),
+                }
+                // Routed through the keymap (one lookup per Action, each its own
+                // `ctx.input` call inside `Keymap::pressed`); priority order (ratings
+                // 0..5, then Pick, then Reject) and "one intent per frame" preserved.
+                use crate::settings::keymap::Action;
+                let km = &self.state.settings.keymap;
+                let rating_actions = [
+                    Action::Rating0,
+                    Action::Rating1,
+                    Action::Rating2,
+                    Action::Rating3,
+                    Action::Rating4,
+                    Action::Rating5,
+                ];
+                let mut intent = None;
+                for (n, action) in rating_actions.into_iter().enumerate() {
+                    if km.pressed(ctx, action) {
+                        intent = Some(KeyIntent::Rating(n as u8));
+                        break;
+                    }
+                }
+                let intent = intent.or_else(|| {
+                    if km.pressed(ctx, Action::FlagPick) {
+                        Some(KeyIntent::Flag(Flag::Pick))
+                    } else if km.pressed(ctx, Action::FlagReject) {
+                        Some(KeyIntent::Flag(Flag::Reject))
                     } else {
-                        "Added to export queue.".to_string()
-                    });
+                        None
+                    }
+                });
+
+                if let Some(intent) = intent {
+                    // --- 2. Resolve target image id ---
+                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                        self.state.selected
+                    } else {
+                        self.state.viewer.as_ref().map(|v| v.image_id)
+                    };
+
+                    if let Some(target_id) = target_id {
+                        // --- 3. Look up current value ---
+                        let rec = self.state.images.iter().find(|r| r.id == target_id);
+                        let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
+                        let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
+
+                        // --- 4. Build toggled edit ---
+                        let edit = match intent {
+                            KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(
+                                Rating::new(crate::metadata::toggle_rating(cur_rating, n)),
+                            ),
+                            KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
+                                crate::metadata::toggle_flag(cur_flag, f),
+                            ),
+                        };
+
+                        // --- 5. Apply ---
+                        if self.module.is_library() && self.state.viewer.is_none() {
+                            self.state.apply_metadata_edit(ctx, edit);
+                        } else {
+                            self.state
+                                .apply_metadata_edit_to_image(ctx, target_id, edit);
+                        }
+                    }
+                }
+
+                // Q toggles export-queue membership for the same target image used
+                // by the rating/flag intents above (grid selection in Library-no-
+                // viewer, else the open viewer image). Kept as a parallel check
+                // rather than folded into `KeyIntent` so the rating/flag toggle
+                // logic above is untouched.
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::AddToQueue)
+                {
+                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                        self.state.selected
+                    } else {
+                        self.state.viewer.as_ref().map(|v| v.image_id)
+                    };
+                    if let Some(target_id) = target_id {
+                        let was_queued = self.state.queue_contains(target_id);
+                        self.state.queue_toggle(target_id);
+                        self.state.warning = Some(if was_queued {
+                            "Removed from export queue.".to_string()
+                        } else {
+                            "Added to export queue.".to_string()
+                        });
+                    }
                 }
             }
-        }
 
-        // Left/Right move between images while viewing (Develop), non-cyclic.
-        if self.module == crate::module::Module::Develop
-            && self.state.viewer.is_some()
-            && !ctx.wants_keyboard_input()
-        {
-            let km = &self.state.settings.keymap;
-            let dir = if km.pressed(ctx, crate::settings::keymap::Action::NextImage) {
-                Some(crate::viewer::nav::Step::Next)
-            } else if km.pressed(ctx, crate::settings::keymap::Action::PrevImage) {
-                Some(crate::viewer::nav::Step::Prev)
-            } else {
-                None
-            };
-            if let Some(dir) = dir {
-                self.navigate_step(ctx, frame, dir);
-            }
-
-            // Before/After: `\` shows the empty (before) stack while held, and
-            // reverts to the live stack on release.
-            //
-            // NOTE (Task 2.3 keymap routing, deliberate behavior change): the
-            // dispatch for this refactor explicitly routes `HoldBeforePeek`
-            // through `Keymap::held` (level-triggered), matching the keymap's
-            // own design — `Action::HoldBeforePeek` is documented as "Hold to
-            // show original (before)" and `held()` exists specifically for this
-            // action. The pre-refactor code actually toggled `before_after` on
-            // each `key_pressed` (an edge-triggered latch), which contradicted
-            // its own doc comment in `viewer/mod.rs` calling it "momentary".
-            // This routes it to the momentary/hold behavior the naming always
-            // implied: `before_after` now directly mirrors "is the chord held",
-            // only re-evaluating the preview on an actual state transition
-            // (press or release), not every frame it's held.
-            let hold_before = self
-                .state
-                .settings
-                .keymap
-                .held(ctx, crate::settings::keymap::Action::HoldBeforePeek);
-            let before_after_changed = self
-                .state
-                .viewer
-                .as_ref()
-                .is_some_and(|v| v.before_after != hold_before);
-            if before_after_changed {
-                if let Some(v) = self.state.viewer.as_mut() {
-                    v.before_after = hold_before;
-                }
-                let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
-                self.set_preview_and_full(frame, stack); // re-evaluates with before_after
-            }
-
-            // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
-            // keymap's bound chord (defaults to Ctrl+Shift+Z) — kept for users
-            // used to the common Ctrl+Y redo convention.
-            let km = &self.state.settings.keymap;
-            let undo = km.pressed(ctx, crate::settings::keymap::Action::Undo);
-            let ctrl_y = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y));
-            let redo = km.pressed(ctx, crate::settings::keymap::Action::Redo) || ctrl_y;
-            if undo || redo {
-                self.apply_undo_redo(ctx, frame, undo);
-            }
-
-            // Toggle before/after SPLIT-compare (draggable divider), mirroring
-            // the `develop_filter_bar` toggle button's click handling exactly:
-            // flips `split_compare` and, only when turning it on, resets
-            // `split_pos` to center. (Auto-fit-at-1:1 is a later task — not
-            // added here.)
-            if self
-                .state
-                .settings
-                .keymap
-                .pressed(ctx, crate::settings::keymap::Action::ToggleSplitCompare)
+            // Left/Right move between images while viewing (Develop), non-cyclic.
+            if self.module == crate::module::Module::Develop
+                && self.state.viewer.is_some()
+                && !ctx.wants_keyboard_input()
             {
-                self.toggle_split_compare();
+                let km = &self.state.settings.keymap;
+                let dir = if km.pressed(ctx, crate::settings::keymap::Action::NextImage) {
+                    Some(crate::viewer::nav::Step::Next)
+                } else if km.pressed(ctx, crate::settings::keymap::Action::PrevImage) {
+                    Some(crate::viewer::nav::Step::Prev)
+                } else {
+                    None
+                };
+                if let Some(dir) = dir {
+                    self.navigate_step(ctx, frame, dir);
+                }
+
+                // Before/After: `\` shows the empty (before) stack while held, and
+                // reverts to the live stack on release.
+                //
+                // NOTE (Task 2.3 keymap routing, deliberate behavior change): the
+                // dispatch for this refactor explicitly routes `HoldBeforePeek`
+                // through `Keymap::held` (level-triggered), matching the keymap's
+                // own design — `Action::HoldBeforePeek` is documented as "Hold to
+                // show original (before)" and `held()` exists specifically for this
+                // action. The pre-refactor code actually toggled `before_after` on
+                // each `key_pressed` (an edge-triggered latch), which contradicted
+                // its own doc comment in `viewer/mod.rs` calling it "momentary".
+                // This routes it to the momentary/hold behavior the naming always
+                // implied: `before_after` now directly mirrors "is the chord held",
+                // only re-evaluating the preview on an actual state transition
+                // (press or release), not every frame it's held.
+                let hold_before = self
+                    .state
+                    .settings
+                    .keymap
+                    .held(ctx, crate::settings::keymap::Action::HoldBeforePeek);
+                let before_after_changed = self
+                    .state
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.before_after != hold_before);
+                if before_after_changed {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.before_after = hold_before;
+                    }
+                    let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
+                    self.set_preview_and_full(frame, stack); // re-evaluates with before_after
+                }
+
+                // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
+                // keymap's bound chord (defaults to Ctrl+Shift+Z) — kept for users
+                // used to the common Ctrl+Y redo convention.
+                let km = &self.state.settings.keymap;
+                let undo = km.pressed(ctx, crate::settings::keymap::Action::Undo);
+                let ctrl_y = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y));
+                let redo = km.pressed(ctx, crate::settings::keymap::Action::Redo) || ctrl_y;
+                if undo || redo {
+                    self.apply_undo_redo(ctx, frame, undo);
+                }
+
+                // Toggle before/after SPLIT-compare (draggable divider), mirroring
+                // the `develop_filter_bar` toggle button's click handling exactly:
+                // flips `split_compare` and, only when turning it on, resets
+                // `split_pos` to center. (Auto-fit-at-1:1 is a later task — not
+                // added here.)
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::ToggleSplitCompare)
+                {
+                    self.toggle_split_compare();
+                }
             }
         }
 

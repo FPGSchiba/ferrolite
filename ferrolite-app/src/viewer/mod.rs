@@ -192,6 +192,12 @@ pub struct ViewerState {
     /// alongside the other load handles so scrubbing past this image doesn't
     /// leave stale background decodes racing the newly-opened one.
     pub prefetch_handles: Vec<JobHandle>,
+
+    /// True once any edit is applied to this image THIS session (including a
+    /// reset-to-identity, which is also a change). Drives auto-regeneration of
+    /// the Library thumbnail when leaving Develop. Set only in the app's
+    /// `apply_edit`/undo/redo paths — NOT in the `OpsLoaded` load path.
+    pub edits_dirty: bool,
 }
 
 impl ViewerState {
@@ -242,6 +248,7 @@ impl ViewerState {
             histogram: HistogramState::new(),
             prefetch_requested: false,
             prefetch_handles: Vec::new(),
+            edits_dirty: false,
         }
     }
 
@@ -526,6 +533,15 @@ mod tests {
         assert!(
             !v.loaded,
             "RAW opens unrevealed (spinner) until full decode"
+        );
+    }
+
+    #[test]
+    fn new_viewer_is_not_edits_dirty() {
+        let v = ViewerState::open(1, std::path::PathBuf::from("x.jpg"), FileKind::Standard);
+        assert!(
+            !v.edits_dirty,
+            "a freshly opened viewer has no session edits"
         );
     }
 

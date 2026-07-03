@@ -5,6 +5,24 @@ use crate::metadata::MetaEdit;
 use crate::state::AppState;
 use ferrolite_image::{Flag, Rating};
 
+/// Selection scoping for context-menu actions: if the right-clicked image is
+/// part of the current grid multi-selection, act on the whole selection; else
+/// act on just that image. `single_image` (loupe/filmstrip) always scopes to
+/// the one image. Returns a sorted id list (stable, dedup'd via the set).
+pub fn regen_target_ids(
+    single_image: bool,
+    right_clicked: i64,
+    selection: &std::collections::HashSet<i64>,
+) -> Vec<i64> {
+    if !single_image && selection.contains(&right_clicked) {
+        let mut ids: Vec<i64> = selection.iter().copied().collect();
+        ids.sort_unstable();
+        ids
+    } else {
+        vec![right_clicked]
+    }
+}
+
 /// Render the menu for `image_id` inside a `context_menu` closure.
 ///
 /// `single_image` controls scoping:
@@ -99,10 +117,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image
         }
         ui.close_menu();
     }
+
+    if ui.button("Regenerate thumbnail").clicked() {
+        let ids = regen_target_ids(single_image, image_id, &state.selection);
+        let n = ids.len();
+        state.pending_thumb_regen.extend(ids);
+        state.warning = Some(if n == 1 {
+            "Regenerating thumbnail…".to_string()
+        } else {
+            format!("Regenerating {n} thumbnails…")
+        });
+        ui.close_menu();
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
     /// `single_image = true` must never activate the multi-select path, even when
     /// `image_id` is present in a stale grid multi-selection.  Mirrors the
     /// `use_selection` computation inside `show`.
@@ -124,5 +157,29 @@ mod tests {
             compute_use_selection(false),
             "single_image=false with image_id in selection should use multi-select path"
         );
+    }
+
+    #[test]
+    fn single_image_mode_targets_only_that_image() {
+        let sel: HashSet<i64> = [1, 2, 3].into_iter().collect();
+        assert_eq!(regen_target_ids(true, 2, &sel), vec![2]);
+    }
+
+    #[test]
+    fn grid_right_click_inside_selection_targets_whole_selection() {
+        let sel: HashSet<i64> = [1, 2, 3].into_iter().collect();
+        assert_eq!(regen_target_ids(false, 2, &sel), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn grid_right_click_outside_selection_targets_only_that_image() {
+        let sel: HashSet<i64> = [1, 2, 3].into_iter().collect();
+        assert_eq!(regen_target_ids(false, 9, &sel), vec![9]);
+    }
+
+    #[test]
+    fn grid_right_click_with_empty_selection_targets_only_that_image() {
+        let sel: HashSet<i64> = HashSet::new();
+        assert_eq!(regen_target_ids(false, 5, &sel), vec![5]);
     }
 }

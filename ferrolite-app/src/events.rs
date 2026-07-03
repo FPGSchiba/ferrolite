@@ -75,6 +75,19 @@ pub enum AppEvent {
         #[allow(dead_code)]
         image_id: i64,
     },
+    /// A preview-cache READ (Task 6) resolved to a HIT: the cached JPEG for
+    /// `image_id` was found and decoded off-thread to `linear` (display-linear
+    /// RGBA f32, sRGB→linear already done on the job thread). Handled in `app.rs`
+    /// (needs GPU state) to reveal via the Improvement-1 sRGB path, skipping the
+    /// RAW pixel decode; not folded by `apply`.
+    PreviewCacheHit {
+        image_id: i64,
+        linear: ferrolite_image::LinearRgbaF32,
+    },
+    /// A preview-cache READ (Task 6) resolved to a MISS (no entry, or a read/
+    /// decode error). Handled in `app.rs`: the full-decode path then runs and
+    /// (Task 5) caches its result. Not folded by `apply`.
+    PreviewCacheMiss { image_id: i64 },
     /// Tile progress for the running single-file export.
     ExportProgress {
         image_id: i64,
@@ -176,6 +189,10 @@ impl AppState {
             AppEvent::HistogramReady { .. } => None,
             // Metrics/tests only; the write-back job already requested a repaint.
             AppEvent::PreviewCacheWritten { .. } => None,
+            // Handled in `app.rs` (needs GPU state to reveal / gate the full
+            // decode); nothing to fold here.
+            AppEvent::PreviewCacheHit { .. } => None,
+            AppEvent::PreviewCacheMiss { .. } => None,
             // Handled in `app.rs` (needs GPU-independent status-bar update, but
             // routed there alongside the other viewer-scoped events); nothing to
             // fold here.

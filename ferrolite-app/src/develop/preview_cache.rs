@@ -17,18 +17,18 @@
 //! render every visit) until a later task reads back the real GPU render.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use ferrolite_color::{Mat3, WorkingSpace};
-use ferrolite_decode::ColorProfile;
+use ferrolite_decode::{decode_color_profile, ColorProfile};
 use ferrolite_image::LinearRgbaF32;
-use ferrolite_jobs::{JobSystem, Priority};
+use ferrolite_jobs::{JobHandle, JobSystem, Priority};
 use ferrolite_pipeline::OpStack;
 use ferrolite_previews::{
-    encode_srgb_jpeg, fnv1a_64, hash_serde, PreviewKey, PreviewStore, PIPELINE_SCHEMA_VERSION,
-    PREVIEW_LONG_EDGE,
+    decode_srgb_jpeg, encode_srgb_jpeg, fnv1a_64, hash_serde, PreviewKey, PreviewStore,
+    PIPELINE_SCHEMA_VERSION, PREVIEW_LONG_EDGE,
 };
 
 use crate::events::AppEvent;
@@ -87,13 +87,77 @@ pub fn key_for(
 
 /// Whether an open should write its render back to the preview cache.
 ///
-/// Only RAW opens with the **default** op stack qualify: Task 5 caches the
-/// identity render but keys by the actual stack, so caching under an edited key
-/// would later reveal the wrong image (see the module-level correctness guard).
-/// A later task will thread a real "cache miss" flag through the read path; for
-/// now every qualifying RAW open is treated as a miss.
-pub fn should_write_back(is_raw: bool, op_stack: &OpStack) -> bool {
-    is_raw && *op_stack == OpStack::default()
+/// Three conditions must all hold:
+/// * **RAW** — Standard images never reach the RAW reveal path.
+/// * **default op stack** — Task 5 caches the identity render but keys by the
+///   actual stack, so caching under an edited key would later reveal the wrong
+///   image (see the module-level correctness guard).
+/// * **cache miss** (`is_cache_miss`) — a cache *hit* already has the entry on
+///   disk, so re-encoding + re-writing it would be pure waste. Task 6 threads
+///   the real miss flag here from the read path (`v.cache_write_back`).
+pub fn should_write_back(is_raw: bool, op_stack: &OpStack, is_cache_miss: bool) -> bool {
+    is_raw && *op_stack == OpStack::default() && is_cache_miss
+}
+
+/// Look up `key` in `store`; on a hit decode the cached JPEG and convert it from
+/// 8-bit sRGB to display-linear (reusing [`crate::viewer::load::preview_to_linear`]),
+/// so the result matches `PreviewReady`'s shape for reveal via the Improvement-1
+/// sRGB path (`reveal_srgb_preview`). Returns `None` on a miss or a decode error
+/// — a read failure must always resolve to a miss so the viewer falls through to
+/// the full-decode path and never gets stuck. Pure (no threads / GPU / UI).
+pub fn read_cached_preview(store: &PreviewStore, key: &PreviewKey) -> Option<LinearRgbaF32> {
+    let bytes = store.get(key)?;
+    let imgbuf = decode_srgb_jpeg(&bytes).ok()?;
+    Some(crate::viewer::load::preview_to_linear(&imgbuf))
+}
+
+/// Spawn a `Visible`-priority job that consults the preview cache for the open
+/// RAW and reports the outcome as a [`AppEvent::PreviewCacheHit`] (with the
+/// decoded display-linear buffer, ready for `reveal_srgb_preview`) or a
+/// [`AppEvent::PreviewCacheMiss`]. It gates the reveal, so it rides the open
+/// critical path at the same priority as the full decode.
+///
+/// The [`PreviewKey`] is built INSIDE the job, not on the UI thread: it needs
+/// the camera [`ColorProfile`], obtained via [`decode_color_profile`] (a cheap
+/// dummy `raw_image`, NO demosaic) — a multi-millisecond metadata decode that
+/// must never run on the UI thread (CLAUDE.md threading rule 1). The JPEG decode
+/// and sRGB→linear conversion also run here. The UI thread only clones
+/// `path`/`op_stack` in.
+///
+/// Any failure (cancelled, profile decode error, key error, cache miss, decode
+/// error) resolves to `PreviewCacheMiss` so the viewer never stalls waiting on a
+/// reveal that will not come. Returns the [`JobHandle`] so the caller can cancel
+/// the read when the user scrubs past this image.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_cache_read(
+    jobs: &Arc<JobSystem>,
+    store: Arc<PreviewStore>,
+    tx: &std::sync::mpsc::Sender<AppEvent>,
+    ctx: &egui::Context,
+    image_id: i64,
+    path: PathBuf,
+    op_stack: OpStack,
+    working_space: WorkingSpace,
+) -> JobHandle {
+    let tx = tx.clone();
+    let ctx = ctx.clone();
+    jobs.submit(Priority::Visible, move |cancel| {
+        if cancel.is_cancelled() {
+            return;
+        }
+        // Build the key off-thread: the profile decode is a metadata-only dummy
+        // decode (no demosaic), still too heavy for the UI thread.
+        let outcome = decode_color_profile(&path)
+            .ok()
+            .and_then(|profile| key_for(&path, &op_stack, working_space, &profile).ok())
+            .and_then(|key| read_cached_preview(&store, &key));
+        let event = match outcome {
+            Some(linear) => AppEvent::PreviewCacheHit { image_id, linear },
+            None => AppEvent::PreviewCacheMiss { image_id },
+        };
+        let _ = tx.send(event);
+        ctx.request_repaint();
+    })
 }
 
 /// Spawn a `Background` job that encodes `render` (with `display_matrix`
@@ -243,18 +307,79 @@ mod tests {
     }
 
     #[test]
-    fn write_back_only_for_raw_default_stack() {
+    fn write_back_only_for_raw_default_stack_on_miss() {
         let default_stack = OpStack::default();
         let edited_stack = default_stack.set_op(ferrolite_pipeline::Op::Exposure(
             ferrolite_pipeline::Exposure { ev: 0.5 },
         ));
 
-        // RAW + default stack → write back (the only qualifying case).
-        assert!(should_write_back(true, &default_stack));
+        // RAW + default stack + cache MISS → write back (the only qualifying case).
+        assert!(should_write_back(true, &default_stack, true));
+        // RAW + default stack + cache HIT → SKIP: the entry already exists on
+        // disk, so re-encoding it is pure waste.
+        assert!(!should_write_back(true, &default_stack, false));
         // RAW + edited stack → SKIP (guard: identity render under an edited key
-        // would reveal the wrong image).
-        assert!(!should_write_back(true, &edited_stack));
+        // would reveal the wrong image), regardless of the miss flag.
+        assert!(!should_write_back(true, &edited_stack, true));
         // Non-RAW → never (standard images do not reach the RAW reveal path).
-        assert!(!should_write_back(false, &default_stack));
+        assert!(!should_write_back(false, &default_stack, true));
+    }
+
+    #[test]
+    fn read_cached_preview_hits_seeded_entry_and_misses_absent() {
+        // A tiny known render, JPEG-encoded with the real codec and seeded into a
+        // temp store under `key`, must read back as a display-linear buffer with
+        // the (downscaled) cached dims; an absent key must read back as `None`.
+        let dir = std::env::temp_dir().join(format!(
+            "ferrolite-cacheread-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        let store = PreviewStore::new(&dir).expect("store creates its dir");
+
+        let path = temp_raw_file("cacheread");
+        let key = key_for(
+            &path,
+            &OpStack::default(),
+            WorkingSpace::Rec2020,
+            &sample_profile(),
+        )
+        .expect("key_for succeeds");
+
+        // 8×4 solid mid-gray working-linear render (long edge 8 < 2048 → no
+        // downscale, so decoded dims equal the render dims).
+        let mut px = Vec::with_capacity(8 * 4 * 4);
+        for _ in 0..(8 * 4) {
+            px.extend_from_slice(&[0.18, 0.18, 0.18, 1.0]);
+        }
+        let render = LinearRgbaF32::new(8, 4, px).expect("valid render");
+        let jpeg = encode_srgb_jpeg(&render, ferrolite_color::identity(), PREVIEW_LONG_EDGE, 90)
+            .expect("encode succeeds");
+        store.put(&key, &jpeg).expect("seed the cache");
+
+        let hit = read_cached_preview(&store, &key).expect("seeded key must hit");
+        assert_eq!((hit.width, hit.height), (8, 4), "cached preview dims");
+        assert!(hit.pixels[3] > 0.99, "alpha is opaque after sRGB→linear");
+
+        // A key for a different file (different size/mtime) must miss.
+        let other_path = temp_raw_file("cacheread-absent");
+        let absent_key = key_for(
+            &other_path,
+            &OpStack::default(),
+            WorkingSpace::Rec2020,
+            &sample_profile(),
+        )
+        .expect("key_for succeeds");
+        assert!(
+            read_cached_preview(&store, &absent_key).is_none(),
+            "absent key must miss"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&other_path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -117,6 +117,22 @@ pub struct ViewerState {
     pub preview_handle: Option<JobHandle>,
     pub full_handle: Option<JobHandle>,
 
+    // ── Preview-cache read gating (Task 6) ─────────────────────────────────
+    /// Handle for the in-flight preview-cache read job; cancelled on navigation
+    /// so a scrubbed-past image's read coalesces with the rest.
+    pub cache_read_handle: Option<JobHandle>,
+    /// True once the debounced preview-cache read has been submitted (one-shot).
+    pub cache_read_requested: bool,
+    /// True once the cache read resolved (HIT or MISS). The RAW tier-2 full
+    /// decode is gated on this: the full decode fires only after the read
+    /// resolves, so a cache HIT reveals from disk and the full decode then
+    /// streams in zoom/sparse detail.
+    pub cache_resolved: bool,
+    /// Whether the eventual full-decode render should be written back to the
+    /// cache. Starts `true` (a fresh open is a miss until proven otherwise); set
+    /// `false` on a cache HIT (the entry already exists) and `true` on a MISS.
+    pub cache_write_back: bool,
+
     // ── Edit state (Task 8 / Plan 4) — read by Tasks 9+ ────────────────────
     /// The full-res linear source retained for re-evaluation when the op stack
     /// changes (built from the tier-2 full decode). For a Standard image this is
@@ -195,6 +211,10 @@ impl ViewerState {
             image_dims: None,
             preview_handle: None,
             full_handle: None,
+            cache_read_handle: None,
+            cache_read_requested: false,
+            cache_resolved: false,
+            cache_write_back: true,
             preview_source: None,
             raw_preview_source: None,
             preview_edit: None,
@@ -274,6 +294,9 @@ impl ViewerState {
             h.cancel();
         }
         if let Some(h) = self.ops_read_handle.as_ref() {
+            h.cancel();
+        }
+        if let Some(h) = self.cache_read_handle.as_ref() {
             h.cancel();
         }
     }

@@ -114,6 +114,20 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
     })
 }
 
+/// The camera [`ColorProfile`] from rawler metadata WITHOUT a pixel decode
+/// (dummy `raw_image`), so a preview-cache key can be built at open time
+/// without paying for demosaic. Must equal `decode_full(path).color_profile`
+/// — the same `img.color_matrix` field feeds both (verified by the
+/// `decode_color_profile_matches_full` test).
+pub fn decode_color_profile(path: &Path) -> Result<ColorProfile, DecodeError> {
+    let src = RawSource::new(path).map_err(rawler_err)?;
+    let decoder = rawler::get_decoder(&src).map_err(rawler_err)?;
+    let params = RawDecodeParams::default();
+    // `dummy = true`: geometry/metadata only, NO pixel decode (no demosaic).
+    let img = decoder.raw_image(&src, &params, true).map_err(rawler_err)?;
+    Ok(ColorProfile::from_color_matrix(&img.color_matrix))
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
@@ -170,5 +184,25 @@ mod tests {
             "color profile matrix must be finite"
         );
         assert!(d.color_profile.white_xy.iter().all(|v| *v > 0.0));
+    }
+
+    /// LINCHPIN: the cheap dummy-decode profile must equal the full-decode
+    /// profile. If rawler ever returned different color matrices for a dummy
+    /// vs a real `raw_image`, every preview-cache read would build a key with a
+    /// different `color_profile_hash` than the write path used, so every read
+    /// would miss every write. This test is the guard for that invariant.
+    #[test]
+    fn decode_color_profile_matches_full() {
+        let fixture = Path::new("../fixtures/raw/sample.rw2");
+        if !fixture.exists() {
+            eprintln!("no RAW fixture; skipping decode_color_profile equivalence");
+            return;
+        }
+        let cheap = decode_color_profile(fixture).expect("cheap profile decode");
+        let full = decode_full(fixture).expect("full decode").color_profile;
+        assert_eq!(
+            cheap, full,
+            "dummy-decode color profile must equal the full-decode color profile"
+        );
     }
 }

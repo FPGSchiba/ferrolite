@@ -726,9 +726,10 @@ impl FerroliteApp {
         // stack being `OpStack::default()`. Edited images are a deliberate cache
         // miss until a later task reads back the real GPU render.
         //
-        // TASK 6 will thread a real "cache miss" flag through the read; for now
-        // every qualifying RAW open is treated as a miss (always write-back when
-        // RAW + identity). All encode/JPEG/disk I/O runs inside the job — the
+        // Task 6 threads the real "cache miss" flag through the read path:
+        // `v.cache_write_back` is `false` after a cache HIT (the entry already
+        // exists) and `true` after a MISS, so a hit never re-encodes. All
+        // encode/JPEG/disk I/O runs inside the job — the
         // only UI-thread work here is `key_for` (a small `fs::metadata`) and
         // cloning the render/matrix into the job (CLAUDE.md threading rule 1).
         if full_installed {
@@ -738,8 +739,12 @@ impl FerroliteApp {
                 if v.image_id != image_id {
                     return None;
                 }
-                crate::develop::preview_cache::should_write_back(is_raw, &v.op_stack)
-                    .then(|| (v.path.clone(), v.op_stack.clone()))
+                crate::develop::preview_cache::should_write_back(
+                    is_raw,
+                    &v.op_stack,
+                    v.cache_write_back,
+                )
+                .then(|| (v.path.clone(), v.op_stack.clone()))
             });
             if let Some((path, op_stack)) = write_back {
                 match crate::develop::preview_cache::key_for(
@@ -780,6 +785,60 @@ impl FerroliteApp {
         }
 
         self.mark_histogram_dirty();
+    }
+
+    /// A preview-cache READ resolved to a HIT (Task 6): the cached JPEG for
+    /// `image_id` was decoded off-thread to `linear`. Reveal it via the same
+    /// Improvement-1 sRGB path Standard images use (`reveal_srgb_preview`, which
+    /// runs one bounded `sRGB→working` GPU pass, fits, and installs the VT), so a
+    /// second visit to a RAW shows instantly WITHOUT the RAW pixel decode. Then
+    /// mark `cache_resolved` so the sparse full decode still fires next frame for
+    /// zoom/1:1 detail, and `cache_write_back = false` so that full decode does
+    /// NOT re-encode an entry that already exists. Stale `image_id` is dropped.
+    fn apply_preview_cache_hit(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        linear: &ferrolite_image::LinearRgbaF32,
+    ) {
+        match self.state.viewer.as_mut() {
+            Some(v) if v.image_id == image_id => {
+                // Reuse the sRGB reveal path, which reads `preview_source`.
+                v.preview_source = Some(std::sync::Arc::new(linear.clone()));
+            }
+            _ => return, // stale: viewer closed or a different image is open
+        }
+        let revealed = self.reveal_srgb_preview(frame, image_id);
+        if revealed {
+            self.mark_histogram_dirty();
+        }
+        if let Some(v) = self.state.viewer.as_mut() {
+            if v.image_id == image_id {
+                // A hit already has the entry on disk: do not write it back.
+                v.cache_write_back = false;
+                // Let the debounced full decode fire next frame (zoom detail).
+                v.cache_resolved = true;
+                // reveal_srgb_preview marks the viewer idle (no tier-2 for the
+                // Standard path); the RAW hit still wants the sparse full, so
+                // clear idle to keep the drive loop alive until it arrives.
+                if revealed {
+                    v.idle = false;
+                }
+            }
+        }
+    }
+
+    /// A preview-cache READ resolved to a MISS (Task 6): no usable entry, so let
+    /// the existing full-decode path run (`cache_resolved`) and have it cache its
+    /// result (`cache_write_back`, consumed by `should_write_back` in
+    /// `apply_full_decoded`). Stale `image_id` is dropped.
+    fn apply_preview_cache_miss(&mut self, image_id: i64) {
+        if let Some(v) = self.state.viewer.as_mut() {
+            if v.image_id == image_id {
+                v.cache_write_back = true;
+                v.cache_resolved = true;
+            }
+        }
     }
 
     /// Apply `stack` to both render tiers (GPU + memory only; no history/persist).
@@ -1458,6 +1517,18 @@ impl eframe::App for FerroliteApp {
                     self.state.dirty = true;
                     continue;
                 }
+                crate::events::AppEvent::PreviewCacheHit { image_id, linear } => {
+                    self.apply_preview_cache_hit(frame, *image_id, linear);
+                    self.state.dirty = true;
+                    ctx.request_repaint();
+                    continue;
+                }
+                crate::events::AppEvent::PreviewCacheMiss { image_id } => {
+                    self.apply_preview_cache_miss(*image_id);
+                    self.state.dirty = true;
+                    ctx.request_repaint();
+                    continue;
+                }
                 crate::events::AppEvent::OpsLoaded { image_id, stack } => {
                     if let Some(v) = self.state.viewer.as_mut() {
                         if v.image_id == *image_id && !v.ops_loaded {
@@ -1916,25 +1987,48 @@ impl eframe::App for FerroliteApp {
             }
             // Tier-2 is RAW-only: a Standard image's preview is already full-res.
             // Debounced (FULL_DECODE_DEBOUNCE) so fast arrow-nav doesn't submit a
-            // full decode per image flipped through — only the settled-on image
-            // does, once `open_elapsed` crosses the threshold.
+            // read/full decode per image flipped through — only the settled-on
+            // image does, once `open_elapsed` crosses the threshold.
+            //
+            // Task 6 read-before-full: once the debounce elapses, consult the
+            // preview cache FIRST (`spawn_cache_read`). The RAW full decode is
+            // then gated on the read having resolved (`cache_resolved`), so a
+            // cache HIT reveals from disk and the full decode streams in only the
+            // extra zoom/1:1 detail — a MISS falls straight through to decode.
             let dt = ctx.input(|i| i.stable_dt);
             v.open_elapsed += dt;
-            if !v.full_requested && v.kind == ferrolite_image::FileKind::Raw {
+            if v.kind == ferrolite_image::FileKind::Raw
+                && (!v.cache_read_requested || (!v.full_requested && v.cache_resolved))
+            {
                 if v.open_elapsed >= FULL_DECODE_DEBOUNCE {
-                    let h = viewer::load::spawn_full(
-                        &self.state.jobs,
-                        &self.state.tx,
-                        ctx,
-                        v.image_id,
-                        v.path.clone(),
-                    );
-                    v.full_handle = Some(h);
-                    v.full_requested = true;
+                    if !v.cache_read_requested {
+                        let h = crate::develop::preview_cache::spawn_cache_read(
+                            &self.state.jobs,
+                            std::sync::Arc::clone(&self.state.preview_store),
+                            &self.state.tx,
+                            ctx,
+                            v.image_id,
+                            v.path.clone(),
+                            v.op_stack.clone(),
+                            self.state.working_space,
+                        );
+                        v.cache_read_handle = Some(h);
+                        v.cache_read_requested = true;
+                    } else if !v.full_requested && v.cache_resolved {
+                        let h = viewer::load::spawn_full(
+                            &self.state.jobs,
+                            &self.state.tx,
+                            ctx,
+                            v.image_id,
+                            v.path.clone(),
+                        );
+                        v.full_handle = Some(h);
+                        v.full_requested = true;
+                    }
                 } else {
                     // Guarantee a frame fires once the debounce elapses even if
                     // the app would otherwise go idle waiting on input, so a
-                    // still (non-navigated) image's full decode still submits.
+                    // still (non-navigated) image's cache read still submits.
                     ctx.request_repaint_after(std::time::Duration::from_secs_f32(
                         FULL_DECODE_DEBOUNCE - v.open_elapsed,
                     ));

@@ -17,7 +17,7 @@ pub use demosaic::{DemosaicParams, DemosaicToRgb16f, QuadBin};
 pub use error::DecodeError;
 pub use metadata::Metadata;
 pub use orient::apply_orientation_linear;
-pub use raw::{decode_full, RawDecoded};
+pub use raw::{decode_color_profile, decode_full, RawDecoded};
 pub use standard::{decode_preview_standard, read_metadata_standard};
 
 use ferrolite_image::{FileKind, ImageBuffer, Orientation};

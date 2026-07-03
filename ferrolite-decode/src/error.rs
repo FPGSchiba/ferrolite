@@ -12,6 +12,8 @@ pub enum DecodeError {
     Io(#[from] std::io::Error),
     #[error("exif error: {0}")]
     Exif(String),
+    #[error("jpeg error: {0}")]
+    Jpeg(String),
 }
 
 /// rawler's error type implements `Display`; we flatten it to a string so this

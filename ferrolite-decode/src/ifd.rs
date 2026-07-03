@@ -1,0 +1,369 @@
+//! Minimal, pure, panic-free TIFF/EXIF IFD walker used to compute the byte
+//! span that must be resident (read from disk) before `rawler` can extract a
+//! RAW file's embedded preview and read its metadata. This is NOT a general
+//! TIFF parser: it only looks for the embedded-JPEG preview pointer
+//! (`JPEGInterchangeFormat`/`JPEGInterchangeFormatLength`, tags 513/514),
+//! walking IFD0 and, if present, one level of `SubIFDs`.
+//!
+//! Deliberately NOT used: `StripOffsets`(273)/`StripByteCounts`(279). On a
+//! TIFF-based RAW (e.g. Sony ARW), IFD0's strip tags point at the
+//! full-resolution raw sensor data — tens of MB — so folding them into the
+//! span would make it cover almost the entire file, defeating the point of
+//! computing a small directed read at all.
+//!
+//! Every offset read from the file is validated against `prefix.len()` before
+//! use; the function never panics or indexes out of bounds, even on
+//! truncated, garbage, or adversarial input — it returns `None` instead.
+
+const TIFF_MAGIC: u16 = 42;
+const IFD_ENTRY_SIZE: u64 = 12;
+
+const TAG_SUB_IFDS: u16 = 330;
+const TAG_JPEG_INTERCHANGE_FORMAT: u16 = 513;
+const TAG_JPEG_INTERCHANGE_FORMAT_LENGTH: u16 = 514;
+
+const TYPE_SHORT: u16 = 3;
+const TYPE_LONG: u16 = 4;
+
+/// Minimal byte range that must be resident for rawler to extract the embedded
+/// preview + read metadata, parsed from a TIFF prefix. `end` is exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewSpan {
+    pub end: u64,
+}
+
+#[derive(Clone, Copy)]
+enum Endian {
+    Little,
+    Big,
+}
+
+impl Endian {
+    fn read_u16(self, buf: &[u8], offset: u64) -> Option<u16> {
+        let start = usize::try_from(offset).ok()?;
+        let bytes = buf.get(start..start.checked_add(2)?)?;
+        Some(match self {
+            Endian::Little => u16::from_le_bytes([bytes[0], bytes[1]]),
+            Endian::Big => u16::from_be_bytes([bytes[0], bytes[1]]),
+        })
+    }
+
+    fn read_u32(self, buf: &[u8], offset: u64) -> Option<u32> {
+        let start = usize::try_from(offset).ok()?;
+        let bytes = buf.get(start..start.checked_add(4)?)?;
+        Some(match self {
+            Endian::Little => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            Endian::Big => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+        })
+    }
+}
+
+/// One decoded IFD entry: tag, field type, count, and the raw 4-byte
+/// value/offset slot (still in file byte order; interpretation depends on
+/// `type_` and `count`).
+struct RawEntry {
+    tag: u16,
+    type_: u16,
+    count: u32,
+    value_offset: u64,
+}
+
+/// Parse a TIFF/EXIF header at the start of `prefix`; return the max end offset
+/// (`offset + length`) among the embedded-JPEG preview pointers
+/// (JPEGInterchangeFormat 513 / JPEGInterchangeFormatLength 514) found in
+/// IFD0 + SubIFDs. Returns None if `prefix` is not a parseable TIFF or no
+/// 513/514 pair is found (e.g. StripOffsets/StripByteCounts alone never
+/// produce a span — see module docs).
+pub fn preview_span_end(prefix: &[u8]) -> Option<PreviewSpan> {
+    let endian = detect_endian(prefix)?;
+    let magic = endian.read_u16(prefix, 2)?;
+    if magic != TIFF_MAGIC {
+        return None;
+    }
+    let ifd0_offset = u64::from(endian.read_u32(prefix, 4)?);
+
+    let mut max_end: Option<u64> = None;
+    accumulate_ifd_span(prefix, endian, ifd0_offset, &mut max_end, true);
+
+    max_end.map(|end| PreviewSpan { end })
+}
+
+fn detect_endian(prefix: &[u8]) -> Option<Endian> {
+    match prefix.get(0..2)? {
+        b"II" => Some(Endian::Little),
+        b"MM" => Some(Endian::Big),
+        _ => None,
+    }
+}
+
+/// Walk one IFD at `ifd_offset`, folding any preview-strip pairs it directly
+/// contains into `max_end`, and — if `follow_sub_ifds` is set — recursing one
+/// level into any `SubIFDs` (330) entries found. All offsets are bounds
+/// checked against `prefix.len()`; any failure silently contributes nothing
+/// (the overall result is `None` only if no valid pair was found anywhere).
+fn accumulate_ifd_span(
+    prefix: &[u8],
+    endian: Endian,
+    ifd_offset: u64,
+    max_end: &mut Option<u64>,
+    follow_sub_ifds: bool,
+) {
+    let Some(entries) = read_ifd_entries(prefix, endian, ifd_offset) else {
+        return;
+    };
+
+    let jpeg_off = find_entry(&entries, TAG_JPEG_INTERCHANGE_FORMAT)
+        .and_then(|e| entry_u32_value(prefix, endian, e));
+    let jpeg_len = find_entry(&entries, TAG_JPEG_INTERCHANGE_FORMAT_LENGTH)
+        .and_then(|e| entry_u32_value(prefix, endian, e));
+    if let (Some(off), Some(len)) = (jpeg_off, jpeg_len) {
+        fold_span(max_end, off, len);
+    }
+
+    if follow_sub_ifds {
+        if let Some(sub_entry) = find_entry(&entries, TAG_SUB_IFDS) {
+            for sub_offset in entry_u32_values(prefix, endian, sub_entry) {
+                accumulate_ifd_span(prefix, endian, u64::from(sub_offset), max_end, false);
+            }
+        }
+    }
+}
+
+/// Read the entry count + all 12-byte entries of the IFD at `ifd_offset`.
+/// Returns `None` if the offset, count field, or any entry is out of bounds.
+fn read_ifd_entries(prefix: &[u8], endian: Endian, ifd_offset: u64) -> Option<Vec<RawEntry>> {
+    let count = endian.read_u16(prefix, ifd_offset)?;
+    let entries_start = ifd_offset.checked_add(2)?;
+
+    let mut entries = Vec::with_capacity(usize::from(count));
+    for i in 0..u64::from(count) {
+        let entry_offset = entries_start.checked_add(i.checked_mul(IFD_ENTRY_SIZE)?)?;
+        let tag = endian.read_u16(prefix, entry_offset)?;
+        let type_ = endian.read_u16(prefix, entry_offset.checked_add(2)?)?;
+        let cnt = endian.read_u32(prefix, entry_offset.checked_add(4)?)?;
+        let value_offset = entry_offset.checked_add(8)?;
+        // Confirm the value/offset slot itself is in bounds (4 bytes).
+        let _ = endian.read_u32(prefix, value_offset)?;
+        entries.push(RawEntry {
+            tag,
+            type_,
+            count: cnt,
+            value_offset,
+        });
+    }
+    Some(entries)
+}
+
+fn find_entry(entries: &[RawEntry], tag: u16) -> Option<&RawEntry> {
+    entries.iter().find(|e| e.tag == tag)
+}
+
+/// Interpret a single-value SHORT/LONG entry's inline value slot as a u32.
+/// Returns `None` for unsupported types/counts or out-of-bounds reads.
+fn entry_u32_value(prefix: &[u8], endian: Endian, entry: &RawEntry) -> Option<u32> {
+    if entry.count != 1 {
+        return None;
+    }
+    match entry.type_ {
+        TYPE_SHORT => endian.read_u16(prefix, entry.value_offset).map(u32::from),
+        TYPE_LONG => endian.read_u32(prefix, entry.value_offset),
+        _ => None,
+    }
+}
+
+/// Interpret a SHORT/LONG entry (any count) as a list of u32 values, resolving
+/// the external-data offset when the inline 4-byte slot cannot hold them all.
+/// Returns an empty vec (not `None`) on any bounds failure so callers can keep
+/// iterating other tags.
+fn entry_u32_values(prefix: &[u8], endian: Endian, entry: &RawEntry) -> Vec<u32> {
+    let elem_size: u64 = match entry.type_ {
+        TYPE_SHORT => 2,
+        TYPE_LONG => 4,
+        _ => return Vec::new(),
+    };
+    let count = u64::from(entry.count);
+    let Some(total_size) = elem_size.checked_mul(count) else {
+        return Vec::new();
+    };
+
+    let data_offset = if total_size <= 4 {
+        entry.value_offset
+    } else {
+        let Some(off) = endian.read_u32(prefix, entry.value_offset) else {
+            return Vec::new();
+        };
+        u64::from(off)
+    };
+
+    // Never trust `entry.count` (raw untrusted u32) as an allocation size: a
+    // crafted entry with count = 0xFFFF_FFFF would request a multi-GB
+    // allocation, and a failed allocation aborts the process via
+    // `handle_alloc_error`. Bound both the reservation and the loop trip
+    // count by how many `elem_size`-sized elements `prefix` could possibly
+    // hold — no valid read can ever exceed that, so this cannot truncate a
+    // legitimate result.
+    let max_possible_elems = prefix.len() as u64 / elem_size;
+    let bounded_count = count.min(max_possible_elems);
+    let mut out = Vec::with_capacity(bounded_count as usize);
+    for i in 0..bounded_count {
+        let Some(elem_offset) = data_offset.checked_add(match i.checked_mul(elem_size) {
+            Some(v) => v,
+            None => return out,
+        }) else {
+            return out;
+        };
+        let value = match entry.type_ {
+            TYPE_SHORT => endian.read_u16(prefix, elem_offset).map(u32::from),
+            TYPE_LONG => endian.read_u32(prefix, elem_offset),
+            _ => None,
+        };
+        match value {
+            Some(v) => out.push(v),
+            None => return out,
+        }
+    }
+    out
+}
+
+/// Fold one (offset, length) preview pair into the running max `end`,
+/// using checked arithmetic so an overflowing offset+length cannot wrap
+/// around and silently produce a too-small span.
+fn fold_span(max_end: &mut Option<u64>, offset: u32, length: u32) {
+    let Some(end) = u64::from(offset).checked_add(u64::from(length)) else {
+        return;
+    };
+    *max_end = Some(match *max_end {
+        Some(existing) => existing.max(end),
+        None => end,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_span_end;
+
+    // Build a minimal LE TIFF: header + IFD0 with one tag JPEGInterchangeFormat
+    // (513, LONG, value=offset) and JPEGInterchangeFormatLength (514, LONG, value=len).
+    fn tiny_tiff(preview_off: u32, preview_len: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II"); // little-endian
+        b.extend_from_slice(&42u16.to_le_bytes()); // magic
+        b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+                                                  // IFD0 at offset 8: entry count = 2
+        b.extend_from_slice(&2u16.to_le_bytes());
+        // entry: tag 513, type LONG(4), count 1, value
+        let entry = |tag: u16, val: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&tag.to_le_bytes());
+            e.extend_from_slice(&4u16.to_le_bytes()); // LONG
+            e.extend_from_slice(&1u32.to_le_bytes()); // count
+            e.extend_from_slice(&val.to_le_bytes()); // value/offset
+            e
+        };
+        b.extend_from_slice(&entry(513, preview_off));
+        b.extend_from_slice(&entry(514, preview_len));
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        b
+    }
+
+    #[test]
+    fn parses_jpeg_interchange_span() {
+        let t = tiny_tiff(1000, 500);
+        let span = preview_span_end(&t).expect("parsed");
+        assert_eq!(span.end, 1500);
+    }
+
+    #[test]
+    fn returns_none_on_garbage() {
+        assert!(preview_span_end(&[0u8; 16]).is_none());
+        assert!(preview_span_end(b"not a tiff").is_none());
+    }
+
+    #[test]
+    fn handles_big_endian_header() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"MM");
+        b.extend_from_slice(&42u16.to_be_bytes());
+        b.extend_from_slice(&8u32.to_be_bytes());
+        b.extend_from_slice(&1u16.to_be_bytes()); // 1 entry
+        b.extend_from_slice(&513u16.to_be_bytes());
+        b.extend_from_slice(&4u16.to_be_bytes());
+        b.extend_from_slice(&1u32.to_be_bytes());
+        b.extend_from_slice(&2000u32.to_be_bytes());
+        b.extend_from_slice(&0u32.to_be_bytes());
+        // No length tag -> span falls back to header-declared? Expect None (need both).
+        assert!(preview_span_end(&b).is_none());
+    }
+
+    // StripOffsets/StripByteCounts (273/279) alone must no longer contribute to
+    // the span: on a TIFF-based RAW these point at the full-resolution sensor
+    // strips, and folding them in would make the "directed" read cover almost
+    // the whole file (the regression this fix addresses). Only a 513/514 pair
+    // should ever produce a span.
+    #[test]
+    fn strip_tags_alone_do_not_produce_a_span() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II"); // little-endian
+        b.extend_from_slice(&42u16.to_le_bytes()); // magic
+        b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+                                                  // IFD0 at offset 8: entry count = 2 (StripOffsets + StripByteCounts)
+        b.extend_from_slice(&2u16.to_le_bytes());
+        let entry = |tag: u16, val: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&tag.to_le_bytes());
+            e.extend_from_slice(&4u16.to_le_bytes()); // LONG
+            e.extend_from_slice(&1u32.to_le_bytes()); // count
+            e.extend_from_slice(&val.to_le_bytes()); // value/offset
+            e
+        };
+        // Strip tags pointing far into the file (simulating full-res sensor
+        // data), which must be ignored entirely now.
+        b.extend_from_slice(&entry(273, 1000)); // StripOffsets
+        b.extend_from_slice(&entry(279, 50_000_000)); // StripByteCounts (~50 MB)
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+
+        assert!(preview_span_end(&b).is_none());
+    }
+
+    // Regression test for a Critical finding: an untrusted, attacker-controlled
+    // (offset, length) pair must never be folded with unchecked arithmetic.
+    // `fold_span` promotes both u32 values to u64 before adding, via
+    // `checked_add`, so the largest possible pair (u32::MAX + u32::MAX) must
+    // resolve to a valid (if huge) span rather than panicking on overflow.
+    #[test]
+    fn maximal_jpeg_interchange_pair_does_not_panic() {
+        let t = tiny_tiff(u32::MAX, u32::MAX);
+        let span = preview_span_end(&t);
+        assert_eq!(span.map(|s| s.end), Some(u64::from(u32::MAX) * 2));
+    }
+
+    // Regression test for the untrusted-size allocation guard: entry_u32_values
+    // (used to resolve SubIFDs pointers) must never use an unbounded, untrusted
+    // `count` field as a `Vec::with_capacity` size. A crafted SubIFDs (330)
+    // entry with count = 0xFFFF_FFFF would otherwise request a ~17 GB
+    // allocation; the failed allocation aborts the process via
+    // `handle_alloc_error`, violating the parser's "never panic/abort on any
+    // input" contract. No SubIFD can resolve, and no 513/514 pair exists in
+    // IFD0, so the overall result must be `None`, not an abort/hang/OOM.
+    #[test]
+    fn huge_sub_ifds_count_does_not_allocate_or_panic() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II"); // little-endian
+        b.extend_from_slice(&42u16.to_le_bytes()); // magic
+        b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+                                                  // IFD0 at offset 8: entry count = 1 (SubIFDs)
+        b.extend_from_slice(&1u16.to_le_bytes());
+        // entry: tag 330 (SubIFDs), type LONG(4), count = u32::MAX,
+        // value/offset = an out-of-file data pointer so no element can ever
+        // resolve (exercises the external-data-offset branch, not the
+        // degenerate offset-0-in-header case).
+        b.extend_from_slice(&330u16.to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes());
+        b.extend_from_slice(&u32::MAX.to_le_bytes());
+        b.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+
+        // Must return None (no pair could be resolved), not abort/hang/OOM.
+        assert!(preview_span_end(&b).is_none());
+    }
+}

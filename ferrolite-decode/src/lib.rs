@@ -5,6 +5,7 @@
 mod color;
 mod demosaic;
 mod error;
+mod ifd;
 mod metadata;
 mod orient;
 mod preview;
@@ -15,12 +16,15 @@ mod standard;
 pub use color::ColorProfile;
 pub use demosaic::{DemosaicParams, DemosaicToRgb16f, QuadBin};
 pub use error::DecodeError;
+pub use ifd::{preview_span_end, PreviewSpan};
 pub use metadata::Metadata;
 pub use orient::apply_orientation_linear;
 pub use preview::PreviewSource;
 pub use raw::{decode_color_profile, decode_full, RawDecoded};
 pub use source::SourceKind;
-pub use standard::{decode_preview_standard, read_metadata_standard};
+pub use standard::{
+    decode_preview_standard, decode_thumb_source_standard, read_metadata_standard, StdThumbDecode,
+};
 
 use ferrolite_image::{FileKind, ImageBuffer, Orientation};
 use rawler::decoders::{RawDecodeParams, RawMetadata};
@@ -52,6 +56,10 @@ pub struct PreviewInfo {
     pub raw_dims: Option<Duration>,
     pub extract: Option<Duration>,
     pub orient: Option<Duration>,
+    /// Standard (non-RAW) downscale-decode wall time (`Some` only when measured).
+    pub std_decode: Option<Duration>,
+    /// JPEG DCT scale factor used (1/2/4/8); `None` for RAW or non-JPEG fallback.
+    pub dct_scale: Option<u8>,
 }
 
 /// Decode an upright RGB8 preview, routed by `kind`.
@@ -77,6 +85,7 @@ pub fn decode_meta_and_preview(
     path: &Path,
     kind: FileKind,
     measure: bool,
+    thumb_edge: u32,
 ) -> Result<(Metadata, ImageBuffer, PreviewInfo), DecodeError> {
     match kind {
         FileKind::Raw => {
@@ -127,19 +136,20 @@ pub fn decode_meta_and_preview(
                 raw_dims,
                 extract: parts.extract,
                 orient: parts.orient,
+                std_decode: None,
+                dct_scale: None,
             };
             Ok((metadata, preview, info))
         }
         FileKind::Standard => {
             let metadata = standard::read_metadata_standard(path)?;
-            let preview = standard::decode_preview_standard(path)?;
-            // Standard rasters are read directly (not through the prefix/mmap RAW
-            // machinery) and are already fast; tag source as EmbeddedPreview,
-            // `source_kind` None, and leave all sub-timings None.
+            let t = measure.then(std::time::Instant::now);
+            let dec = standard::decode_thumb_source_standard(path, thumb_edge, measure)?;
+            let std_decode = t.map(|t| t.elapsed());
             let info = PreviewInfo {
                 source: PreviewSource::EmbeddedPreview,
-                src_w: preview.width,
-                src_h: preview.height,
+                src_w: dec.image.width,
+                src_h: dec.image.height,
                 source_kind: None,
                 source_acquire: None,
                 source_bytes: None,
@@ -148,8 +158,10 @@ pub fn decode_meta_and_preview(
                 raw_dims: None,
                 extract: None,
                 orient: None,
+                std_decode,
+                dct_scale: Some(dec.dct_scale),
             };
-            Ok((metadata, preview, info))
+            Ok((metadata, dec.image, info))
         }
     }
 }

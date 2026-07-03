@@ -718,9 +718,12 @@ pub struct IngestProfile {
     std_us: Mutex<Vec<u32>>,
     slow: Mutex<Vec<SlowSample>>,
     // RAW byte-source tier counts across ALL files (not just slow): how far the
-    // incremental read had to grow. `grown`+`full` are the files that missed the
-    // 1 MiB prefix (the former slow tail); `full` needed the whole file.
+    // incremental read had to grow. `directed`+`grown`+`full` are the files that
+    // missed the 1 MiB prefix (the former slow tail); `directed` means
+    // offset-parsing found the exact preview span in one extra read; `full`
+    // needed the whole file.
     prefix_hits: AtomicU64,
+    directed: AtomicU64,
     grown: AtomicU64,
     full: AtomicU64,
 }
@@ -797,6 +800,7 @@ impl IngestProfile {
     pub fn record_source(&self, kind: ferrolite_decode::SourceKind) {
         match kind {
             ferrolite_decode::SourceKind::Prefix => &self.prefix_hits,
+            ferrolite_decode::SourceKind::Directed => &self.directed,
             ferrolite_decode::SourceKind::Grown => &self.grown,
             ferrolite_decode::SourceKind::Full => &self.full,
         }
@@ -804,6 +808,9 @@ impl IngestProfile {
     }
     pub fn prefix_hits(&self) -> u64 {
         self.prefix_hits.load(Ordering::Relaxed)
+    }
+    pub fn directed(&self) -> u64 {
+        self.directed.load(Ordering::Relaxed)
     }
     pub fn grown(&self) -> u64 {
         self.grown.load(Ordering::Relaxed)
@@ -934,6 +941,10 @@ pub struct SlowSample {
     pub source: ferrolite_decode::PreviewSource,
     pub model: String,
     pub path: String,
+    /// Standard-file decode wall time (ms); 0.0 for RAW.
+    pub std_decode_ms: f64,
+    /// JPEG DCT scale (1/2/4/8); None for RAW / non-JPEG.
+    pub dct_scale: Option<u8>,
 }
 
 impl SlowSample {
@@ -948,6 +959,7 @@ impl SlowSample {
             + self.raw_dims_ms
             + self.extract_ms
             + self.orient_ms
+            + self.std_decode_ms
     }
     /// Unattributed remainder of `decode_ms` after the measured stages.
     fn rest_ms(&self) -> f64 {
@@ -969,6 +981,7 @@ pub fn source_label(s: ferrolite_decode::PreviewSource) -> &'static str {
 pub fn source_kind_label(k: Option<ferrolite_decode::SourceKind>) -> &'static str {
     match k {
         Some(ferrolite_decode::SourceKind::Prefix) => "prefix",
+        Some(ferrolite_decode::SourceKind::Directed) => "directed",
         Some(ferrolite_decode::SourceKind::Grown) => "grown",
         Some(ferrolite_decode::SourceKind::Full) => "full",
         None => "n/a",
@@ -1002,8 +1015,8 @@ fn ascii_quote(s: &str) -> String {
 pub fn format_slow_line(s: &SlowSample) -> String {
     format!(
         "[ingest-slow] {dec:.0}ms [{tier} {smb:.1}MB] (acquire {acq:.0} / decoder {gd:.0} / meta {rm:.0} / \
-         dims {rd:.0} / extract {ex:.0} / orient {or:.0} / rest {rest:.0}) \
-         {kind} {w}x{h} {mp:.1}MP via {src} model={model} {path}",
+         dims {rd:.0} / extract {ex:.0} / orient {or:.0} / stddec {sd:.0} / rest {rest:.0}) \
+         {kind} {w}x{h} {mp:.1}MP {dct} via {src} model={model} {path}",
         dec = s.decode_ms,
         tier = source_kind_label(s.source_kind),
         smb = s.source_bytes as f64 / 1_048_576.0,
@@ -1013,11 +1026,16 @@ pub fn format_slow_line(s: &SlowSample) -> String {
         rd = s.raw_dims_ms,
         ex = s.extract_ms,
         or = s.orient_ms,
+        sd = s.std_decode_ms,
         rest = s.rest_ms(),
         kind = if s.is_raw { "RAW" } else { "std" },
         w = s.src_w,
         h = s.src_h,
         mp = s.megapixels(),
+        dct = match s.dct_scale {
+            Some(n) => format!("dct 1/{n}"),
+            None => String::from("dct -"),
+        },
         src = source_label(s.source),
         model = ascii_quote(&s.model),
         path = ascii_quote(&s.path),
@@ -1154,28 +1172,68 @@ pub fn emit_slow_aggregate(samples: &[SlowSample], total_files: usize) {
 }
 
 /// One-line RAW byte-source tier split across ALL files: how far the incremental
-/// read had to grow. `prefix` = satisfied by the 1 MiB fast path; `grown`/`full`
-/// missed it (the former mmap-fallback tail); `full` needed the whole file.
-pub fn format_source_split(prefix: u64, grown: u64, full: u64) -> String {
-    let total = prefix + grown + full;
-    let non_prefix = grown + full;
+/// read had to grow. `prefix` = satisfied by the 1 MiB fast path; `directed` =
+/// offset-parsing found the exact preview span in one extra read;
+/// `grown`/`full` fell back to the tiered read (the former mmap-fallback tail);
+/// `full` needed the whole file.
+pub fn format_source_split(prefix: u64, directed: u64, grown: u64, full: u64) -> String {
+    let total = prefix + directed + grown + full;
+    let non_prefix = directed + grown + full;
     let pct = if total > 0 {
         100.0 * non_prefix as f64 / total as f64
     } else {
         0.0
     };
     format!(
-        "[ingest-source] RAW byte-source: prefix {prefix} | grown {grown} | full {full} \
-         ({pct:.1}% needed >1MiB of {total})"
+        "[ingest-source] RAW byte-source: prefix {prefix} | directed {directed} | grown {grown} \
+         | full {full} ({pct:.1}% needed >1MiB of {total})"
     )
 }
 
 /// Emit the RAW byte-source split to the diag sink. No-op when diag is off.
-pub fn emit_source_split(prefix: u64, grown: u64, full: u64) {
+pub fn emit_source_split(prefix: u64, directed: u64, grown: u64, full: u64) {
     if !enabled() {
         return;
     }
-    write_log(&format_source_split(prefix, grown, full));
+    write_log(&format_source_split(prefix, directed, grown, full));
+}
+
+/// Point-in-time view of the ingest [`AdaptiveReadGate`](crate::read_gate::AdaptiveReadGate)
+/// for the one-shot `[ingest-concurrency]` diag line. Mirrors
+/// [`ControllerSnapshot`](crate::read_gate::ControllerSnapshot) plus the two
+/// fields the gate itself doesn't track: a best-effort in-flight peak and
+/// whether the gate is running pinned (adaptation disabled).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConcurrencySnapshot {
+    pub limit: usize,
+    pub rtt_min_us: u64,
+    pub rtt_recent_us: u64,
+    pub gradient: f64,
+    pub inflight_peak: usize,
+    pub pinned: bool,
+}
+
+/// Render the one-shot ingest read-concurrency summary line.
+pub fn format_ingest_concurrency(s: &ConcurrencySnapshot) -> String {
+    format!(
+        "[ingest-concurrency] limit {limit}  rtt_min {rmin}us  rtt_recent {rrec}us  \
+         gradient {grad:.2}  inflight_peak {peak}  pinned {pinned}",
+        limit = s.limit,
+        rmin = s.rtt_min_us,
+        rrec = s.rtt_recent_us,
+        grad = s.gradient,
+        peak = s.inflight_peak,
+        pinned = s.pinned,
+    )
+}
+
+/// Emit the ingest read-concurrency summary to the diag sink. No-op when diag
+/// is off.
+pub fn emit_ingest_concurrency(s: &ConcurrencySnapshot) {
+    if !enabled() {
+        return;
+    }
+    write_log(&format_ingest_concurrency(s));
 }
 
 /// Bytes pre-read to force + time the disk IO a preview decode pages in (headless
@@ -1612,6 +1670,8 @@ mod tests {
             source: src,
             model: model.to_string(),
             path: path.to_string(),
+            std_decode_ms: 0.0,
+            dct_scale: None,
         }
     }
 
@@ -1644,14 +1704,51 @@ mod tests {
     }
 
     #[test]
+    fn format_slow_line_shows_std_decode_and_dct() {
+        use ferrolite_decode::PreviewSource;
+        let mut s = slow_sample(
+            5305.0,
+            5100.0,
+            190.0,
+            6048,
+            4032,
+            PreviewSource::FullImage,
+            "ILCE-7M4",
+            "C:/x/DSC1234.ARW",
+        );
+        s.is_raw = false;
+        s.std_decode_ms = 48.0;
+        s.dct_scale = Some(8);
+        let out = format_slow_line(&s);
+        assert!(out.contains("stddec 48"));
+        assert!(out.contains("dct 1/8"));
+    }
+
+    #[test]
     fn format_source_split_reports_counts_and_pct() {
-        let out = format_source_split(2900, 350, 36);
+        let out = format_source_split(2900, 60, 350, 36);
         assert!(out.starts_with("[ingest-source]"));
         assert!(out.contains("prefix 2900"));
+        assert!(out.contains("directed 60"));
         assert!(out.contains("grown 350"));
         assert!(out.contains("full 36"));
-        assert!(out.contains("of 3286")); // 2900 + 350 + 36
+        assert!(out.contains("of 3346")); // 2900 + 60 + 350 + 36
         assert!(out.is_ascii());
+    }
+
+    #[test]
+    fn format_ingest_concurrency_line() {
+        let out = format_ingest_concurrency(&ConcurrencySnapshot {
+            limit: 5,
+            rtt_min_us: 1200,
+            rtt_recent_us: 3400,
+            gradient: 0.35,
+            inflight_peak: 6,
+            pinned: false,
+        });
+        assert!(out.starts_with("[ingest-concurrency]"));
+        assert!(out.contains("limit 5"));
+        assert!(out.contains("gradient 0.35"));
     }
 
     #[test]
@@ -1660,11 +1757,20 @@ mod tests {
         let p = IngestProfile::default();
         p.record_source(SourceKind::Prefix);
         p.record_source(SourceKind::Prefix);
+        p.record_source(SourceKind::Directed);
         p.record_source(SourceKind::Grown);
         p.record_source(SourceKind::Full);
         assert_eq!(p.prefix_hits(), 2);
+        assert_eq!(p.directed(), 1);
         assert_eq!(p.grown(), 1);
         assert_eq!(p.full(), 1);
+    }
+
+    #[test]
+    fn source_kind_label_covers_directed() {
+        use ferrolite_decode::SourceKind;
+        assert_eq!(source_kind_label(Some(SourceKind::Directed)), "directed");
+        assert_eq!(source_kind_label(None), "n/a");
     }
 
     #[test]

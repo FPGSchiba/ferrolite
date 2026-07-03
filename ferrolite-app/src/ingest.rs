@@ -292,6 +292,16 @@ fn ingest_job(
     let mut phase_a_s = 0.0f64;
     let mut filter_s = 0.0f64;
     let mut producer_done_s = 0.0f64;
+    // Adaptive read-concurrency gate: caps how many ingest worker threads may be
+    // inside the decode's disk read at once, growing/shrinking the cap from
+    // observed read latency (see `read_gate` module docs). Sized off the rayon
+    // pool the parallel producer below actually runs on. Declared outside the
+    // `thread::scope` below so the post-scope `[ingest-concurrency]` emission
+    // can read its final snapshot. The gate is functional regardless of diag;
+    // only that emission is diag-gated.
+    let read_gate = std::sync::Arc::new(crate::read_gate::AdaptiveReadGate::new(
+        rayon::current_num_threads().max(1),
+    ));
     let mut producer_done_at_s = 0.0f64;
     let mut consumer_done_at_s = 0.0f64;
 
@@ -510,9 +520,9 @@ fn ingest_job(
             crate::diag::set_ingest_phase(crate::diag::IngestPhase::Decode);
         }
         let t_producer = profile.as_ref().map(|_| std::time::Instant::now());
-        to_process
-            .par_iter()
-            .for_each_with(row_tx, |sender, &(f, folder_id)| {
+        to_process.par_iter().for_each_with(
+            (row_tx, read_gate.clone()),
+            |(sender, read_gate), &(f, folder_id)| {
                 if cancel.is_cancelled() {
                     return;
                 }
@@ -521,10 +531,22 @@ fn ingest_job(
                     ferrolite_catalog::read_rating(&ferrolite_catalog::sidecar_path(&f.path))
                         .unwrap_or_default();
                 let is_raw = matches!(f.kind, ferrolite_catalog::FileKind::Raw);
-                let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
                 let measure = crate::diag::enabled();
-                let decoded = ferrolite_decode::decode_meta_and_preview(&f.path, f.kind, measure);
+                // Hold the permit only across the disk-read-bound decode; release
+                // it before the CPU-heavy resize/encode below so the gate caps
+                // read concurrency without throttling CPU parallelism. The decode
+                // timer starts AFTER the permit is acquired so a worker blocked
+                // waiting for a permit is not miscounted as decode time.
+                let _permit = read_gate.acquire();
+                let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
+                let decoded = ferrolite_decode::decode_meta_and_preview(
+                    &f.path,
+                    f.kind,
+                    measure,
+                    ferrolite_catalog::THUMB_MAX_EDGE,
+                );
                 let decode_us = t_meta.map(|t| t.elapsed().as_micros() as u64);
+                drop(_permit); // release before generate_thumbnail (CPU work runs permit-free)
                 if let (Some(us), Some(p)) = (decode_us, profile.as_ref()) {
                     p.record_decode(us, is_raw);
                 }
@@ -559,6 +581,8 @@ fn ingest_job(
                                         source: info.source,
                                         model: meta.model.clone(),
                                         path: f.path.display().to_string(),
+                                        std_decode_ms: to_ms(info.std_decode),
+                                        dct_scale: info.dct_scale,
                                     };
                                     crate::diag::write_log(&crate::diag::format_slow_line(&sample));
                                     p.record_slow(sample);
@@ -620,7 +644,8 @@ fn ingest_job(
                         let _ = sender.send((new_image, None));
                     }
                 }
-            });
+            },
+        );
         if let Some(t) = t_producer {
             producer_done_s = t.elapsed().as_secs_f64();
         }
@@ -685,7 +710,22 @@ fn ingest_job(
         };
         crate::diag::emit_ingest_summary(&summary);
         crate::diag::emit_slow_aggregate(&p.slow_samples(), file_count);
-        crate::diag::emit_source_split(p.prefix_hits(), p.grown(), p.full());
+        crate::diag::emit_source_split(p.prefix_hits(), p.directed(), p.grown(), p.full());
+
+        // [ingest-concurrency]: the gate doesn't track a hot-path in-flight
+        // peak (that would add an extra atomic to every acquire/release just
+        // for this one-shot diag line), so `inflight_peak` is best-effort: the
+        // final converged limit, which is also the practical upper bound on
+        // in-flight reads once the controller has settled.
+        let gate_snapshot = read_gate.snapshot();
+        crate::diag::emit_ingest_concurrency(&crate::diag::ConcurrencySnapshot {
+            limit: gate_snapshot.limit,
+            rtt_min_us: gate_snapshot.rtt_min_us,
+            rtt_recent_us: gate_snapshot.rtt_recent_us,
+            gradient: gate_snapshot.gradient,
+            inflight_peak: gate_snapshot.limit,
+            pinned: read_gate.is_pinned(),
+        });
     }
 
     if profile.is_some() {
@@ -722,7 +762,16 @@ pub fn thumbnail_blocking(
     };
 
     let t_decode = profile.then(std::time::Instant::now);
-    let preview = ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?;
+    let preview = match kind {
+        FileKind::Standard => ferrolite_decode::decode_thumb_source_standard(
+            path,
+            ferrolite_catalog::THUMB_MAX_EDGE,
+            false,
+        )
+        .map(|d| d.image)
+        .map_err(|e| e.to_string())?,
+        FileKind::Raw => ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?,
+    };
     let decode_us = t_decode.map_or(0, |t| t.elapsed().as_micros() as u64);
 
     let t_encode = profile.then(std::time::Instant::now);

@@ -58,6 +58,7 @@ pub fn title_bar(
     module: &mut Module,
     version: &str,
     export_enabled: bool,
+    viewer_open: bool,
     keymap: &Keymap,
     can_undo: bool,
     can_redo: bool,
@@ -150,28 +151,20 @@ pub fn title_bar(
                     keymap,
                     "Add to export queue",
                     Action::AddToQueue,
-                    export_enabled,
+                    viewer_open,
                 )
                 .clicked()
                 {
                     action = Some(MenuAction::AddToQueue);
                     ui.close_menu();
                 }
-                if menu_button(
-                    ui,
-                    keymap,
-                    "Previous image",
-                    Action::PrevImage,
-                    export_enabled,
-                )
-                .clicked()
+                if menu_button(ui, keymap, "Previous image", Action::PrevImage, viewer_open)
+                    .clicked()
                 {
                     action = Some(MenuAction::PrevImage);
                     ui.close_menu();
                 }
-                if menu_button(ui, keymap, "Next image", Action::NextImage, export_enabled)
-                    .clicked()
-                {
+                if menu_button(ui, keymap, "Next image", Action::NextImage, viewer_open).clicked() {
                     action = Some(MenuAction::NextImage);
                     ui.close_menu();
                 }
@@ -204,18 +197,18 @@ pub fn title_bar(
                     keymap,
                     "Before/After split",
                     Action::ToggleSplitCompare,
-                    true,
+                    viewer_open,
                 )
                 .clicked()
                 {
                     action = Some(MenuAction::ToggleSplit);
                     ui.close_menu();
                 }
-                if ui.button("Fit").clicked() {
+                if ui.add_enabled(viewer_open, Button::new("Fit")).clicked() {
                     action = Some(MenuAction::ZoomFit);
                     ui.close_menu();
                 }
-                if ui.button("1:1").clicked() {
+                if ui.add_enabled(viewer_open, Button::new("1:1")).clicked() {
                     action = Some(MenuAction::ZoomActual);
                     ui.close_menu();
                 }

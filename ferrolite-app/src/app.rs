@@ -1886,6 +1886,7 @@ impl eframe::App for FerroliteApp {
                     v.pyramid.is_some()
                         || (v.kind != ferrolite_image::FileKind::Raw && v.preview_source.is_some())
                 });
+                let viewer_open = self.state.viewer.is_some();
                 let module_before = self.module;
                 let can_undo = self
                     .state
@@ -1903,6 +1904,7 @@ impl eframe::App for FerroliteApp {
                     &mut self.module,
                     "v0.0.1",
                     export_enabled,
+                    viewer_open,
                     &self.state.settings.keymap,
                     can_undo,
                     can_redo,

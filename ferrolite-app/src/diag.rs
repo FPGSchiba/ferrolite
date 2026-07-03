@@ -8,6 +8,7 @@
 
 use ferrolite_jobs::JobStats;
 use std::io::Write;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -611,6 +612,251 @@ pub fn format_shutdown(before: JobStats, joined: bool, timeout_ms: u64, on_exit_
     )
 }
 
+/// Per-ingest-job generation profile. Created only when `diag::enabled()`,
+/// threaded through `ingest_job` as `Option<Arc<IngestProfile>>`. All methods
+/// are pure accumulators (no global gate) so they unit-test directly; the caller
+/// gates creation/use behind `enabled()`. `Relaxed` throughout — diagnostics,
+/// not synchronization.
+#[derive(Default)]
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+pub struct IngestProfile {
+    decode_sum_us: AtomicU64,
+    decode_max_us: AtomicU64,
+    encode_sum_us: AtomicU64,
+    encode_count: AtomicU64,
+    upsert_sum_us: AtomicU64,
+    upsert_batches: AtomicU64,
+    chan_inflight: AtomicU64,
+    chan_depth_max: AtomicU64,
+    // Per-file decode µs, split by kind (RAW vs Standard) for per-kind p50; the
+    // overall distribution is the two merged. Touched only when profiling is on;
+    // a brief push per file, negligible vs a ~200ms decode.
+    raw_us: Mutex<Vec<u32>>,
+    std_us: Mutex<Vec<u32>>,
+}
+
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+impl IngestProfile {
+    pub fn record_decode(&self, us: u64, is_raw: bool) {
+        self.decode_sum_us.fetch_add(us, Ordering::Relaxed);
+        self.decode_max_us.fetch_max(us, Ordering::Relaxed);
+        let bucket = if is_raw { &self.raw_us } else { &self.std_us };
+        if let Ok(mut v) = bucket.lock() {
+            v.push(us as u32);
+        }
+    }
+    pub fn record_encode(&self, us: u64) {
+        self.encode_sum_us.fetch_add(us, Ordering::Relaxed);
+        self.encode_count.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn record_upsert(&self, us: u64) {
+        self.upsert_sum_us.fetch_add(us, Ordering::Relaxed);
+        self.upsert_batches.fetch_add(1, Ordering::Relaxed);
+    }
+    /// Producer sent a row into the channel: bump inflight and track the peak.
+    pub fn on_send(&self) {
+        let depth = self.chan_inflight.fetch_add(1, Ordering::Relaxed) + 1;
+        self.chan_depth_max.fetch_max(depth, Ordering::Relaxed);
+    }
+    /// Consumer took a row off the channel.
+    pub fn on_recv(&self) {
+        self.chan_inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn decode_sum_us(&self) -> u64 {
+        self.decode_sum_us.load(Ordering::Relaxed)
+    }
+    pub fn decode_max_us(&self) -> u64 {
+        self.decode_max_us.load(Ordering::Relaxed)
+    }
+    pub fn encode_sum_us(&self) -> u64 {
+        self.encode_sum_us.load(Ordering::Relaxed)
+    }
+    pub fn upsert_sum_us(&self) -> u64 {
+        self.upsert_sum_us.load(Ordering::Relaxed)
+    }
+    pub fn upsert_batches(&self) -> u64 {
+        self.upsert_batches.load(Ordering::Relaxed)
+    }
+    pub fn chan_depth_max(&self) -> u64 {
+        self.chan_depth_max.load(Ordering::Relaxed)
+    }
+    /// All per-file decode samples (RAW ∪ Standard), for overall percentiles.
+    pub fn decode_samples(&self) -> Vec<u32> {
+        let mut out = self.raw_samples();
+        out.extend(self.std_samples());
+        out
+    }
+    pub fn raw_samples(&self) -> Vec<u32> {
+        self.raw_us.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+    pub fn std_samples(&self) -> Vec<u32> {
+        self.std_us.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+}
+
+/// Nearest-rank percentile of `samples` (µs). Returns 0 for an empty slice.
+/// `pct` in 0.0..=1.0. Clones + sorts, so callers pass a snapshot, not a hot Vec.
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+pub fn percentile(samples: &[u32], pct: f64) -> u32 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut v = samples.to_vec();
+    v.sort_unstable();
+    let rank = (pct * v.len() as f64).ceil() as usize;
+    let idx = rank.saturating_sub(1).min(v.len() - 1);
+    v[idx]
+}
+
+/// Plain, `format`-ready snapshot of one ingest job's generation profile.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+pub struct IngestSummary {
+    pub files: usize,
+    pub wall_s: f64,
+    pub scan_s: f64,
+    pub phase_a_s: f64,
+    pub filter_s: f64,
+    pub decode_par_s: f64,
+    pub decode_sum_s: f64,
+    pub cores: usize,
+    pub decode_p50_ms: f64,
+    pub decode_p95_ms: f64,
+    pub decode_max_ms: f64,
+    pub encode_sum_s: f64,
+    pub encode_avg_ms: f64,
+    pub upsert_batches: u64,
+    pub upsert_avg_ms: f64,
+    pub upsert_sum_s: f64,
+    pub chan_depth_max: u64,
+    pub producer_done_s: f64,
+    pub consumer_done_s: f64,
+    pub raw_count: usize,
+    pub raw_p50_ms: f64,
+    pub std_count: usize,
+    pub std_p50_ms: f64,
+}
+
+/// Render the one-shot per-ingest summary block.
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+pub fn format_ingest_summary(s: &IngestSummary) -> String {
+    let speedup = if s.decode_par_s > 0.0 {
+        s.decode_sum_s / s.decode_par_s
+    } else {
+        0.0
+    };
+    let tail = (s.consumer_done_s - s.producer_done_s).max(0.0);
+    format!(
+        "[ingest-summary] {files} files in {wall:.1}s\n\
+         \x20phases  scan {scan:.1}s  phaseA {pa:.1}s  filter {flt:.1}s  decode(par) {dec:.1}s\n\
+         \x20decode  \u{03a3} {dsum:.0}s / {cores} cores \u{2192} {sp:.1}x | p50 {p50:.0}ms p95 {p95:.0}ms max {mx:.0}ms\n\
+         \x20encode  \u{03a3} {esum:.1}s  avg {eavg:.0}ms\n\
+         \x20upsert  {ub} batches  avg {uavg:.0}ms (\u{03a3} {usum:.1}s)\n\
+         \x20channel max depth {chan}  | producer done@{pd:.1}s  consumer done@{cd:.1}s  (tail {tail:.1}s)\n\
+         \x20by kind  RAW {rawn} (decode p50 {rawp50:.0}ms) | std {stdn} (decode p50 {stdp50:.0}ms)",
+        files = s.files,
+        wall = s.wall_s,
+        scan = s.scan_s,
+        pa = s.phase_a_s,
+        flt = s.filter_s,
+        dec = s.decode_par_s,
+        dsum = s.decode_sum_s,
+        cores = s.cores,
+        sp = speedup,
+        p50 = s.decode_p50_ms,
+        p95 = s.decode_p95_ms,
+        mx = s.decode_max_ms,
+        esum = s.encode_sum_s,
+        eavg = s.encode_avg_ms,
+        ub = s.upsert_batches,
+        uavg = s.upsert_avg_ms,
+        usum = s.upsert_sum_s,
+        chan = s.chan_depth_max,
+        pd = s.producer_done_s,
+        cd = s.consumer_done_s,
+        tail = tail,
+        rawn = s.raw_count,
+        rawp50 = s.raw_p50_ms,
+        stdn = s.std_count,
+        stdp50 = s.std_p50_ms,
+    )
+}
+
+/// Emit the ingest summary to the diag log sink (stderr + session file).
+/// Gated: no-op when diag is off.
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+pub fn emit_ingest_summary(s: &IngestSummary) {
+    if !enabled() {
+        return;
+    }
+    write_log(&format_ingest_summary(s));
+}
+
+/// Bytes pre-read to force + time the disk IO a preview decode pages in (headless
+/// `thumbnail_blocking` bench path). ~2 MiB covers the embedded preview prefix.
+const PROBE_READ_BYTES: usize = 2 << 20;
+/// Emit a running blocking-profile summary every this many profiled thumbnails.
+const BLOCKING_SUMMARY_EVERY: u64 = 2;
+
+static BLK_COUNT: AtomicU64 = AtomicU64::new(0);
+static BLK_IO_US: AtomicU64 = AtomicU64::new(0);
+static BLK_DECODE_US: AtomicU64 = AtomicU64::new(0);
+static BLK_ENCODE_US: AtomicU64 = AtomicU64::new(0);
+static BLK_WRITE_US: AtomicU64 = AtomicU64::new(0);
+static BLK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Force + time the cold disk read for `path` (also warms the OS cache so the
+/// decode timed next reflects CPU only). Returns the read duration in µs. Used
+/// only by `ingest::thumbnail_blocking` (bench/test). Callers gate on `enabled()`.
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+pub fn measure_read(path: &Path) -> u64 {
+    use std::io::Read;
+    let t = Instant::now();
+    if let Ok(mut f) = std::fs::File::open(path) {
+        let mut buf = vec![0u8; PROBE_READ_BYTES];
+        if let Ok(n) = f.read(&mut buf) {
+            BLK_READ_BYTES.fetch_add(n as u64, Ordering::Relaxed);
+        }
+    }
+    t.elapsed().as_micros() as u64
+}
+
+/// Record one headless blocking-thumbnail's phase timings (µs) and print a
+/// cumulative `[thumb-blocking]` summary every `BLOCKING_SUMMARY_EVERY` files.
+/// Gated: no-op when diag is off.
+#[allow(dead_code)] // wired in Task 2 (ingest.rs)
+pub fn record_blocking(io_us: u64, decode_us: u64, encode_us: u64, write_us: u64) {
+    if !enabled() {
+        return;
+    }
+    let n = BLK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let io = BLK_IO_US.fetch_add(io_us, Ordering::Relaxed) + io_us;
+    let dec = BLK_DECODE_US.fetch_add(decode_us, Ordering::Relaxed) + decode_us;
+    let enc = BLK_ENCODE_US.fetch_add(encode_us, Ordering::Relaxed) + encode_us;
+    let wr = BLK_WRITE_US.fetch_add(write_us, Ordering::Relaxed) + write_us;
+    if !n.is_multiple_of(BLOCKING_SUMMARY_EVERY) {
+        return;
+    }
+    let bytes = BLK_READ_BYTES.load(Ordering::Relaxed);
+    let mbps = if io > 0 {
+        bytes as f64 / io as f64
+    } else {
+        0.0
+    };
+    let nf = n as f64;
+    write_log(&format!(
+        "[thumb-blocking] n={n}  avg/file: io={:.1}ms decode={:.1}ms encode={:.1}ms write={:.1}ms \
+         | read {:.0}MB @ {:.1}MB/s",
+        io as f64 / 1000.0 / nf,
+        dec as f64 / 1000.0 / nf,
+        enc as f64 / 1000.0 / nf,
+        wr as f64 / 1000.0 / nf,
+        bytes as f64 / 1e6,
+        mbps,
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -813,6 +1059,78 @@ mod tests {
         let joined = format_shutdown(ferrolite_jobs::JobStats::default(), true, 75, 3.0);
         assert!(joined.contains("joined=true"));
         assert!(!joined.contains("detach@"), "no detach note when joined");
+    }
+
+    #[test]
+    fn percentile_picks_expected_values() {
+        let v: Vec<u32> = (1..=100).collect(); // 1..100
+        assert_eq!(percentile(&v, 0.5), 50);
+        assert_eq!(percentile(&v, 0.95), 95);
+        assert_eq!(percentile(&v, 1.0), 100);
+        assert_eq!(percentile(&[], 0.5), 0, "empty → 0");
+        assert_eq!(percentile(&[7], 0.5), 7, "single element");
+    }
+
+    #[test]
+    fn ingest_profile_accumulates_per_kind() {
+        let p = IngestProfile::default();
+        p.record_decode(100_000, true); // 100ms RAW
+        p.record_decode(300_000, true); // 300ms RAW
+        p.record_decode(10_000, false); // 10ms std
+        p.record_encode(40_000);
+        p.record_upsert(380_000);
+        p.on_send();
+        p.on_send();
+        p.on_recv();
+        assert_eq!(p.decode_samples().len(), 3);
+        assert_eq!(p.raw_samples().len(), 2);
+        assert_eq!(p.std_samples().len(), 1);
+        assert_eq!(p.decode_sum_us(), 410_000);
+        assert_eq!(p.decode_max_us(), 300_000);
+        assert_eq!(p.encode_sum_us(), 40_000);
+        assert_eq!(p.upsert_sum_us(), 380_000);
+        assert_eq!(p.upsert_batches(), 1);
+        assert_eq!(p.chan_depth_max(), 2, "peak inflight was 2 before the recv");
+    }
+
+    #[test]
+    fn format_ingest_summary_contains_all_sections() {
+        let s = IngestSummary {
+            files: 2730,
+            wall_s: 412.3,
+            scan_s: 3.1,
+            phase_a_s: 45.2,
+            filter_s: 38.4,
+            decode_par_s: 310.7,
+            decode_sum_s: 2100.0,
+            cores: 10,
+            decode_p50_ms: 210.0,
+            decode_p95_ms: 800.0,
+            decode_max_ms: 3100.0,
+            encode_sum_s: 180.0,
+            encode_avg_ms: 66.0,
+            upsert_batches: 21,
+            upsert_avg_ms: 380.0,
+            upsert_sum_s: 8.0,
+            chan_depth_max: 640,
+            producer_done_s: 320.1,
+            consumer_done_s: 412.3,
+            raw_count: 2600,
+            raw_p50_ms: 230.0,
+            std_count: 130,
+            std_p50_ms: 12.0,
+        };
+        let out = format_ingest_summary(&s);
+        assert!(out.contains("[ingest-summary] 2730 files in 412.3s"));
+        assert!(out.contains("scan 3.1s"));
+        assert!(out.contains("phaseA 45.2s"));
+        assert!(out.contains("filter 38.4s"));
+        assert!(out.contains("decode(par) 310.7s"));
+        assert!(out.contains("6.8x"), "speedup = 2100/310.7 ≈ 6.8");
+        assert!(out.contains("p50 210ms p95 800ms max 3100ms"));
+        assert!(out.contains("tail 92.2s"), "consumer_done - producer_done");
+        assert!(out.contains("RAW 2600"));
+        assert!(out.contains("std 130"));
     }
 
     #[test]

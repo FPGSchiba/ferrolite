@@ -530,25 +530,38 @@ fn ingest_job(
                 }
                 match decoded {
                     Ok((meta, preview, info)) => {
-                        if let (Some(p), Some(us)) = (profile.as_ref(), decode_us) {
-                            let decode_ms = us as f64 / 1000.0;
-                            if decode_ms >= crate::diag::slow_threshold_ms() {
-                                let to_ms = |d: Option<std::time::Duration>| {
-                                    d.map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
-                                };
-                                let sample = crate::diag::SlowSample {
-                                    decode_ms,
-                                    extract_ms: to_ms(info.extract),
-                                    orient_ms: to_ms(info.orient),
-                                    is_raw,
-                                    src_w: info.src_w,
-                                    src_h: info.src_h,
-                                    source: info.source,
-                                    model: meta.model.clone(),
-                                    path: f.path.display().to_string(),
-                                };
-                                crate::diag::write_log(&crate::diag::format_slow_line(&sample));
-                                p.record_slow(sample);
+                        if let Some(p) = profile.as_ref() {
+                            // Count the byte-source tier for every RAW decode (not
+                            // just slow ones): `fallbacks` ≈ the slow-file count is
+                            // the signal that the mmap fallback is the tail.
+                            if let Some(kind) = info.source_kind {
+                                p.record_source(kind);
+                            }
+                            if let Some(us) = decode_us {
+                                let decode_ms = us as f64 / 1000.0;
+                                if decode_ms >= crate::diag::slow_threshold_ms() {
+                                    let to_ms = |d: Option<std::time::Duration>| {
+                                        d.map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+                                    };
+                                    let sample = crate::diag::SlowSample {
+                                        decode_ms,
+                                        source_kind: info.source_kind,
+                                        source_acquire_ms: to_ms(info.source_acquire),
+                                        get_decoder_ms: to_ms(info.get_decoder),
+                                        raw_metadata_ms: to_ms(info.raw_metadata),
+                                        raw_dims_ms: to_ms(info.raw_dims),
+                                        extract_ms: to_ms(info.extract),
+                                        orient_ms: to_ms(info.orient),
+                                        is_raw,
+                                        src_w: info.src_w,
+                                        src_h: info.src_h,
+                                        source: info.source,
+                                        model: meta.model.clone(),
+                                        path: f.path.display().to_string(),
+                                    };
+                                    crate::diag::write_log(&crate::diag::format_slow_line(&sample));
+                                    p.record_slow(sample);
+                                }
                             }
                         }
                         let new_image = NewImage::from_metadata(
@@ -671,6 +684,7 @@ fn ingest_job(
         };
         crate::diag::emit_ingest_summary(&summary);
         crate::diag::emit_slow_aggregate(&p.slow_samples(), file_count);
+        crate::diag::emit_source_split(p.prefix_hits(), p.fallbacks());
     }
 
     if profile.is_some() {

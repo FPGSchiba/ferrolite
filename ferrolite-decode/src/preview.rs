@@ -16,11 +16,13 @@ pub enum PreviewSource {
     EmbeddedThumbnail,
 }
 
-/// What the preview extraction did, for diagnostics. `source`/`src_w`/`src_h`
-/// are always populated (free); `extract`/`orient` are `Some` only when the
-/// caller passes `measure = true` (zero `Instant` cost when false).
+/// `preview_from_decoder`'s own contribution to diagnostics. `source`/`src_w`/
+/// `src_h` are always populated (free); `extract`/`orient` are `Some` only when
+/// the caller passes `measure = true` (zero `Instant` cost when false). The full
+/// public `PreviewInfo` (in `lib.rs`) folds these together with the source-tier
+/// probe and the metadata/geometry sub-timings.
 #[derive(Debug, Clone, Copy)]
-pub struct PreviewInfo {
+pub(crate) struct PreviewParts {
     pub source: PreviewSource,
     pub src_w: u32,
     pub src_h: u32,
@@ -38,7 +40,7 @@ pub(crate) fn preview_from_decoder(
     src: &RawSource,
     exif_orientation: u16,
     measure: bool,
-) -> Result<(ImageBuffer, PreviewInfo), DecodeError> {
+) -> Result<(ImageBuffer, PreviewParts), DecodeError> {
     let params = RawDecodeParams::default();
 
     let t_extract = measure.then(Instant::now);
@@ -64,7 +66,7 @@ pub(crate) fn preview_from_decoder(
 
     Ok((
         buf,
-        PreviewInfo {
+        PreviewParts {
             source,
             src_w,
             src_h,
@@ -78,7 +80,7 @@ pub(crate) fn preview_from_decoder(
 /// Uses a sequential prefix read (not mmap page-faults) so slow disks aren't
 /// seek-thrashed — see `source::with_ingest_source`.
 pub fn decode_preview_raw(path: &Path) -> Result<ImageBuffer, DecodeError> {
-    crate::source::with_ingest_source(path, |src| {
+    crate::source::with_ingest_source(path, false, |src| {
         let decoder = rawler::get_decoder(src).map_err(rawler_err)?;
         let params = RawDecodeParams::default();
 
@@ -90,7 +92,8 @@ pub fn decode_preview_raw(path: &Path) -> Result<ImageBuffer, DecodeError> {
             .unwrap_or(1);
 
         preview_from_decoder(decoder.as_ref(), src, exif_orientation, false)
-            .map(|(buf, _info)| buf)
+            .map(|(buf, _parts)| buf)
             .map_err(|_| DecodeError::NoPreview(path.to_path_buf()))
     })
+    .map(|(buf, _probe)| buf)
 }

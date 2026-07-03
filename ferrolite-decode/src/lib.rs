@@ -17,16 +17,40 @@ pub use demosaic::{DemosaicParams, DemosaicToRgb16f, QuadBin};
 pub use error::DecodeError;
 pub use metadata::Metadata;
 pub use orient::apply_orientation_linear;
-pub use preview::{PreviewInfo, PreviewSource};
+pub use preview::PreviewSource;
 pub use raw::{decode_full, RawDecoded};
+pub use source::SourceKind;
 pub use standard::{decode_preview_standard, read_metadata_standard};
 
 use ferrolite_image::{FileKind, ImageBuffer, Orientation};
 use rawler::decoders::{RawDecodeParams, RawMetadata};
 use rawler::rawimage::RawImage;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use crate::error::rawler as rawler_err;
+
+/// Diagnostics for one `decode_meta_and_preview` call. `source`/`src_w`/`src_h`
+/// are always populated; every `Option<Duration>` is `Some` only when the caller
+/// passed `measure = true` (zero `Instant` cost otherwise). The timings split the
+/// per-file cost into its stages: acquiring the byte source, `get_decoder`,
+/// `raw_metadata`, the dummy-geometry `raw_image`, then the embedded-preview
+/// `extract` and `orient`. `source_kind` reports whether the fast 1 MiB prefix
+/// sufficed or the file fell back to the full mmap source; it is `None` for
+/// standard (non-RAW) rasters, which do not use that machinery.
+#[derive(Debug, Clone, Copy)]
+pub struct PreviewInfo {
+    pub source: PreviewSource,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub source_kind: Option<SourceKind>,
+    pub source_acquire: Option<Duration>,
+    pub get_decoder: Option<Duration>,
+    pub raw_metadata: Option<Duration>,
+    pub raw_dims: Option<Duration>,
+    pub extract: Option<Duration>,
+    pub orient: Option<Duration>,
+}
 
 /// Decode an upright RGB8 preview, routed by `kind`.
 pub fn decode_preview(path: &Path, kind: FileKind) -> Result<ImageBuffer, DecodeError> {
@@ -53,34 +77,71 @@ pub fn decode_meta_and_preview(
     measure: bool,
 ) -> Result<(Metadata, ImageBuffer, PreviewInfo), DecodeError> {
     match kind {
-        FileKind::Raw => crate::source::with_ingest_source(path, |src| {
-            let decoder = rawler::get_decoder(src).map_err(rawler_err)?;
-            let params = RawDecodeParams::default();
+        FileKind::Raw => {
+            let (parts_bundle, probe) = crate::source::with_ingest_source(path, measure, |src| {
+                let t = measure.then(Instant::now);
+                let decoder = rawler::get_decoder(src).map_err(rawler_err)?;
+                let get_decoder = t.map(|t| t.elapsed());
 
-            let meta_raw = decoder.raw_metadata(src, &params).map_err(rawler_err)?;
-            // `dummy = true`: geometry only, no pixel decode (fast on an in-memory source).
-            let dims = decoder.raw_image(src, &params, true).map_err(rawler_err)?;
-            let exif_orientation = meta_raw.exif.orientation.unwrap_or(1);
+                let params = RawDecodeParams::default();
 
-            let metadata = build_metadata_from_raw(&meta_raw, &dims)?;
-            let (preview, info) = crate::preview::preview_from_decoder(
-                decoder.as_ref(),
-                src,
-                exif_orientation,
-                measure,
-            )
-            .map_err(|_| DecodeError::NoPreview(path.to_path_buf()))?;
+                let t = measure.then(Instant::now);
+                let meta_raw = decoder.raw_metadata(src, &params).map_err(rawler_err)?;
+                let raw_metadata = t.map(|t| t.elapsed());
+
+                // `dummy = true`: geometry only, no pixel decode (fast on an in-memory source).
+                let t = measure.then(Instant::now);
+                let dims = decoder.raw_image(src, &params, true).map_err(rawler_err)?;
+                let raw_dims = t.map(|t| t.elapsed());
+
+                let exif_orientation = meta_raw.exif.orientation.unwrap_or(1);
+                let metadata = build_metadata_from_raw(&meta_raw, &dims)?;
+                let (preview, parts) = crate::preview::preview_from_decoder(
+                    decoder.as_ref(),
+                    src,
+                    exif_orientation,
+                    measure,
+                )
+                .map_err(|_| DecodeError::NoPreview(path.to_path_buf()))?;
+                Ok((
+                    metadata,
+                    preview,
+                    parts,
+                    get_decoder,
+                    raw_metadata,
+                    raw_dims,
+                ))
+            })?;
+            let (metadata, preview, parts, get_decoder, raw_metadata, raw_dims) = parts_bundle;
+            let info = PreviewInfo {
+                source: parts.source,
+                src_w: parts.src_w,
+                src_h: parts.src_h,
+                source_kind: Some(probe.kind),
+                source_acquire: probe.acquire,
+                get_decoder,
+                raw_metadata,
+                raw_dims,
+                extract: parts.extract,
+                orient: parts.orient,
+            };
             Ok((metadata, preview, info))
-        }),
+        }
         FileKind::Standard => {
             let metadata = standard::read_metadata_standard(path)?;
             let preview = standard::decode_preview_standard(path)?;
-            // Standard rasters are read directly (not a RAW fallback branch) and
-            // are already fast; tag as EmbeddedPreview and leave sub-timings None.
+            // Standard rasters are read directly (not through the prefix/mmap RAW
+            // machinery) and are already fast; tag source as EmbeddedPreview,
+            // `source_kind` None, and leave all sub-timings None.
             let info = PreviewInfo {
                 source: PreviewSource::EmbeddedPreview,
                 src_w: preview.width,
                 src_h: preview.height,
+                source_kind: None,
+                source_acquire: None,
+                get_decoder: None,
+                raw_metadata: None,
+                raw_dims: None,
                 extract: None,
                 orient: None,
             };
@@ -126,7 +187,7 @@ fn build_metadata_from_raw(meta: &RawMetadata, dims: &RawImage) -> Result<Metada
 /// Reads a sequential file prefix rather than mmap-faulting through the file —
 /// see `source::with_ingest_source` for why that matters on slow disks.
 fn read_metadata_raw(path: &Path) -> Result<Metadata, DecodeError> {
-    crate::source::with_ingest_source(path, |src| {
+    crate::source::with_ingest_source(path, false, |src| {
         let decoder = rawler::get_decoder(src).map_err(rawler_err)?;
         let params = RawDecodeParams::default();
 
@@ -136,4 +197,5 @@ fn read_metadata_raw(path: &Path) -> Result<Metadata, DecodeError> {
 
         build_metadata_from_raw(&meta, &dims)
     })
+    .map(|(meta, _probe)| meta)
 }

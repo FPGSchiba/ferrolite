@@ -1427,6 +1427,45 @@ impl FerroliteApp {
             }
         }
     }
+
+    /// Drain "Regenerate thumbnail" requests queued by the grid context menu.
+    /// Runs once per frame where the GPU render state is available; each image
+    /// loads its edit stack from its `.xmp` sidecar inside the Background job
+    /// (missing/malformed → identity, i.e. a color-managed unedited thumbnail).
+    fn drain_thumb_regen_requests(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if self.state.pending_thumb_regen.is_empty() {
+            return;
+        }
+        let Some(rs) = frame.wgpu_render_state() else {
+            // No GPU this frame; keep the requests for a later frame.
+            return;
+        };
+        let ids = std::mem::take(&mut self.state.pending_thumb_regen);
+        let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let cam =
+            crate::develop::thumb_regen::srgb_fallback_camera_to_working(self.state.working_space);
+        for id in ids {
+            let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() else {
+                continue;
+            };
+            let Ok(Some(folder)) = self.state.reads.folder_path(rec.folder_id) else {
+                continue;
+            };
+            let path = std::path::PathBuf::from(folder).join(&rec.filename);
+            crate::develop::thumb_regen::spawn_regen_edited_thumbnail(
+                &self.state.jobs,
+                &self.state.writer,
+                &self.state.tx,
+                ctx,
+                std::sync::Arc::clone(&gpu),
+                id,
+                path,
+                rec.kind,
+                cam,
+                crate::develop::thumb_regen::RegenStackSource::Sidecar,
+            );
+        }
+    }
 }
 
 /// Title-bar height; resize edges start below it so they never fight the bar.
@@ -1664,6 +1703,7 @@ impl eframe::App for FerroliteApp {
         let repaint_forced = !self.state.pending_uploads.is_empty();
         crate::diag::add_events(events_this_frame);
         crate::diag::add_uploads(uploads_this_frame);
+        self.drain_thumb_regen_requests(ctx, frame);
         // Refresh toolbar metadata-filter caches once per completed ingest (bounded).
         if ingest_done {
             self.state.reload_vocab();

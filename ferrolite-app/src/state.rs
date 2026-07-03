@@ -147,6 +147,9 @@ pub struct AppState {
     pub selection_anchor: Option<i64>,
     /// Non-critical warning surfaced in the UI (e.g. query error).
     pub warning: Option<String>,
+    /// Image ids queued by the "Regenerate thumbnail" context-menu action,
+    /// drained in `update()` where the GPU render state is available.
+    pub pending_thumb_regen: Vec<i64>,
 
     /// Inline rename in progress: (kind, id, edit buffer).
     /// Set on double-click or "Rename" context-menu; cleared on Enter/blur.
@@ -246,6 +249,7 @@ impl AppState {
             selection: HashSet::new(),
             selection_anchor: None,
             warning: None,
+            pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
             iso_range: None,
             date_range: None,
@@ -794,6 +798,7 @@ impl AppState {
             selection: HashSet::new(),
             selection_anchor: None,
             warning: None,
+            pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
             iso_range: None,
             date_range: None,

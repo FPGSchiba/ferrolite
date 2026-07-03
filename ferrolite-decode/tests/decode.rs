@@ -68,12 +68,14 @@ fn preview_info_reports_dims_and_gated_timings() {
         info.extract.is_some() && info.orient.is_some(),
         "measured => Some timings"
     );
-    assert!(matches!(
+    // No rawler 0.7.2 decoder implements `preview_image`, so a RAW preview must
+    // come from the full-resolution embedded image or the embedded thumbnail —
+    // never the `preview_image` branch. This is the spec's core mechanism claim.
+    assert_ne!(
         info.source,
-        PreviewSource::FullImage
-            | PreviewSource::EmbeddedThumbnail
-            | PreviewSource::EmbeddedPreview
-    ));
+        PreviewSource::EmbeddedPreview,
+        "RAW preview must not use the (unimplemented) preview_image branch"
+    );
 
     // measure = false: no timings recorded.
     let (_m2, _p2, info2) =

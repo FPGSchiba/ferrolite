@@ -3,6 +3,7 @@
 //! filter strip so the two never duplicate widget logic.
 
 use crate::library::icons;
+use crate::settings::keymap::{Action, Keymap};
 use ferrolite_catalog::{SortKey, TagMode, TagRecord};
 use ferrolite_image::{Flag, TagId};
 
@@ -19,9 +20,32 @@ pub fn star_value_clicked(current: u8, clicked: u8) -> u8 {
 const STAR_R: f32 = 5.0;
 const STAR_GAP: f32 = 3.0;
 
+/// The `Action` bound to setting a given star index (1..=5), if any — used to
+/// show its shortcut in the Develop footer's star tooltips (Task 4.4).
+fn rating_action(n: u8) -> Option<Action> {
+    match n {
+        1 => Some(Action::Rating1),
+        2 => Some(Action::Rating2),
+        3 => Some(Action::Rating3),
+        4 => Some(Action::Rating4),
+        5 => Some(Action::Rating5),
+        _ => None,
+    }
+}
+
 /// Draw `max` clickable stars (first `current` filled, ACCENT; rest outlined, TEXT_FAINT).
 /// Returns the new value if a star was clicked (active→0), else None.
-pub fn clickable_stars(ui: &mut egui::Ui, current: u8, max: u8) -> Option<u8> {
+///
+/// When `keymap` is `Some`, each star gets an `on_hover_text` showing its
+/// rating action + bound shortcut (Develop footer only — the Library filter's
+/// rating threshold passes `None` since it does not correspond to a keyboard
+/// action).
+pub fn clickable_stars(
+    ui: &mut egui::Ui,
+    current: u8,
+    max: u8,
+    keymap: Option<&Keymap>,
+) -> Option<u8> {
     let width = icons::advance_width(STAR_R, STAR_GAP, max);
     let (rect, _resp) =
         ui.allocate_exact_size(egui::vec2(width, STAR_R * 2.0 + 4.0), egui::Sense::hover());
@@ -40,6 +64,20 @@ pub fn clickable_stars(ui: &mut egui::Ui, current: u8, max: u8) -> Option<u8> {
         };
         icons::star(ui.painter(), center, STAR_R, filled, color);
         let hit = egui::Rect::from_center_size(center, egui::vec2(cell, rect.height()));
+        if let Some(km) = keymap {
+            if let Some(action) = rating_action(n) {
+                let star_resp = ui.interact(
+                    hit,
+                    ui.id().with(("clickable_star", n)),
+                    egui::Sense::hover(),
+                );
+                star_resp.on_hover_text(format!(
+                    "{} ({})",
+                    action.label(),
+                    km.chord(action).label()
+                ));
+            }
+        }
         if clicked_now && pointer.map(|p| hit.contains(p)).unwrap_or(false) {
             result = Some(star_value_clicked(current, n));
         }
@@ -65,7 +103,7 @@ pub fn rating_threshold(
             changed = true;
         }
     }
-    if let Some(v) = clickable_stars(ui, *min_rating, 5) {
+    if let Some(v) = clickable_stars(ui, *min_rating, 5, None) {
         *min_rating = v;
         changed = true;
     }

@@ -3,6 +3,7 @@
 
 use crate::library::{filter_widgets, icons};
 use crate::metadata::MetaEdit;
+use crate::settings::keymap::Action;
 use crate::state::AppState;
 use ferrolite_image::{Flag, Rating};
 
@@ -23,15 +24,28 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
 
-        // Rating: clickable stars (set N / clear on re-click).
-        if let Some(v) = filter_widgets::clickable_stars(ui, cur_rating, 5) {
+        let keymap = &state.settings.keymap;
+
+        // Rating: clickable stars (set N / clear on re-click). Each star shows
+        // its rating action + bound shortcut on hover (Task 4.4).
+        if let Some(v) = filter_widgets::clickable_stars(ui, cur_rating, 5, Some(keymap)) {
             state.apply_metadata_edit_to_image(ctx, image_id, MetaEdit::SetRating(Rating::new(v)));
         }
 
         // Flag: Pick / Reject toggle buttons.
-        for (f, color, label) in [
-            (Flag::Pick, crate::theme::SEMANTIC_GREEN, "Pick"),
-            (Flag::Reject, crate::theme::SEMANTIC_RED, "Reject"),
+        for (f, color, label, action) in [
+            (
+                Flag::Pick,
+                crate::theme::SEMANTIC_GREEN,
+                "Pick",
+                Action::FlagPick,
+            ),
+            (
+                Flag::Reject,
+                crate::theme::SEMANTIC_RED,
+                "Reject",
+                Action::FlagReject,
+            ),
         ] {
             let active = cur_flag == f;
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
@@ -47,7 +61,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
                 color,
                 false,
             );
-            if resp.on_hover_text(label).clicked() {
+            let hover = format!(
+                "{} ({})",
+                label,
+                state.settings.keymap.chord(action).label()
+            );
+            if resp.on_hover_text(hover).clicked() {
                 let new = if active { Flag::None } else { f };
                 state.apply_metadata_edit_to_image(ctx, image_id, MetaEdit::SetFlag(new));
             }
@@ -79,7 +98,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
             egui::Stroke::new(1.0, crate::theme::BORDER_STRONG),
         );
         icons::export_tray(ui.painter(), rect.center(), 14.0, icon_color);
-        if resp.on_hover_text("Toggle export queue (Q)").clicked() {
+        let queue_hover = format!(
+            "Toggle export queue ({})",
+            state.settings.keymap.chord(Action::AddToQueue).label()
+        );
+        if resp.on_hover_text(queue_hover).clicked() {
             state.queue_toggle(image_id);
         }
 

@@ -1,7 +1,7 @@
 //! Env-flag-gated diagnostics dev-mode (`FERROLITE_DIAG`). Zero overhead when
 //! unset: `enabled()` is a single cached bool check that short-circuits every
-//! recorder, the per-frame tick, and the overlay. Sibling to `thumb_profile.rs`
-//! (the narrow ingest profiler), which this does not touch.
+//! recorder, the per-frame tick, the overlay, and ingest/blocking generation
+//! profiling.
 //!
 //! `FERROLITE_DIAG` = unset→off | `1`/`both`→log+overlay | `log` | `overlay`.
 //! `FERROLITE_DIAG_FILE` overrides the session-log path.
@@ -133,7 +133,7 @@ pub fn write_log(block: &str) {
     }
 }
 
-// ── App-side cumulative counters (process-global, like thumb_profile's statics).
+// ── App-side cumulative counters (process-global statics).
 // UI-thread-written in practice; Relaxed atomics keep them cheap and sound.
 static TEX_HIT: AtomicU64 = AtomicU64::new(0);
 static TEX_MISS: AtomicU64 = AtomicU64::new(0);
@@ -618,7 +618,6 @@ pub fn format_shutdown(before: JobStats, joined: bool, timeout_ms: u64, on_exit_
 /// gates creation/use behind `enabled()`. `Relaxed` throughout — diagnostics,
 /// not synchronization.
 #[derive(Default)]
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 pub struct IngestProfile {
     decode_sum_us: AtomicU64,
     decode_max_us: AtomicU64,
@@ -635,7 +634,6 @@ pub struct IngestProfile {
     std_us: Mutex<Vec<u32>>,
 }
 
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 impl IngestProfile {
     pub fn record_decode(&self, us: u64, is_raw: bool) {
         self.decode_sum_us.fetch_add(us, Ordering::Relaxed);
@@ -697,7 +695,6 @@ impl IngestProfile {
 
 /// Nearest-rank percentile of `samples` (µs). Returns 0 for an empty slice.
 /// `pct` in 0.0..=1.0. Clones + sorts, so callers pass a snapshot, not a hot Vec.
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 pub fn percentile(samples: &[u32], pct: f64) -> u32 {
     if samples.is_empty() {
         return 0;
@@ -711,7 +708,6 @@ pub fn percentile(samples: &[u32], pct: f64) -> u32 {
 
 /// Plain, `format`-ready snapshot of one ingest job's generation profile.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 pub struct IngestSummary {
     pub files: usize,
     pub wall_s: f64,
@@ -739,7 +735,6 @@ pub struct IngestSummary {
 }
 
 /// Render the one-shot per-ingest summary block.
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 pub fn format_ingest_summary(s: &IngestSummary) -> String {
     let speedup = if s.decode_par_s > 0.0 {
         s.decode_sum_s / s.decode_par_s
@@ -785,7 +780,6 @@ pub fn format_ingest_summary(s: &IngestSummary) -> String {
 
 /// Emit the ingest summary to the diag log sink (stderr + session file).
 /// Gated: no-op when diag is off.
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 pub fn emit_ingest_summary(s: &IngestSummary) {
     if !enabled() {
         return;
@@ -809,7 +803,6 @@ static BLK_READ_BYTES: AtomicU64 = AtomicU64::new(0);
 /// Force + time the cold disk read for `path` (also warms the OS cache so the
 /// decode timed next reflects CPU only). Returns the read duration in µs. Used
 /// only by `ingest::thumbnail_blocking` (bench/test). Callers gate on `enabled()`.
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 pub fn measure_read(path: &Path) -> u64 {
     use std::io::Read;
     let t = Instant::now();
@@ -825,7 +818,6 @@ pub fn measure_read(path: &Path) -> u64 {
 /// Record one headless blocking-thumbnail's phase timings (µs) and print a
 /// cumulative `[thumb-blocking]` summary every `BLOCKING_SUMMARY_EVERY` files.
 /// Gated: no-op when diag is off.
-#[allow(dead_code)] // wired in Task 2 (ingest.rs)
 pub fn record_blocking(io_us: u64, decode_us: u64, encode_us: u64, write_us: u64) {
     if !enabled() {
         return;

@@ -213,12 +213,13 @@ fn flush_batch(
     force: bool,
     pending: &mut Vec<(NewImage, Option<(Thumbnail, DecodedThumb)>)>,
     kept: &mut HashSet<i64>,
+    profile: Option<&Arc<crate::diag::IngestProfile>>,
 ) {
     if pending.is_empty() {
         return;
     }
     let rows = std::mem::take(pending);
-    let t_batch = crate::thumb_profile::enabled().then(std::time::Instant::now);
+    let t_batch = profile.map(|_| std::time::Instant::now());
 
     // Split each row into the (NewImage, Option<Thumbnail>) the batch write
     // needs and the DecodedThumb kept aside for the post-commit texture-upload
@@ -252,8 +253,8 @@ fn flush_batch(
             return;
         }
     };
-    if let Some(t) = t_batch {
-        crate::thumb_profile::record_upsert(t.elapsed().as_micros() as u64);
+    if let (Some(t), Some(p)) = (t_batch, profile) {
+        p.record_upsert(t.elapsed().as_micros() as u64);
     }
 
     for (id, decoded) in ids.into_iter().zip(decoded_thumbs.into_iter()) {
@@ -283,7 +284,22 @@ fn ingest_job(
     ctx: egui::Context,
     cancel: &CancelToken,
 ) {
+    let profile =
+        crate::diag::enabled().then(|| std::sync::Arc::new(crate::diag::IngestProfile::default()));
+    let t_job = profile.as_ref().map(|_| std::time::Instant::now());
+    // Phase wall-clocks (seconds), filled when profiling.
+    let mut scan_s = 0.0f64;
+    let mut phase_a_s = 0.0f64;
+    let mut filter_s = 0.0f64;
+    let mut producer_done_s = 0.0f64;
+    let mut producer_done_at_s = 0.0f64;
+
+    let t_scan = profile.as_ref().map(|_| std::time::Instant::now());
     let files = scan_tree(&folder);
+    if let Some(t) = t_scan {
+        scan_s = t.elapsed().as_secs_f64();
+    }
+    let file_count = files.len();
     let force = matches!(mode, ReindexMode::Full);
 
     // Create folder rows top-down, wiring parent_id.
@@ -312,6 +328,7 @@ fn ingest_job(
     // instead of being gated by the ~metadata rate; dimensions and thumbnails
     // stream in during Phase B below. `insert_pending` leaves already-indexed rows
     // untouched, so re-opening a folder stays instant.
+    let t_phase_a = profile.as_ref().map(|_| std::time::Instant::now());
     {
         let added_at = now_epoch_secs();
         let mut inserted = 0usize;
@@ -349,6 +366,9 @@ fn ingest_job(
         });
         ctx.request_repaint();
     }
+    if let Some(t) = t_phase_a {
+        phase_a_s = t.elapsed().as_secs_f64();
+    }
 
     // Streaming ingest. The expensive part — one decode per file yielding BOTH
     // metadata AND the embedded preview, then resize/encode into a thumbnail —
@@ -374,6 +394,7 @@ fn ingest_job(
             let writer = Arc::clone(&writer);
             let tx = tx.clone();
             let ctx = ctx.clone();
+            let profile = profile.clone();
             scope.spawn(move || {
                 use std::sync::mpsc::RecvTimeoutError;
                 // For Full, collect every present file's id so prune can delete the rest.
@@ -393,15 +414,34 @@ fn ingest_job(
                     }
                     match row_rx.recv_timeout(FLUSH_INTERVAL) {
                         Ok(row) => {
+                            if let Some(p) = &profile {
+                                p.on_recv();
+                            }
                             pending.push(row);
                             if pending.len() >= INGEST_WRITE_BATCH {
-                                flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
+                                flush_batch(
+                                    &writer,
+                                    &tx,
+                                    &ctx,
+                                    force,
+                                    &mut pending,
+                                    &mut kept,
+                                    profile.as_ref(),
+                                );
                             }
                         }
                         Err(RecvTimeoutError::Timeout) => {
                             // No new row within the interval: commit whatever has
                             // accumulated so the grid keeps filling smoothly.
-                            flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
+                            flush_batch(
+                                &writer,
+                                &tx,
+                                &ctx,
+                                force,
+                                &mut pending,
+                                &mut kept,
+                                profile.as_ref(),
+                            );
                         }
                         Err(RecvTimeoutError::Disconnected) => break,
                     }
@@ -410,7 +450,15 @@ fn ingest_job(
                 // finished) or the loop broke on cancel — either way, already-decoded
                 // rows in `pending` must not be silently dropped. `flush_batch` is a
                 // no-op on an empty batch, so this is always safe.
-                flush_batch(&writer, &tx, &ctx, force, &mut pending, &mut kept);
+                flush_batch(
+                    &writer,
+                    &tx,
+                    &ctx,
+                    force,
+                    &mut pending,
+                    &mut kept,
+                    profile.as_ref(),
+                );
                 kept
             })
         };
@@ -419,6 +467,7 @@ fn ingest_job(
         // (Incremental skips unchanged files by (mtime,size); Full forces all), so
         // the status bar knows the true denominator. `to_process` pairs each file
         // with its resolved folder_id. Emit the planned total once.
+        let t_filter = profile.as_ref().map(|_| std::time::Instant::now());
         let to_process: Vec<(&ferrolite_catalog::ScannedFile, i64)> = files
             .iter()
             .filter_map(|f| {
@@ -434,6 +483,9 @@ fn ingest_job(
                 Some((f, folder_id))
             })
             .collect();
+        if let Some(t) = t_filter {
+            filter_s = t.elapsed().as_secs_f64();
+        }
         let _ = tx.send(AppEvent::IngestPlanned {
             total: to_process.len(),
         });
@@ -443,6 +495,7 @@ fn ingest_job(
         // success, generates the thumbnail inline; the finished row + thumbnail is
         // streamed to the consumer. When the parallel pass ends, every cloned
         // sender drops and the channel closes, draining the consumer to completion.
+        let t_producer = profile.as_ref().map(|_| std::time::Instant::now());
         to_process
             .par_iter()
             .for_each_with(row_tx, |sender, &(f, folder_id)| {
@@ -453,11 +506,11 @@ fn ingest_job(
                 let rating =
                     ferrolite_catalog::read_rating(&ferrolite_catalog::sidecar_path(&f.path))
                         .unwrap_or_default();
-                let profile = crate::thumb_profile::enabled();
-                let t_meta = profile.then(std::time::Instant::now);
+                let is_raw = matches!(f.kind, ferrolite_catalog::FileKind::Raw);
+                let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
                 let decoded = ferrolite_decode::decode_meta_and_preview(&f.path, f.kind);
-                if let Some(t) = t_meta {
-                    crate::thumb_profile::record_meta(t.elapsed().as_micros() as u64);
+                if let (Some(t), Some(p)) = (t_meta, profile.as_ref()) {
+                    p.record_decode(t.elapsed().as_micros() as u64, is_raw);
                 }
                 match decoded {
                     Ok((meta, preview)) => {
@@ -480,7 +533,7 @@ fn ingest_job(
                             return;
                         }
                         // Resize + JPEG-encode the preview into a thumbnail inline.
-                        let t_enc = profile.then(std::time::Instant::now);
+                        let t_enc = profile.as_ref().map(|_| std::time::Instant::now());
                         let thumb = match ferrolite_catalog::generate_thumbnail(&preview) {
                             Ok(pair) => Some(pair),
                             Err(e) => {
@@ -491,8 +544,11 @@ fn ingest_job(
                                 None
                             }
                         };
-                        if let Some(t) = t_enc {
-                            crate::thumb_profile::record_encode(t.elapsed().as_micros() as u64);
+                        if let (Some(t), Some(p)) = (t_enc, profile.as_ref()) {
+                            p.record_encode(t.elapsed().as_micros() as u64);
+                        }
+                        if let Some(p) = profile.as_ref() {
+                            p.on_send();
                         }
                         let _ = sender.send((new_image, thumb));
                     }
@@ -505,10 +561,17 @@ fn ingest_job(
                             f.kind,
                             added_at,
                         );
+                        if let Some(p) = profile.as_ref() {
+                            p.on_send();
+                        }
                         let _ = sender.send((new_image, None));
                     }
                 }
             });
+        if let Some(t) = t_producer {
+            producer_done_s = t.elapsed().as_secs_f64();
+        }
+        producer_done_at_s = t_job.map_or(0.0, |t| t.elapsed().as_secs_f64());
 
         kept_image_ids = consumer.join().expect("ingest consumer thread panicked");
     });
@@ -526,6 +589,47 @@ fn ingest_job(
                 eprintln!("ferrolite: prune_subtree failed: {e}");
             }
         }
+    }
+
+    if let (Some(p), Some(t)) = (&profile, t_job) {
+        let wall_s = t.elapsed().as_secs_f64();
+        let raw = p.raw_samples();
+        let std_s = p.std_samples();
+        let all = p.decode_samples();
+        let us_to_ms = |u: u32| u as f64 / 1000.0;
+        let encode_count = all.len().max(1) as f64;
+        let summary = crate::diag::IngestSummary {
+            files: file_count,
+            wall_s,
+            scan_s,
+            phase_a_s,
+            filter_s,
+            decode_par_s: producer_done_s,
+            decode_sum_s: p.decode_sum_us() as f64 / 1e6,
+            cores: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            decode_p50_ms: us_to_ms(crate::diag::percentile(&all, 0.5)),
+            decode_p95_ms: us_to_ms(crate::diag::percentile(&all, 0.95)),
+            decode_max_ms: p.decode_max_us() as f64 / 1000.0,
+            encode_sum_s: p.encode_sum_us() as f64 / 1e6,
+            encode_avg_ms: (p.encode_sum_us() as f64 / 1000.0) / encode_count,
+            upsert_batches: p.upsert_batches(),
+            upsert_avg_ms: if p.upsert_batches() > 0 {
+                (p.upsert_sum_us() as f64 / 1000.0) / p.upsert_batches() as f64
+            } else {
+                0.0
+            },
+            upsert_sum_s: p.upsert_sum_us() as f64 / 1e6,
+            chan_depth_max: p.chan_depth_max(),
+            producer_done_s: producer_done_at_s,
+            consumer_done_s: wall_s,
+            raw_count: raw.len(),
+            raw_p50_ms: us_to_ms(crate::diag::percentile(&raw, 0.5)),
+            std_count: std_s.len(),
+            std_p50_ms: us_to_ms(crate::diag::percentile(&std_s, 0.5)),
+        };
+        crate::diag::emit_ingest_summary(&summary);
     }
 
     let _ = tx.send(AppEvent::IngestDone);
@@ -548,12 +652,12 @@ pub fn thumbnail_blocking(
     path: &Path,
     kind: FileKind,
 ) -> Result<(Thumbnail, DecodedThumb), String> {
-    // Opt-in profiling (FERROLITE_PROFILE_THUMBS): time the disk read separately
-    // from decode/encode. `measure_read` also warms the cache, so the decode
-    // timed next reflects CPU only. Off by default with zero overhead.
-    let profile = crate::thumb_profile::enabled();
+    // Opt-in profiling (FERROLITE_DIAG): time the disk read separately from
+    // decode/encode. `measure_read` also warms the cache, so the decode timed
+    // next reflects CPU only. Off by default with zero overhead.
+    let profile = crate::diag::enabled();
     let io_us = if profile {
-        crate::thumb_profile::measure_read(path)
+        crate::diag::measure_read(path)
     } else {
         0
     };
@@ -581,7 +685,7 @@ pub fn thumbnail_blocking(
     let write_us = t_write.map_or(0, |t| t.elapsed().as_micros() as u64);
 
     if profile {
-        crate::thumb_profile::record(io_us, decode_us, encode_us, write_us);
+        crate::diag::record_blocking(io_us, decode_us, encode_us, write_us);
     }
     Ok((thumb, decoded))
 }

@@ -1335,16 +1335,6 @@ impl eframe::App for FerroliteApp {
             self.state.reload_vocab();
         }
 
-        // Once-per-second pipeline diagnostic (only when FERROLITE_PROFILE_THUMBS
-        // is set): shows whether throughput is gated by indexing/spawning or by
-        // workers being saturated with ingest jobs.
-        crate::thumb_profile::diag(
-            self.state.indexed,
-            self.state.ingest_done as u64,
-            self.state.ingest_total as u64,
-            self.state.jobs.active_count(),
-            self.state.jobs.pending_count(),
-        );
         if self.state.dirty {
             self.state.refresh_images();
             self.state.dirty = false;

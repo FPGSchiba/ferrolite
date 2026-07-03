@@ -13,7 +13,6 @@ mod module;
 mod state;
 mod status_bar;
 mod theme;
-mod thumb_profile;
 mod viewer;
 mod widgets;
 

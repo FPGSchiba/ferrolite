@@ -29,9 +29,20 @@
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
-/// Environment variable that, when set to an integer `N >= 1`, pins the ingest
-/// read concurrency to exactly `N` and disables the adaptive controller. Any
-/// other value (`0`, unset, or unparseable) leaves the gate adaptive.
+/// Environment variable controlling the ingest read-concurrency gate.
+///
+/// An instrumented run showed the adaptive controller converging on a limit
+/// *below* the rayon worker count and, once clogged by a run of slow reads,
+/// staying there — throttling ingest instead of protecting it. So the gate
+/// now defaults to **no throttling** and the interesting modes are opt-in:
+///
+/// - unset / empty / unrecognized => no throttle: pinned at `max_limit` (a
+///   permit is always available up to the worker count, so `acquire()` never
+///   blocks in the default rayon setup).
+/// - `"adaptive"` / `"auto"` (case-insensitive) => the gradient controller
+///   from this module's docs, free to move within `[1, max_limit]`.
+/// - an integer `N >= 1` => pinned at `min(N, max_limit)`, for A/B
+///   measurement against a fixed cap.
 const READ_CONCURRENCY_ENV: &str = "FERROLITE_INGEST_READ_CONCURRENCY";
 
 /// Smoothing factor for the recent-latency EWMA. Chosen so the controller
@@ -198,13 +209,17 @@ struct State {
 ///
 /// # Modes
 ///
-/// - **Adaptive** (default): every dropped [`ReadPermit`] feeds its measured
-///   latency into the controller and recomputes the limit, so the number of
-///   concurrent reads tracks observed I/O contention.
-/// - **Pinned**: when [`FERROLITE_INGEST_READ_CONCURRENCY`](READ_CONCURRENCY_ENV)
-///   is set to `N >= 1` (or via [`with_pinned_limit`](Self::with_pinned_limit)),
-///   the limit is fixed at `N` and `observe`/`recompute` are skipped entirely.
-///   Permit accounting still enforces the fixed limit.
+/// - **Pinned at `max_limit`** (default): no throttling. A permit is always
+///   available up to the worker count, so `acquire()` never blocks in the
+///   default rayon setup, and `observe`/`recompute` are skipped entirely.
+/// - **Pinned at `N`**: when [`FERROLITE_INGEST_READ_CONCURRENCY`](READ_CONCURRENCY_ENV)
+///   is set to an integer `N >= 1` (or via [`with_pinned_limit`](Self::with_pinned_limit)),
+///   the limit is fixed at `min(N, max_limit)` and `observe`/`recompute` are
+///   skipped entirely. Permit accounting still enforces the fixed limit.
+/// - **Adaptive** (opt-in via `"adaptive"` / `"auto"`): every dropped
+///   [`ReadPermit`] feeds its measured latency into the controller and
+///   recomputes the limit, so the number of concurrent reads tracks observed
+///   I/O contention within `[1, max_limit]`.
 ///
 /// # Synchronization design
 ///
@@ -231,35 +246,38 @@ impl AdaptiveReadGate {
     /// ingest worker count).
     ///
     /// Reads the [`FERROLITE_INGEST_READ_CONCURRENCY`](READ_CONCURRENCY_ENV)
-    /// environment variable: if it parses to an integer `N >= 1`, the limit is
-    /// pinned to `N` and adaptation is disabled. Otherwise (`0`, unset, or
-    /// unparseable) the gate is adaptive, starting at
-    /// `(max_limit / 2).max(2).min(max_limit)` and free to move within
-    /// `[1, max_limit]`.
+    /// environment variable to select a mode (see the module- and type-level
+    /// docs for the full semantics):
+    ///
+    /// - unset / empty / unrecognized => no throttle: pinned at `max_limit`.
+    ///   This is the default.
+    /// - `"adaptive"` / `"auto"` (case-insensitive) => adaptive controller
+    ///   over `[1, max_limit]`.
+    /// - an integer `N >= 1` => pinned at `min(N, max_limit)`.
     pub fn new(max_limit: usize) -> Self {
-        if let Some(n) = std::env::var(READ_CONCURRENCY_ENV)
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .filter(|&n| n >= 1)
-        {
-            return Self::with_pinned_limit(n);
-        }
-        let start = (max_limit / 2).max(2).min(max_limit.max(1));
-        let controller = ConcurrencyController::new(1, max_limit.max(1), start);
-        Self {
-            state: Mutex::new(State {
-                controller,
-                in_flight: 0,
-            }),
-            slot_freed: Condvar::new(),
-            pinned: false,
+        let max_limit = max_limit.max(1);
+        match std::env::var(READ_CONCURRENCY_ENV) {
+            Ok(raw) => {
+                let trimmed = raw.trim();
+                if trimmed.eq_ignore_ascii_case("adaptive") || trimmed.eq_ignore_ascii_case("auto")
+                {
+                    Self::with_adaptive_limit(max_limit)
+                } else if let Some(n) = trimmed.parse::<usize>().ok().filter(|&n| n >= 1) {
+                    Self::with_pinned_limit(n.min(max_limit))
+                } else {
+                    // Empty or unrecognized: default to no throttle.
+                    Self::with_pinned_limit(max_limit)
+                }
+            }
+            Err(_) => Self::with_pinned_limit(max_limit),
         }
     }
 
     /// Create a gate whose limit is pinned to exactly `n` (adaptation
     /// disabled). Does **not** read any environment variable — this is the
-    /// ctor used by tests and internally by [`new`](Self::new) for the pinned
-    /// path. `n` is floored to `1` so the gate can always make progress.
+    /// ctor used by tests, by the default no-throttle path, and by the fixed-
+    /// `N` opt-in path. `n` is floored to `1` so the gate can always make
+    /// progress.
     pub fn with_pinned_limit(n: usize) -> Self {
         let n = n.max(1);
         // A controller whose min == max == start can never change its limit,
@@ -273,6 +291,26 @@ impl AdaptiveReadGate {
             }),
             slot_freed: Condvar::new(),
             pinned: true,
+        }
+    }
+
+    /// Create a gate running the adaptive gradient controller, free to move
+    /// within `[1, max_limit]`. Does **not** read any environment variable —
+    /// this is the ctor used internally by [`new`](Self::new) for the
+    /// `"adaptive"`/`"auto"` opt-in path. Starts at
+    /// `(max_limit / 2).max(2).min(max_limit)`, matching the previous default
+    /// starting point.
+    fn with_adaptive_limit(max_limit: usize) -> Self {
+        let max_limit = max_limit.max(1);
+        let start = (max_limit / 2).max(2).min(max_limit);
+        let controller = ConcurrencyController::new(1, max_limit, start);
+        Self {
+            state: Mutex::new(State {
+                controller,
+                in_flight: 0,
+            }),
+            slot_freed: Condvar::new(),
+            pinned: false,
         }
     }
 
@@ -406,6 +444,38 @@ mod tests {
         let gate = AdaptiveReadGate::with_pinned_limit(3);
         assert!(gate.is_pinned());
         assert_eq!(gate.snapshot().limit, 3);
+    }
+
+    #[test]
+    fn default_no_throttle_pins_at_max_limit_and_never_blocks() {
+        // Models the unset/empty/unrecognized-env default path (`new` without
+        // reading the environment): AdaptiveReadGate::with_pinned_limit(max_limit)
+        // is exactly what `new` falls back to when
+        // FERROLITE_INGEST_READ_CONCURRENCY is unset, so this exercises the
+        // default behavior without touching process env in tests.
+        const MAX_LIMIT: usize = 10;
+        let gate = AdaptiveReadGate::with_pinned_limit(MAX_LIMIT);
+        assert!(gate.is_pinned(), "default gate must report pinned");
+        assert_eq!(
+            gate.snapshot().limit,
+            MAX_LIMIT,
+            "default gate must be pinned at the full worker count (no throttling)"
+        );
+
+        // Acquiring up to MAX_LIMIT permits simultaneously must never block:
+        // hold them all at once and confirm every acquire() returns promptly.
+        let permits: Vec<_> = (0..MAX_LIMIT).map(|_| gate.acquire()).collect();
+        assert_eq!(permits.len(), MAX_LIMIT);
+    }
+
+    #[test]
+    fn adaptive_opt_in_constructor_matches_previous_default_start() {
+        // Models the "adaptive"/"auto" opt-in path (`new` without reading the
+        // environment). The starting point matches the old always-adaptive
+        // default: (max_limit / 2).max(2).min(max_limit).
+        let gate = AdaptiveReadGate::with_adaptive_limit(12);
+        assert!(!gate.is_pinned(), "adaptive gate must not report pinned");
+        assert_eq!(gate.snapshot().limit, 6);
     }
 
     #[test]

@@ -531,20 +531,22 @@ fn ingest_job(
                     ferrolite_catalog::read_rating(&ferrolite_catalog::sidecar_path(&f.path))
                         .unwrap_or_default();
                 let is_raw = matches!(f.kind, ferrolite_catalog::FileKind::Raw);
-                let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
                 let measure = crate::diag::enabled();
                 // Hold the permit only across the disk-read-bound decode; release
                 // it before the CPU-heavy resize/encode below so the gate caps
-                // read concurrency without throttling CPU parallelism.
+                // read concurrency without throttling CPU parallelism. The decode
+                // timer starts AFTER the permit is acquired so a worker blocked
+                // waiting for a permit is not miscounted as decode time.
                 let _permit = read_gate.acquire();
+                let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
                 let decoded = ferrolite_decode::decode_meta_and_preview(
                     &f.path,
                     f.kind,
                     measure,
                     ferrolite_catalog::THUMB_MAX_EDGE,
                 );
-                drop(_permit); // release before generate_thumbnail (CPU work runs permit-free)
                 let decode_us = t_meta.map(|t| t.elapsed().as_micros() as u64);
+                drop(_permit); // release before generate_thumbnail (CPU work runs permit-free)
                 if let (Some(us), Some(p)) = (decode_us, profile.as_ref()) {
                     p.record_decode(us, is_raw);
                 }

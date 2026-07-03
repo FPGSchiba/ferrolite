@@ -13,3 +13,4 @@ pub mod ops_edit;
 pub mod ops_persist;
 pub mod preview_cache;
 pub mod split;
+pub mod thumb_regen;

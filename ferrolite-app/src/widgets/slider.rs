@@ -144,6 +144,20 @@ impl<'a> Widget for EguiSlider<'a> {
 
         *self.value = value;
 
+        // Commit-on-release. During a drag the value is applied live and the
+        // response is marked changed on each moved frame (so callers get
+        // `commit == false` previews). But the drag-STOP frame moves no pointer
+        // and matches none of the mark-changed branches above, so it is never
+        // marked changed — yet it is the ONLY frame where `drag_stopped()` is
+        // true, which is exactly the frame callers use to persist the edit
+        // (`commit = drag_stopped() || …`). Callers emit their committing
+        // outcome inside `if response.changed()`, so without marking the
+        // drag-stop frame changed a dragged edit updates the preview but is
+        // never saved. Mark it changed so the final, committing outcome fires.
+        if response.drag_stopped() {
+            response.mark_changed();
+        }
+
         // `active` reflects this frame's interaction state; read after writeback is intentional (writeback doesn't affect `response`).
         let active = response.dragged();
         let frac = math::fraction(value, self.min, self.max);

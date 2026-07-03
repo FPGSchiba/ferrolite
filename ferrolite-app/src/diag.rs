@@ -934,6 +934,10 @@ pub struct SlowSample {
     pub source: ferrolite_decode::PreviewSource,
     pub model: String,
     pub path: String,
+    /// Standard-file decode wall time (ms); 0.0 for RAW.
+    pub std_decode_ms: f64,
+    /// JPEG DCT scale (1/2/4/8); None for RAW / non-JPEG.
+    pub dct_scale: Option<u8>,
 }
 
 impl SlowSample {
@@ -948,6 +952,7 @@ impl SlowSample {
             + self.raw_dims_ms
             + self.extract_ms
             + self.orient_ms
+            + self.std_decode_ms
     }
     /// Unattributed remainder of `decode_ms` after the measured stages.
     fn rest_ms(&self) -> f64 {
@@ -1002,8 +1007,8 @@ fn ascii_quote(s: &str) -> String {
 pub fn format_slow_line(s: &SlowSample) -> String {
     format!(
         "[ingest-slow] {dec:.0}ms [{tier} {smb:.1}MB] (acquire {acq:.0} / decoder {gd:.0} / meta {rm:.0} / \
-         dims {rd:.0} / extract {ex:.0} / orient {or:.0} / rest {rest:.0}) \
-         {kind} {w}x{h} {mp:.1}MP via {src} model={model} {path}",
+         dims {rd:.0} / extract {ex:.0} / orient {or:.0} / stddec {sd:.0} / rest {rest:.0}) \
+         {kind} {w}x{h} {mp:.1}MP {dct} via {src} model={model} {path}",
         dec = s.decode_ms,
         tier = source_kind_label(s.source_kind),
         smb = s.source_bytes as f64 / 1_048_576.0,
@@ -1013,11 +1018,16 @@ pub fn format_slow_line(s: &SlowSample) -> String {
         rd = s.raw_dims_ms,
         ex = s.extract_ms,
         or = s.orient_ms,
+        sd = s.std_decode_ms,
         rest = s.rest_ms(),
         kind = if s.is_raw { "RAW" } else { "std" },
         w = s.src_w,
         h = s.src_h,
         mp = s.megapixels(),
+        dct = match s.dct_scale {
+            Some(n) => format!("dct 1/{n}"),
+            None => String::from("dct -"),
+        },
         src = source_label(s.source),
         model = ascii_quote(&s.model),
         path = ascii_quote(&s.path),
@@ -1612,6 +1622,8 @@ mod tests {
             source: src,
             model: model.to_string(),
             path: path.to_string(),
+            std_decode_ms: 0.0,
+            dct_scale: None,
         }
     }
 
@@ -1641,6 +1653,27 @@ mod tests {
         assert!(out.contains("via full_image"));
         assert!(out.contains("ILCE-7M4"));
         assert!(out.is_ascii());
+    }
+
+    #[test]
+    fn format_slow_line_shows_std_decode_and_dct() {
+        use ferrolite_decode::PreviewSource;
+        let mut s = slow_sample(
+            5305.0,
+            5100.0,
+            190.0,
+            6048,
+            4032,
+            PreviewSource::FullImage,
+            "ILCE-7M4",
+            "C:/x/DSC1234.ARW",
+        );
+        s.is_raw = false;
+        s.std_decode_ms = 48.0;
+        s.dct_scale = Some(8);
+        let out = format_slow_line(&s);
+        assert!(out.contains("stddec 48"));
+        assert!(out.contains("dct 1/8"));
     }
 
     #[test]

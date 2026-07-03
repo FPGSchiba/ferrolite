@@ -523,7 +523,12 @@ fn ingest_job(
                 let is_raw = matches!(f.kind, ferrolite_catalog::FileKind::Raw);
                 let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
                 let measure = crate::diag::enabled();
-                let decoded = ferrolite_decode::decode_meta_and_preview(&f.path, f.kind, measure);
+                let decoded = ferrolite_decode::decode_meta_and_preview(
+                    &f.path,
+                    f.kind,
+                    measure,
+                    ferrolite_catalog::THUMB_MAX_EDGE,
+                );
                 let decode_us = t_meta.map(|t| t.elapsed().as_micros() as u64);
                 if let (Some(us), Some(p)) = (decode_us, profile.as_ref()) {
                     p.record_decode(us, is_raw);
@@ -559,6 +564,8 @@ fn ingest_job(
                                         source: info.source,
                                         model: meta.model.clone(),
                                         path: f.path.display().to_string(),
+                                        std_decode_ms: to_ms(info.std_decode),
+                                        dct_scale: info.dct_scale,
                                     };
                                     crate::diag::write_log(&crate::diag::format_slow_line(&sample));
                                     p.record_slow(sample);
@@ -722,7 +729,16 @@ pub fn thumbnail_blocking(
     };
 
     let t_decode = profile.then(std::time::Instant::now);
-    let preview = ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?;
+    let preview = match kind {
+        FileKind::Standard => ferrolite_decode::decode_thumb_source_standard(
+            path,
+            ferrolite_catalog::THUMB_MAX_EDGE,
+            false,
+        )
+        .map(|d| d.image)
+        .map_err(|e| e.to_string())?,
+        FileKind::Raw => ferrolite_decode::decode_preview(path, kind).map_err(|e| e.to_string())?,
+    };
     let decode_us = t_decode.map_or(0, |t| t.elapsed().as_micros() as u64);
 
     let t_encode = profile.then(std::time::Instant::now);

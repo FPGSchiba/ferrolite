@@ -20,7 +20,9 @@ pub use orient::apply_orientation_linear;
 pub use preview::PreviewSource;
 pub use raw::{decode_color_profile, decode_full, RawDecoded};
 pub use source::SourceKind;
-pub use standard::{decode_preview_standard, read_metadata_standard};
+pub use standard::{
+    decode_preview_standard, decode_thumb_source_standard, read_metadata_standard, StdThumbDecode,
+};
 
 use ferrolite_image::{FileKind, ImageBuffer, Orientation};
 use rawler::decoders::{RawDecodeParams, RawMetadata};

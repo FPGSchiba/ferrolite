@@ -15,3 +15,4 @@ image = { workspace = true, features = ["jpeg", "png", "tiff", "webp", "bmp", "g
 exif = { workspace = true }
 thiserror = { workspace = true }
 rayon = { workspace = true }
+jpeg-decoder = "0.3"

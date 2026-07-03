@@ -26,7 +26,19 @@
 //! [`observe`]: ConcurrencyController::observe
 //! [`recompute`]: ConcurrencyController::recompute
 
-#![allow(dead_code)] // Wired into the ingest permit gate in a follow-up task.
+// The controller and its `AdaptiveReadGate` wrapper are exercised by the unit
+// tests in this module, but the gate is not yet threaded into the ingest read
+// path (that wiring lands in Task C3), so from the binary's call graph the API
+// is still unreached. Keep the module-wide allow until C3 removes it.
+#![allow(dead_code)]
+
+use std::sync::{Condvar, Mutex};
+use std::time::Instant;
+
+/// Environment variable that, when set to an integer `N >= 1`, pins the ingest
+/// read concurrency to exactly `N` and disables the adaptive controller. Any
+/// other value (`0`, unset, or unparseable) leaves the gate adaptive.
+const READ_CONCURRENCY_ENV: &str = "FERROLITE_INGEST_READ_CONCURRENCY";
 
 /// Smoothing factor for the recent-latency EWMA. Chosen so the controller
 /// reacts within roughly 10-20 samples of a latency regime change (verified in
@@ -172,9 +184,219 @@ impl ConcurrencyController {
     }
 }
 
+/// Mutable state guarded by the gate's `Mutex`.
+///
+/// Holds the pure [`ConcurrencyController`] plus the number of permits handed
+/// out and not yet dropped (`in_flight`). Both fields are only ever touched
+/// while the gate's mutex is held.
+struct State {
+    controller: ConcurrencyController,
+    in_flight: usize,
+}
+
+/// A dynamically-resizable read-permit gate for ingest reads.
+///
+/// Wraps the pure [`ConcurrencyController`] with the synchronization it needs
+/// to act as an admission gate: a `Mutex<State>` protects the controller and
+/// the in-flight count, and a `Condvar` lets [`acquire`](Self::acquire) block
+/// until a slot opens up (either because a permit dropped or because the
+/// controller grew the limit).
+///
+/// # Modes
+///
+/// - **Adaptive** (default): every dropped [`ReadPermit`] feeds its measured
+///   latency into the controller and recomputes the limit, so the number of
+///   concurrent reads tracks observed I/O contention.
+/// - **Pinned**: when [`FERROLITE_INGEST_READ_CONCURRENCY`](READ_CONCURRENCY_ENV)
+///   is set to `N >= 1` (or via [`with_pinned_limit`](Self::with_pinned_limit)),
+///   the limit is fixed at `N` and `observe`/`recompute` are skipped entirely.
+///   Permit accounting still enforces the fixed limit.
+///
+/// # Synchronization design
+///
+/// - `acquire` holds the mutex, then waits on the condvar *while*
+///   `in_flight >= limit` in a `while` loop (never an `if`), so a spurious or
+///   stale wakeup simply re-checks the predicate. `Condvar::wait` atomically
+///   releases the mutex while parked and reacquires it on wake, so the
+///   predicate is always evaluated under the lock.
+/// - `ReadPermit::drop` takes the lock, updates the controller (adaptive mode
+///   only), decrements `in_flight`, releases the lock, then `notify_all`. Both
+///   events that can unblock a waiter — a freed slot and a grown limit —
+///   happen together under that one lock/notify, so no waiter that should now
+///   proceed can miss the wakeup.
+pub struct AdaptiveReadGate {
+    state: Mutex<State>,
+    slot_freed: Condvar,
+    /// Whether adaptation is disabled (fixed limit). Immutable after
+    /// construction, so it can be read without taking the lock.
+    pinned: bool,
+}
+
+impl AdaptiveReadGate {
+    /// Create a gate sized for `max_limit` concurrent reads (typically the
+    /// ingest worker count).
+    ///
+    /// Reads the [`FERROLITE_INGEST_READ_CONCURRENCY`](READ_CONCURRENCY_ENV)
+    /// environment variable: if it parses to an integer `N >= 1`, the limit is
+    /// pinned to `N` and adaptation is disabled. Otherwise (`0`, unset, or
+    /// unparseable) the gate is adaptive, starting at
+    /// `(max_limit / 2).max(2).min(max_limit)` and free to move within
+    /// `[1, max_limit]`.
+    pub fn new(max_limit: usize) -> Self {
+        if let Some(n) = std::env::var(READ_CONCURRENCY_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+        {
+            return Self::with_pinned_limit(n);
+        }
+        let start = (max_limit / 2).max(2).min(max_limit.max(1));
+        let controller = ConcurrencyController::new(1, max_limit.max(1), start);
+        Self {
+            state: Mutex::new(State {
+                controller,
+                in_flight: 0,
+            }),
+            slot_freed: Condvar::new(),
+            pinned: false,
+        }
+    }
+
+    /// Create a gate whose limit is pinned to exactly `n` (adaptation
+    /// disabled). Does **not** read any environment variable — this is the
+    /// ctor used by tests and internally by [`new`](Self::new) for the pinned
+    /// path. `n` is floored to `1` so the gate can always make progress.
+    pub fn with_pinned_limit(n: usize) -> Self {
+        let n = n.max(1);
+        // A controller whose min == max == start can never change its limit,
+        // so even if `recompute` were called it would be a no-op. We still gate
+        // adaptation behind `pinned` to skip the timing/observe work entirely.
+        let controller = ConcurrencyController::new(n, n, n);
+        Self {
+            state: Mutex::new(State {
+                controller,
+                in_flight: 0,
+            }),
+            slot_freed: Condvar::new(),
+            pinned: true,
+        }
+    }
+
+    /// Acquire a read permit, blocking until `in_flight < limit`.
+    ///
+    /// Increments the in-flight count and captures a start [`Instant`] used to
+    /// measure this read's latency when the returned [`ReadPermit`] drops.
+    pub fn acquire(&self) -> ReadPermit<'_> {
+        let mut state = self.state.lock().expect("read gate mutex poisoned");
+        // Re-check the predicate in a `while` loop: after any wakeup the limit
+        // and in_flight may have changed, and spurious wakeups are permitted by
+        // the platform. `wait` atomically releases the lock while parked and
+        // reacquires it before returning, so the predicate below is always
+        // evaluated while holding the mutex.
+        while state.in_flight >= state.controller.limit() {
+            state = self
+                .slot_freed
+                .wait(state)
+                .expect("read gate mutex poisoned");
+        }
+        state.in_flight += 1;
+        // Drop the guard before returning; the permit does its own locking on
+        // drop.
+        drop(state);
+        ReadPermit {
+            gate: self,
+            start: Instant::now(),
+        }
+    }
+
+    /// A snapshot of the underlying controller's state, for diagnostics.
+    pub fn snapshot(&self) -> ControllerSnapshot {
+        self.state
+            .lock()
+            .expect("read gate mutex poisoned")
+            .controller
+            .snapshot()
+    }
+
+    /// Whether the gate is running with a fixed (pinned) limit and adaptation
+    /// disabled.
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+}
+
+/// RAII read permit handed out by [`AdaptiveReadGate::acquire`].
+///
+/// While alive it counts toward the gate's `in_flight` total. On drop it
+/// measures elapsed time since acquisition and (in adaptive mode) feeds that
+/// latency into the controller before releasing its slot and waking any waiter.
+pub struct ReadPermit<'a> {
+    gate: &'a AdaptiveReadGate,
+    start: Instant,
+}
+
+impl Drop for ReadPermit<'_> {
+    fn drop(&mut self) {
+        // Measure latency before taking the lock so contention on the mutex is
+        // not counted as read latency.
+        let elapsed_us = self.start.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        {
+            let mut state = self.gate.state.lock().expect("read gate mutex poisoned");
+            if !self.gate.pinned {
+                // Adaptive: fold this read's latency into the controller and
+                // recompute the limit. The limit may grow here, which — together
+                // with the freed slot below — is exactly what the notify covers.
+                state.controller.observe(elapsed_us);
+                state.controller.recompute();
+            }
+            state.in_flight -= 1;
+        } // release the lock before notifying
+          // Wake every waiter: a slot just freed and (in adaptive mode) the limit
+          // may have grown, so more than one parked thread might now proceed.
+          // Each re-checks its predicate under the lock, so over-notifying is
+          // safe and under-notifying is impossible.
+        self.gate.slot_freed.notify_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ConcurrencyController;
+    use super::{AdaptiveReadGate, ConcurrencyController};
+
+    #[test]
+    fn gate_blocks_beyond_limit_then_releases() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let gate = Arc::new(AdaptiveReadGate::with_pinned_limit(2)); // test ctor pinning limit=2
+        let peak = Arc::new(AtomicUsize::new(0));
+        let cur = Arc::new(AtomicUsize::new(0));
+        let mut hs = vec![];
+        for _ in 0..8 {
+            let (g, p, c) = (gate.clone(), peak.clone(), cur.clone());
+            hs.push(std::thread::spawn(move || {
+                let _permit = g.acquire();
+                let now = c.fetch_add(1, Ordering::SeqCst) + 1;
+                p.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                c.fetch_sub(1, Ordering::SeqCst);
+            }));
+        }
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert!(
+            peak.load(Ordering::SeqCst) <= 2,
+            "never more than 2 concurrent permits"
+        );
+    }
+
+    #[test]
+    fn env_override_pins_limit() {
+        // with_pinned_limit models the FERROLITE_INGEST_READ_CONCURRENCY=N path.
+        let gate = AdaptiveReadGate::with_pinned_limit(3);
+        assert!(gate.is_pinned());
+        assert_eq!(gate.snapshot().limit, 3);
+    }
 
     #[test]
     fn flat_fast_latency_grows_limit_toward_max() {

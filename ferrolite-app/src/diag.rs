@@ -718,9 +718,12 @@ pub struct IngestProfile {
     std_us: Mutex<Vec<u32>>,
     slow: Mutex<Vec<SlowSample>>,
     // RAW byte-source tier counts across ALL files (not just slow): how far the
-    // incremental read had to grow. `grown`+`full` are the files that missed the
-    // 1 MiB prefix (the former slow tail); `full` needed the whole file.
+    // incremental read had to grow. `directed`+`grown`+`full` are the files that
+    // missed the 1 MiB prefix (the former slow tail); `directed` means
+    // offset-parsing found the exact preview span in one extra read; `full`
+    // needed the whole file.
     prefix_hits: AtomicU64,
+    directed: AtomicU64,
     grown: AtomicU64,
     full: AtomicU64,
 }
@@ -797,6 +800,7 @@ impl IngestProfile {
     pub fn record_source(&self, kind: ferrolite_decode::SourceKind) {
         match kind {
             ferrolite_decode::SourceKind::Prefix => &self.prefix_hits,
+            ferrolite_decode::SourceKind::Directed => &self.directed,
             ferrolite_decode::SourceKind::Grown => &self.grown,
             ferrolite_decode::SourceKind::Full => &self.full,
         }
@@ -804,6 +808,9 @@ impl IngestProfile {
     }
     pub fn prefix_hits(&self) -> u64 {
         self.prefix_hits.load(Ordering::Relaxed)
+    }
+    pub fn directed(&self) -> u64 {
+        self.directed.load(Ordering::Relaxed)
     }
     pub fn grown(&self) -> u64 {
         self.grown.load(Ordering::Relaxed)
@@ -974,6 +981,7 @@ pub fn source_label(s: ferrolite_decode::PreviewSource) -> &'static str {
 pub fn source_kind_label(k: Option<ferrolite_decode::SourceKind>) -> &'static str {
     match k {
         Some(ferrolite_decode::SourceKind::Prefix) => "prefix",
+        Some(ferrolite_decode::SourceKind::Directed) => "directed",
         Some(ferrolite_decode::SourceKind::Grown) => "grown",
         Some(ferrolite_decode::SourceKind::Full) => "full",
         None => "n/a",
@@ -1164,28 +1172,30 @@ pub fn emit_slow_aggregate(samples: &[SlowSample], total_files: usize) {
 }
 
 /// One-line RAW byte-source tier split across ALL files: how far the incremental
-/// read had to grow. `prefix` = satisfied by the 1 MiB fast path; `grown`/`full`
-/// missed it (the former mmap-fallback tail); `full` needed the whole file.
-pub fn format_source_split(prefix: u64, grown: u64, full: u64) -> String {
-    let total = prefix + grown + full;
-    let non_prefix = grown + full;
+/// read had to grow. `prefix` = satisfied by the 1 MiB fast path; `directed` =
+/// offset-parsing found the exact preview span in one extra read;
+/// `grown`/`full` fell back to the tiered read (the former mmap-fallback tail);
+/// `full` needed the whole file.
+pub fn format_source_split(prefix: u64, directed: u64, grown: u64, full: u64) -> String {
+    let total = prefix + directed + grown + full;
+    let non_prefix = directed + grown + full;
     let pct = if total > 0 {
         100.0 * non_prefix as f64 / total as f64
     } else {
         0.0
     };
     format!(
-        "[ingest-source] RAW byte-source: prefix {prefix} | grown {grown} | full {full} \
-         ({pct:.1}% needed >1MiB of {total})"
+        "[ingest-source] RAW byte-source: prefix {prefix} | directed {directed} | grown {grown} \
+         | full {full} ({pct:.1}% needed >1MiB of {total})"
     )
 }
 
 /// Emit the RAW byte-source split to the diag sink. No-op when diag is off.
-pub fn emit_source_split(prefix: u64, grown: u64, full: u64) {
+pub fn emit_source_split(prefix: u64, directed: u64, grown: u64, full: u64) {
     if !enabled() {
         return;
     }
-    write_log(&format_source_split(prefix, grown, full));
+    write_log(&format_source_split(prefix, directed, grown, full));
 }
 
 /// Bytes pre-read to force + time the disk IO a preview decode pages in (headless
@@ -1678,12 +1688,13 @@ mod tests {
 
     #[test]
     fn format_source_split_reports_counts_and_pct() {
-        let out = format_source_split(2900, 350, 36);
+        let out = format_source_split(2900, 60, 350, 36);
         assert!(out.starts_with("[ingest-source]"));
         assert!(out.contains("prefix 2900"));
+        assert!(out.contains("directed 60"));
         assert!(out.contains("grown 350"));
         assert!(out.contains("full 36"));
-        assert!(out.contains("of 3286")); // 2900 + 350 + 36
+        assert!(out.contains("of 3346")); // 2900 + 60 + 350 + 36
         assert!(out.is_ascii());
     }
 
@@ -1693,11 +1704,20 @@ mod tests {
         let p = IngestProfile::default();
         p.record_source(SourceKind::Prefix);
         p.record_source(SourceKind::Prefix);
+        p.record_source(SourceKind::Directed);
         p.record_source(SourceKind::Grown);
         p.record_source(SourceKind::Full);
         assert_eq!(p.prefix_hits(), 2);
+        assert_eq!(p.directed(), 1);
         assert_eq!(p.grown(), 1);
         assert_eq!(p.full(), 1);
+    }
+
+    #[test]
+    fn source_kind_label_covers_directed() {
+        use ferrolite_decode::SourceKind;
+        assert_eq!(source_kind_label(Some(SourceKind::Directed)), "directed");
+        assert_eq!(source_kind_label(None), "n/a");
     }
 
     #[test]

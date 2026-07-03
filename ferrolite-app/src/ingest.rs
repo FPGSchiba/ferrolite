@@ -692,7 +692,7 @@ fn ingest_job(
         };
         crate::diag::emit_ingest_summary(&summary);
         crate::diag::emit_slow_aggregate(&p.slow_samples(), file_count);
-        crate::diag::emit_source_split(p.prefix_hits(), p.grown(), p.full());
+        crate::diag::emit_source_split(p.prefix_hits(), p.directed(), p.grown(), p.full());
     }
 
     if profile.is_some() {

@@ -36,6 +36,8 @@ const READ_CHUNK: usize = 1 << 20;
 pub enum SourceKind {
     /// Satisfied by the first (1 MiB) read — the fast path.
     Prefix,
+    /// Offset-parsing found the exact preview span; the read stopped there.
+    Directed,
     /// Needed a larger bounded read (past 1 MiB) but not the whole file.
     Grown,
     /// Needed the entire file (read to EOF).
@@ -93,15 +95,67 @@ pub(crate) fn with_ingest_source<T>(
     let mut file = File::open(path)?;
     let mut buf: Vec<u8> = Vec::new();
     let mut acquire = Duration::ZERO;
-    let mut last_err: Option<DecodeError> = None;
 
-    // Cap tiers, then a sentinel `usize::MAX` meaning "read to EOF".
-    let targets = INGEST_READ_CAPS
+    // First (1 MiB) read, tried directly so a prefix-parse failure can attempt
+    // one offset-directed read before falling into the tier loop.
+    let t = measure.then(Instant::now);
+    read_up_to(&mut file, &mut buf, INGEST_READ_CAPS[0])?;
+    if let Some(t) = t {
+        acquire += t.elapsed();
+    }
+
+    let mut last_err = match f(&RawSource::new_from_slice(&buf)) {
+        Ok(v) => {
+            return Ok((
+                v,
+                SourceProbe {
+                    kind: SourceKind::Prefix,
+                    acquire: measure.then_some(acquire),
+                    bytes: measure.then_some(buf.len() as u64),
+                },
+            ));
+        }
+        Err(e) => e,
+    };
+
+    // The preview wasn't in the prefix. If offset-parsing can find the exact
+    // preview span from the TIFF IFDs already in `buf`, do ONE directed read
+    // straight to that span instead of growing through the 2/4/8 MiB tiers.
+    // `read_up_to` naturally clamps at EOF if the file is shorter than the
+    // parsed span, so a bogus/oversized offset just falls through below.
+    if let Some(span) = crate::ifd::preview_span_end(&buf) {
+        if span.end > buf.len() as u64 {
+            let target = usize::try_from(span.end).unwrap_or(usize::MAX);
+            let t = measure.then(Instant::now);
+            read_up_to(&mut file, &mut buf, target)?;
+            if let Some(t) = t {
+                acquire += t.elapsed();
+            }
+            match f(&RawSource::new_from_slice(&buf)) {
+                Ok(v) => {
+                    return Ok((
+                        v,
+                        SourceProbe {
+                            kind: SourceKind::Directed,
+                            acquire: measure.then_some(acquire),
+                            bytes: measure.then_some(buf.len() as u64),
+                        },
+                    ));
+                }
+                Err(e) => last_err = e,
+            }
+        }
+    }
+
+    // Fallback: existing tiered incremental read, starting from the 2 MiB cap
+    // (the 1 MiB prefix was already read and, on a directed-read miss, so was
+    // the directed span — both are reused via `buf`, never re-read).
+    let targets = INGEST_READ_CAPS[1..]
         .iter()
         .copied()
         .chain(std::iter::once(usize::MAX));
 
-    for (i, target) in targets.enumerate() {
+    for target in targets {
         let t = measure.then(Instant::now);
         let at_eof = read_up_to(&mut file, &mut buf, target)?;
         if let Some(t) = t {
@@ -110,9 +164,7 @@ pub(crate) fn with_ingest_source<T>(
 
         match f(&RawSource::new_from_slice(&buf)) {
             Ok(v) => {
-                let kind = if i == 0 {
-                    SourceKind::Prefix
-                } else if at_eof {
+                let kind = if at_eof {
                     SourceKind::Full
                 } else {
                     SourceKind::Grown
@@ -126,7 +178,7 @@ pub(crate) fn with_ingest_source<T>(
                     },
                 ));
             }
-            Err(e) => last_err = Some(e),
+            Err(e) => last_err = e,
         }
 
         // Nothing more to read: the decode genuinely failed on the whole file.
@@ -135,7 +187,7 @@ pub(crate) fn with_ingest_source<T>(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| DecodeError::NoPreview(path.to_path_buf())))
+    Err(last_err)
 }
 
 #[cfg(test)]
@@ -173,6 +225,60 @@ mod tests {
         assert_eq!(v, 42);
         assert_eq!(probe.kind, SourceKind::Prefix);
         assert!(probe.bytes.unwrap() <= (1 << 20) + READ_CHUNK as u64);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Build a minimal LE TIFF header (mirrors `ifd::tests::tiny_tiff`) whose
+    /// JPEGInterchangeFormat offset+length point at the embedded preview span.
+    fn tiny_tiff(preview_off: u32, preview_len: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II"); // little-endian
+        b.extend_from_slice(&42u16.to_le_bytes()); // magic
+        b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+                                                  // IFD0 at offset 8: entry count = 2
+        b.extend_from_slice(&2u16.to_le_bytes());
+        let entry = |tag: u16, val: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&tag.to_le_bytes());
+            e.extend_from_slice(&4u16.to_le_bytes()); // LONG
+            e.extend_from_slice(&1u32.to_le_bytes()); // count
+            e.extend_from_slice(&val.to_le_bytes()); // value/offset
+            e
+        };
+        b.extend_from_slice(&entry(513, preview_off)); // JPEGInterchangeFormat
+        b.extend_from_slice(&entry(514, preview_len)); // JPEGInterchangeFormatLength
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+        b
+    }
+
+    #[test]
+    fn directed_read_satisfies_preview_just_past_prefix_in_one_read() {
+        // Marker sits just past the 1 MiB prefix; the TIFF header at the front
+        // declares a JPEGInterchangeFormat span that exactly covers it, so
+        // offset-parsing should drive a single directed read straight there
+        // instead of growing through the 2/4/8 MiB tiers.
+        let marker_at = (1 << 20) + 4096; // just past 1 MiB
+        let preview_len = 8u32;
+        let mut data = vec![0u8; marker_at + preview_len as usize + 16];
+        let header = tiny_tiff(marker_at as u32, preview_len);
+        data[..header.len()].copy_from_slice(&header);
+        data[marker_at] = 0xAB;
+        let path = temp_file("directed", &data);
+
+        let (v, probe) = with_ingest_source(&path, true, needs_byte(marker_at)).unwrap();
+        assert_eq!(v, 42);
+        assert_eq!(probe.kind, SourceKind::Directed);
+        // Satisfied by the exact span end, not a full 8 MiB-tier read.
+        let span_end = marker_at as u64 + preview_len as u64;
+        let bytes = probe.bytes.unwrap();
+        assert!(
+            bytes < (2 << 20) as u64,
+            "expected a directed read well under the 2 MiB tier, got {bytes}"
+        );
+        assert!(
+            bytes >= span_end,
+            "directed read must cover at least the preview span end"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

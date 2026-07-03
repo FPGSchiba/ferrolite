@@ -8,7 +8,10 @@ use crate::library::folder_tree::{flatten, subtree_count};
 use crate::state::{AppState, PendingRemove, RenameKind};
 use crate::theme;
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
+/// Returns `true` if the user opened a new folder this frame (via "Open
+/// folder…"), so the caller can persist `settings.last_folder` + mark dirty.
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> bool {
+    let mut folder_opened = false;
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new("CATALOG")
@@ -38,6 +41,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
 
     if ui.button("Open folder…").clicked() {
         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            state.settings.last_folder = Some(folder.clone());
+            folder_opened = true;
             spawn_ingest(state, ctx, folder);
         }
     }
@@ -381,6 +386,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) {
             state.warning = Some(format!("Tagged {} image(s) with \"{}\".", ids.len(), tname));
         }
     }
+    folder_opened
 }
 
 /// Delete a collection and clean up source / dirty state accordingly.

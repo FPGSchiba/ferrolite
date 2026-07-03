@@ -184,6 +184,12 @@ pub struct AppState {
     /// On-disk cache of downscaled, color-managed RAW previews (sits next to
     /// `catalog.db`). Shared into `Background` write-back jobs via `Arc`.
     pub preview_store: Arc<ferrolite_previews::PreviewStore>,
+
+    /// Persisted user preferences (keybindings, export options, filter,
+    /// working space, etc.). Loaded at startup from `settings.json`; edits
+    /// must call `FerroliteApp::mark_settings_dirty()` so they persist (see
+    /// `crate::settings::persist`).
+    pub settings: crate::settings::Settings,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -260,6 +266,7 @@ impl AppState {
             grid_layout: None,
             working_space: ferrolite_color::WorkingSpace::default(),
             preview_store: Arc::new(open_preview_store(&default_previews_dir())),
+            settings: crate::settings::persist::load(),
         })
     }
 
@@ -813,6 +820,7 @@ impl AppState {
                 std::process::id(),
                 tid
             )))),
+            settings: crate::settings::Settings::default(),
         }
     }
 

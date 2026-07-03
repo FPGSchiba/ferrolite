@@ -21,6 +21,10 @@ pub struct FerroliteApp {
     pending_texture_clear: bool,
     /// Per-frame diagnostics state (env-gated via `FERROLITE_DIAG`); see `diag.rs`.
     diag: crate::diag::DiagState,
+    /// Set by `mark_settings_dirty()` whenever `state.settings` is mutated;
+    /// cleared by `save_settings_if_dirty()`, which coalesces any number of
+    /// per-frame edits into a single off-thread write per frame.
+    settings_dirty: bool,
 }
 
 impl FerroliteApp {
@@ -54,6 +58,30 @@ impl FerroliteApp {
             crop_active_prev: false,
             pending_texture_clear: false,
             diag: crate::diag::DiagState::new(),
+            settings_dirty: false,
+        }
+    }
+
+    /// Mark `state.settings` as changed so `save_settings_if_dirty()` writes
+    /// it off the UI thread at the end of this frame's `update()`. Every
+    /// settings mutation site must call this (see `settings::keymap::Keymap`
+    /// doc comment).
+    ///
+    /// Not yet called anywhere: no code mutates `state.settings` until the
+    /// Phase 2/3 wiring tasks land. Allowed dead code until then rather than
+    /// expanding this dispatch's scope.
+    #[allow(dead_code)]
+    fn mark_settings_dirty(&mut self) {
+        self.settings_dirty = true;
+    }
+
+    /// Coalesced end-of-frame save: if `settings_dirty`, persist `state.settings`
+    /// off the UI thread (`crate::settings::persist::save`) and clear the flag.
+    /// Called once per `update()`.
+    fn save_settings_if_dirty(&mut self) {
+        if self.settings_dirty {
+            crate::settings::persist::save(&self.state.jobs, &self.state.settings);
+            self.settings_dirty = false;
         }
     }
 }
@@ -2504,6 +2532,11 @@ impl eframe::App for FerroliteApp {
                 }
             }
         }
+
+        // End-of-frame: persist any settings mutated this frame, off the UI
+        // thread. No-op while settings_dirty is never set (nothing mutates
+        // settings yet — Phase 2/3 wiring lands later).
+        self.save_settings_if_dirty();
     }
 
     /// Prevent the UI thread from blocking unboundedly on worker joins at close

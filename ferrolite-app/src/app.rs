@@ -278,6 +278,46 @@ impl FerroliteApp {
         }
     }
 
+    /// If the current viewer's edit stack changed this session, spawn a
+    /// Background job to regenerate its Library thumbnail from the in-memory
+    /// stack, then clear the flag so re-entrant frames do not double-spawn.
+    /// Called at every "leave Develop for this image" transition. No-op when
+    /// there is no viewer, no session edits, or no GPU render state.
+    fn maybe_regen_on_leave(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let (image_id, path, kind, stack) = {
+            let Some(v) = self.state.viewer.as_mut() else {
+                return;
+            };
+            if !crate::develop::thumb_regen::should_regenerate_on_leave(v.edits_dirty) {
+                return;
+            }
+            // Clear before spawning so an edge-triggered re-check this frame
+            // (e.g. module switch) cannot enqueue a duplicate job.
+            v.edits_dirty = false;
+            (v.image_id, v.path.clone(), v.kind, v.op_stack.clone())
+        };
+        let Some(rs) = frame.wgpu_render_state() else {
+            // No GPU this frame: keep the existing thumbnail. An on-demand
+            // "Regenerate thumbnail" can recover it later.
+            return;
+        };
+        let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let cam =
+            crate::develop::thumb_regen::srgb_fallback_camera_to_working(self.state.working_space);
+        crate::develop::thumb_regen::spawn_regen_edited_thumbnail(
+            &self.state.jobs,
+            &self.state.writer,
+            &self.state.tx,
+            ctx,
+            gpu,
+            image_id,
+            path,
+            kind,
+            cam,
+            crate::develop::thumb_regen::RegenStackSource::InMemory(stack),
+        );
+    }
+
     /// Open the single-file export dialog for the current viewer image.
     fn open_export_dialog(&mut self) {
         if self.state.viewer.is_some() {
@@ -982,6 +1022,7 @@ impl FerroliteApp {
         let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
+        v.edits_dirty = true;
         v.history.push(kind, stack.clone());
         let image_id = v.image_id;
         let path = v.path.clone();
@@ -1336,6 +1377,7 @@ impl FerroliteApp {
         frame: &mut eframe::Frame,
         rec: &ferrolite_catalog::ImageRecord,
     ) {
+        self.maybe_regen_on_leave(ctx, frame);
         if let Some(old) = self.state.viewer.as_ref() {
             let old_id = old.image_id;
             old.cancel_loads();
@@ -1812,6 +1854,7 @@ impl eframe::App for FerroliteApp {
         // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
         // closed image's work stops competing with whatever is opened next.
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.maybe_regen_on_leave(ctx, frame);
             if let Some(v) = self.state.viewer.take() {
                 v.cancel_loads();
                 self.cancel_viewer_tiles(frame, v.image_id);
@@ -1993,6 +2036,9 @@ impl eframe::App for FerroliteApp {
                 });
                 if let Some(stack) = result {
                     self.set_preview_and_full(frame, stack.clone());
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.edits_dirty = true;
+                    }
                     // Persist the resulting stack (undo/redo changes the on-disk state).
                     // Gather viewer scalars into locals before the iter_mut borrow.
                     if let Some(v) = self.state.viewer.as_ref() {
@@ -2170,6 +2216,7 @@ impl eframe::App for FerroliteApp {
         // clear to the top of next frame instead (fixes all-grey cells after
         // Develop once the clear runs, without racing this frame's submit).
         if !module_at_frame_start.is_library() && self.module.is_library() {
+            self.maybe_regen_on_leave(ctx, frame);
             self.pending_texture_clear = true;
         }
 

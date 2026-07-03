@@ -10,6 +10,7 @@ mod ingest;
 mod library;
 mod metadata;
 mod module;
+mod read_gate;
 mod state;
 mod status_bar;
 mod theme;

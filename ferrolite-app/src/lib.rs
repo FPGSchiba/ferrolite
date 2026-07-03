@@ -9,6 +9,7 @@ pub mod export;
 pub mod ingest;
 pub mod library;
 pub mod metadata;
+pub mod read_gate;
 pub mod state;
 pub mod status_bar;
 pub mod theme;

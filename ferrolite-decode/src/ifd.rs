@@ -1,9 +1,15 @@
 //! Minimal, pure, panic-free TIFF/EXIF IFD walker used to compute the byte
 //! span that must be resident (read from disk) before `rawler` can extract a
 //! RAW file's embedded preview and read its metadata. This is NOT a general
-//! TIFF parser: it only looks for the tags needed to bound that span
-//! (`JPEGInterchangeFormat`/`Length` and `StripOffsets`/`StripByteCounts`),
+//! TIFF parser: it only looks for the embedded-JPEG preview pointer
+//! (`JPEGInterchangeFormat`/`JPEGInterchangeFormatLength`, tags 513/514),
 //! walking IFD0 and, if present, one level of `SubIFDs`.
+//!
+//! Deliberately NOT used: `StripOffsets`(273)/`StripByteCounts`(279). On a
+//! TIFF-based RAW (e.g. Sony ARW), IFD0's strip tags point at the
+//! full-resolution raw sensor data — tens of MB — so folding them into the
+//! span would make it cover almost the entire file, defeating the point of
+//! computing a small directed read at all.
 //!
 //! Every offset read from the file is validated against `prefix.len()` before
 //! use; the function never panics or indexes out of bounds, even on
@@ -12,8 +18,6 @@
 const TIFF_MAGIC: u16 = 42;
 const IFD_ENTRY_SIZE: u64 = 12;
 
-const TAG_STRIP_OFFSETS: u16 = 273;
-const TAG_STRIP_BYTE_COUNTS: u16 = 279;
 const TAG_SUB_IFDS: u16 = 330;
 const TAG_JPEG_INTERCHANGE_FORMAT: u16 = 513;
 const TAG_JPEG_INTERCHANGE_FORMAT_LENGTH: u16 = 514;
@@ -65,9 +69,11 @@ struct RawEntry {
 }
 
 /// Parse a TIFF/EXIF header at the start of `prefix`; return the max end offset
-/// (`offset + length`) among the embedded-preview strips (JPEGInterchangeFormat
-/// 513/514 and StripOffsets 273 / StripByteCounts 279) found in IFD0 + SubIFDs.
-/// Returns None if `prefix` is not a parseable TIFF or no preview pointer found.
+/// (`offset + length`) among the embedded-JPEG preview pointers
+/// (JPEGInterchangeFormat 513 / JPEGInterchangeFormatLength 514) found in
+/// IFD0 + SubIFDs. Returns None if `prefix` is not a parseable TIFF or no
+/// 513/514 pair is found (e.g. StripOffsets/StripByteCounts alone never
+/// produce a span — see module docs).
 pub fn preview_span_end(prefix: &[u8]) -> Option<PreviewSpan> {
     let endian = detect_endian(prefix)?;
     let magic = endian.read_u16(prefix, 2)?;
@@ -112,12 +118,6 @@ fn accumulate_ifd_span(
         .and_then(|e| entry_u32_value(prefix, endian, e));
     if let (Some(off), Some(len)) = (jpeg_off, jpeg_len) {
         fold_span(max_end, off, len);
-    }
-
-    let strip_off = find_entry(&entries, TAG_STRIP_OFFSETS);
-    let strip_len = find_entry(&entries, TAG_STRIP_BYTE_COUNTS);
-    if let (Some(off_entry), Some(len_entry)) = (strip_off, strip_len) {
-        accumulate_strip_pairs(prefix, endian, off_entry, len_entry, max_end);
     }
 
     if follow_sub_ifds {
@@ -225,24 +225,7 @@ fn entry_u32_values(prefix: &[u8], endian: Endian, entry: &RawEntry) -> Vec<u32>
     out
 }
 
-/// Fold every (offset, length) pair from parallel StripOffsets/StripByteCounts
-/// entries into `max_end`. The two arrays must be read with the same count;
-/// pairs beyond the shorter array's length are ignored.
-fn accumulate_strip_pairs(
-    prefix: &[u8],
-    endian: Endian,
-    offsets_entry: &RawEntry,
-    lengths_entry: &RawEntry,
-    max_end: &mut Option<u64>,
-) {
-    let offsets = entry_u32_values(prefix, endian, offsets_entry);
-    let lengths = entry_u32_values(prefix, endian, lengths_entry);
-    for (off, len) in offsets.iter().zip(lengths.iter()) {
-        fold_span(max_end, *off, *len);
-    }
-}
-
-/// Fold one (offset, length) preview/strip pair into the running max `end`,
+/// Fold one (offset, length) preview pair into the running max `end`,
 /// using checked arithmetic so an overflowing offset+length cannot wrap
 /// around and silently produce a too-small span.
 fn fold_span(max_end: &mut Option<u64>, offset: u32, length: u32) {
@@ -312,30 +295,69 @@ mod tests {
         assert!(preview_span_end(&b).is_none());
     }
 
-    // Regression test for a Critical finding: entry_u32_values must never use
-    // an untrusted, unbounded `count` field as a `Vec::with_capacity` size.
-    // A crafted StripOffsets (273) entry with count = 0xFFFF_FFFF would
-    // otherwise request a ~17 GB allocation; the failed allocation aborts the
-    // process via `handle_alloc_error`, violating the parser's "never
-    // panic/abort on any input" contract. This must return `None` promptly.
+    // StripOffsets/StripByteCounts (273/279) alone must no longer contribute to
+    // the span: on a TIFF-based RAW these point at the full-resolution sensor
+    // strips, and folding them in would make the "directed" read cover almost
+    // the whole file (the regression this fix addresses). Only a 513/514 pair
+    // should ever produce a span.
     #[test]
-    fn huge_entry_count_does_not_allocate_or_panic() {
+    fn strip_tags_alone_do_not_produce_a_span() {
         let mut b = Vec::new();
         b.extend_from_slice(b"II"); // little-endian
         b.extend_from_slice(&42u16.to_le_bytes()); // magic
         b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
                                                   // IFD0 at offset 8: entry count = 2 (StripOffsets + StripByteCounts)
         b.extend_from_slice(&2u16.to_le_bytes());
-        // entry: tag 273 (StripOffsets), type LONG(4), count = u32::MAX,
+        let entry = |tag: u16, val: u32| {
+            let mut e = Vec::new();
+            e.extend_from_slice(&tag.to_le_bytes());
+            e.extend_from_slice(&4u16.to_le_bytes()); // LONG
+            e.extend_from_slice(&1u32.to_le_bytes()); // count
+            e.extend_from_slice(&val.to_le_bytes()); // value/offset
+            e
+        };
+        // Strip tags pointing far into the file (simulating full-res sensor
+        // data), which must be ignored entirely now.
+        b.extend_from_slice(&entry(273, 1000)); // StripOffsets
+        b.extend_from_slice(&entry(279, 50_000_000)); // StripByteCounts (~50 MB)
+        b.extend_from_slice(&0u32.to_le_bytes()); // next IFD = 0
+
+        assert!(preview_span_end(&b).is_none());
+    }
+
+    // Regression test for a Critical finding: an untrusted, attacker-controlled
+    // (offset, length) pair must never be folded with unchecked arithmetic.
+    // `fold_span` promotes both u32 values to u64 before adding, via
+    // `checked_add`, so the largest possible pair (u32::MAX + u32::MAX) must
+    // resolve to a valid (if huge) span rather than panicking on overflow.
+    #[test]
+    fn maximal_jpeg_interchange_pair_does_not_panic() {
+        let t = tiny_tiff(u32::MAX, u32::MAX);
+        let span = preview_span_end(&t);
+        assert_eq!(span.map(|s| s.end), Some(u64::from(u32::MAX) * 2));
+    }
+
+    // Regression test for the untrusted-size allocation guard: entry_u32_values
+    // (used to resolve SubIFDs pointers) must never use an unbounded, untrusted
+    // `count` field as a `Vec::with_capacity` size. A crafted SubIFDs (330)
+    // entry with count = 0xFFFF_FFFF would otherwise request a ~17 GB
+    // allocation; the failed allocation aborts the process via
+    // `handle_alloc_error`, violating the parser's "never panic/abort on any
+    // input" contract. No SubIFD can resolve, and no 513/514 pair exists in
+    // IFD0, so the overall result must be `None`, not an abort/hang/OOM.
+    #[test]
+    fn huge_sub_ifds_count_does_not_allocate_or_panic() {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"II"); // little-endian
+        b.extend_from_slice(&42u16.to_le_bytes()); // magic
+        b.extend_from_slice(&8u32.to_le_bytes()); // IFD0 offset = 8
+                                                  // IFD0 at offset 8: entry count = 1 (SubIFDs)
+        b.extend_from_slice(&1u16.to_le_bytes());
+        // entry: tag 330 (SubIFDs), type LONG(4), count = u32::MAX,
         // value/offset = an out-of-file data pointer so no element can ever
         // resolve (exercises the external-data-offset branch, not the
         // degenerate offset-0-in-header case).
-        b.extend_from_slice(&273u16.to_le_bytes());
-        b.extend_from_slice(&4u16.to_le_bytes());
-        b.extend_from_slice(&u32::MAX.to_le_bytes());
-        b.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
-        // entry: tag 279 (StripByteCounts), type LONG(4), count = u32::MAX, same out-of-file offset
-        b.extend_from_slice(&279u16.to_le_bytes());
+        b.extend_from_slice(&330u16.to_le_bytes());
         b.extend_from_slice(&4u16.to_le_bytes());
         b.extend_from_slice(&u32::MAX.to_le_bytes());
         b.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());

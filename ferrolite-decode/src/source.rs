@@ -31,6 +31,17 @@ const INGEST_READ_CAPS: [usize; 4] = [1 << 20, 2 << 20, 4 << 20, 8 << 20];
 /// read syscall (a smaller chunk measurably slowed the fast path on the SD card).
 const READ_CHUNK: usize = 1 << 20;
 
+/// Upper bound on an offset-directed read, equal to the last `INGEST_READ_CAPS`
+/// tier (8 MiB). A directed read is only ever taken as a *shortcut* to the same
+/// bytes the tiered path would eventually read anyway — it must never pull more
+/// than the tiered path would before hitting EOF. Without this cap, a
+/// TIFF-based RAW whose strip/preview-adjacent tags happen to be misparsed (or
+/// a genuinely malformed file) can produce a span pointing tens of MB into the
+/// file, causing a "directed" read to become a whole-file read — precisely the
+/// regression this constant guards against. When the parsed span exceeds this
+/// cap, we fall back to the proven tiered read instead.
+const DIRECTED_MAX_SPAN: u64 = 8 << 20;
+
 /// Which read tier satisfied the decode. Diagnostic-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceKind {
@@ -81,12 +92,12 @@ fn read_up_to(file: &mut File, buf: &mut Vec<u8>, target: usize) -> std::io::Res
 
 /// Run the decode `f` against an in-memory `RawSource`, growing the buffer only
 /// as far as the decode needs: try the 1 MiB prefix; on a miss, if the embedded
-/// preview span can be parsed from the prefix, read exactly to that span
-/// ([`SourceKind::Directed`]); otherwise grow through the 2/4/8 MiB tiers, then
-/// the whole file. The file is opened once and read sequentially (bytes are
-/// appended, never re-read). Returns the decode result plus a [`SourceProbe`]
-/// reporting which tier satisfied it (and, when `measure`, the read time +
-/// bytes read).
+/// preview span can be parsed from the prefix AND is within `DIRECTED_MAX_SPAN`,
+/// read exactly to that span ([`SourceKind::Directed`]); otherwise grow through
+/// the 2/4/8 MiB tiers, then the whole file. The file is opened once and read
+/// sequentially (bytes are appended, never re-read). Returns the decode result
+/// plus a [`SourceProbe`] reporting which tier satisfied it (and, when
+/// `measure`, the read time + bytes read).
 ///
 /// `f` may be called several times (prefix, the optional directed read, then
 /// each remaining tier), so it must be side-effect-free on failure (all our
@@ -127,8 +138,12 @@ pub(crate) fn with_ingest_source<T>(
     // straight to that span instead of growing through the 2/4/8 MiB tiers.
     // `read_up_to` naturally clamps at EOF if the file is shorter than the
     // parsed span, so a bogus/oversized offset just falls through below.
+    // The span is additionally capped at `DIRECTED_MAX_SPAN`: a directed read
+    // must never pull more than the tiered path would before reaching EOF, so
+    // an implausibly large span (misparsed or malformed input) falls back to
+    // the tiered read below instead of reading far into (or all of) the file.
     if let Some(span) = crate::ifd::preview_span_end(&buf) {
-        if span.end > buf.len() as u64 {
+        if span.end > buf.len() as u64 && span.end <= DIRECTED_MAX_SPAN {
             let target = usize::try_from(span.end).unwrap_or(usize::MAX);
             let t = measure.then(Instant::now);
             read_up_to(&mut file, &mut buf, target)?;
@@ -283,6 +298,33 @@ mod tests {
             bytes >= span_end,
             "directed read must cover at least the preview span end"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn oversized_span_falls_back_to_tiered_read_instead_of_directed() {
+        // Regression test: a parsed span exceeding DIRECTED_MAX_SPAN (8 MiB) —
+        // e.g. a TIFF-based RAW whose strip tags would (pre-fix) point tens of
+        // MB into the file — must NOT trigger a directed read straight there.
+        // It must fall back to the proven tiered path, so the marker (placed
+        // within the 8 MiB tier) is still found via SourceKind::Grown, not
+        // Directed.
+        let marker_at = 5 << 20; // within the 8 MiB tier
+        let bogus_span_end = 47u32 << 20; // far past DIRECTED_MAX_SPAN
+        let mut data = vec![0u8; 12 << 20];
+        let header = tiny_tiff(bogus_span_end, 0);
+        data[..header.len()].copy_from_slice(&header);
+        data[marker_at] = 0xAB;
+        let path = temp_file("oversized-span", &data);
+
+        let (v, probe) = with_ingest_source(&path, true, needs_byte(marker_at)).unwrap();
+        assert_eq!(v, 42);
+        assert_ne!(
+            probe.kind,
+            SourceKind::Directed,
+            "an oversized parsed span must not trigger a directed read"
+        );
+        assert_eq!(probe.kind, SourceKind::Grown);
         let _ = std::fs::remove_file(&path);
     }
 

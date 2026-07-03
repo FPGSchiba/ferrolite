@@ -26,12 +26,6 @@
 //! [`observe`]: ConcurrencyController::observe
 //! [`recompute`]: ConcurrencyController::recompute
 
-// The controller and its `AdaptiveReadGate` wrapper are exercised by the unit
-// tests in this module, but the gate is not yet threaded into the ingest read
-// path (that wiring lands in Task C3), so from the binary's call graph the API
-// is still unreached. Keep the module-wide allow until C3 removes it.
-#![allow(dead_code)]
-
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 
@@ -349,6 +343,7 @@ impl Drop for ReadPermit<'_> {
                 state.controller.observe(elapsed_us);
                 state.controller.recompute();
             }
+            debug_assert!(state.in_flight > 0, "permit drop without matching acquire");
             state.in_flight -= 1;
         } // release the lock before notifying
           // Wake every waiter: a slot just freed and (in adaptive mode) the limit
@@ -366,14 +361,24 @@ mod tests {
     #[test]
     fn gate_blocks_beyond_limit_then_releases() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
+        const THREADS: usize = 8;
         let gate = Arc::new(AdaptiveReadGate::with_pinned_limit(2)); // test ctor pinning limit=2
         let peak = Arc::new(AtomicUsize::new(0));
         let cur = Arc::new(AtomicUsize::new(0));
+        // Barrier sized to THREADS: every thread finishes setup and calls
+        // `wait()` before any of them calls `acquire()`, so all THREADS threads
+        // race to acquire simultaneously. This makes contention deterministic
+        // (guaranteed, not scheduling-dependent) — without it, threads could be
+        // spawned/scheduled far enough apart that some finish their permit and
+        // release before others even start, and the observed peak could come
+        // out at 1, silently passing on a broken gate.
+        let barrier = Arc::new(Barrier::new(THREADS));
         let mut hs = vec![];
-        for _ in 0..8 {
-            let (g, p, c) = (gate.clone(), peak.clone(), cur.clone());
+        for _ in 0..THREADS {
+            let (g, p, c, b) = (gate.clone(), peak.clone(), cur.clone(), barrier.clone());
             hs.push(std::thread::spawn(move || {
+                b.wait();
                 let _permit = g.acquire();
                 let now = c.fetch_add(1, Ordering::SeqCst) + 1;
                 p.fetch_max(now, Ordering::SeqCst);
@@ -384,9 +389,14 @@ mod tests {
         for h in hs {
             h.join().unwrap();
         }
-        assert!(
-            peak.load(Ordering::SeqCst) <= 2,
-            "never more than 2 concurrent permits"
+        // With all 8 threads guaranteed to race for the gate at once and each
+        // holding its permit for 20ms, the observed peak concurrency must hit
+        // the pinned limit exactly (not just "never exceed it"): the barrier
+        // rules out the under-contention case where peak comes in below 2.
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "guaranteed contention must reach the pinned limit of 2 concurrent permits"
         );
     }
 

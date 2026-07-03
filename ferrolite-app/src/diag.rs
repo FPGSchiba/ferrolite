@@ -1198,6 +1198,44 @@ pub fn emit_source_split(prefix: u64, directed: u64, grown: u64, full: u64) {
     write_log(&format_source_split(prefix, directed, grown, full));
 }
 
+/// Point-in-time view of the ingest [`AdaptiveReadGate`](crate::read_gate::AdaptiveReadGate)
+/// for the one-shot `[ingest-concurrency]` diag line. Mirrors
+/// [`ControllerSnapshot`](crate::read_gate::ControllerSnapshot) plus the two
+/// fields the gate itself doesn't track: a best-effort in-flight peak and
+/// whether the gate is running pinned (adaptation disabled).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConcurrencySnapshot {
+    pub limit: usize,
+    pub rtt_min_us: u64,
+    pub rtt_recent_us: u64,
+    pub gradient: f64,
+    pub inflight_peak: usize,
+    pub pinned: bool,
+}
+
+/// Render the one-shot ingest read-concurrency summary line.
+pub fn format_ingest_concurrency(s: &ConcurrencySnapshot) -> String {
+    format!(
+        "[ingest-concurrency] limit {limit}  rtt_min {rmin}us  rtt_recent {rrec}us  \
+         gradient {grad:.2}  inflight_peak {peak}  pinned {pinned}",
+        limit = s.limit,
+        rmin = s.rtt_min_us,
+        rrec = s.rtt_recent_us,
+        grad = s.gradient,
+        peak = s.inflight_peak,
+        pinned = s.pinned,
+    )
+}
+
+/// Emit the ingest read-concurrency summary to the diag sink. No-op when diag
+/// is off.
+pub fn emit_ingest_concurrency(s: &ConcurrencySnapshot) {
+    if !enabled() {
+        return;
+    }
+    write_log(&format_ingest_concurrency(s));
+}
+
 /// Bytes pre-read to force + time the disk IO a preview decode pages in (headless
 /// `thumbnail_blocking` bench path). ~2 MiB covers the embedded preview prefix.
 const PROBE_READ_BYTES: usize = 2 << 20;
@@ -1696,6 +1734,21 @@ mod tests {
         assert!(out.contains("full 36"));
         assert!(out.contains("of 3346")); // 2900 + 60 + 350 + 36
         assert!(out.is_ascii());
+    }
+
+    #[test]
+    fn format_ingest_concurrency_line() {
+        let out = format_ingest_concurrency(&ConcurrencySnapshot {
+            limit: 5,
+            rtt_min_us: 1200,
+            rtt_recent_us: 3400,
+            gradient: 0.35,
+            inflight_peak: 6,
+            pinned: false,
+        });
+        assert!(out.starts_with("[ingest-concurrency]"));
+        assert!(out.contains("limit 5"));
+        assert!(out.contains("gradient 0.35"));
     }
 
     #[test]

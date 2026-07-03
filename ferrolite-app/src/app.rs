@@ -66,11 +66,6 @@ impl FerroliteApp {
     /// it off the UI thread at the end of this frame's `update()`. Every
     /// settings mutation site must call this (see `settings::keymap::Keymap`
     /// doc comment).
-    ///
-    /// Not yet called anywhere: no code mutates `state.settings` until the
-    /// Phase 2/3 wiring tasks land. Allowed dead code until then rather than
-    /// expanding this dispatch's scope.
-    #[allow(dead_code)]
     fn mark_settings_dirty(&mut self) {
         self.settings_dirty = true;
     }
@@ -346,10 +341,14 @@ impl FerroliteApp {
         );
     }
 
-    /// Open the single-file export dialog for the current viewer image.
+    /// Open the single-file export dialog for the current viewer image, seeded
+    /// from the persisted export settings so it starts from what the user
+    /// picked last (batch or single).
     fn open_export_dialog(&mut self) {
         if self.state.viewer.is_some() {
-            self.state.export_dialog = Some(crate::export::ExportDialogState::default());
+            self.state.export_dialog = Some(crate::export::ExportDialogState {
+                options: self.state.settings.export.to_options(),
+            });
         }
     }
 
@@ -359,6 +358,8 @@ impl FerroliteApp {
             return;
         };
         let options = dialog.options;
+        self.state.settings.export = crate::settings::dto::PersistedExport::from_options(&options);
+        self.mark_settings_dirty();
 
         // Compute camera→working BEFORE any borrow of `self.state.viewer` is held,
         // since `camera_to_working()` itself immutably borrows `self`.
@@ -2391,10 +2392,18 @@ impl eframe::App for FerroliteApp {
                             .color(theme::TEXT_FAINT),
                     );
                     ui.add_space(6.0);
+                    let before = self.state.export_settings;
                     crate::export::settings_form::settings_form(
                         ui,
                         &mut self.state.export_settings,
                     );
+                    if self.state.export_settings != before {
+                        self.state.settings.export =
+                            crate::settings::dto::PersistedExport::from_options(
+                                &self.state.export_settings,
+                            );
+                        self.mark_settings_dirty();
+                    }
                 });
         }
 

@@ -209,6 +209,7 @@ impl AppState {
             .map(|n| n.get().saturating_sub(1).max(1))
             .unwrap_or(3);
         let (tx, rx) = std::sync::mpsc::channel();
+        let settings = crate::settings::persist::load();
         Ok(Self {
             jobs: Arc::new(JobSystem::new(workers)),
             writer: Arc::new(Mutex::new(writer)),
@@ -236,18 +237,18 @@ impl AppState {
             active_ingests: 0,
             last_watch_check: None,
             startup_rescan_done: false,
-            include_subfolders: true,
+            include_subfolders: settings.filter.include_subfolders,
             expanded_folders: HashSet::new(),
             pending_remove: None,
             viewer: None,
             export_dialog: None,
             batch: None,
             export_queue: Vec::new(),
-            export_settings: ferrolite_export::ExportOptions::default(),
+            export_settings: settings.export.to_options(),
             export_dest: None,
             export_template: "{name}".to_string(),
             export_help_open: false,
-            filter: FilterState::default(),
+            filter: settings.filter.apply_to(FilterState::default()),
             source: ViewSource::All,
             tags: Vec::new(),
             collections: Vec::new(),
@@ -264,9 +265,9 @@ impl AppState {
             ops_save_failed: false,
             images_rev: 0,
             grid_layout: None,
-            working_space: ferrolite_color::WorkingSpace::default(),
+            working_space: settings.working_space.to_ws(),
             preview_store: Arc::new(open_preview_store(&default_previews_dir())),
-            settings: crate::settings::persist::load(),
+            settings,
         })
     }
 

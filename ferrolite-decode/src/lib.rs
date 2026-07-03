@@ -5,6 +5,7 @@
 mod color;
 mod demosaic;
 mod error;
+mod ifd;
 mod metadata;
 mod orient;
 mod preview;
@@ -15,6 +16,7 @@ mod standard;
 pub use color::ColorProfile;
 pub use demosaic::{DemosaicParams, DemosaicToRgb16f, QuadBin};
 pub use error::DecodeError;
+pub use ifd::{preview_span_end, PreviewSpan};
 pub use metadata::Metadata;
 pub use orient::apply_orientation_linear;
 pub use preview::PreviewSource;

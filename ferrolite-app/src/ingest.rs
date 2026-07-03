@@ -522,12 +522,12 @@ fn ingest_job(
                         .unwrap_or_default();
                 let is_raw = matches!(f.kind, ferrolite_catalog::FileKind::Raw);
                 let t_meta = profile.as_ref().map(|_| std::time::Instant::now());
-                let decoded = ferrolite_decode::decode_meta_and_preview(&f.path, f.kind);
+                let decoded = ferrolite_decode::decode_meta_and_preview(&f.path, f.kind, false);
                 if let (Some(t), Some(p)) = (t_meta, profile.as_ref()) {
                     p.record_decode(t.elapsed().as_micros() as u64, is_raw);
                 }
                 match decoded {
-                    Ok((meta, preview)) => {
+                    Ok((meta, preview, _info)) => {
                         let new_image = NewImage::from_metadata(
                             folder_id,
                             f.filename.clone(),

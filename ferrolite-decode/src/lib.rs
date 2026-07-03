@@ -17,6 +17,7 @@ pub use demosaic::{DemosaicParams, DemosaicToRgb16f, QuadBin};
 pub use error::DecodeError;
 pub use metadata::Metadata;
 pub use orient::apply_orientation_linear;
+pub use preview::{PreviewInfo, PreviewSource};
 pub use raw::{decode_full, RawDecoded};
 pub use standard::{decode_preview_standard, read_metadata_standard};
 
@@ -49,7 +50,8 @@ pub fn read_metadata(path: &Path, kind: FileKind) -> Result<Metadata, DecodeErro
 pub fn decode_meta_and_preview(
     path: &Path,
     kind: FileKind,
-) -> Result<(Metadata, ImageBuffer), DecodeError> {
+    measure: bool,
+) -> Result<(Metadata, ImageBuffer, PreviewInfo), DecodeError> {
     match kind {
         FileKind::Raw => crate::source::with_ingest_source(path, |src| {
             let decoder = rawler::get_decoder(src).map_err(rawler_err)?;
@@ -61,15 +63,28 @@ pub fn decode_meta_and_preview(
             let exif_orientation = meta_raw.exif.orientation.unwrap_or(1);
 
             let metadata = build_metadata_from_raw(&meta_raw, &dims)?;
-            let preview =
-                crate::preview::preview_from_decoder(decoder.as_ref(), src, exif_orientation)
-                    .map_err(|_| DecodeError::NoPreview(path.to_path_buf()))?;
-            Ok((metadata, preview))
+            let (preview, info) = crate::preview::preview_from_decoder(
+                decoder.as_ref(),
+                src,
+                exif_orientation,
+                measure,
+            )
+            .map_err(|_| DecodeError::NoPreview(path.to_path_buf()))?;
+            Ok((metadata, preview, info))
         }),
         FileKind::Standard => {
             let metadata = standard::read_metadata_standard(path)?;
             let preview = standard::decode_preview_standard(path)?;
-            Ok((metadata, preview))
+            // Standard rasters are read directly (not a RAW fallback branch) and
+            // are already fast; tag as EmbeddedPreview and leave sub-timings None.
+            let info = PreviewInfo {
+                source: PreviewSource::EmbeddedPreview,
+                src_w: preview.width,
+                src_h: preview.height,
+                extract: None,
+                orient: None,
+            };
+            Ok((metadata, preview, info))
         }
     }
 }

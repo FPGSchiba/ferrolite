@@ -37,8 +37,8 @@ fn decode_preview_returns_nonempty_rgb8() {
 
 #[test]
 fn combined_matches_separate_paths() {
-    let (m, p) =
-        ferrolite_decode::decode_meta_and_preview(&fixture(), FileKind::Raw).expect("combined");
+    let (m, p, _info) = ferrolite_decode::decode_meta_and_preview(&fixture(), FileKind::Raw, false)
+        .expect("combined");
     let m2 = ferrolite_decode::read_metadata(&fixture(), FileKind::Raw).expect("metadata");
     let p2 = ferrolite_decode::decode_preview(&fixture(), FileKind::Raw).expect("preview");
     assert_eq!(
@@ -47,6 +47,42 @@ fn combined_matches_separate_paths() {
     );
     assert_eq!((p.width, p.height), (p2.width, p2.height));
     assert_eq!(p.pixels, p2.pixels, "preview pixels should be identical");
+}
+
+#[test]
+fn preview_info_reports_dims_and_gated_timings() {
+    use ferrolite_decode::PreviewSource;
+    // measure = true: dims populated, sub-timings present, source is a RAW branch.
+    let (_m, p, info) = ferrolite_decode::decode_meta_and_preview(&fixture(), FileKind::Raw, true)
+        .expect("measured");
+    assert!(
+        info.src_w > 0 && info.src_h > 0,
+        "embedded dims should be > 0"
+    );
+    assert!(
+        (info.src_w == p.width && info.src_h == p.height)
+            || (info.src_w == p.height && info.src_h == p.width),
+        "embedded dims match the buffer up to a 90-degree orientation swap"
+    );
+    assert!(
+        info.extract.is_some() && info.orient.is_some(),
+        "measured => Some timings"
+    );
+    assert!(matches!(
+        info.source,
+        PreviewSource::FullImage
+            | PreviewSource::EmbeddedThumbnail
+            | PreviewSource::EmbeddedPreview
+    ));
+
+    // measure = false: no timings recorded.
+    let (_m2, _p2, info2) =
+        ferrolite_decode::decode_meta_and_preview(&fixture(), FileKind::Raw, false)
+            .expect("unmeasured");
+    assert!(
+        info2.extract.is_none() && info2.orient.is_none(),
+        "unmeasured => None timings"
+    );
 }
 
 #[test]

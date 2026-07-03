@@ -161,7 +161,6 @@ pub enum IngestPhase {
     PhaseA,
     Filter,
     Decode,
-    Done,
 }
 
 impl IngestPhase {
@@ -172,7 +171,6 @@ impl IngestPhase {
             IngestPhase::PhaseA => "phaseA",
             IngestPhase::Filter => "filter",
             IngestPhase::Decode => "decode",
-            IngestPhase::Done => "done",
         }
     }
     fn from_u8(v: u8) -> IngestPhase {
@@ -181,7 +179,6 @@ impl IngestPhase {
             2 => IngestPhase::PhaseA,
             3 => IngestPhase::Filter,
             4 => IngestPhase::Decode,
-            5 => IngestPhase::Done,
             _ => IngestPhase::Idle,
         }
     }
@@ -192,7 +189,6 @@ impl IngestPhase {
             IngestPhase::PhaseA => 2,
             IngestPhase::Filter => 3,
             IngestPhase::Decode => 4,
-            IngestPhase::Done => 5,
         }
     }
 }

@@ -293,6 +293,7 @@ fn ingest_job(
     let mut filter_s = 0.0f64;
     let mut producer_done_s = 0.0f64;
     let mut producer_done_at_s = 0.0f64;
+    let mut consumer_done_at_s = 0.0f64;
 
     if profile.is_some() {
         crate::diag::set_ingest_phase(crate::diag::IngestPhase::Scan);
@@ -589,6 +590,7 @@ fn ingest_job(
         producer_done_at_s = t_job.map_or(0.0, |t| t.elapsed().as_secs_f64());
 
         kept_image_ids = consumer.join().expect("ingest consumer thread panicked");
+        consumer_done_at_s = t_job.map_or(0.0, |t| t.elapsed().as_secs_f64());
     });
 
     // Full: prune catalog rows for files/folders no longer on disk. Skip if
@@ -638,7 +640,7 @@ fn ingest_job(
             upsert_sum_s: p.upsert_sum_us() as f64 / 1e6,
             chan_depth_max: p.chan_depth_max(),
             producer_done_s: producer_done_at_s,
-            consumer_done_s: wall_s,
+            consumer_done_s: consumer_done_at_s,
             raw_count: raw.len(),
             raw_p50_ms: us_to_ms(crate::diag::percentile(&raw, 0.5)),
             std_count: std_s.len(),

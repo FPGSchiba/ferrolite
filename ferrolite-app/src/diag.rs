@@ -716,6 +716,7 @@ pub struct IngestProfile {
     // a brief push per file, negligible vs a ~200ms decode.
     raw_us: Mutex<Vec<u32>>,
     std_us: Mutex<Vec<u32>>,
+    slow: Mutex<Vec<SlowSample>>,
 }
 
 impl IngestProfile {
@@ -777,6 +778,16 @@ impl IngestProfile {
     }
     pub fn std_samples(&self) -> Vec<u32> {
         self.std_us.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+    #[allow(dead_code)] // wired to ingest in Task 4
+    pub fn record_slow(&self, s: SlowSample) {
+        if let Ok(mut v) = self.slow.lock() {
+            v.push(s);
+        }
+    }
+    #[allow(dead_code)] // wired to ingest in Task 4
+    pub fn slow_samples(&self) -> Vec<SlowSample> {
+        self.slow.lock().map(|v| v.clone()).unwrap_or_default()
     }
 }
 
@@ -872,6 +883,180 @@ pub fn emit_ingest_summary(s: &IngestSummary) {
         return;
     }
     write_log(&format_ingest_summary(s));
+}
+
+/// Max slowest files listed in the aggregate block.
+#[allow(dead_code)] // consumed by emit_slow_aggregate, wired to ingest in Task 4
+const SLOW_TOP_N: usize = 10;
+
+/// One slow-decode sample, recorded only when profiling is on and a file's total
+/// decode time crossed `slow_threshold_ms()`. Not yet constructed outside tests;
+/// `ingest.rs` records these via `IngestProfile::record_slow` in Task 4.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SlowSample {
+    pub decode_ms: f64,
+    pub extract_ms: f64,
+    pub orient_ms: f64,
+    pub is_raw: bool,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub source: ferrolite_decode::PreviewSource,
+    pub model: String,
+    pub path: String,
+}
+
+impl SlowSample {
+    #[allow(dead_code)] // used by format_slow_line, wired to ingest in Task 4
+    fn megapixels(&self) -> f64 {
+        (self.src_w as f64 * self.src_h as f64) / 1_000_000.0
+    }
+}
+
+/// Short ASCII label for a preview source (used in logs).
+#[allow(dead_code)] // wired to ingest in Task 4
+pub fn source_label(s: ferrolite_decode::PreviewSource) -> &'static str {
+    use ferrolite_decode::PreviewSource::*;
+    match s {
+        EmbeddedPreview => "preview",
+        FullImage => "full_image",
+        EmbeddedThumbnail => "thumbnail",
+    }
+}
+
+/// Slow-file logging threshold in ms: `FERROLITE_DIAG_SLOW_MS` if set and valid,
+/// else 500. Cached once.
+#[allow(dead_code)] // wired to ingest in Task 4
+pub fn slow_threshold_ms() -> f64 {
+    static T: OnceLock<f64> = OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("FERROLITE_DIAG_SLOW_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| *v >= 0.0)
+            .unwrap_or(500.0)
+    })
+}
+
+/// One-line slow-file record. ASCII-only.
+#[allow(dead_code)] // wired to ingest in Task 4
+pub fn format_slow_line(s: &SlowSample) -> String {
+    let rest = (s.decode_ms - s.extract_ms - s.orient_ms).max(0.0);
+    format!(
+        "[ingest-slow] {dec:.0}ms (extract {ex:.0} / orient {or:.0} / rest {rest:.0}) \
+         {kind} {w}x{h} {mp:.1}MP via {src} model={model:?} {path:?}",
+        dec = s.decode_ms,
+        ex = s.extract_ms,
+        or = s.orient_ms,
+        rest = rest,
+        kind = if s.is_raw { "RAW" } else { "std" },
+        w = s.src_w,
+        h = s.src_h,
+        mp = s.megapixels(),
+        src = source_label(s.source),
+        model = s.model,
+        path = s.path,
+    )
+}
+
+/// End-of-ingest aggregate over all slow samples. ASCII-only.
+#[allow(dead_code)] // wired to ingest in Task 4
+pub fn format_slow_aggregate(samples: &[SlowSample], total_files: usize) -> String {
+    use ferrolite_decode::PreviewSource;
+    if samples.is_empty() {
+        return format!("[ingest-slow-summary] 0 slow files (of {total_files})");
+    }
+    let n = samples.len();
+    let share = if total_files > 0 {
+        100.0 * n as f64 / total_files as f64
+    } else {
+        0.0
+    };
+    let extract_sum_s: f64 = samples.iter().map(|s| s.extract_ms).sum::<f64>() / 1000.0;
+    let orient_sum_s: f64 = samples.iter().map(|s| s.orient_ms).sum::<f64>() / 1000.0;
+
+    let count_src = |src: PreviewSource| samples.iter().filter(|s| s.source == src).count();
+    let by_source = format!(
+        "full_image {f} | thumbnail {t} | preview {p}",
+        f = count_src(PreviewSource::FullImage),
+        t = count_src(PreviewSource::EmbeddedThumbnail),
+        p = count_src(PreviewSource::EmbeddedPreview),
+    );
+
+    // by model: stable order by descending count, then name.
+    let mut models: Vec<&str> = samples.iter().map(|s| s.model.as_str()).collect();
+    models.sort_unstable();
+    models.dedup();
+    let mut model_rows: Vec<(usize, String)> = models
+        .iter()
+        .map(|m| {
+            let ms: Vec<u32> = samples
+                .iter()
+                .filter(|s| s.model == *m)
+                .map(|s| s.decode_ms as u32)
+                .collect();
+            (
+                ms.len(),
+                format!("{m:?} {} (p50 {}ms)", ms.len(), percentile(&ms, 0.5)),
+            )
+        })
+        .collect();
+    model_rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let by_model = model_rows
+        .iter()
+        .map(|(_, r)| r.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    // top-N slowest by decode_ms desc, tie-broken by path for determinism.
+    let mut top: Vec<&SlowSample> = samples.iter().collect();
+    top.sort_by(|a, b| {
+        b.decode_ms
+            .partial_cmp(&a.decode_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    let top_lines = top
+        .iter()
+        .take(SLOW_TOP_N)
+        .map(|s| {
+            format!(
+                "  {dec:.0}ms {w}x{h} via {src} {path:?}",
+                dec = s.decode_ms,
+                w = s.src_w,
+                h = s.src_h,
+                src = source_label(s.source),
+                path = s.path,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "[ingest-slow-summary] {n} slow files ({share:.1}% of {total_files})  \
+         extract-sum {es:.1}s  orient-sum {os:.1}s\n\
+         \x20by source  {by_source}\n\
+         \x20by model   {by_model}\n\
+         \x20top {topn} slowest:\n{top_lines}",
+        n = n,
+        share = share,
+        total_files = total_files,
+        es = extract_sum_s,
+        os = orient_sum_s,
+        by_source = by_source,
+        by_model = by_model,
+        topn = top.len().min(SLOW_TOP_N),
+        top_lines = top_lines,
+    )
+}
+
+/// Emit the slow aggregate to the diag sink. No-op when diag is off.
+#[allow(dead_code)] // wired to ingest in Task 4
+pub fn emit_slow_aggregate(samples: &[SlowSample], total_files: usize) {
+    if !enabled() {
+        return;
+    }
+    write_log(&format_slow_aggregate(samples, total_files));
 }
 
 /// Bytes pre-read to force + time the disk IO a preview decode pages in (headless
@@ -1276,6 +1461,126 @@ mod tests {
             !format_log(&s).contains(" ingest  phase"),
             "no ingest line when idle"
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn slow_sample(
+        decode_ms: f64,
+        ex: f64,
+        or_: f64,
+        w: u32,
+        h: u32,
+        src: ferrolite_decode::PreviewSource,
+        model: &str,
+        path: &str,
+    ) -> SlowSample {
+        SlowSample {
+            decode_ms,
+            extract_ms: ex,
+            orient_ms: or_,
+            is_raw: true,
+            src_w: w,
+            src_h: h,
+            source: src,
+            model: model.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    #[test]
+    fn format_slow_line_has_all_fields_ascii() {
+        use ferrolite_decode::PreviewSource;
+        let s = slow_sample(
+            5305.0,
+            5100.0,
+            190.0,
+            6048,
+            4032,
+            PreviewSource::FullImage,
+            "ILCE-7M4",
+            "C:/x/DSC1234.ARW",
+        );
+        let out = format_slow_line(&s);
+        assert!(out.starts_with("[ingest-slow]"));
+        assert!(out.contains("5305ms"));
+        assert!(out.contains("extract 5100"));
+        assert!(out.contains("orient 190"));
+        assert!(out.contains("rest 15")); // 5305 - 5100 - 190
+        assert!(out.contains("6048x4032"));
+        assert!(out.contains("24.4MP"));
+        assert!(out.contains("via full_image"));
+        assert!(out.contains("ILCE-7M4"));
+        assert!(out.is_ascii());
+    }
+
+    #[test]
+    fn format_slow_aggregate_reports_counts_sources_models_and_top() {
+        use ferrolite_decode::PreviewSource;
+        let samples = vec![
+            slow_sample(
+                6000.0,
+                5800.0,
+                150.0,
+                6048,
+                4032,
+                PreviewSource::FullImage,
+                "ILCE-7M4",
+                "a.ARW",
+            ),
+            slow_sample(
+                5000.0,
+                4800.0,
+                150.0,
+                6048,
+                4032,
+                PreviewSource::FullImage,
+                "ILCE-7M4",
+                "b.ARW",
+            ),
+            slow_sample(
+                700.0,
+                120.0,
+                520.0,
+                8256,
+                5504,
+                PreviewSource::EmbeddedThumbnail,
+                "NIKON Z 7",
+                "c.NEF",
+            ),
+        ];
+        let out = format_slow_aggregate(&samples, 3320);
+        assert!(out.contains("[ingest-slow-summary] 3 slow files"));
+        assert!(out.contains("full_image 2"));
+        assert!(out.contains("thumbnail 1"));
+        assert!(out.contains("ILCE-7M4"));
+        assert!(out.contains("NIKON Z 7"));
+        // top-slowest section lists the 6000ms file first.
+        let top_idx = out.find("top ").expect("has a top section");
+        assert!(out[top_idx..].contains("6000ms"));
+        assert!(out.is_ascii());
+    }
+
+    #[test]
+    fn slow_threshold_defaults_to_500_when_unset() {
+        // Note: reads the process env once (cached). In CI the var is unset.
+        assert_eq!(slow_threshold_ms(), 500.0);
+    }
+
+    #[test]
+    fn ingest_profile_records_slow_samples() {
+        use ferrolite_decode::PreviewSource;
+        let p = IngestProfile::default();
+        p.record_slow(slow_sample(
+            5305.0,
+            5100.0,
+            190.0,
+            6048,
+            4032,
+            PreviewSource::FullImage,
+            "m",
+            "p",
+        ));
+        assert_eq!(p.slow_samples().len(), 1);
     }
 
     #[test]

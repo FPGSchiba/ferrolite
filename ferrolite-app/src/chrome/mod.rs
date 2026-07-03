@@ -27,6 +27,7 @@ pub enum MenuAction {
     ZoomFit,
     ZoomActual,
     ToggleHistogram,
+    OpenHelp,
 }
 
 /// Build a menu `Button` labeled `text`, with the bound shortcut for `action`
@@ -222,8 +223,15 @@ pub fn title_bar(
                     ui.close_menu();
                 }
             });
-            let _ = ui.menu_button("Help", |ui| {
-                ui.add_enabled(false, egui::Button::new("(no actions)"));
+            ui.menu_button("Help", |ui| {
+                if menu_button(ui, keymap, "Keyboard shortcuts", Action::OpenHelp, true).clicked() {
+                    action = Some(MenuAction::OpenHelp);
+                    ui.close_menu();
+                }
+                if ui.button("About Ferrolite").clicked() {
+                    action = Some(MenuAction::OpenHelp);
+                    ui.close_menu();
+                }
             });
         },
     );

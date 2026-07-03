@@ -6,6 +6,7 @@ mod diag;
 mod events;
 mod export;
 mod export_module;
+mod help;
 mod ingest;
 mod library;
 mod metadata;

@@ -28,6 +28,9 @@ pub struct FerroliteApp {
     /// One-shot restore-session guard: set `true` on the first `update()` frame,
     /// whether or not a restore actually happened, so the check runs exactly once.
     did_restore: bool,
+    /// Whether the Help modal (`crate::help::show`) is open. Opened by
+    /// `Action::OpenHelp` (F1, global) or the Help menu.
+    show_help: bool,
 }
 
 impl FerroliteApp {
@@ -64,6 +67,7 @@ impl FerroliteApp {
             diag: crate::diag::DiagState::new(),
             settings_dirty: false,
             did_restore: false,
+            show_help: false,
         }
     }
 
@@ -1983,6 +1987,9 @@ impl eframe::App for FerroliteApp {
                         self.state.settings.show_histogram = !self.state.settings.show_histogram;
                         self.mark_settings_dirty();
                     }
+                    Some(crate::chrome::MenuAction::OpenHelp) => {
+                        self.show_help = true;
+                    }
                     None => {}
                 }
             });
@@ -2159,6 +2166,21 @@ impl eframe::App for FerroliteApp {
                     self.open_record(ctx, frame, &rec);
                 }
             }
+        }
+
+        // F1 opens the Help modal. Global: works regardless of module/viewer
+        // state, but suppressed while a text field holds focus or the
+        // remove-confirmation modal is up (consistent with the neighboring
+        // shortcuts here).
+        if self.state.pending_remove.is_none()
+            && !ctx.wants_keyboard_input()
+            && self
+                .state
+                .settings
+                .keymap
+                .pressed(ctx, crate::settings::keymap::Action::OpenHelp)
+        {
+            self.show_help = true;
         }
 
         // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
@@ -2709,6 +2731,14 @@ impl eframe::App for FerroliteApp {
             if !open {
                 self.state.pending_remove = None;
             }
+        }
+
+        // Help modal (About + live keyboard-shortcut reference). Opened by
+        // F1 (`Action::OpenHelp`) or the Help menu.
+        {
+            let mut open = self.show_help;
+            crate::help::show(ctx, &mut open, &self.state.settings.keymap);
+            self.show_help = open;
         }
 
         // Single-file export dialog (spec §8.3). Non-modal (see

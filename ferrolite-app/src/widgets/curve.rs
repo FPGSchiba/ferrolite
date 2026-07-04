@@ -11,12 +11,18 @@
 
 use crate::develop::curve_math::{self, GrabOrInsert};
 use crate::theme;
+use crate::widgets::draw_reset_arrow;
 use ferrolite_pipeline::{curve_lut, CurveMode};
 
 const SIZE: f32 = 260.0; // square edit area
 const HIT_R: f32 = 0.06; // normalized hit radius
 const DOT_R: f32 = 5.0; // idle point-dot radius
 const DOT_R_HOVER: f32 = 6.5; // enlarged radius for the hovered point
+const MODE_RESET_R: f32 = 4.5; // mode-selector reset arrow radius
+
+/// The app default curve mode for newly-created curves (Spec 4.1 CD2 Task 6);
+/// also the target the mode selector's own reset returns to.
+const DEFAULT_MODE: CurveMode = CurveMode::Smooth;
 
 /// Visual styling for a `curve_editor` instance, so different curve uses
 /// (tone curve vs. future per-channel color curves) can have distinct colors.
@@ -36,8 +42,8 @@ pub struct CurveEdit {
 
 /// Paint + interact with a curve editor bound to `points`/`mode`. All memory
 /// keys are salted with `id_source` so two instances on one screen don't
-/// collide. Returns `Some(CurveEdit)` on any change (drag, insert, delete, or
-/// reset), `None` otherwise.
+/// collide. Returns `Some(CurveEdit)` on any change (drag, insert, delete,
+/// reset, or mode change), `None` otherwise.
 pub fn curve_editor(
     ui: &mut egui::Ui,
     id_source: impl std::hash::Hash,
@@ -215,21 +221,83 @@ pub fn curve_editor(
             .color(theme::TEXT_FAINT),
     );
 
-    // Per-component reset affordance, styled like the Basic section's "Reset"
-    // (see CLAUDE.md "Per-component reset" rule). Dim/disabled at default.
-    let modified = !curve_math::is_identity(&points);
-    if ui
-        .add_enabled(modified, egui::Button::new("Reset").small())
-        .clicked()
-    {
-        // Resetting clears any stale selection tied to the old point list.
-        ui.memory_mut(|m| m.data.insert_temp::<Option<usize>>(selected_id, None));
-        return Some(CurveEdit {
-            points: curve_math::identity_points(),
-            mode,
-            reset: true,
-            commit: true,
-        });
+    let mut result: Option<CurveEdit> = None;
+
+    ui.horizontal(|ui| {
+        // Per-component reset affordance, styled like the Basic section's "Reset"
+        // (see CLAUDE.md "Per-component reset" rule). Dim/disabled at default.
+        let modified = !curve_math::is_identity(&points);
+        if ui
+            .add_enabled(modified, egui::Button::new("Reset").small())
+            .clicked()
+        {
+            // Resetting clears any stale selection tied to the old point list.
+            ui.memory_mut(|m| m.data.insert_temp::<Option<usize>>(selected_id, None));
+            result = Some(CurveEdit {
+                points: curve_math::identity_points(),
+                mode,
+                reset: true,
+                commit: true,
+            });
+        }
+
+        ui.add_space(8.0);
+
+        // Mode selector: Linear / Smooth segmented control, with its own
+        // per-control reset (CLAUDE.md rule) back to the app default (Smooth).
+        let mut new_mode = mode;
+        if ui
+            .selectable_label(mode == CurveMode::Linear, "Linear")
+            .clicked()
+        {
+            new_mode = CurveMode::Linear;
+        }
+        if ui
+            .selectable_label(mode == CurveMode::Smooth, "Smooth")
+            .clicked()
+        {
+            new_mode = CurveMode::Smooth;
+        }
+
+        let (mode_reset_rect, _) =
+            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        let mode_modified = mode != DEFAULT_MODE;
+        let mode_reset_resp = ui.interact(
+            mode_reset_rect,
+            base_id.with("mode_reset"),
+            egui::Sense::click(),
+        );
+        let mode_reset_color = if mode_modified {
+            if mode_reset_resp.hovered() {
+                style.curve_color
+            } else {
+                theme::TEXT_FAINT
+            }
+        } else {
+            theme::BORDER_STRONG
+        };
+        draw_reset_arrow(
+            ui.painter(),
+            mode_reset_rect.center(),
+            MODE_RESET_R,
+            mode_reset_color,
+        );
+        if mode_reset_resp.clicked() && mode_modified {
+            new_mode = DEFAULT_MODE;
+        }
+
+        if new_mode != mode && result.is_none() {
+            result = Some(CurveEdit {
+                points: points.clone(),
+                mode: new_mode,
+                reset: false,
+                commit: true,
+            });
+        }
+    });
+
+    if result.is_some() {
+        return result;
     }
 
     if changed {

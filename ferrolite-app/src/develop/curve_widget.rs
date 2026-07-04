@@ -2,13 +2,15 @@
 //! only paints + routes pointer events. Visual-tested (no unit tests).
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::curve_math;
+use crate::develop::curve_math::{self, GrabOrInsert};
 use crate::theme;
 use crate::widgets::draw_reset_arrow;
 use ferrolite_pipeline::{Op, OpKind, OpStack, ToneCurve};
 
 const SIZE: f32 = 260.0; // square edit area
-const HIT_R: f32 = 0.04; // normalized hit radius
+const HIT_R: f32 = 0.06; // normalized hit radius
+const DOT_R: f32 = 5.0; // idle point-dot radius
+const DOT_R_HOVER: f32 = 6.5; // enlarged radius for the hovered point
 const RESET_SIZE: f32 = 16.0; // reset hit-target square size
 const RESET_ICON_R: f32 = 4.5; // reset icon radius, matches EguiSlider's
                                // Mirrors `EguiSlider`'s HANDLE_IDLE token (not in the shared `theme` module).
@@ -76,10 +78,18 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         poly,
         egui::Stroke::new(1.5, theme::ACCENT),
     ));
-    for &p in &points {
+
+    // Hover highlight: the point the cursor is currently within HIT_R of.
+    let hovered_idx = resp
+        .hover_pos()
+        .and_then(|p| curve_math::nearest_point(&points, to_norm(p), HIT_R));
+
+    for (i, &p) in points.iter().enumerate() {
+        let is_hovered = hovered_idx == Some(i);
+        let radius = if is_hovered { DOT_R_HOVER } else { DOT_R };
         painter.circle(
             to_screen(p),
-            3.5,
+            radius,
             theme::ACCENT_BRIGHT,
             egui::Stroke::new(1.0, theme::BG_BASE),
         );
@@ -106,9 +116,9 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         let norm = to_norm(pos);
         if resp.drag_started() || resp.clicked() {
             // Grab the nearest existing point, else insert a new one.
-            match curve_math::nearest_point(&points, norm, HIT_R) {
-                Some(idx) => ui.memory_mut(|m| m.data.insert_temp(resp.id, idx)),
-                None => {
+            match curve_math::grab_or_insert(&points, norm, HIT_R) {
+                GrabOrInsert::Grab(idx) => ui.memory_mut(|m| m.data.insert_temp(resp.id, idx)),
+                GrabOrInsert::Insert => {
                     // Insert at the clamped coordinate, then grab THAT point by its
                     // exact (bit-identical) value — nearest_point can resolve to a
                     // neighbor on a crowded curve.

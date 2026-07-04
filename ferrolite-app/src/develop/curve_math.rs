@@ -74,6 +74,23 @@ pub fn delete_point(points: &[(f32, f32)], idx: usize) -> Vec<(f32, f32)> {
     out
 }
 
+/// Decision for a click/drag-start on the curve: grab the nearest existing
+/// point within `hit_r`, else signal that a new point should be inserted.
+/// Using a generous radius here (vs. a bit-identical match) fixes "moving a
+/// point creates a new node" when the cursor drifts slightly off the point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrabOrInsert {
+    Grab(usize),
+    Insert,
+}
+
+pub fn grab_or_insert(points: &[(f32, f32)], cursor: (f32, f32), hit_r: f32) -> GrabOrInsert {
+    match nearest_point(points, cursor, hit_r) {
+        Some(idx) => GrabOrInsert::Grab(idx),
+        None => GrabOrInsert::Insert,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +203,19 @@ mod tests {
             delete_point(&two, 1).len(),
             2,
             "right endpoint of 2-point curve not deletable"
+        );
+    }
+
+    #[test]
+    fn grab_when_near_else_insert() {
+        let pts = vec![(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)];
+        assert_eq!(
+            grab_or_insert(&pts, (0.51, 0.49), 0.06),
+            GrabOrInsert::Grab(1)
+        );
+        assert_eq!(
+            grab_or_insert(&pts, (0.25, 0.80), 0.06),
+            GrabOrInsert::Insert
         );
     }
 }

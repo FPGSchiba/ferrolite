@@ -89,6 +89,9 @@ pub fn spawn_export(
 ) -> ferrolite_jobs::JobHandle {
     let tx = state.tx.clone();
     let egui_ctx = egui_ctx.clone();
+    // Shared lens db (photo tier) so the export bakes + renders any enabled lens
+    // correction off-thread inside the job. `None` when no db is loaded.
+    let lens_db = state.lens_db.clone();
     let handle = state.jobs.submit(Priority::Background, move |cancel| {
         // Resolve the source to a GPU pyramid. For a Standard image this uploads
         // the full-res pyramid on the worker thread (never the UI thread).
@@ -115,6 +118,7 @@ pub fn spawn_export(
             stack: &stack,
             camera_to_working,
             working_space,
+            lens_db: lens_db.as_ref(),
             options: &options,
             dest: &dest,
             source_path: &source_path,

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use ferrolite_color::WorkingSpace;
 use ferrolite_gpu::GpuContext;
 use ferrolite_jobs::CancelToken;
+use ferrolite_lens::LensfunDb;
 use ferrolite_pipeline::{GpuPyramidSource, OpStack};
 
 use crate::encode::encode_to_file;
@@ -25,6 +26,12 @@ pub struct ExportRequest<'a> {
     /// Row-major camera→working 3×3 for the open image + working space.
     pub camera_to_working: [[f32; 3]; 3],
     pub working_space: WorkingSpace,
+    /// Shared lens database. When present AND the stack carries an enabled lens
+    /// correction with a matched `lens_id`, the export bakes the correction
+    /// products off-thread (inside this job) and renders them; otherwise the
+    /// render is identity (byte-identical to an uncorrected export). `None` for
+    /// batch/thumbnail-less callers or when no db is loaded.
+    pub lens_db: Option<&'a Arc<LensfunDb>>,
     pub options: &'a ExportOptions,
     pub dest: &'a Path,
     /// Source image path for EXIF copy.
@@ -55,6 +62,7 @@ pub fn run_export(
         req.camera_to_working,
         req.working_space,
         opts.output_space,
+        req.lens_db,
         depth,
         cancel,
         progress,

@@ -11,6 +11,10 @@ workspace = true
 [dependencies]
 ferrolite-color = { workspace = true }
 ferrolite-pipeline = { workspace = true }
+# Photo-tier: lens corrections bake off-thread inside the export job via the
+# shared `LensDb`. `ferrolite-lens` only pulls in `lensfun` + `thiserror` (no
+# engine crates), keeping `lensfun` confined to that crate.
+ferrolite-lens = { workspace = true }
 ferrolite-gpu = { workspace = true }
 ferrolite-image = { workspace = true }
 ferrolite-jobs = { workspace = true }

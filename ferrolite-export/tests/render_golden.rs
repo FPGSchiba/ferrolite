@@ -9,7 +9,8 @@ use ferrolite_export::{render_tiled, BitDepth, PixelData};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_jobs::CancelToken;
-use ferrolite_pipeline::{EditPipeline, GpuPyramidSource, OpStack};
+use ferrolite_lens::{load_bundled, LensDb};
+use ferrolite_pipeline::{Correction, EditPipeline, GpuPyramidSource, LensCorrection, Op, OpStack};
 
 const TOL: i32 = 6; // absorbs f16 + tile-edge resample (Spec 2 SEAM_TOL rationale)
 
@@ -52,6 +53,7 @@ fn tiled_render_matches_whole_image_reference() {
         IDENTITY,
         WorkingSpace::Srgb,
         WorkingSpace::Srgb,
+        None,
         BitDepth::Eight,
         &cancel,
         &mut |d, t| seen = (d, t),
@@ -96,9 +98,136 @@ fn cancellation_stops_render() {
         IDENTITY,
         WorkingSpace::Srgb,
         WorkingSpace::Srgb,
+        None,
         BitDepth::Eight,
         &cancel,
         &mut |_, _| {},
     );
     assert!(matches!(r, Err(ferrolite_export::ExportError::Cancelled)));
+}
+
+// ---------------------------------------------------------------------------
+// C1 golden: the export path actually RENDERS lens corrections. Mirrors the
+// pipeline `lens_golden.rs` corrected render — export a synthetic image with a
+// real bundled lens's distortion+TCA+vignetting enabled and assert the output
+// differs from the uncorrected export (and is non-trivially so). Before the C1
+// fix, `render_tiled` passed `None, None` and this diff would be exactly zero.
+// ---------------------------------------------------------------------------
+
+/// The bundled distorting lens used by the pipeline lens goldens (real Lensfun
+/// distortion + TCA + vignetting calibration; wide end distorts most).
+fn corrected_lens_op() -> Op {
+    Op::LensCorrection(LensCorrection {
+        lens_id: Some("Canon EF 24-70mm f/2.8L II USM".into()),
+        focal_len: 24.0,
+        aperture: 2.8, // wide open vignettes most
+        crop_factor: 1.0,
+        distortion: Correction {
+            enabled: true,
+            amount: 1.0,
+        },
+        tca: Correction {
+            enabled: true,
+            amount: 1.0,
+        },
+        vignetting: Correction {
+            enabled: true,
+            amount: 1.0,
+        },
+    })
+}
+
+#[test]
+fn export_renders_lens_corrections() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let Ok(db) = load_bundled() else {
+        eprintln!("bundled lens db unavailable; skipping");
+        return;
+    };
+    // Confirm the bundled db actually resolves + bakes for this lens; otherwise
+    // the corrected export would be identity and the assertion below vacuous.
+    let db = Arc::new(db);
+    if db.match_by_id("Canon EF 24-70mm f/2.8L II USM").is_none() {
+        eprintln!("bundled db has no calibration for the fixture lens; skipping");
+        return;
+    }
+
+    let (w, h) = (600u32, 500u32);
+    let img = probe(w, h);
+    let ctx = Arc::new(ctx);
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &img));
+    let cancel = CancelToken::new();
+
+    let stack = OpStack::default().set_op(corrected_lens_op());
+
+    // Corrected export (db present → bakes + renders the warp/vignette).
+    let corrected = render_tiled(
+        &ctx,
+        &pyramid,
+        &stack,
+        IDENTITY,
+        WorkingSpace::Srgb,
+        WorkingSpace::Srgb,
+        Some(&db),
+        BitDepth::Eight,
+        &cancel,
+        &mut |_, _| {},
+    )
+    .expect("corrected render");
+
+    // Uncorrected export of the SAME stack but with no db → identity (the
+    // pre-C1 behavior). Same dimensions (a lens correction doesn't change the
+    // output size), so a pixel-wise diff is well defined.
+    let uncorrected = render_tiled(
+        &ctx,
+        &pyramid,
+        &stack,
+        IDENTITY,
+        WorkingSpace::Srgb,
+        WorkingSpace::Srgb,
+        None,
+        BitDepth::Eight,
+        &cancel,
+        &mut |_, _| {},
+    )
+    .expect("uncorrected render");
+
+    assert_eq!(
+        (corrected.width, corrected.height),
+        (uncorrected.width, uncorrected.height),
+        "a lens correction must not change output dimensions"
+    );
+    let PixelData::Eight(a) = corrected.data else {
+        panic!("expected 8-bit corrected")
+    };
+    let PixelData::Eight(b) = uncorrected.data else {
+        panic!("expected 8-bit uncorrected")
+    };
+    assert_eq!(a.len(), b.len());
+
+    let mut max_diff = 0i32;
+    let mut changed = 0usize;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let d = (*x as i32 - *y as i32).abs();
+        max_diff = max_diff.max(d);
+        if d > 0 {
+            changed += 1;
+        }
+    }
+    eprintln!("export corrected-vs-uncorrected max diff = {max_diff}, changed bytes = {changed}");
+    assert!(
+        max_diff > 2,
+        "the export must visibly apply the lens correction (max diff {max_diff}) — \
+         render_tiled dropped the bake?"
+    );
+    // A distortion+TCA+vignetting correction touches a large fraction of pixels,
+    // not just a handful of edge samples.
+    assert!(
+        changed > a.len() / 10,
+        "the correction should affect a substantial region ({changed}/{} bytes)",
+        a.len()
+    );
 }

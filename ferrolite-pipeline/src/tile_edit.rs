@@ -190,7 +190,7 @@ impl TileEditPipeline {
         }
         vignette.set(VignetteUniform {
             vig_amount: crate::uniforms::vignette_amount(lc.as_ref()),
-            pad: [0.0; 3],
+            ..VignetteUniform::default()
         });
 
         Self {
@@ -281,10 +281,26 @@ impl TileEditPipeline {
     }
 
     /// Set the vignette lerp amount (buffer write; no rebuild). 0 = identity.
+    /// Read-modify-write so an independent `manual` setting is preserved.
     pub fn set_vig_amount(&mut self, amount: f32) {
         let u = VignetteUniform {
             vig_amount: amount,
-            pad: [0.0; 3],
+            ..self.vignette.get()
+        };
+        if u != self.vignette.get() {
+            self.vignette.set(u);
+            self.graph.mark_dirty(self.vignette_id);
+        }
+    }
+
+    /// Set the parametric manual (lens-free) vignette strength (buffer write; no
+    /// rebuild). 0 = identity; negative darkens corners, positive brightens them.
+    /// Read-modify-write so the independent `vig_amount` (profile) setting is
+    /// preserved.
+    pub fn set_vig_manual(&mut self, manual: f32) {
+        let u = VignetteUniform {
+            manual,
+            ..self.vignette.get()
         };
         if u != self.vignette.get() {
             self.vignette.set(u);

@@ -404,6 +404,89 @@ fn vignetting_applies_radial_gain() {
 }
 
 // ---------------------------------------------------------------------------
+// Golden 2c: manual (lens-free) vignette darkens corners with NO lens/LUT bound.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn manual_vignette_darkens_corners_with_no_lens() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    let (w, h) = (96u32, 72u32);
+    // Flat mid-grey so the only spatial variation is the vignette gain.
+    let flat = LinearRgbaF32::new(
+        w,
+        h,
+        vec![0.5f32; (w * h * 4) as usize]
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i % 4 == 3 { 1.0 } else { v })
+            .collect(),
+    )
+    .unwrap();
+
+    // No LensCorrection op at all: no LUT/lens bound, `vig_amount` stays 0 (the
+    // pipeline's own identity default). Only the new `set_vig_manual` acts.
+    let stack = OpStack::default();
+    let mut pipe = EditPipeline::new(ctx.clone(), &flat, stack, IDENTITY);
+    pipe.set_vig_manual(-0.5);
+    let out = common::read_image_linear(&ctx, &pipe.evaluate());
+
+    let center_idx = (((h / 2) * w + w / 2) * 4) as usize;
+    let corner_idx = 0usize; // top-left corner
+    let center_r = out[center_idx];
+    let corner_r = out[corner_idx];
+    eprintln!("manual vignette center R = {center_r}, corner R = {corner_r}");
+    assert!(
+        corner_r < center_r - 1e-3,
+        "manual=-0.5 with no lens/LUT must darken the corners relative to the center"
+    );
+    // Center stays ~identity (r≈0 → manual(r)≈1.0 regardless of `manual`).
+    assert!(
+        (center_r - 0.5).abs() < 0.02,
+        "center should stay near the un-vignetted mid-grey (manual term ~0 at r=0)"
+    );
+}
+
+#[test]
+fn manual_and_vig_amount_zero_is_identity_vs_source() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    let (w, h) = (64u32, 48u32);
+    let src = smooth_source(w, h);
+
+    let stack = OpStack::default();
+    let mut pipe = EditPipeline::new(ctx.clone(), &src, stack, IDENTITY);
+    // Explicitly re-assert both identity values (defaults), proving `set_vig_*`
+    // round-trips to a no-op and doesn't disturb the other field.
+    pipe.set_vig_manual(0.0);
+    pipe.set_vig_amount(0.0);
+    let out = common::read_image_linear(&ctx, &pipe.evaluate());
+
+    // Compare against a pipeline with no vignette calls at all (also identity):
+    // the color-matrix is identity, so the only transform before readback is the
+    // vignette pass, which must be a no-op at manual=0 && vig_amount=0.
+    let src_lin: Vec<f32> = src
+        .pixels
+        .iter()
+        .map(|&v| half::f16::from_f32(v).to_f32())
+        .collect();
+    let diff = max_channel_diff(&out, &src_lin);
+    eprintln!("manual=0,vig_amount=0 max diff vs source = {diff}");
+    // f16 storage round-trip tolerance (source is stored/read back as f16 through
+    // the identity color-matrix + vignette passes); not a structural difference.
+    assert!(
+        diff < 1e-3,
+        "manual=0 && vig_amount=0 must be identity (within f16 round-trip) vs the source"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Golden 3: tile-seam — the corrected tiled producer matches the whole image.
 // ---------------------------------------------------------------------------
 

@@ -370,15 +370,21 @@ pub struct LensUniform {
 pub struct VignetteUniform {
     /// Lerp factor between identity (gain 1.0) and the LUT gain. 0 = identity.
     pub vig_amount: f32,
-    pub pad: [f32; 3],
+    /// Parametric manual (lens-free) vignette strength. Composed as
+    /// `1.0 + manual * r * r` (r = normalized center→corner radius), so 0 is
+    /// identity. Negative darkens corners; positive brightens them. Independent
+    /// of `vig_amount` — see `corr(r) * manual(r)` in vignette.wgsl.
+    pub manual: f32,
+    pub pad: [f32; 2],
 }
 
 impl Default for VignetteUniform {
-    /// Identity: `vig_amount = 0` → the pass multiplies rgb by 1.0.
+    /// Identity: `vig_amount = 0`, `manual = 0` → the pass multiplies rgb by 1.0.
     fn default() -> Self {
         Self {
             vig_amount: 0.0,
-            pad: [0.0; 3],
+            manual: 0.0,
+            pad: [0.0; 2],
         }
     }
 }
@@ -751,6 +757,7 @@ mod tests {
     #[test]
     fn vignette_uniform_default_is_identity_and_aligned() {
         assert_eq!(VignetteUniform::default().vig_amount, 0.0);
+        assert_eq!(VignetteUniform::default().manual, 0.0);
         assert_eq!(std::mem::size_of::<VignetteUniform>() % 16, 0);
     }
 

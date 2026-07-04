@@ -1,7 +1,9 @@
 //! Pure helpers: map a UI value to a new immutable `OpStack`. A value at its
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
-use ferrolite_pipeline::{sharpen_halo, Contrast, Exposure, Op, OpStack, Sharpen, WhiteBalance};
+use ferrolite_pipeline::{
+    sharpen_halo, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, WhiteBalance,
+};
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
     if ev == 0.0 {
@@ -32,6 +34,20 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
         s.reset(ferrolite_pipeline::OpKind::Sharpen)
     } else {
         s.set_op(Op::Sharpen(Sharpen { amount, radius }))
+    }
+}
+
+/// A `LensCorrection` with no matched lens AND every correction disabled is
+/// identity (nothing to bake, nothing to apply) → remove the op entirely so
+/// `is_identity()`/`has_edits` stay correct, mirroring every other `set_*`
+/// helper in this file.
+pub fn set_lens_correction(s: &OpStack, lc: LensCorrection) -> OpStack {
+    let identity =
+        lc.lens_id.is_none() && !lc.distortion.enabled && !lc.tca.enabled && !lc.vignetting.enabled;
+    if identity {
+        s.reset(ferrolite_pipeline::OpKind::LensCorrection)
+    } else {
+        s.set_op(Op::LensCorrection(lc))
     }
 }
 
@@ -69,6 +85,36 @@ pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
 mod tests {
     use super::*;
     use ferrolite_pipeline::{Op, OpStack};
+
+    #[test]
+    fn set_lens_correction_removes_when_unmatched_and_all_off() {
+        use ferrolite_pipeline::{Correction, LensCorrection};
+        let off = LensCorrection {
+            lens_id: None,
+            focal_len: 24.0,
+            aperture: 8.0,
+            crop_factor: 1.0,
+            distortion: Correction::default(),
+            tca: Correction::default(),
+            vignetting: Correction::default(),
+        };
+        let s = set_lens_correction(&OpStack::default(), off.clone());
+        assert!(
+            s.lens_correction().is_none(),
+            "no lens + all off = identity"
+        );
+
+        let on = LensCorrection {
+            lens_id: Some("EF 24-70".into()),
+            distortion: Correction {
+                enabled: true,
+                amount: 1.0,
+            },
+            ..off
+        };
+        let s2 = set_lens_correction(&OpStack::default(), on);
+        assert!(s2.lens_correction().is_some());
+    }
 
     #[test]
     fn set_exposure_adds_then_identity_removes() {

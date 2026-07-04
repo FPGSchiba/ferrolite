@@ -813,9 +813,16 @@ impl FerroliteApp {
                     if let Some(vg) = v.lens_vignette.as_ref() {
                         ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
                     }
-                    ep.set_vig_amount(ferrolite_pipeline::vignette_amount(
+                    // Mode-aware vignette (MV2): profile LUT lerp when a bake is
+                    // bound, else the lens-free parametric manual gain — so a
+                    // persisted manual-vignette op (lens_id=None, no bake) still
+                    // applies on open. Both uniforms are pushed as a pair.
+                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
                         v.op_stack.lens_correction().as_ref(),
-                    ));
+                        v.lens_vignette.is_some(),
+                    );
+                    ep.set_vig_amount(vig_amount);
+                    ep.set_vig_manual(vig_manual);
                     let out = ep.evaluate();
                     let tex = out.texture.clone();
                     let dims = (out.width, out.height);
@@ -923,6 +930,12 @@ impl FerroliteApp {
                     // Thread the current lens bake (if any) into the fresh producer
                     // (U7): `None` until a bake completes, which is byte-identical
                     // to no lens correction (identity warp/vignette defaults).
+                    // Mode-aware vignette pair (MV2) so a persisted manual-vignette
+                    // op (lens_id=None → no bake) applies on open.
+                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                        v.op_stack.lens_correction().as_ref(),
+                        v.lens_vignette.is_some(),
+                    );
                     let tep = ferrolite_pipeline::TileEditPipeline::new(
                         ctx_arc,
                         pyramid,
@@ -931,7 +944,10 @@ impl FerroliteApp {
                         v.lens_warp.as_ref(),
                         v.lens_vignette.as_ref(),
                     );
-                    v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                    let mut producer = viewer::EditTileProducer::new(tep);
+                    producer.set_vig_amount(vig_amount);
+                    producer.set_vig_manual(vig_manual);
+                    v.edit_producer = Some(producer);
                     let version = v.opstack_version.max(1);
                     let mut renderer = rs.renderer.write();
                     if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -1129,7 +1145,12 @@ impl FerroliteApp {
             if let Some(vg) = v.lens_vignette.as_ref() {
                 ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
             }
-            ep.set_vig_amount(ferrolite_pipeline::vignette_amount(lc.as_ref()));
+            // Mode-aware vignette pair (MV2): a bake just landed, so
+            // `has_vignette_lut` reflects the fresh `v.lens_vignette`.
+            let (vig_amount, vig_manual) =
+                crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
+            ep.set_vig_amount(vig_amount);
+            ep.set_vig_manual(vig_manual);
             let img = ep.evaluate();
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -1140,6 +1161,11 @@ impl FerroliteApp {
             }
         }
         if let Some(pyr) = v.pyramid.clone() {
+            // Mode-aware vignette pair for the rebuilt full-res producer (MV2).
+            let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                shown.lens_correction().as_ref(),
+                v.lens_vignette.is_some(),
+            );
             let tep = ferrolite_pipeline::TileEditPipeline::new(
                 ctx_arc.clone(),
                 pyr,
@@ -1148,7 +1174,10 @@ impl FerroliteApp {
                 v.lens_warp.as_ref(),
                 v.lens_vignette.as_ref(),
             );
-            v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+            let mut producer = viewer::EditTileProducer::new(tep);
+            producer.set_vig_amount(vig_amount);
+            producer.set_vig_manual(vig_manual);
+            v.edit_producer = Some(producer);
             v.opstack_version = v.opstack_version.wrapping_add(1);
             let version = v.opstack_version;
             let mut renderer = rs.renderer.write();
@@ -1248,7 +1277,14 @@ impl FerroliteApp {
                 lc.as_ref(),
                 v.lens_warp.is_some(),
             ));
-            ep.set_vig_amount(ferrolite_pipeline::vignette_amount(lc.as_ref()));
+            // Mode-aware vignette pair (MV2): profile lerp when a LUT is bound,
+            // else the lens-free parametric manual gain. This is the site that
+            // makes a manual-vignette Amount drag update the fit-zoom preview
+            // live with NO lens (uniform-only; no bake, no rebuild).
+            let (vig_amount, vig_manual) =
+                crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
+            ep.set_vig_amount(vig_amount);
+            ep.set_vig_manual(vig_manual);
             // Evaluate BEFORE taking the renderer lock; pass the resulting texture
             // (cheap Arc clone) into the write scope. (`ep` borrows `self.state`,
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
@@ -1285,6 +1321,14 @@ impl FerroliteApp {
                     // one matching `shown`'s lens_id/focal/aperture/crop/enabled
                     // flags — i.e. the bake already stored on `v` by the
                     // `LensBaked` handler for this same key.
+                    // Mode-aware vignette pair (MV2) for the fresh producer, so a
+                    // rebuild (e.g. geometry change) with a persisted manual or
+                    // profile vignette keeps applying it — the constructor only
+                    // seeds `vig_amount`, never the parametric `manual`.
+                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                        shown.lens_correction().as_ref(),
+                        v.lens_vignette.is_some(),
+                    );
                     let tep = ferrolite_pipeline::TileEditPipeline::new(
                         ctx_arc,
                         pyr,
@@ -1293,7 +1337,10 @@ impl FerroliteApp {
                         v.lens_warp.as_ref(),
                         v.lens_vignette.as_ref(),
                     );
-                    v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                    let mut producer = viewer::EditTileProducer::new(tep);
+                    producer.set_vig_amount(vig_amount);
+                    producer.set_vig_manual(vig_manual);
+                    v.edit_producer = Some(producer);
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {
                 // Color-only change: update params in place. Also covers a lens
@@ -1305,7 +1352,13 @@ impl FerroliteApp {
                     lc.as_ref(),
                     v.lens_warp.is_some(),
                 ));
-                producer.set_vig_amount(ferrolite_pipeline::vignette_amount(lc.as_ref()));
+                // Mode-aware vignette pair (MV2): a manual Amount drag with no
+                // lens reaches here (uniform-only, no rebuild) and updates the
+                // full-res producer live.
+                let (vig_amount, vig_manual) =
+                    crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
+                producer.set_vig_amount(vig_amount);
+                producer.set_vig_manual(vig_manual);
             }
             let version = v.opstack_version;
             let image_id = v.image_id;

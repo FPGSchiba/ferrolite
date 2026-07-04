@@ -49,6 +49,13 @@ impl EditTileProducer {
     pub fn set_vig_amount(&mut self, amount: f32) {
         self.pipeline.set_vig_amount(amount);
     }
+
+    /// Set the parametric manual (lens-free) vignette gain (buffer write only;
+    /// 0 = identity, negative darkens corners, positive brightens). Independent
+    /// of `set_vig_amount` (profile LUT lerp); see `develop::vignette_mode`.
+    pub fn set_vig_manual(&mut self, manual: f32) {
+        self.pipeline.set_vig_manual(manual);
+    }
 }
 
 impl TileProducer for EditTileProducer {

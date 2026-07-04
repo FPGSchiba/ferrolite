@@ -58,8 +58,8 @@ impl LensfunDb {
     }
 }
 
-/// Build a modifier at coarse grid dims `n×n`, enable distortion (+ TCA if
-/// available), and read back a per-channel warp grid.
+/// Build a modifier at coarse grid dims `n×n`, enable distortion + TCA, and
+/// read back a real per-channel warp grid.
 ///
 /// # Confirmed lensfun 0.7.0 API (see `.superpowers/sdd/u2-report.md`)
 ///
@@ -69,21 +69,27 @@ impl LensfunDb {
 /// `[x0,y0,x1,y1,...]`), while `Modifier::apply_subpixel_distortion` fills a
 /// 6-float-per-pixel `[xR,yR,xG,yG,xB,yB]` buffer with the **TCA-only** remap
 /// (green channel is always the untouched input coordinate — TCA is a shift
-/// relative to green, not a full geometry warp). Combining both into one true
-/// per-channel warp would require re-deriving the normalized<->pixel
-/// conversion lensfun does internally.
+/// relative to green, not a full geometry warp).
 ///
-/// Per the brief's documented fallback, we take the distortion-only path and
-/// fill R=G=B from `apply_geometry_distortion`, leaving TCA as identity
-/// (R/G/B coincide). This is real, verified distortion data — just not also
-/// carrying real TCA. Revisit if a future task needs true per-channel TCA.
+/// Both calls share the exact same pixel<->normalized round-trip (same
+/// `norm_scale`/`center_x`/`center_y`, same `x_start`/`y_start` convention;
+/// confirmed by reading `Modifier::apply_geometry_distortion` and
+/// `Modifier::apply_subpixel_distortion` in `lensfun`'s `src/modifier.rs`),
+/// so the TCA-only shift `(xR,yR) - (xG,yG)` from `apply_subpixel_distortion`
+/// is directly additive, in the same pixel-space units, to the distortion-only
+/// source coord `d` from `apply_geometry_distortion`. We compose them:
+/// `R_src = d + (r0 - g0)`, `G_src = d`, `B_src = d + (b0 - g0)`. If the lens
+/// has no TCA calibration, `apply_subpixel_distortion` returns `false` and we
+/// fall back to identity TCA (`R_src = G_src = B_src = d`) — distortion still
+/// applies.
 fn bake_geometry_impl(lens: &lensfun::Lens, crop: f32, focal: f32, n: u32) -> Option<WarpGrid> {
     let mut modifier = lensfun::Modifier::new(lens, focal, crop, n, n, true);
     let has_dist = modifier.enable_distortion_correction(lens);
-    // TCA is currently not folded into the grid (see doc comment above); we
-    // still enable it so a future combined-warp implementation is a one-line
-    // change, but its output isn't consumed yet.
-    let _has_tca = modifier.enable_tca_correction(lens);
+    // `has_tca` tells us whether a real TCA calibration was found for this
+    // lens/focal; we gate `apply_subpixel_distortion` on it below so we only
+    // trust its output (vs. falling back to identity) when a calibration
+    // genuinely exists.
+    let has_tca = modifier.enable_tca_correction(lens);
     if !has_dist {
         return None; // no distortion model for this lens at this focal length
     }
@@ -95,22 +101,46 @@ fn bake_geometry_impl(lens: &lensfun::Lens, crop: f32, focal: f32, n: u32) -> Op
         return None;
     }
 
+    // `apply_subpixel_distortion` fills `6 * n * n` floats:
+    // `[xR,yR,xG,yG,xB,yB,...]` over the same `n×n` rectangle. Returns
+    // `false` when the lens has no TCA calibration at this focal length —
+    // in that case `tca` stays `None` and every node falls back to identity.
+    let mut subpix = vec![0.0f32; 6 * (n as usize) * (n as usize)];
+    let tca_ok = has_tca
+        && modifier.apply_subpixel_distortion(0.0, 0.0, n as usize, n as usize, &mut subpix);
+
     let mut coords = Vec::with_capacity((n * n) as usize);
     let mut max_disp = 0.0f32;
     let denom = (n - 1).max(1) as f32;
     for y in 0..n {
         for x in 0..n {
-            let off = 2 * (y as usize * n as usize + x as usize);
-            let (rx, ry) = (remap[off], remap[off + 1]);
+            let idx = y as usize * n as usize + x as usize;
+            let off = 2 * idx;
+            let (dx, dy) = (remap[off], remap[off + 1]);
+
+            let (dr, db) = if tca_ok {
+                let s = 6 * idx;
+                let (xr, yr) = (subpix[s], subpix[s + 1]);
+                let (xg, yg) = (subpix[s + 2], subpix[s + 3]);
+                let (xb, yb) = (subpix[s + 4], subpix[s + 5]);
+                ((xr - xg, yr - yg), (xb - xg, yb - yg))
+            } else {
+                ((0.0, 0.0), (0.0, 0.0))
+            };
+
+            let (rx, ry) = (dx + dr.0, dy + dr.1);
+            let (bx, by) = (dx + db.0, dy + db.1);
             let norm = [
                 rx / denom,
                 ry / denom,
-                rx / denom,
-                ry / denom,
-                rx / denom,
-                ry / denom,
+                dx / denom,
+                dy / denom,
+                bx / denom,
+                by / denom,
             ];
-            let d = ((rx - x as f32).powi(2) + (ry - y as f32).powi(2)).sqrt();
+            // max_disp tracks the distortion-only (green) channel, as before
+            // — TCA offsets are sub-pixel and must not change the halo.
+            let d = ((dx - x as f32).powi(2) + (dy - y as f32).powi(2)).sqrt();
             max_disp = max_disp.max(d);
             coords.push(norm);
         }
@@ -297,6 +327,85 @@ mod tests {
         );
         // All coords finite and roughly in-bounds (bilinear edge-clamp handles the rest).
         assert!(g.coords.iter().flatten().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn bake_geometry_carries_real_per_channel_tca() {
+        // Same lens/focal as the distortion test above: `slr-canon.xml` has a
+        // real `<tca model="poly3" focal="24" .../>` calibration entry for
+        // this exact lens, confirmed by reading the bundled DB source.
+        let q = LensQuery {
+            camera_make: "Canon".into(),
+            camera_model: "Canon EOS 5D Mark III".into(),
+            lens_model: Some("Canon EF 24-70mm f/2.8L II USM".into()),
+            focal_len: 24.0,
+            aperture: 8.0,
+        };
+        let db = db();
+        let m = db.match_lens(&q).unwrap();
+        let lens = db.lens_by_id(&m.lens_id).expect("lens resolves");
+        assert!(
+            lens.interpolate_tca(24.0).is_some(),
+            "fixture lens must have a real TCA calibration at focal=24"
+        );
+        let g = db
+            .bake_geometry(&m, 24.0, GRID_N)
+            .expect("distortion model exists");
+
+        // Pick an off-center node (not the exact center, where the TCA shift
+        // is ~0 by construction) and assert R/G/B genuinely differ.
+        let (x, y) = (GRID_N - 1, GRID_N / 2);
+        let node = g.coords[(y * GRID_N + x) as usize];
+        let (r, gc, b) = ([node[0], node[1]], [node[2], node[3]], [node[4], node[5]]);
+        assert_ne!(
+            r, gc,
+            "red source coord must differ from green for a lens with real TCA data"
+        );
+        assert_ne!(
+            b, gc,
+            "blue source coord must differ from green for a lens with real TCA data"
+        );
+        assert_ne!(
+            r, b,
+            "red source coord must differ from blue for a lens with real TCA data"
+        );
+        assert!(node.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn bake_geometry_falls_back_to_identity_tca_when_lens_has_none() {
+        // `Canon EF 17-35mm f/2.8L USM` has a real distortion calibration but
+        // no `<tca>` entry at all in `slr-canon.xml` — confirmed by reading
+        // the bundled DB source.
+        let q = LensQuery {
+            camera_make: "Canon".into(),
+            camera_model: "Canon EOS 5D Mark III".into(),
+            lens_model: Some("Canon EF 17-35mm f/2.8L USM".into()),
+            focal_len: 17.0,
+            aperture: 8.0,
+        };
+        let db = db();
+        let m = db.match_lens(&q).unwrap();
+        let lens = db.lens_by_id(&m.lens_id).expect("lens resolves");
+        assert!(
+            lens.interpolate_tca(17.0).is_none(),
+            "fixture lens must NOT have a TCA calibration"
+        );
+        let g = db
+            .bake_geometry(&m, 17.0, GRID_N)
+            .expect("distortion model exists");
+        for node in &g.coords {
+            assert_eq!(
+                [node[0], node[1]],
+                [node[2], node[3]],
+                "no TCA data: red must equal green"
+            );
+            assert_eq!(
+                [node[4], node[5]],
+                [node[2], node[3]],
+                "no TCA data: blue must equal green"
+            );
+        }
     }
 
     #[test]

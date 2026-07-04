@@ -72,7 +72,7 @@ pub enum BitDepth {
     Sixteen,
 }
 
-/// AVIF encode effort: speed-vs-size/quality tradeoff (spec §4.1). Maps to
+/// AVIF encode effort: speed-vs-size/quality tradeoff. Maps to
 /// ravif's speed (1 = slow/best … 10 = fast/worst). `Best` is deliberately 3,
 /// not 1 ("very very slow"), to avoid pathological export times.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

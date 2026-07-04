@@ -20,7 +20,7 @@ pub use filename::{
     FilenameCtx,
 };
 pub use job::{run_export, ExportOutcome, ExportRequest};
-pub use options::{BitDepth, ExportFormat, ExportOptions, ResizeSpec};
+pub use options::{BitDepth, Effort, ExportFormat, ExportOptions, ResizeSpec};
 pub use render::{render_tiled, PixelData, RenderedImage};
 
 /// Test-only re-export of the internal encoder so integration tests can encode a

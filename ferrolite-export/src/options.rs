@@ -47,7 +47,7 @@ impl ExportFormat {
         }
     }
 
-    /// 16-bit output is supported for TIFF, PNG, and JPEG-XL (spec §4.1).
+    /// 16-bit output is supported for TIFF, PNG, and JPEG-XL.
     pub fn supports_16bit(self) -> bool {
         matches!(
             self,
@@ -59,12 +59,37 @@ impl ExportFormat {
     pub fn supports_quality(self) -> bool {
         matches!(self, ExportFormat::Jpeg | ExportFormat::Avif)
     }
+
+    /// Only AVIF exposes the Effort (speed) control.
+    pub fn supports_effort(self) -> bool {
+        matches!(self, ExportFormat::Avif)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitDepth {
     Eight,
     Sixteen,
+}
+
+/// AVIF encode effort: speed-vs-size/quality tradeoff (spec §4.1). Maps to
+/// ravif's speed (1 = slow/best … 10 = fast/worst). `Best` is deliberately 3,
+/// not 1 ("very very slow"), to avoid pathological export times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effort {
+    Fast,
+    Balanced,
+    Best,
+}
+
+impl Effort {
+    pub fn ravif_speed(self) -> u8 {
+        match self {
+            Effort::Fast => 10,
+            Effort::Balanced => 6,
+            Effort::Best => 3,
+        }
+    }
 }
 
 /// Optional output resize (spec §8.1).
@@ -89,6 +114,8 @@ pub struct ExportOptions {
     pub bit_depth: BitDepth,
     /// JPEG (and WebP if it were lossy) quality 1..=100. Ignored otherwise.
     pub quality: u8,
+    /// AVIF encode effort. Ignored for other formats.
+    pub effort: Effort,
     pub resize: ResizeSpec,
     pub copy_exif: bool,
     pub embed_icc: bool,
@@ -102,6 +129,7 @@ impl Default for ExportOptions {
             output_space: WorkingSpace::Srgb, // web-safe default (§8.2)
             bit_depth: BitDepth::Eight,
             quality: 90,
+            effort: Effort::Balanced,
             resize: ResizeSpec::None,
             copy_exif: true,
             embed_icc: true,
@@ -188,5 +216,24 @@ mod tests {
         assert_eq!(ExportFormat::Png.extension(), "png");
         assert_eq!(ExportFormat::Tiff.extension(), "tif");
         assert_eq!(ExportFormat::WebP.extension(), "webp");
+    }
+
+    #[test]
+    fn effort_maps_to_ravif_speed() {
+        assert_eq!(Effort::Fast.ravif_speed(), 10);
+        assert_eq!(Effort::Balanced.ravif_speed(), 6);
+        assert_eq!(Effort::Best.ravif_speed(), 3);
+    }
+
+    #[test]
+    fn only_avif_supports_effort_and_default_is_balanced() {
+        for f in ExportFormat::ALL {
+            assert_eq!(
+                f.supports_effort(),
+                matches!(f, ExportFormat::Avif),
+                "{f:?}"
+            );
+        }
+        assert_eq!(ExportOptions::default().effort, Effort::Balanced);
     }
 }

@@ -1,7 +1,7 @@
-//! Encode a `RenderedImage` to a file in the chosen format, embedding the output
-//! ICC profile where the format supports it (via `ImageEncoder::set_icc_profile`).
-//! Best-effort ICC + never-panic per spec §10: a failed ICC step downgrades to an
-//! untagged (but valid) file plus a warning.
+//! Encode a `RenderedImage` to a file in the chosen format: JPEG/PNG/TIFF/WebP
+//! with EXIF copy + embedded ICC, plus AVIF and JPEG-XL (written untagged, with
+//! no embedded ICC). Best-effort ICC + never-panic per spec §10: a failed ICC
+//! step downgrades to an untagged (but valid) file plus a warning.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -20,10 +20,6 @@ use zune_jpegxl::JxlSimpleEncoder;
 use crate::error::ExportError;
 use crate::options::{ExportFormat, ExportOptions};
 use crate::render::{PixelData, RenderedImage};
-
-/// Temporary fixed ravif speed (1 = slow/best … 10 = fast/worst). Replaced by the
-/// Effort control in Spec 4.2 Task 2.
-const AVIF_SPEED: u8 = 6;
 
 /// Open the destination as a buffered writer. Called lazily inside the four
 /// `image`-crate arms so the AVIF/JXL arms (which write their own bytes via
@@ -117,7 +113,7 @@ pub(crate) fn encode_to_file(
                 .collect();
             let encoded = ravif::Encoder::new()
                 .with_quality(opts.quality as f32)
-                .with_speed(AVIF_SPEED)
+                .with_speed(opts.effort.ravif_speed())
                 .encode_rgb(ravif::Img::new(pixels.as_slice(), w as usize, h as usize))
                 .map_err(|e| ExportError::Encode(e.to_string()))?;
             std::fs::write(dest, &encoded.avif_file).map_err(|e| ExportError::Io(e.to_string()))?;

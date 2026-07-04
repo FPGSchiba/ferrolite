@@ -1839,8 +1839,17 @@ impl eframe::App for FerroliteApp {
         }
 
         // One-shot startup display-profile detect, once the render state is valid
-        // (ViewerPipelines pre-warmed in `new`). Fires exactly once; the resulting
-        // LUT/matrix is applied when the off-thread bake job reports back.
+        // (ViewerPipelines pre-warmed in `new`). Ordering is guaranteed: `new()`
+        // inserts `ViewerPipelines` into `cc.wgpu_render_state`'s callback
+        // resources synchronously (same `if let Some(rs) = ..` block that also
+        // gates this check's `wgpu_render_state()`), and `AppState::new()`
+        // (which loads persisted settings, including `settings.display_profile`)
+        // runs after that block completes — both finish before the first
+        // `update()` call, i.e. before this line can ever run. So the mode this
+        // reads via `redetect_display_profile` -> `self.state.settings.display_profile`
+        // is always the persisted one, and the pipelines it targets are always
+        // ready. Fires exactly once; the resulting LUT/matrix is applied when
+        // the off-thread bake job reports back.
         if !self.did_display_detect && frame.wgpu_render_state().is_some() {
             self.did_display_detect = true;
             self.redetect_display_profile(ctx, frame);

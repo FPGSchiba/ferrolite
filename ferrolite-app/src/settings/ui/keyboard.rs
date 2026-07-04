@@ -98,13 +98,18 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     // While listening, capture the next mappable keypress BEFORE drawing the
     // rows (so this frame's row already reflects any resulting change/cancel).
     if let Some(action) = listen.action {
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
             // Bare Esc cancels listening rather than binding to Escape. Esc
             // is otherwise a valid bindable `Key::Escape` (e.g. CloseViewer's
             // default), but overloading it as "cancel capture" is the more
             // useful/expected behavior for a rebind UI, and a user who really
             // wants to bind Esc to something else has no other way to exit
             // capture mode. Documented deliberate choice (see dispatch report).
+            //
+            // Consumed (rather than a non-consuming `key_pressed` peek) so the
+            // Settings window's own Esc-to-close check in `ui.rs::show` (which
+            // runs after this tab is drawn) doesn't also see this same Esc
+            // press and close the whole dialog in the same frame.
             listen = ListenState::default();
         } else {
             let mods = ctx.input(|i| i.modifiers);

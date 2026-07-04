@@ -2,14 +2,6 @@
 //! Library filter, and app preferences). Stored as JSON in the OS data dir;
 //! loaded at startup, saved off the UI thread. NOT part of the catalog (which
 //! is a rebuildable cache) — this is genuine app state.
-//!
-//! Foundation dispatch: this module is not yet wired into `AppState`/`app.rs`
-//! (that lands in later Spec 4.1 tasks — see
-//! `docs/superpowers/plans/2026-07-04-spec4.1-ux-polish.md`), so several
-//! public items have no caller yet. Allow dead_code at the module boundary
-//! rather than expanding this dispatch's scope; remove once Phase 1/3 wiring
-//! lands.
-#![allow(dead_code)]
 
 pub mod dto;
 pub mod keymap;

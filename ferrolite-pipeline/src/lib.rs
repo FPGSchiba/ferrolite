@@ -14,8 +14,8 @@ pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
 pub use nodes::{color_convert, upload_source};
 pub use op::{
-    Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, HslBand, Op, OpKind, OpStack, Sharpen,
-    ToneCurve, WhiteBalance, STACK_VERSION,
+    Aspect, Contrast, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand, Op, OpKind, OpStack,
+    Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, EditPipeline};
 pub use serialize::{deserialize, serialize};
@@ -25,8 +25,8 @@ pub use tile_edit::TileEditPipeline;
 // (used by `pipeline`/`uniforms`), so they are not part of the public surface.
 // Exception: `sharpen_halo` is part of the public API for Plan 3's tile producer.
 pub use uniforms::{
-    geometry_tile_uniform, sharpen_halo, ContrastUniform, ExposureUniform, GeometryUniform,
-    HslUniform, SharpenUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    curve_lut, geometry_tile_uniform, sharpen_halo, ContrastUniform, ExposureUniform,
+    GeometryUniform, HslUniform, SharpenUniform, WbUniform, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

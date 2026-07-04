@@ -95,6 +95,10 @@ impl EditPipeline {
 
         let tone_curve = Rc::new(Cell::new(curve_lut(
             &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
+            stack
+                .tone_curve()
+                .map(|t| t.mode)
+                .unwrap_or(crate::op::CurveMode::Linear),
         )));
         let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
         let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![contrast_id]);
@@ -176,7 +180,13 @@ impl EditPipeline {
             self.contrast.set(c);
             self.graph.mark_dirty(self.contrast_id);
         }
-        let lut = curve_lut(&stack.tone_curve().map(|t| t.points).unwrap_or_default());
+        let lut = curve_lut(
+            &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
+            stack
+                .tone_curve()
+                .map(|t| t.mode)
+                .unwrap_or(crate::op::CurveMode::Linear),
+        );
         if lut != self.tone_curve.get() {
             self.tone_curve.set(lut);
             self.graph.mark_dirty(self.tone_curve_id);

@@ -113,6 +113,10 @@ impl TileEditPipeline {
         );
         let tone_curve = Rc::new(Cell::new(curve_lut(
             &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
+            stack
+                .tone_curve()
+                .map(|t| t.mode)
+                .unwrap_or(crate::op::CurveMode::Linear),
         )));
         let tone_curve_id = graph.add_node(
             Box::new(CurveNode::new(ctx.clone(), tone_curve.clone())),
@@ -179,6 +183,10 @@ impl TileEditPipeline {
         self.contrast.set(contrast_uniform(stack.contrast()));
         self.tone_curve.set(curve_lut(
             &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
+            stack
+                .tone_curve()
+                .map(|t| t.mode)
+                .unwrap_or(crate::op::CurveMode::Linear),
         ));
         self.hsl.set(hsl_uniform(stack.hsl()));
         self.sharpen.set(sharpen_uniform(stack.sharpen()));

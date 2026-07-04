@@ -46,18 +46,19 @@ pub fn curve_lut(points: &[(f32, f32)], mode: crate::op::CurveMode) -> [f32; 256
     if pts.is_empty() {
         pts = vec![(0.0, 0.0), (1.0, 1.0)];
     }
-    // Precompute monotone-cubic tangents once (only used by Smooth).
-    let tangents = (mode == crate::op::CurveMode::Smooth).then(|| fritsch_carlson_tangents(&pts));
-
     let mut lut = [0.0f32; 256];
-    for (i, slot) in lut.iter_mut().enumerate() {
-        let x = i as f32 / 255.0;
-        *slot = match mode {
-            crate::op::CurveMode::Linear => curve_interp_linear(&pts, x),
-            crate::op::CurveMode::Smooth => {
-                curve_interp_smooth(&pts, tangents.as_ref().unwrap(), x)
+    match mode {
+        crate::op::CurveMode::Linear => {
+            for (i, slot) in lut.iter_mut().enumerate() {
+                *slot = curve_interp_linear(&pts, i as f32 / 255.0);
             }
-        };
+        }
+        crate::op::CurveMode::Smooth => {
+            let tangents = fritsch_carlson_tangents(&pts);
+            for (i, slot) in lut.iter_mut().enumerate() {
+                *slot = curve_interp_smooth(&pts, &tangents, i as f32 / 255.0);
+            }
+        }
     }
     for i in 1..256 {
         if lut[i] < lut[i - 1] {

@@ -3028,8 +3028,14 @@ impl eframe::App for FerroliteApp {
         // Ctrl+, (`Action::OpenSettings`) or the File menu.
         {
             let mut open = self.show_settings;
-            if crate::settings::ui::show(ctx, &mut open, &mut self.state.settings) {
+            // Clone the resolved display name: `settings::ui::show` needs
+            // `&mut self.state.settings` and `&self.state.display_profile_name`
+            // simultaneously, which the borrow checker can't reconcile through
+            // a single `&mut self.state` field-by-field borrow at this call site.
+            let display_name = self.state.display_profile_name.clone();
+            if crate::settings::ui::show(ctx, &mut open, &mut self.state.settings, &display_name) {
                 self.mark_settings_dirty();
+                self.redetect_display_profile(ctx, frame);
             }
             self.show_settings = open;
         }

@@ -466,4 +466,46 @@ mod tests {
             Keymap::defaults().chord(Action::ToggleSplitCompare)
         );
     }
+
+    #[test]
+    fn every_egui_key_is_bindable_and_roundtrips() {
+        // Rebinding must accept ANY key, not just the default-binding subset.
+        for &k in egui::Key::ALL {
+            let ours = Key::from_egui(k);
+            assert!(
+                ours.is_some(),
+                "egui::Key::{k:?} must be bindable (from_egui returned None)"
+            );
+            assert_eq!(ours.unwrap().to_egui(), k, "round-trip failed for {k:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_key_variant_names_still_deserialize() {
+        // Existing settings.json stored the OLD enum variant names — they must still load.
+        for name in [
+            "ArrowLeft",
+            "ArrowRight",
+            "Num0",
+            "Num1",
+            "Num5",
+            "Q",
+            "Backslash",
+            "Comma",
+            "Escape",
+            "Enter",
+            "F1",
+            "A",
+            "I",
+            "O",
+            "Y",
+            "Z",
+        ] {
+            let json = format!("\"{name}\"");
+            assert!(
+                serde_json::from_str::<Key>(&json).is_ok(),
+                "legacy key name {name} must deserialize"
+            );
+        }
+    }
 }

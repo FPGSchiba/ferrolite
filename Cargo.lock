@@ -1333,6 +1333,7 @@ dependencies = [
  "ferrolite-color",
  "ferrolite-gpu",
  "ferrolite-image",
+ "ferrolite-lens",
  "half",
  "image",
  "pollster 0.4.0",

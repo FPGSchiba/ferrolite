@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 ferrolite-image = { workspace = true }
 ferrolite-gpu = { workspace = true }
+ferrolite-lens = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 half = { workspace = true }

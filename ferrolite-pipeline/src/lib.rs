@@ -3,6 +3,7 @@
 //! compute passes implement the edits. Photo tier (GPL-OK).
 mod gpu_pyramid;
 mod image;
+mod lens_gpu;
 mod nodes;
 mod op;
 mod pipeline;
@@ -12,6 +13,7 @@ mod uniforms;
 
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
+pub use lens_gpu::{VignetteTexture, WarpGridTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{
     Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,
@@ -23,10 +25,10 @@ pub use tile_edit::TileEditPipeline;
 // The uniform structs are exported as the documented GPU memory layout the
 // edit passes consume; the param→uniform helper fns + math are crate-internal
 // (used by `pipeline`/`uniforms`), so they are not part of the public surface.
-// Exception: `sharpen_halo` is part of the public API for Plan 3's tile producer.
+// Exception: `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
 pub use uniforms::{
-    curve_lut, geometry_tile_uniform, sharpen_halo, ContrastUniform, ExposureUniform,
-    GeometryUniform, HslUniform, SharpenUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    curve_lut, geometry_tile_uniform, lens_halo_px, sharpen_halo, ContrastUniform, ExposureUniform,
+    GeometryUniform, HslUniform, LensUniform, SharpenUniform, WbUniform, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

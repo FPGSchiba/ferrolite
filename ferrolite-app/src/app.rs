@@ -228,7 +228,6 @@ impl FerroliteApp {
     /// `false` if a prerequisite (GPU / viewer / source) is missing.
     fn reveal_srgb_preview(&mut self, frame: &eframe::Frame, image_id: i64) -> bool {
         let pw = self.preview_to_working();
-        let w2d = ferrolite_color::working_to_display(self.state.working_space);
         let Some(rs) = frame.wgpu_render_state() else {
             return false; // no wgpu backend (should not happen in this build)
         };
@@ -252,8 +251,10 @@ impl FerroliteApp {
                 .callback_resources
                 .get::<viewer::ViewerPipelines>()
                 .expect("ViewerPipelines pre-warmed at startup");
-            // A Standard image never reaches apply_full_decoded, so set the tail here.
-            vp.pipelines.set_display_matrix(&gpu.queue, w2d);
+            // A Standard image never reaches apply_full_decoded, so set the tail
+            // here — routed through the current display state so an active monitor
+            // LUT stays applied instead of reverting to analytic sRGB on open.
+            self.apply_display_tail(&gpu, vp);
             ferrolite_vt::VirtualTexture::single_from_texture(
                 &gpu,
                 converted.texture.clone(),
@@ -819,10 +820,9 @@ impl FerroliteApp {
                 .callback_resources
                 .get::<viewer::ViewerPipelines>()
                 .expect("ViewerPipelines pre-warmed at startup");
-            vp.pipelines.set_display_matrix(
-                &gpu.queue,
-                ferrolite_color::working_to_display(self.state.working_space),
-            );
+            // Route through the current display state so an active monitor LUT
+            // stays applied across image opens instead of reverting to sRGB.
+            self.apply_display_tail(&gpu, vp);
             let full = ferrolite_vt::VirtualTexture::sparse(
                 &gpu,
                 source,
@@ -1197,6 +1197,25 @@ impl FerroliteApp {
     /// and invalidate full-res tiles so they re-render. Never rebuilds pipelines.
     ///
     /// Wired to the Develop adjustment panel's working-space `ComboBox`.
+    /// Re-apply the currently-resolved display tail to the viewer pipelines.
+    /// LUT path when a monitor profile is active, else the analytic sRGB matrix.
+    /// Synchronous — safe to call on every image reveal (no re-bake, no flash).
+    /// Re-uploading the LUT on open also self-heals a device-loss.
+    fn apply_display_tail(&self, gpu: &ferrolite_gpu::GpuContext, vp: &viewer::ViewerPipelines) {
+        match &self.state.display_lut {
+            Some(l) => vp.pipelines.set_display_lut(
+                &gpu.queue,
+                l.size,
+                &l.rgba16f,
+                ferrolite_color::DISPLAY_LUT_SHAPER_GAMMA,
+            ),
+            None => vp.pipelines.set_display_matrix(
+                &gpu.queue,
+                ferrolite_color::working_to_display(self.state.working_space),
+            ),
+        }
+    }
+
     /// Detect the window's monitor profile (cheap UI-thread OS call), then
     /// parse + bake the display LUT off the UI thread on `ferrolite-jobs`.
     /// Bumps `display_detect_gen` so stale results from superseded re-detects
@@ -2038,26 +2057,16 @@ impl eframe::App for FerroliteApp {
                     // Drop results superseded by a newer re-detect.
                     if *generation == self.state.display_detect_gen {
                         self.state.display_profile_name = name.clone();
+                        // Store the resolved tail so the handler and the image
+                        // reveal sites share one source of truth (`apply_display_tail`).
+                        self.state.display_lut = lut.clone();
                         if let Some(rs) = frame.wgpu_render_state() {
                             let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
                             let renderer = rs.renderer.read();
                             if let Some(vp) =
                                 renderer.callback_resources.get::<viewer::ViewerPipelines>()
                             {
-                                match lut {
-                                    Some(l) => vp.pipelines.set_display_lut(
-                                        &gpu.queue,
-                                        l.size,
-                                        &l.rgba16f,
-                                        ferrolite_color::DISPLAY_LUT_SHAPER_GAMMA,
-                                    ),
-                                    None => vp.pipelines.set_display_matrix(
-                                        &gpu.queue,
-                                        ferrolite_color::working_to_display(
-                                            self.state.working_space,
-                                        ),
-                                    ),
-                                }
+                                self.apply_display_tail(&gpu, vp);
                             }
                         }
                         ctx.request_repaint();

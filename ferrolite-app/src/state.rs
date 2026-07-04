@@ -197,6 +197,9 @@ pub struct AppState {
     /// Monotonic generation; each re-detect bumps it. Stale job results are dropped.
     #[allow(dead_code)] // guards stale detect-job results (Unit 5)
     pub display_detect_gen: u64,
+    /// The last resolved monitor LUT (`None` = sRGB/fallback). Re-applied on every
+    /// image reveal so opening an image never reverts the display to analytic sRGB.
+    pub display_lut: Option<ferrolite_color::DisplayLut>,
     /// The monitor key the window was last seen on (0 = unknown / unsupported OS).
     #[allow(dead_code)] // compared on window-move to trigger re-detect (Unit 5)
     pub last_monitor_key: u64,
@@ -280,6 +283,7 @@ impl AppState {
             settings,
             display_profile_name: "sRGB (default)".to_string(),
             display_detect_gen: 0,
+            display_lut: None,
             last_monitor_key: 0,
         })
     }
@@ -845,6 +849,7 @@ impl AppState {
             settings: crate::settings::Settings::default(),
             display_profile_name: "sRGB (default)".to_string(),
             display_detect_gen: 0,
+            display_lut: None,
             last_monitor_key: 0,
         }
     }
@@ -955,6 +960,14 @@ fn open_preview_store(dir: &std::path::Path) -> ferrolite_previews::PreviewStore
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A freshly constructed state must have no monitor LUT resolved yet, so the
+    /// display tail starts on the analytic sRGB path until a detect resolves.
+    #[test]
+    fn display_lut_defaults_to_none() {
+        let s = AppState::for_test();
+        assert!(s.display_lut.is_none());
+    }
 
     /// `reset_ingest_counters` must zero exactly the four scan/ingest
     /// progress counters, independent of any other state. This is the shared

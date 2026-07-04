@@ -59,7 +59,7 @@ fn profile_name(p: &moxcms::ColorProfile) -> Option<String> {
 
 /// A baked `working→monitor` 3D LUT. `rgba16f` is `size³` RGBA half-float
 /// texels, R fastest then G then B (matches wgpu `write_texture` row/layer order).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DisplayLut {
     pub size: u32,
     pub rgba16f: Vec<u16>,

@@ -472,7 +472,14 @@ impl DisplayPipelines {
         rgba16f: &[u16],
         shaper_gamma: f32,
     ) {
-        debug_assert_eq!(size, LUT_SIZE, "display LUT size must match LUT_SIZE");
+        if size != LUT_SIZE {
+            // Never panic in release: a mismatched size would corrupt the upload
+            // (wrong row/layer strides), so skip it and leave the tail unchanged.
+            eprintln!(
+                "ferrolite-vt: set_display_lut size {size} != LUT_SIZE {LUT_SIZE}; ignoring upload"
+            );
+            return;
+        }
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.lut_texture,

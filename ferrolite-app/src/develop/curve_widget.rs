@@ -164,6 +164,12 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         // index can't linger and drive a later Delete press.
         selected = None;
         ui.memory_mut(|m| m.data.insert_temp(selected_id, selected));
+        // Also clear the active grab/drag index stored under resp.id. If a
+        // point is deleted while a drag-grab index is still stashed there,
+        // the list can shrink such that the stale index is still in range,
+        // and a subsequent resp.dragged() would silently move the wrong
+        // point via move_point.
+        ui.memory_mut(|m| m.data.remove::<usize>(resp.id));
     }
 
     ui.small(

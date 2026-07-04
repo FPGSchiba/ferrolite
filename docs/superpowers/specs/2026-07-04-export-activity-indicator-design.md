@@ -89,30 +89,36 @@ in-flight image's tiles.
   current_name: <open image filename>, handles: vec![handle], .. })` — which requires **capturing
   the job handle `spawn_export` currently discards** (this is what gives single export a cancel it
   lacks today).
-- `ExportProgress` updates `tile_done`/`tile_total`. `ExportFinished` clears the activity
-  (`= None`) and sets the transient summary text as today.
+- `ExportProgress` updates `tile_done`/`tile_total`. `ExportFinished` folds the (Single-kind)
+  activity via `item_finished` — so `is_done()` becomes true and the segment hides (see §4) — and
+  sets the transient summary text as today. The activity is **not** nulled (a new export replaces
+  it); this keeps the mechanism identical to batch and preserves any consumer that reads the
+  finished activity.
 
 **Batch export (`export/batch.rs`, `app.rs`):**
 - `spawn_batch` already returns one handle → stored in `export_activity.handles`.
-- **Add** a lightweight `AppEvent::ExportItemStarted { image_id }` sent by the sequential batch job
-  before each item; the app sets `current_name` from `state.images` (by id) and resets
-  `tile_done/tile_total`.
+- **Add** a lightweight `AppEvent::ExportItemStarted { name: String }` sent by the sequential batch
+  job before each item (the output file basename); the app sets `current_name` from it (via
+  `start_item`) and resets `tile_done/tile_total`. (Carrying the name directly avoids a
+  `state.images` lookup and works even if the image isn't in the current folder view.)
 - Wire `run_one`'s currently-`noop` progress closure to emit per-tile progress (throttled ~every 8
   tiles + on completion, exactly like single export) so the bar advances within each image.
 - `BatchItemFinished` still bumps `completed`/`failed` (folded in `events.rs`); when
-  `is_done()`, clear the activity (`= None`).
+  `is_done()`, the segment hides (see §4). The activity is **not** nulled — it persists so the
+  Export module's "Done — N exported, M failed" summary survives; a new export replaces it.
 
 **Cancel ✕** → `activity.cancel_all()` cancels the stored handle(s); `run_export` already checks
-the token per tile and aborts; the finish event clears the activity. The Export module's existing
-cancel button reuses the same `cancel_all()` path.
+the token per tile and aborts; the terminal finish event marks the activity done (segment hides).
+The Export module's existing cancel button reuses the same `cancel_all()` path.
 
 ---
 
 ## 4. Rendering (`status_bar.rs`)
 
-- A new export segment rendered only when `state.export_activity.is_some()`, placed in the
-  right-aligned activity cluster next to the existing ingest indicator — **mirroring the ingest
-  `ProgressBar` pattern already present** in `status_bar::show`.
+- A new export segment rendered only when `state.export_activity.is_some() && !is_done()`, placed
+  just after the selected-image EXIF text (left of the right-aligned ingest cluster) so it reads
+  left-to-right — **mirroring the ingest `ProgressBar` pattern already present** in
+  `status_bar::show`.
 - Styled as **active info** (normal/accent text + a progress bar), **not** the red
   `SEMANTIC_RED` the `warning` channel uses.
 - Layout (single line, right cluster):
@@ -124,9 +130,12 @@ cancel button reuses the same `cancel_all()` path.
 - The text assembly is a **pure function** `export_status_text(&ExportActivity) -> String`
   (+ a `truncate_name` helper), unit-tested; egui only lays out label + bar + button.
 
-**Completion behavior:** on `is_done()` / single finish the activity is set to `None`, so the
-segment **vanishes**; the final "Exported N/N" / failure summary flashes via the existing status
-text (decided 2026-07-04 — no lingering "done ✓" state, to avoid a second transient mechanism).
+**Completion behavior:** when `is_done()` becomes true (batch: last `BatchItemFinished`; single:
+`ExportFinished`), the segment is **hidden by the `!is_done()` gate** — the activity itself is
+**not** nulled, so the Export module keeps its "Done — N exported, M failed" summary. A subsequent
+export replaces the activity. The final "Exported N/N" / failure summary also flashes via the
+existing status text (decided 2026-07-04 — no lingering "done ✓" state in the status-bar segment,
+to avoid a second transient mechanism).
 
 ---
 

@@ -107,6 +107,7 @@ pub fn export_status_text(a: &ExportActivity) -> String {
     let name = a
         .current_name
         .as_deref()
+        .filter(|n| !n.is_empty())
         .map(|n| truncate_name(n, 24))
         .unwrap_or_else(|| "…".to_string());
     let mut s = match a.kind {
@@ -194,6 +195,15 @@ mod tests {
     #[test]
     fn export_status_text_missing_name_uses_placeholder() {
         let a = crate::export::ExportActivity::new_batch(2);
+        assert!(export_status_text(&a).starts_with("Exporting …"));
+    }
+
+    #[test]
+    fn export_status_text_empty_name_uses_placeholder() {
+        // A blank basename (e.g. a dest path with no file_name) must render the
+        // "…" placeholder, not "Exporting  " — same as a missing name.
+        let mut a = crate::export::ExportActivity::new_batch(2);
+        a.start_item(Some(String::new()));
         assert!(export_status_text(&a).starts_with("Exporting …"));
     }
 }

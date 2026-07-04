@@ -1192,11 +1192,6 @@ impl FerroliteApp {
         self.persist_ops(ctx, image_id, path, stack);
     }
 
-    /// Change the editing working space: recompose camera→working + working→display,
-    /// push the tail matrix to the display pipelines (once), update both edit tiers,
-    /// and invalidate full-res tiles so they re-render. Never rebuilds pipelines.
-    ///
-    /// Wired to the Develop adjustment panel's working-space `ComboBox`.
     /// Re-apply the currently-resolved display tail to the viewer pipelines.
     /// LUT path when a monitor profile is active, else the analytic sRGB matrix.
     /// Synchronous — safe to call on every image reveal (no re-bake, no flash).
@@ -1275,6 +1270,11 @@ impl FerroliteApp {
         ctx.request_repaint();
     }
 
+    /// Change the editing working space: recompose camera→working + working→display,
+    /// push the tail matrix to the display pipelines (once), update both edit tiers,
+    /// and invalidate full-res tiles so they re-render. Never rebuilds pipelines.
+    ///
+    /// Wired to the Develop adjustment panel's working-space `ComboBox`.
     fn apply_working_space(
         &mut self,
         ctx: &egui::Context,

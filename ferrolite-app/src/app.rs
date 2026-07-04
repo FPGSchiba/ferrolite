@@ -443,6 +443,7 @@ impl FerroliteApp {
             &self.state.tx,
             ctx,
             gpu,
+            self.state.lens_db.clone(),
             image_id,
             path,
             kind,
@@ -784,30 +785,48 @@ impl FerroliteApp {
         // buffer is never memcpy'd a second time onto the UI thread.
         let raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
             is_raw.then(|| std::sync::Arc::new(image.clone()));
-        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> =
-            if let Some(src) = raw_preview_source.as_ref() {
-                match self.state.viewer.as_mut() {
-                    Some(v) if v.image_id == image_id => {
-                        v.raw_preview_source = Some(std::sync::Arc::clone(src));
-                        let ctx_arc =
-                            std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                        let mut ep = ferrolite_pipeline::EditPipeline::new(
-                            ctx_arc,
-                            src,
-                            v.op_stack.clone(),
-                            cam,
-                        );
-                        let out = ep.evaluate();
-                        let tex = out.texture.clone();
-                        let dims = (out.width, out.height);
-                        v.preview_edit = Some(ep);
-                        Some((tex, dims))
+        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if let Some(src) =
+            raw_preview_source.as_ref()
+        {
+            match self.state.viewer.as_mut() {
+                Some(v) if v.image_id == image_id => {
+                    v.raw_preview_source = Some(std::sync::Arc::clone(src));
+                    let ctx_arc =
+                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let mut ep = ferrolite_pipeline::EditPipeline::new(
+                        ctx_arc.clone(),
+                        src,
+                        v.op_stack.clone(),
+                        cam,
+                    );
+                    // Bind any lens bake already present (e.g. a re-open that
+                    // baked before this decode landed) so the initial preview
+                    // isn't uncorrected (I1). Usually None at fresh open; the
+                    // `LensBaked` handler pushes the bake once it completes.
+                    if let Some(w) = v.lens_warp.as_ref() {
+                        ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
                     }
-                    _ => None,
+                    ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                        v.op_stack.lens_correction().as_ref(),
+                        v.lens_warp.is_some(),
+                    ));
+                    if let Some(vg) = v.lens_vignette.as_ref() {
+                        ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
+                    }
+                    ep.set_vig_amount(ferrolite_pipeline::vignette_amount(
+                        v.op_stack.lens_correction().as_ref(),
+                    ));
+                    let out = ep.evaluate();
+                    let tex = out.texture.clone();
+                    let dims = (out.width, out.height);
+                    v.preview_edit = Some(ep);
+                    Some((tex, dims))
                 }
-            } else {
-                None
-            };
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
             std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
@@ -1089,10 +1108,40 @@ impl FerroliteApp {
         } else {
             v.op_stack.clone()
         };
+
+        // Push the fresh bake to the PREVIEW/fit tier too, so toggling or
+        // adjusting a correction updates the fit-zoom image live (I1). The
+        // before-view (identity `shown`) carries no lens op, so bind identity
+        // there. Bake products are cheap GPU uploads here (already baked
+        // off-thread by the job that produced this `result`). Built once and
+        // reused by the full-res producer rebuild below (CLAUDE.md GPU rule).
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let _ = &ctx_arc; // used by the preview and/or full-res branch below
+        if let Some(ep) = v.preview_edit.as_mut() {
+            let lc = shown.lens_correction();
+            if let Some(w) = v.lens_warp.as_ref() {
+                ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
+            }
+            ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                lc.as_ref(),
+                v.lens_warp.is_some(),
+            ));
+            if let Some(vg) = v.lens_vignette.as_ref() {
+                ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
+            }
+            ep.set_vig_amount(ferrolite_pipeline::vignette_amount(lc.as_ref()));
+            let img = ep.evaluate();
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == image_id {
+                    g.preview
+                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
+                }
+            }
+        }
         if let Some(pyr) = v.pyramid.clone() {
-            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
             let tep = ferrolite_pipeline::TileEditPipeline::new(
-                ctx_arc,
+                ctx_arc.clone(),
                 pyr,
                 shown,
                 cam,
@@ -1171,16 +1220,35 @@ impl FerroliteApp {
             let (src, matrix) = v.preview_tier_source(cam, pw);
             if let Some(src) = src {
                 let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                v.preview_edit = Some(ferrolite_pipeline::EditPipeline::new(
-                    ctx_arc,
+                let mut ep = ferrolite_pipeline::EditPipeline::new(
+                    ctx_arc.clone(),
                     &src,
                     shown.clone(),
                     matrix,
-                ));
+                );
+                // A rebuilt preview must re-bind the current lens bake so an
+                // already-corrected image keeps its correction at fit zoom (I1).
+                if let Some(w) = v.lens_warp.as_ref() {
+                    ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
+                }
+                if let Some(vg) = v.lens_vignette.as_ref() {
+                    ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
+                }
+                v.preview_edit = Some(ep);
             }
         }
         if let Some(ep) = v.preview_edit.as_mut() {
             ep.set_stack(shown.clone());
+            // Apply the current lens amounts + vig lerp to the preview too, so a
+            // lens Amount-only drag (no bake, no rebuild) updates the fit-zoom
+            // image live — mirroring the full-res producer's amount-only branch
+            // below. `use_warp` follows whether a grid is currently bound.
+            let lc = shown.lens_correction();
+            ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                lc.as_ref(),
+                v.lens_warp.is_some(),
+            ));
+            ep.set_vig_amount(ferrolite_pipeline::vignette_amount(lc.as_ref()));
             // Evaluate BEFORE taking the renderer lock; pass the resulting texture
             // (cheap Arc clone) into the write scope. (`ep` borrows `self.state`,
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
@@ -1976,6 +2044,7 @@ impl FerroliteApp {
                 &self.state.tx,
                 ctx,
                 std::sync::Arc::clone(&gpu),
+                self.state.lens_db.clone(),
                 id,
                 path,
                 rec.kind,

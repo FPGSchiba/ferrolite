@@ -62,35 +62,56 @@ pub fn show(ctx: &egui::Context, open: &mut bool, settings: &mut Settings) -> bo
             }
         });
 
+    // Fixed content width, matching the Help modal's sized/centered approach
+    // (`help.rs`'s `fixed_size`) so this renders as a proper dialog rather
+    // than a full-width band. Height is capped but not fixed — `max_height`
+    // lets short content (e.g. the General tab) size down while the
+    // Keyboard tab's longer row list scrolls internally instead of growing
+    // the window past the cap.
+    const CONTENT_WIDTH: f32 = 600.0;
+    const MAX_HEIGHT: f32 = 560.0;
+
     egui::Window::new("Settings")
         .collapsible(false)
         .resizable(false)
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .fixed_size(egui::vec2(560.0, 480.0))
+        .max_width(CONTENT_WIDTH)
+        .max_height(MAX_HEIGHT)
         .show(ctx, |ui| {
+            // Lock the content `Ui` to a fixed width so no child widget
+            // (combo box, slider, grid) can force the window wider — this is
+            // what keeps the window a sized dialog instead of a full-width
+            // band when content wants more horizontal room.
+            ui.set_width(CONTENT_WIDTH);
+
             let mut tab = active_tab(ctx);
             ui.horizontal(|ui| {
-                ui.allocate_ui(egui::vec2(140.0, ui.available_height() - 44.0), |ui| {
-                    ui.vertical(|ui| {
-                        if ui
-                            .selectable_label(tab == SettingsTab::General, "General")
-                            .clicked()
-                        {
-                            tab = SettingsTab::General;
-                        }
-                        if ui
-                            .selectable_label(tab == SettingsTab::Keyboard, "Keyboard")
-                            .clicked()
-                        {
-                            tab = SettingsTab::Keyboard;
-                        }
-                    });
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("settings_content_scroll")
-                    .show(ui, |ui| match tab {
+                if ui
+                    .selectable_label(tab == SettingsTab::General, "General")
+                    .clicked()
+                {
+                    tab = SettingsTab::General;
+                }
+                if ui
+                    .selectable_label(tab == SettingsTab::Keyboard, "Keyboard")
+                    .clicked()
+                {
+                    tab = SettingsTab::Keyboard;
+                }
+            });
+            set_active_tab(ctx, tab);
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            egui::ScrollArea::vertical()
+                .id_salt("settings_content_scroll")
+                .max_height(MAX_HEIGHT - 96.0)
+                .show(ui, |ui| {
+                    ui.set_width(CONTENT_WIDTH);
+                    match tab {
                         SettingsTab::General => {
                             if draw_general_tab(ui, settings) {
                                 changed = true;
@@ -101,9 +122,8 @@ pub fn show(ctx: &egui::Context, open: &mut bool, settings: &mut Settings) -> bo
                                 changed = true;
                             }
                         }
-                    });
-            });
-            set_active_tab(ctx, tab);
+                    }
+                });
 
             ui.add_space(8.0);
             ui.separator();
@@ -160,14 +180,17 @@ fn draw_general_tab(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     ui.add_space(12.0);
 
     ui.label("Default working space (applied at startup)");
+    ui.add_space(4.0);
     let mut ws = settings.working_space.to_ws();
-    egui::ComboBox::from_id_salt("settings_working_space")
-        .selected_text(format!("{ws:?}"))
-        .show_ui(ui, |ui| {
-            for w in ferrolite_color::WorkingSpace::ALL {
-                ui.selectable_value(&mut ws, w, format!("{w:?}"));
-            }
-        });
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("settings_working_space")
+            .selected_text(format!("{ws:?}"))
+            .show_ui(ui, |ui| {
+                for w in ferrolite_color::WorkingSpace::ALL {
+                    ui.selectable_value(&mut ws, w, format!("{w:?}"));
+                }
+            });
+    });
     if ws != settings.working_space.to_ws() {
         settings.working_space = super::dto::PersistedWorkingSpace::from_ws(ws);
         changed = true;
@@ -179,12 +202,15 @@ fn draw_general_tab(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     // (`library/toolbar.rs`'s `EguiSlider { min: 0.0, max: 100.0, .. }`), so
     // this default matches what the in-grid slider can actually reach.
     ui.label("Default thumbnail size");
-    if ui
-        .add(egui::Slider::new(&mut settings.grid_size, 0.0..=100.0))
-        .changed()
-    {
-        changed = true;
-    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui
+            .add(egui::Slider::new(&mut settings.grid_size, 0.0..=100.0))
+            .changed()
+        {
+            changed = true;
+        }
+    });
 
     ui.add_space(16.0);
     ui.label(

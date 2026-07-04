@@ -10,6 +10,7 @@ pub mod ingest;
 pub mod library;
 pub mod metadata;
 pub mod module;
+pub mod monitor_profile;
 pub mod read_gate;
 pub mod settings;
 pub mod state;

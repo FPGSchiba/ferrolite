@@ -34,9 +34,21 @@ ferrolite-vt = { workspace = true }
 half = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "tiff", "webp"] }
 rayon = { workspace = true }
+raw-window-handle = "0.6"
 rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_ColorSystem",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.24"
+core-foundation = "0.10"
 
 [dev-dependencies]
 image = { workspace = true, features = ["png"] }

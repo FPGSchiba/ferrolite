@@ -1,7 +1,7 @@
 //! The only module that names `lensfun`. `match_lens`/`bake_geometry`/
 //! `bake_vignetting`/`find_lenses` are all real (Tasks 2–4 landed).
 
-use crate::types::{LensError, LensMatch, LensQuery, VignetteMap, WarpGrid};
+use crate::types::{LensCaps, LensError, LensMatch, LensQuery, VignetteMap, WarpGrid};
 #[cfg(test)]
 use crate::types::{GRID_N, VIGNETTE_LEN};
 
@@ -26,6 +26,11 @@ pub trait LensDb {
         aperture: f32,
         len: u32,
     ) -> Option<VignetteMap>;
+    /// Report which corrections have real calibration data for this lens at
+    /// the given focal/aperture, so the app can grey out controls the lens
+    /// can't drive. Resolves `lens_id` the same way [`LensDb::bake_geometry`]/
+    /// [`LensDb::bake_vignetting`] do; returns `None` if it doesn't resolve.
+    fn lens_caps(&self, lens_id: &str, focal: f32, aperture: f32) -> Option<LensCaps>;
 }
 
 /// Opaque wrapper around a loaded `lensfun::Database`.
@@ -259,11 +264,24 @@ impl LensDb for LensfunDb {
         // `camera_hint` is used to pick each hit's reported crop factor
         // (falling back to the lens's own calibration crop) rather than as a
         // hard filter.
-        let camera = self
-            .db
-            .find_cameras(Some(camera_hint), "")
-            .into_iter()
-            .next();
+        //
+        // When `camera_hint` is empty (e.g. the image has no camera EXIF at
+        // all — a PNG, a screenshot, a synthetic render), we must NOT call
+        // `find_cameras(Some(""), "")`: an empty maker string is not "no
+        // hint", it's a real (degenerate) query, and `Database::find_cameras`
+        // will happily rank and return *some* camera — observed in practice
+        // to be a bogus first entry with crop_factor ≈ 0.577 — which would
+        // then be wrongly applied to every returned lens, mis-scaling the
+        // bake. So skip the camera lookup entirely in that case and let every
+        // hit fall back to its own calibration crop.
+        let camera = if camera_hint.is_empty() {
+            None
+        } else {
+            self.db
+                .find_cameras(Some(camera_hint), "")
+                .into_iter()
+                .next()
+        };
         self.db
             .find_lenses(None, needle)
             .into_iter()
@@ -287,6 +305,22 @@ impl LensDb for LensfunDb {
     ) -> Option<VignetteMap> {
         let lens = self.lens_by_id(&m.lens_id)?;
         bake_vignetting_impl(lens, m.crop_factor, focal, aperture, len)
+    }
+
+    fn lens_caps(&self, lens_id: &str, focal: f32, aperture: f32) -> Option<LensCaps> {
+        let lens = self.lens_by_id(lens_id)?;
+        Some(LensCaps {
+            distortion: lens.interpolate_distortion(focal).is_some(),
+            tca: lens.interpolate_tca(focal).is_some(),
+            // Matches the `distance` convention `bake_vignetting_impl` passes
+            // to `Modifier::enable_vignetting_correction` — vignetting
+            // calibrations are effectively distance-independent at real-world
+            // shooting distances, so a large fixed value samples the same
+            // calibration curve the bake would use.
+            vignetting: lens
+                .interpolate_vignetting(focal, aperture, 1000.0)
+                .is_some(),
+        })
     }
 }
 
@@ -482,6 +516,54 @@ mod tests {
     }
 
     #[test]
+    fn find_lenses_with_empty_camera_hint_falls_back_to_lens_crop() {
+        // Regression test for the bogus-crop bug: `find_cameras(Some(""), "")`
+        // returns *some* camera (observed crop_factor ≈ 0.577) which used to
+        // be applied to every hit unconditionally. An empty `camera_hint`
+        // happens whenever the source image has no camera EXIF at all (e.g. a
+        // PNG), so it must never reach `find_cameras` and must instead fall
+        // back to each lens's own calibration crop factor.
+        let db = db();
+        let hits = db.find_lenses("", "FE 24mm");
+        let hit = hits
+            .iter()
+            .find(|m| m.display_name.contains("FE 24mm"))
+            .expect("bundled DB has a Sony FE 24mm lens");
+        let lens = db.lens_by_id(&hit.lens_id).expect("lens resolves");
+        assert_eq!(
+            hit.crop_factor, lens.crop_factor,
+            "empty camera_hint must fall back to the lens's own calibration crop"
+        );
+        assert!(
+            hit.crop_factor > 0.9,
+            "the FE 24mm is a full-frame lens; crop must not be the bogus ~0.577 \
+             value a spurious find_cameras lookup would have produced, got {}",
+            hit.crop_factor
+        );
+    }
+
+    #[test]
+    fn find_lenses_with_nonempty_camera_hint_still_uses_camera_crop() {
+        // Non-empty hints must keep resolving through `find_cameras` as before.
+        let db = db();
+        let hits = db.find_lenses("Canon", "24-70mm f/2.8L II");
+        let hit = hits
+            .iter()
+            .find(|m| m.display_name.contains("24-70"))
+            .expect("bundled DB has the Canon 24-70/2.8L II");
+        let camera = db
+            .db
+            .find_cameras(Some("Canon"), "")
+            .into_iter()
+            .next()
+            .expect("bundled DB has at least one Canon camera");
+        assert_eq!(
+            hit.crop_factor, camera.crop_factor,
+            "non-empty camera_hint must still resolve via find_cameras"
+        );
+    }
+
+    #[test]
     fn match_by_id_resolves_a_persisted_lens_id() {
         let q = LensQuery {
             camera_make: "Canon".into(),
@@ -552,5 +634,55 @@ mod tests {
              produce different warp geometry — otherwise the app's crop \
              override in spawn_lens_bake would be silently inert"
         );
+    }
+
+    #[test]
+    fn lens_caps_reports_distortion_and_tca_but_no_vignetting_for_fe_24mm() {
+        // "FE 24mm f/2.8 G" is confirmed (by probing the bundled DB) to have
+        // real distortion + TCA calibration but NO vignetting calibration at
+        // all — a real-world case the UI needs to grey out the vignette
+        // control for.
+        let db = db();
+        let hits = db.find_lenses("", "FE 24mm f/2.8 G");
+        let hit = hits
+            .iter()
+            .find(|m| m.display_name == "FE 24mm f/2.8 G")
+            .expect("bundled DB has the Sony FE 24mm f/2.8 G");
+        let caps = db
+            .lens_caps(&hit.lens_id, 24.0, 2.8)
+            .expect("lens_id resolves");
+        assert!(caps.distortion, "FE 24mm f/2.8 G has a distortion profile");
+        // Self-consistent with the direct lensfun call, in case the DB's
+        // calibration set for this lens ever changes.
+        let lens = db.lens_by_id(&hit.lens_id).expect("lens resolves");
+        assert_eq!(caps.tca, lens.interpolate_tca(24.0).is_some());
+        assert!(
+            !caps.vignetting,
+            "FE 24mm f/2.8 G has no vignetting calibration in the bundled DB"
+        );
+    }
+
+    #[test]
+    fn lens_caps_reports_vignetting_for_a_lens_with_a_vignetting_profile() {
+        // "Canon EF 24-70mm f/2.8L II USM" is confirmed (via the vignetting
+        // bake test above) to have a real vignetting calibration.
+        let db = db();
+        let hits = db.find_lenses("Canon", "Canon EF 24-70mm f/2.8L II USM");
+        let hit = hits
+            .iter()
+            .find(|m| m.display_name.contains("24-70"))
+            .expect("bundled DB has the Canon 24-70/2.8L II");
+        let caps = db
+            .lens_caps(&hit.lens_id, 24.0, 2.8)
+            .expect("lens_id resolves");
+        assert!(caps.distortion);
+        assert!(caps.vignetting, "this lens has a real vignetting profile");
+    }
+
+    #[test]
+    fn lens_caps_unknown_lens_id_is_none() {
+        assert!(db()
+            .lens_caps("Nonexistent Lens Key 9000", 24.0, 2.8)
+            .is_none());
     }
 }

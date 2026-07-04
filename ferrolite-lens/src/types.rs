@@ -50,3 +50,14 @@ pub struct WarpGrid {
 pub struct VignetteMap {
     pub radial: Vec<f32>,
 }
+
+/// Per-correction data availability for a resolved lens at a given
+/// focal/aperture. Lets the app grey out controls the lens has no
+/// calibration to drive (e.g. many primes have distortion data but no
+/// vignetting profile).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LensCaps {
+    pub distortion: bool,
+    pub tca: bool,
+    pub vignetting: bool,
+}

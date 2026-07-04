@@ -7,7 +7,7 @@
 
 mod keyboard;
 
-use super::Settings;
+use super::{dto, Settings};
 use crate::theme;
 
 /// Which tab is active, stored in `egui` memory so it survives across frames
@@ -34,7 +34,12 @@ fn set_active_tab(ctx: &egui::Context, tab: SettingsTab) {
 /// Render the Settings modal if `*open`. Returns `true` if any setting was
 /// changed this frame (the caller should then persist + apply as needed).
 /// Closes (`*open = false`) on the Close button, Esc, or a backdrop click.
-pub fn show(ctx: &egui::Context, open: &mut bool, settings: &mut Settings) -> bool {
+pub fn show(
+    ctx: &egui::Context,
+    open: &mut bool,
+    settings: &mut Settings,
+    display_name: &str,
+) -> bool {
     if !*open {
         return false;
     }
@@ -113,7 +118,7 @@ pub fn show(ctx: &egui::Context, open: &mut bool, settings: &mut Settings) -> bo
                     ui.set_width(CONTENT_WIDTH);
                     match tab {
                         SettingsTab::General => {
-                            if draw_general_tab(ui, settings) {
+                            if draw_general_tab(ui, settings, display_name) {
                                 changed = true;
                             }
                         }
@@ -143,8 +148,9 @@ pub fn show(ctx: &egui::Context, open: &mut bool, settings: &mut Settings) -> bo
 }
 
 /// General preferences tab: session restore, remove confirmation, histogram
-/// overlay, default working space, and default grid (thumbnail) size.
-fn draw_general_tab(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
+/// overlay, default working space, default grid (thumbnail) size, and the
+/// display (monitor color) profile mode.
+fn draw_general_tab(ui: &mut egui::Ui, settings: &mut Settings, display_name: &str) -> bool {
     let mut changed = false;
 
     ui.heading("General");
@@ -211,6 +217,67 @@ fn draw_general_tab(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             changed = true;
         }
     });
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(12.0);
+
+    // Display (monitor color) group. Config-surface preference, not an
+    // editing control — deliberately no per-control reset arrow (see
+    // CLAUDE.md's per-component reset rule, which scopes to editable
+    // controls in the Develop module, not Settings preferences); the
+    // "reset" here is simply choosing Auto.
+    ui.heading("Display");
+    ui.add_space(8.0);
+    ui.label(format!("Active profile: {display_name}"));
+    ui.add_space(4.0);
+    let mut mode = settings.display_profile.clone();
+    let mut display_changed = false;
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_label("Monitor color")
+            .selected_text(match &mode {
+                dto::PersistedDisplayProfile::Auto => "Auto (detect)".to_string(),
+                dto::PersistedDisplayProfile::Srgb => "sRGB".to_string(),
+                dto::PersistedDisplayProfile::Custom(_) => "Custom file…".to_string(),
+            })
+            .show_ui(ui, |ui| {
+                display_changed |= ui
+                    .selectable_value(
+                        &mut mode,
+                        dto::PersistedDisplayProfile::Auto,
+                        "Auto (detect)",
+                    )
+                    .changed();
+                display_changed |= ui
+                    .selectable_value(&mut mode, dto::PersistedDisplayProfile::Srgb, "sRGB")
+                    .changed();
+                if ui
+                    .selectable_label(
+                        matches!(mode, dto::PersistedDisplayProfile::Custom(_)),
+                        "Custom file…",
+                    )
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("ICC profile", &["icc", "icm"])
+                        .pick_file()
+                    {
+                        mode = dto::PersistedDisplayProfile::Custom(path);
+                        display_changed = true;
+                    }
+                }
+            });
+        if ui.button("Redetect").clicked() {
+            // Force a re-resolve even if the mode itself is unchanged (e.g.
+            // the user moved the window to another monitor and wants to
+            // re-check without touching the mode).
+            display_changed = true;
+        }
+    });
+    if display_changed {
+        settings.display_profile = mode;
+        changed = true;
+    }
 
     ui.add_space(16.0);
     ui.label(

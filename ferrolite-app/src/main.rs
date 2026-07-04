@@ -11,6 +11,7 @@ mod ingest;
 mod library;
 mod metadata;
 mod module;
+mod monitor_profile;
 mod read_gate;
 mod settings;
 mod state;

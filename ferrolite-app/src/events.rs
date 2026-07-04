@@ -129,6 +129,15 @@ pub enum AppEvent {
         ok: bool,
         message: String,
     },
+    /// A display-profile detect+parse+bake job finished. `lut = Some` → the
+    /// monitor-managed LUT path; `None` → sRGB fallback. `generation` guards
+    /// against stale results from superseded re-detects. Handled in `app.rs`
+    /// (needs GPU state); the `apply` fold ignores it.
+    DisplayProfileResolved {
+        lut: Option<ferrolite_color::DisplayLut>,
+        name: String,
+        generation: u64,
+    },
 }
 
 impl AppState {
@@ -243,6 +252,9 @@ impl AppState {
                 }
                 None
             }
+            // Handled in `app.rs` (needs GPU state to build/replace the display
+            // LUT texture); nothing to fold here.
+            AppEvent::DisplayProfileResolved { .. } => None,
         }
     }
 }

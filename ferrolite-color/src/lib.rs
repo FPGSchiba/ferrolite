@@ -7,6 +7,7 @@
 
 mod adapt;
 mod camera;
+mod display_lut;
 mod error;
 mod icc;
 mod matrix;
@@ -16,6 +17,10 @@ mod working_space;
 
 pub use adapt::chromatic_adaptation;
 pub use camera::{camera_to_working, normalize_neutral};
+pub use display_lut::{
+    bake_display_lut, shaper_decode, shaper_encode, DisplayLut, DisplayProfile,
+    DISPLAY_LUT_SHAPER_GAMMA, DISPLAY_LUT_SIZE,
+};
 pub use error::ColorError;
 pub use icc::{emit_icc, parse_icc};
 pub use matrix::{diag, identity, inverse, mul_mat3, mul_vec3, Mat3, Xy};

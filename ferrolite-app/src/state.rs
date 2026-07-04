@@ -190,6 +190,19 @@ pub struct AppState {
     /// must call `FerroliteApp::mark_settings_dirty()` so they persist (see
     /// `crate::settings::persist`).
     pub settings: crate::settings::Settings,
+
+    /// Resolved display-profile name for the Settings label ("sRGB (default)" when off).
+    #[allow(dead_code)] // read by the Settings UI + display-profile detect flow (Unit 5)
+    pub display_profile_name: String,
+    /// Monotonic generation; each re-detect bumps it. Stale job results are dropped.
+    #[allow(dead_code)] // guards stale detect-job results (Unit 5)
+    pub display_detect_gen: u64,
+    /// The last resolved monitor LUT (`None` = sRGB/fallback). Re-applied on every
+    /// image reveal so opening an image never reverts the display to analytic sRGB.
+    pub display_lut: Option<ferrolite_color::DisplayLut>,
+    /// The monitor key the window was last seen on (0 = unknown / unsupported OS).
+    #[allow(dead_code)] // compared on window-move to trigger re-detect (Unit 5)
+    pub last_monitor_key: u64,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -268,6 +281,10 @@ impl AppState {
             working_space: settings.working_space.to_ws(),
             preview_store: Arc::new(open_preview_store(&default_previews_dir())),
             settings,
+            display_profile_name: "sRGB (default)".to_string(),
+            display_detect_gen: 0,
+            display_lut: None,
+            last_monitor_key: 0,
         })
     }
 
@@ -830,6 +847,10 @@ impl AppState {
                 tid
             )))),
             settings: crate::settings::Settings::default(),
+            display_profile_name: "sRGB (default)".to_string(),
+            display_detect_gen: 0,
+            display_lut: None,
+            last_monitor_key: 0,
         }
     }
 
@@ -939,6 +960,14 @@ fn open_preview_store(dir: &std::path::Path) -> ferrolite_previews::PreviewStore
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A freshly constructed state must have no monitor LUT resolved yet, so the
+    /// display tail starts on the analytic sRGB path until a detect resolves.
+    #[test]
+    fn display_lut_defaults_to_none() {
+        let s = AppState::for_test();
+        assert!(s.display_lut.is_none());
+    }
 
     /// `reset_ingest_counters` must zero exactly the four scan/ingest
     /// progress counters, independent of any other state. This is the shared

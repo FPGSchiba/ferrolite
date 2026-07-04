@@ -25,6 +25,7 @@ pub struct Settings {
     pub restore_session: bool,
     pub last_module: dto::PersistedModule,
     pub last_folder: Option<std::path::PathBuf>,
+    pub display_profile: dto::PersistedDisplayProfile,
 }
 
 impl Default for Settings {
@@ -40,6 +41,7 @@ impl Default for Settings {
             restore_session: false,
             last_module: dto::PersistedModule::default(),
             last_folder: None,
+            display_profile: dto::PersistedDisplayProfile::default(),
         }
     }
 }

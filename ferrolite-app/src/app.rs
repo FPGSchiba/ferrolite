@@ -146,13 +146,29 @@ impl FerroliteApp {
     /// Toggle the open viewer's before/after SPLIT-compare (draggable
     /// divider), mirroring the `develop_filter_bar` toggle button's click
     /// handling exactly: flips `split_compare` and, only when turning it on,
-    /// resets `split_pos` to center. Shared by the `Y` keyboard shortcut and
-    /// the View menu's "Before/After split" item.
+    /// resets `split_pos` to center. Shared by the `Y` keyboard shortcut, the
+    /// View menu's "Before/After split" item, and the filter-bar toggle button.
+    ///
+    /// The split only renders on the preview tier (`drive_viewer`'s
+    /// `split_active = v.split_compare && !show_full`) — once the sparse
+    /// "full" tile tier has taken over (`show_full`, which settles to
+    /// `v.full_ready && !v.crossfading` once idle) the toggle would otherwise
+    /// be a dead click. So on an off→on transition while already at/near that
+    /// full tier, force the view back to fit so the preview tier (and thus the
+    /// divider) is immediately visible again.
     fn toggle_split_compare(&mut self) {
         if let Some(v) = self.state.viewer.as_mut() {
+            let turning_on = !v.split_compare;
             v.split_compare = !v.split_compare;
             if v.split_compare {
                 v.split_pos = 0.5;
+                let show_full_now = v.full_ready && !v.crossfading;
+                if turning_on && show_full_now {
+                    if let Some(dims) = v.image_dims {
+                        v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
+                        v.idle = false; // resume the drive loop so the fit takes effect
+                    }
+                }
             }
         }
     }
@@ -1388,15 +1404,12 @@ impl FerroliteApp {
         let interactive = !v.crop_active && (show_full || !v.split_compare);
 
         let canvas_rect = ui.available_rect_before_wrap();
+        // Split only renders on the preview tier; once `show_full` takes over it
+        // dead-ends here (silently — `toggle_split_compare` now forces a fit on
+        // enable, so this state is reached only via zooming/navigating in while
+        // already split, not via the toggle itself).
         let split_active = v.split_compare && !show_full;
         let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
-        if v.split_compare && show_full && !v.split_full_logged {
-            eprintln!("before/after split suppressed at 1:1 zoom; showing after-view");
-            v.split_full_logged = true;
-        }
-        if !show_full {
-            v.split_full_logged = false;
-        }
 
         // `paint` applies this frame's pan/zoom and clears `idle` when the view
         // moved, so read `idle` AFTER it to catch an interaction this frame.

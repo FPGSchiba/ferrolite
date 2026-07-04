@@ -170,8 +170,6 @@ pub struct ViewerState {
     pub split_compare: bool,
     /// Divider position as a fraction of the canvas width, in [MIN_POS, MAX_POS].
     pub split_pos: f32,
-    /// One-shot guard so the "split suppressed at 1:1" note logs once, not per frame.
-    pub split_full_logged: bool,
     /// When `true`, the crop overlay is active.
     pub crop_active: bool,
     /// Index of the currently-selected HSL band in the HSL panel (0–7).
@@ -240,7 +238,6 @@ impl ViewerState {
             before_after: false,
             split_compare: false,
             split_pos: 0.5,
-            split_full_logged: false,
             crop_active: false,
             hsl_band: 0,
             ops_loaded: false,

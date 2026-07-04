@@ -9,12 +9,13 @@ use ferrolite_image::LinearRgbaF32;
 use wgpu::util::DeviceExt;
 
 use crate::image::PipelineImage;
+use crate::lens_gpu::WarpGridTexture;
 use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode};
 use crate::op::OpStack;
 use crate::uniforms::{
     color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, geometry_uniform,
     hsl_uniform, sharpen_uniform, wb_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform,
-    GeometryUniform, HslUniform, SharpenUniform, WbUniform,
+    GeometryUniform, HslUniform, LensUniform, SharpenUniform, WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -40,6 +41,7 @@ pub struct EditPipeline {
     sharpen: Rc<Cell<SharpenUniform>>,
     geometry_id: NodeId,
     geometry: Rc<Cell<GeometryUniform>>,
+    geometry_node: Rc<GeometryNode>,
     src_w: u32,
     src_h: u32,
     node_count: usize,
@@ -123,8 +125,8 @@ impl EditPipeline {
 
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
         let geometry = Rc::new(Cell::new(geo_uniform));
-        let geometry_node = GeometryNode::new(ctx.clone(), geometry.clone());
-        let geometry_id = graph.add_node(Box::new(geometry_node), vec![sharpen_id]);
+        let geometry_node = Rc::new(GeometryNode::new(ctx.clone(), geometry.clone()));
+        let geometry_id = graph.add_node(Box::new(geometry_node.clone()), vec![sharpen_id]);
 
         Self {
             ctx,
@@ -146,11 +148,26 @@ impl EditPipeline {
             sharpen,
             geometry_id,
             geometry,
+            geometry_node,
             src_w,
             src_h,
             node_count: 9,
             stack,
         }
+    }
+
+    /// Bind a freshly baked lens warp grid to the geometry pass (bake-time; no
+    /// pipeline rebuild). Dirties geometry so the next evaluate re-samples.
+    pub fn set_warp(&mut self, warp: WarpGridTexture) {
+        self.geometry_node.set_warp(warp);
+        self.graph.mark_dirty(self.geometry_id);
+    }
+
+    /// Set the lens correction amounts + `use_warp` flag on the geometry pass
+    /// (buffer write; no rebuild). Dirties geometry so the next evaluate applies.
+    pub fn set_lens_uniform(&mut self, lens: LensUniform) {
+        self.geometry_node.set_lens_uniform(lens);
+        self.graph.mark_dirty(self.geometry_id);
     }
 
     /// Update the camera→working matrix (working-space change) and dirty the head

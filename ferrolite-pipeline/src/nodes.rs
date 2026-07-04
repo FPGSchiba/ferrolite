@@ -11,8 +11,9 @@ use wgpu::util::DeviceExt;
 
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
+use crate::lens_gpu::WarpGridTexture;
 use crate::op::Geometry;
-use crate::uniforms::{geometry_tile_uniform, GeometryUniform};
+use crate::uniforms::{geometry_tile_uniform, GeometryUniform, LensUniform};
 
 /// Upload a display-linear `f32` image as an `Rgba16Float` GPU texture (the
 /// pipeline source). Mirrors the VT's single-texture upload (f32 -> f16).
@@ -270,7 +271,11 @@ impl<U: bytemuck::Pod> Node<PipelineImage> for PointOpNode<U> {
 }
 
 /// Bind-group layout for the geometry pass: 0 = input texture (filterable),
-/// 1 = output storage texture, 2 = transform uniform, 3 = filtering sampler.
+/// 1 = output storage texture, 2 = transform uniform, 3 = filtering sampler,
+/// 4 = warp texture A (`rgba32float` `[rU,rV,gU,gV]`, non-filterable), 5 = warp
+/// texture B (`rg32float` `[bU,bV]`, non-filterable), 6 = lens uniform. The two
+/// warp textures are `textureLoad`-sampled (no sampler) with manual bilinear in
+/// the shader — see `geometry.wgsl` and `lens_gpu.rs` for the rationale.
 fn geometry_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("geometry-bgl"),
@@ -311,18 +316,110 @@ fn geometry_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
+            // Warp textures are unfilterable f32 (device lacks FLOAT32_FILTERABLE);
+            // sampled via textureLoad, so declared as non-filterable float.
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     })
 }
 
-/// Geometry compute pass (crop + rotate). Output texture dims come from the
-/// uniform's `out_dims`, so it reallocates when the crop changes.
+/// The lens-warp resources every geometry node owns: the current warp grid
+/// (default `identity`), its two `textureLoad`-only texture views built ONCE per
+/// grid swap (never per frame — CLAUDE.md GPU rule), and a `LensUniform` buffer
+/// (default `use_warp = 0`, i.e. the byte-identical no-correction path).
+struct WarpBinding {
+    warp: WarpGridTexture,
+    a_view: wgpu::TextureView,
+    b_view: wgpu::TextureView,
+    lens_buf: wgpu::Buffer,
+}
+
+impl WarpBinding {
+    /// Default identity warp + `use_warp = 0` lens uniform. Valid to bind before
+    /// any bake completes; the shader skips the grid sample entirely.
+    fn new(ctx: &GpuContext) -> Self {
+        let warp = WarpGridTexture::identity(ctx);
+        let a_view = warp.rg_ba_view();
+        let b_view = warp.b_uv_view();
+        let lens_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("geometry-lens-uniform"),
+            size: std::mem::size_of::<LensUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctx.queue.write_buffer(
+            &lens_buf,
+            0,
+            bytemuck::bytes_of(&LensUniform {
+                dist_amount: 0.0,
+                tca_amount: 0.0,
+                vig_amount: 0.0,
+                use_warp: 0,
+            }),
+        );
+        Self {
+            warp,
+            a_view,
+            b_view,
+            lens_buf,
+        }
+    }
+
+    /// Swap in a freshly baked warp grid (bake-time, infrequent). Rebuilds the
+    /// cached texture views; callers must also recreate any cached bind group.
+    fn set_warp(&mut self, warp: WarpGridTexture) {
+        self.a_view = warp.rg_ba_view();
+        self.b_view = warp.b_uv_view();
+        self.warp = warp;
+    }
+
+    /// Overwrite the lens uniform (amounts + `use_warp`). Buffer write only — no
+    /// view, bind group, or pipeline rebuild.
+    fn set_lens_uniform(&self, ctx: &GpuContext, lens: LensUniform) {
+        ctx.queue
+            .write_buffer(&self.lens_buf, 0, bytemuck::bytes_of(&lens));
+    }
+}
+
+/// Geometry compute pass (crop + rotate, optionally fused with the lens warp).
+/// Output texture dims come from the uniform's `out_dims`, so it reallocates when
+/// the crop changes.
 pub(crate) struct GeometryNode {
     ctx: Arc<GpuContext>,
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
+    warp: RefCell<WarpBinding>,
     params: Rc<Cell<crate::uniforms::GeometryUniform>>,
     out: RefCell<Option<PipelineImage>>,
 }
@@ -365,15 +462,27 @@ impl GeometryNode {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let warp = RefCell::new(WarpBinding::new(&ctx));
         Self {
             ctx,
             pipeline,
             bgl,
             uniform_buf,
             sampler,
+            warp,
             params,
             out: RefCell::new(None),
         }
+    }
+
+    /// Swap in a freshly baked warp grid (bake-time; rebuilds cached views).
+    pub(crate) fn set_warp(&self, warp: WarpGridTexture) {
+        self.warp.borrow_mut().set_warp(warp);
+    }
+
+    /// Overwrite the lens uniform (amounts + `use_warp`); buffer write only.
+    pub(crate) fn set_lens_uniform(&self, lens: LensUniform) {
+        self.warp.borrow().set_lens_uniform(&self.ctx, lens);
     }
 
     fn ensure_out(&self, w: u32, h: u32) -> PipelineImage {
@@ -423,6 +532,7 @@ impl Node<PipelineImage> for GeometryNode {
         let dst_view = dst
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let warp = self.warp.borrow();
         let bind = self
             .ctx
             .device
@@ -446,6 +556,18 @@ impl Node<PipelineImage> for GeometryNode {
                         binding: 3,
                         resource: wgpu::BindingResource::Sampler(&self.sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&warp.a_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&warp.b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: warp.lens_buf.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -464,6 +586,15 @@ impl Node<PipelineImage> for GeometryNode {
         }
         self.ctx.queue.submit([enc.finish()]);
         dst
+    }
+}
+
+/// Delegating `Node` impl so a `GeometryNode` can be shared via `Rc` — the
+/// pipeline keeps a handle to drive `set_warp`/`set_lens_uniform` while a boxed
+/// clone lives in the graph. Both point at the same node (interior mutability).
+impl Node<PipelineImage> for Rc<GeometryNode> {
+    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
+        (**self).evaluate(inputs)
     }
 }
 
@@ -641,6 +772,14 @@ impl Node<PipelineImage> for CurveNode {
     }
 }
 
+/// Delegating `Node` impl so a `GeometryHeadNode` can be shared via `Rc` (see the
+/// `Rc<GeometryNode>` impl above for the rationale).
+impl Node<PipelineImage> for Rc<GeometryHeadNode> {
+    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
+        (**self).evaluate(inputs)
+    }
+}
+
 /// The current tile request driving the geometry head (coord + active halo).
 #[derive(Clone, Copy)]
 pub(crate) struct TileRequest {
@@ -658,6 +797,7 @@ pub(crate) struct GeometryHeadNode {
     bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
+    warp: RefCell<WarpBinding>,
     source: Arc<GpuPyramidSource>,
     geometry: Geometry,
     request: Rc<Cell<TileRequest>>,
@@ -704,17 +844,29 @@ impl GeometryHeadNode {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let warp = RefCell::new(WarpBinding::new(&ctx));
         Self {
             ctx,
             pipeline,
             bgl,
             uniform_buf,
             sampler,
+            warp,
             source,
             geometry,
             request,
             out: RefCell::new(None),
         }
+    }
+
+    /// Swap in a freshly baked warp grid (bake-time; rebuilds cached views).
+    pub(crate) fn set_warp(&self, warp: WarpGridTexture) {
+        self.warp.borrow_mut().set_warp(warp);
+    }
+
+    /// Overwrite the lens uniform (amounts + `use_warp`); buffer write only.
+    pub(crate) fn set_lens_uniform(&self, lens: LensUniform) {
+        self.warp.borrow().set_lens_uniform(&self.ctx, lens);
     }
 
     fn ensure_out(&self, ext: u32) -> PipelineImage {
@@ -769,6 +921,7 @@ impl Node<PipelineImage> for GeometryHeadNode {
         let dst_view = dst
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let warp = self.warp.borrow();
         let bind = self
             .ctx
             .device
@@ -791,6 +944,18 @@ impl Node<PipelineImage> for GeometryHeadNode {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&warp.a_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&warp.b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: warp.lens_buf.as_entire_binding(),
                     },
                 ],
             });

@@ -20,11 +20,12 @@ use ferrolite_image::{TileCoord, TILE_SIZE};
 
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
+use crate::lens_gpu::WarpGridTexture;
 use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest};
 use crate::op::{Aspect, CropRect, Geometry, OpStack};
 use crate::uniforms::{
     color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_halo,
-    sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform,
+    sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform, LensUniform,
     SharpenUniform, WbUniform,
 };
 
@@ -34,6 +35,7 @@ pub struct TileEditPipeline {
     output_id: NodeId,
     request: Rc<Cell<TileRequest>>,
     head_id: NodeId,
+    head: Rc<GeometryHeadNode>,
     color_matrix_id: NodeId,
     color_matrix: Rc<Cell<ColorMatrixUniform>>,
     halo: u32,
@@ -65,8 +67,13 @@ impl TileEditPipeline {
         }));
 
         let mut graph = Graph::new();
-        let head = GeometryHeadNode::new(ctx.clone(), source, geometry, request.clone());
-        let head_id = graph.add_node(Box::new(head), vec![]);
+        let head = Rc::new(GeometryHeadNode::new(
+            ctx.clone(),
+            source,
+            geometry,
+            request.clone(),
+        ));
+        let head_id = graph.add_node(Box::new(head.clone()), vec![]);
 
         let color_matrix = Rc::new(Cell::new(color_matrix_uniform(camera_to_working)));
         let color_matrix_id = graph.add_node(
@@ -149,6 +156,7 @@ impl TileEditPipeline {
             output_id: sharpen_id,
             request,
             head_id,
+            head,
             color_matrix_id,
             color_matrix,
             halo,
@@ -200,6 +208,20 @@ impl TileEditPipeline {
             self.color_matrix.set(u);
             self.graph.mark_dirty(self.color_matrix_id);
         }
+    }
+
+    /// Bind a freshly baked lens warp grid to the geometry head (bake-time; no
+    /// pipeline rebuild). Dirties the head so the next `produce_tile` re-samples.
+    pub fn set_warp(&mut self, warp: WarpGridTexture) {
+        self.head.set_warp(warp);
+        self.graph.mark_dirty(self.head_id);
+    }
+
+    /// Set the lens correction amounts + `use_warp` flag on the geometry head
+    /// (buffer write; no rebuild). Dirties the head so the next tile applies it.
+    pub fn set_lens_uniform(&mut self, lens: LensUniform) {
+        self.head.set_lens_uniform(lens);
+        self.graph.mark_dirty(self.head_id);
     }
 
     /// Render the edited interior `TILE_SIZE`² for `coord` as an `Rgba16Float`

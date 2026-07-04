@@ -4,17 +4,12 @@
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::curve_math::{self, GrabOrInsert};
 use crate::theme;
-use crate::widgets::draw_reset_arrow;
 use ferrolite_pipeline::{Op, OpKind, OpStack, ToneCurve};
 
 const SIZE: f32 = 260.0; // square edit area
 const HIT_R: f32 = 0.06; // normalized hit radius
 const DOT_R: f32 = 5.0; // idle point-dot radius
 const DOT_R_HOVER: f32 = 6.5; // enlarged radius for the hovered point
-const RESET_SIZE: f32 = 16.0; // reset hit-target square size
-const RESET_ICON_R: f32 = 4.5; // reset icon radius, matches EguiSlider's
-                               // Mirrors `EguiSlider`'s HANDLE_IDLE token (not in the shared `theme` module).
-const HANDLE_IDLE: egui::Color32 = egui::Color32::from_rgb(0x9a, 0x9a, 0x9a);
 
 pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     let mut points = stack
@@ -30,26 +25,6 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     let mut selected: Option<usize> = ui
         .memory(|m| m.data.get_temp::<Option<usize>>(selected_id))
         .unwrap_or(None);
-
-    // Per-component reset affordance (top-right corner), consistent with the
-    // slider's reset icon. See CLAUDE.md "Per-component reset" rule.
-    let reset_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.right() - 18.0, rect.top() + 2.0),
-        egui::pos2(rect.right() - 2.0, rect.top() + 2.0 + RESET_SIZE),
-    );
-    let modified = !curve_math::is_identity(&points);
-    let reset_resp = ui.interact(
-        reset_rect,
-        ui.id().with("tone_curve_reset"),
-        egui::Sense::click(),
-    );
-    if reset_resp.clicked() && modified {
-        return Some(EditOutcome {
-            stack: stack.reset(OpKind::ToneCurve),
-            kind: OpKind::ToneCurve,
-            commit: true,
-        });
-    }
 
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, theme::BG_BASE);
@@ -110,26 +85,11 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         }
     }
 
-    // Reset icon: dim when already at default; matches the slider's scheme.
-    let reset_color = if modified {
-        if reset_resp.hovered() {
-            theme::ACCENT_BRIGHT
-        } else {
-            HANDLE_IDLE
-        }
-    } else {
-        theme::BORDER_STRONG
-    };
-    draw_reset_arrow(painter, reset_rect.center(), RESET_ICON_R, reset_color);
-
     let mut changed = false;
     let mut commit = false;
     let mut deleted = false;
 
-    if let Some(pos) = resp
-        .interact_pointer_pos()
-        .filter(|p| !reset_rect.contains(*p))
-    {
+    if let Some(pos) = resp.interact_pointer_pos() {
         let norm = to_norm(pos);
         if resp.drag_started() || resp.clicked() {
             match curve_math::grab_or_insert(&points, norm, HIT_R) {
@@ -210,6 +170,22 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         egui::RichText::new("Drag to adjust · double/right-click or Delete to remove a point")
             .color(theme::TEXT_FAINT),
     );
+
+    // Per-component reset affordance, styled like the Basic section's "Reset"
+    // (see CLAUDE.md "Per-component reset" rule). Dim/disabled at default.
+    let modified = !curve_math::is_identity(&points);
+    if ui
+        .add_enabled(modified, egui::Button::new("Reset").small())
+        .clicked()
+    {
+        // Resetting clears any stale selection tied to the old point list.
+        ui.memory_mut(|m| m.data.insert_temp::<Option<usize>>(selected_id, None));
+        return Some(EditOutcome {
+            stack: stack.reset(OpKind::ToneCurve),
+            kind: OpKind::ToneCurve,
+            commit: true,
+        });
+    }
 
     if changed {
         let s = if curve_math::is_identity(&points) {

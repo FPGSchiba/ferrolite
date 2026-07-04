@@ -305,6 +305,31 @@ impl PersistedModule {
     }
 }
 
+// ── Display profile ──────────────────────────────────────────────────────────
+use crate::monitor_profile::ProfileSource;
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub enum PersistedDisplayProfile {
+    #[default]
+    Auto,
+    Srgb,
+    Custom(std::path::PathBuf),
+}
+
+/// Resolve the effective profile source. `Srgb` → None (analytic sRGB path);
+/// `Custom` → the file; `Auto` → whatever detection found (may be None).
+#[allow(dead_code)] // wired into the detect flow in Unit 5
+pub fn resolve(
+    mode: &PersistedDisplayProfile,
+    detected: Option<ProfileSource>,
+) -> Option<ProfileSource> {
+    match mode {
+        PersistedDisplayProfile::Srgb => None,
+        PersistedDisplayProfile::Custom(p) => Some(ProfileSource::Path(p.clone())),
+        PersistedDisplayProfile::Auto => detected,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +439,51 @@ mod tests {
         }"#;
         let parsed: PersistedExport = serde_json::from_str(legacy).expect("deserialize legacy");
         assert_eq!(parsed.effort, PersistedEffort::Balanced);
+    }
+
+    #[test]
+    fn resolve_srgb_is_none() {
+        assert!(resolve(
+            &PersistedDisplayProfile::Srgb,
+            Some(ProfileSource::Bytes(vec![1]))
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn resolve_custom_uses_path_even_when_detected_present() {
+        let p = std::path::PathBuf::from("x.icc");
+        let r = resolve(
+            &PersistedDisplayProfile::Custom(p.clone()),
+            Some(ProfileSource::Bytes(vec![9])),
+        );
+        assert!(matches!(r, Some(ProfileSource::Path(pp)) if pp == p));
+    }
+
+    #[test]
+    fn resolve_auto_passes_detected_through() {
+        assert!(resolve(&PersistedDisplayProfile::Auto, None).is_none());
+        assert!(matches!(
+            resolve(
+                &PersistedDisplayProfile::Auto,
+                Some(ProfileSource::Bytes(vec![7]))
+            ),
+            Some(ProfileSource::Bytes(_))
+        ));
+    }
+
+    #[test]
+    fn display_profile_roundtrips_through_json() {
+        for m in [
+            PersistedDisplayProfile::Auto,
+            PersistedDisplayProfile::Srgb,
+            PersistedDisplayProfile::Custom("/tmp/p.icc".into()),
+        ] {
+            let js = serde_json::to_string(&m).unwrap();
+            assert_eq!(
+                serde_json::from_str::<PersistedDisplayProfile>(&js).unwrap(),
+                m
+            );
+        }
     }
 }

@@ -10,6 +10,8 @@ pub enum PersistedFormat {
     Png,
     Tiff,
     WebP,
+    Avif,
+    JpegXl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -53,6 +55,8 @@ impl PersistedExport {
                 ExportFormat::Png => PersistedFormat::Png,
                 ExportFormat::Tiff => PersistedFormat::Tiff,
                 ExportFormat::WebP => PersistedFormat::WebP,
+                ExportFormat::Avif => PersistedFormat::Avif,
+                ExportFormat::JpegXl => PersistedFormat::JpegXl,
             },
             output_space: PersistedWorkingSpace::from_ws(o.output_space),
             bit_depth: match o.bit_depth {
@@ -80,6 +84,8 @@ impl PersistedExport {
                 PersistedFormat::Png => ExportFormat::Png,
                 PersistedFormat::Tiff => ExportFormat::Tiff,
                 PersistedFormat::WebP => ExportFormat::WebP,
+                PersistedFormat::Avif => ExportFormat::Avif,
+                PersistedFormat::JpegXl => ExportFormat::JpegXl,
             },
             output_space: self.output_space.to_ws(),
             bit_depth: match self.bit_depth {

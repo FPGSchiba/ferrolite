@@ -9,14 +9,18 @@ pub enum ExportFormat {
     Png,
     Tiff,
     WebP,
+    Avif,
+    JpegXl,
 }
 
 impl ExportFormat {
-    pub const ALL: [ExportFormat; 4] = [
+    pub const ALL: [ExportFormat; 6] = [
         ExportFormat::Jpeg,
         ExportFormat::Png,
         ExportFormat::Tiff,
         ExportFormat::WebP,
+        ExportFormat::Avif,
+        ExportFormat::JpegXl,
     ];
 
     /// Lower-case file extension (no dot).
@@ -26,6 +30,8 @@ impl ExportFormat {
             ExportFormat::Png => "png",
             ExportFormat::Tiff => "tif",
             ExportFormat::WebP => "webp",
+            ExportFormat::Avif => "avif",
+            ExportFormat::JpegXl => "jxl",
         }
     }
 
@@ -36,17 +42,22 @@ impl ExportFormat {
             ExportFormat::Png => "PNG",
             ExportFormat::Tiff => "TIFF",
             ExportFormat::WebP => "WebP (lossless)",
+            ExportFormat::Avif => "AVIF",
+            ExportFormat::JpegXl => "JPEG-XL (lossless)",
         }
     }
 
-    /// 16-bit output is supported only for TIFF and PNG (spec §8.2).
+    /// 16-bit output is supported for TIFF, PNG, and JPEG-XL (spec §4.1).
     pub fn supports_16bit(self) -> bool {
-        matches!(self, ExportFormat::Tiff | ExportFormat::Png)
+        matches!(
+            self,
+            ExportFormat::Tiff | ExportFormat::Png | ExportFormat::JpegXl
+        )
     }
 
-    /// Only JPEG honors the quality setting (WebP is lossless; PNG/TIFF lossless).
+    /// JPEG and AVIF are lossy and honor the quality setting.
     pub fn supports_quality(self) -> bool {
-        matches!(self, ExportFormat::Jpeg)
+        matches!(self, ExportFormat::Jpeg | ExportFormat::Avif)
     }
 }
 
@@ -154,6 +165,21 @@ mod tests {
         assert!(!ExportFormat::Png.supports_quality());
         assert!(!ExportFormat::Tiff.supports_quality());
         assert!(!ExportFormat::WebP.supports_quality());
+    }
+
+    #[test]
+    fn six_formats_with_stable_extensions_and_labels() {
+        assert_eq!(ExportFormat::ALL.len(), 6);
+        assert_eq!(ExportFormat::Avif.extension(), "avif");
+        assert_eq!(ExportFormat::JpegXl.extension(), "jxl");
+        assert_eq!(ExportFormat::Avif.label(), "AVIF");
+        assert_eq!(ExportFormat::JpegXl.label(), "JPEG-XL (lossless)");
+        // AVIF is lossy → honors quality; JXL is lossless → does not.
+        assert!(ExportFormat::Avif.supports_quality());
+        assert!(!ExportFormat::JpegXl.supports_quality());
+        // JXL joins TIFF/PNG for 16-bit; AVIF is 8-bit only.
+        assert!(ExportFormat::JpegXl.supports_16bit());
+        assert!(!ExportFormat::Avif.supports_16bit());
     }
 
     #[test]

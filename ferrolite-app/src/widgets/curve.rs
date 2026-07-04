@@ -1,27 +1,58 @@
-//! Interactive tone-curve widget. Pure point math in `curve_math`; this layer
-//! only paints + routes pointer events. Visual-tested (no unit tests).
+//! Reusable interactive curve editor widget. Pure point math lives in
+//! `crate::develop::curve_math`; this layer paints + routes pointer events and
+//! is generic over the caller's `id_source` so multiple curve editors can
+//! coexist on one screen (e.g. tone curve + future per-channel color curves).
+//!
+//! This module is the reusable widget only (Spec 4.1 CD2 Task 4/5 of the
+//! curve-spline-modes plan). Nothing calls `curve_editor` yet — the tone-curve
+//! adapter rewrite (Task 6) wires it in. Hence the module-wide `dead_code`
+//! allow until that call site lands.
+#![allow(dead_code)]
 
-use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::curve_math::{self, GrabOrInsert};
 use crate::theme;
-use ferrolite_pipeline::{Op, OpKind, OpStack, ToneCurve};
+use ferrolite_pipeline::{curve_lut, CurveMode};
 
 const SIZE: f32 = 260.0; // square edit area
 const HIT_R: f32 = 0.06; // normalized hit radius
 const DOT_R: f32 = 5.0; // idle point-dot radius
 const DOT_R_HOVER: f32 = 6.5; // enlarged radius for the hovered point
 
-pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
-    let mut points = stack
-        .tone_curve()
-        .map(|t| t.points)
-        .filter(|p| !p.is_empty())
-        .unwrap_or_else(curve_math::identity_points);
+/// Visual styling for a `curve_editor` instance, so different curve uses
+/// (tone curve vs. future per-channel color curves) can have distinct colors.
+pub struct CurveStyle {
+    pub curve_color: egui::Color32,
+    pub point_color: egui::Color32,
+}
+
+/// A change emitted by `curve_editor`. `None` is returned when nothing
+/// changed this frame.
+pub struct CurveEdit {
+    pub points: Vec<(f32, f32)>,
+    pub mode: CurveMode,
+    pub reset: bool,
+    pub commit: bool,
+}
+
+/// Paint + interact with a curve editor bound to `points`/`mode`. All memory
+/// keys are salted with `id_source` so two instances on one screen don't
+/// collide. Returns `Some(CurveEdit)` on any change (drag, insert, delete, or
+/// reset), `None` otherwise.
+pub fn curve_editor(
+    ui: &mut egui::Ui,
+    id_source: impl std::hash::Hash,
+    points: &[(f32, f32)],
+    mode: CurveMode,
+    style: &CurveStyle,
+) -> Option<CurveEdit> {
+    let base_id = ui.id().with(id_source);
+    let mut points = points.to_vec();
 
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click_and_drag());
 
-    let selected_id = resp.id.with("selected_point");
+    let selected_id = base_id.with("selected_point");
+    let grab_id = base_id.with("grab_point");
     let mut selected: Option<usize> = ui
         .memory(|m| m.data.get_temp::<Option<usize>>(selected_id))
         .unwrap_or(None);
@@ -52,11 +83,19 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         |p: (f32, f32)| egui::pos2(rect.left() + p.0 * SIZE, rect.bottom() - p.1 * SIZE);
     let to_norm = |s: egui::Pos2| ((s.x - rect.left()) / SIZE, (rect.bottom() - s.y) / SIZE);
 
-    // Curve polyline.
-    let poly: Vec<egui::Pos2> = points.iter().map(|&p| to_screen(p)).collect();
+    // Curve polyline: sample the pipeline's own interpolation for `mode` so the
+    // drawn shape matches the applied result (straight segments for Linear,
+    // a smooth monotone curve for Smooth) rather than connecting control
+    // points directly.
+    let lut = curve_lut(&points, mode);
+    let poly: Vec<egui::Pos2> = lut
+        .iter()
+        .enumerate()
+        .map(|(i, &y)| to_screen((i as f32 / 255.0, y)))
+        .collect();
     painter.add(egui::Shape::line(
         poly,
-        egui::Stroke::new(1.5, theme::ACCENT),
+        egui::Stroke::new(1.5, style.curve_color),
     ));
 
     // Hover highlight: the point the cursor is currently within HIT_R of.
@@ -71,7 +110,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         painter.circle(
             to_screen(p),
             radius,
-            theme::ACCENT_BRIGHT,
+            style.point_color,
             egui::Stroke::new(1.0, theme::BG_BASE),
         );
         if is_selected {
@@ -80,7 +119,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
             painter.circle_stroke(
                 to_screen(p),
                 radius + 3.0,
-                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::Stroke::new(1.5, style.curve_color),
             );
         }
     }
@@ -94,7 +133,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         if resp.drag_started() || resp.clicked() {
             match curve_math::grab_or_insert(&points, norm, HIT_R) {
                 GrabOrInsert::Grab(idx) => {
-                    ui.memory_mut(|m| m.data.insert_temp(resp.id, idx));
+                    ui.memory_mut(|m| m.data.insert_temp(grab_id, idx));
                     if resp.clicked() && !resp.dragged() {
                         // A plain click (not a drag) on an existing point selects it.
                         selected = Some(idx);
@@ -108,14 +147,14 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
                     let inserted = (norm.0.clamp(0.0, 1.0), norm.1.clamp(0.0, 1.0));
                     points = curve_math::insert_point(&points, norm);
                     let idx = points.iter().position(|&q| q == inserted).unwrap_or(0);
-                    ui.memory_mut(|m| m.data.insert_temp(resp.id, idx));
+                    ui.memory_mut(|m| m.data.insert_temp(grab_id, idx));
                     changed = true;
                     commit = true;
                 }
             }
         }
         if resp.dragged() {
-            if let Some(idx) = ui.memory(|m| m.data.get_temp::<usize>(resp.id)) {
+            if let Some(idx) = ui.memory(|m| m.data.get_temp::<usize>(grab_id)) {
                 points = curve_math::move_point(&points, idx, norm);
                 changed = true;
             }
@@ -164,12 +203,11 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         // index can't linger and drive a later Delete press.
         selected = None;
         ui.memory_mut(|m| m.data.insert_temp(selected_id, selected));
-        // Also clear the active grab/drag index stored under resp.id. If a
-        // point is deleted while a drag-grab index is still stashed there,
-        // the list can shrink such that the stale index is still in range,
-        // and a subsequent resp.dragged() would silently move the wrong
-        // point via move_point.
-        ui.memory_mut(|m| m.data.remove::<usize>(resp.id));
+        // Also clear the active grab/drag index. If a point is deleted while
+        // a drag-grab index is still stashed there, the list can shrink such
+        // that the stale index is still in range, and a subsequent
+        // resp.dragged() would silently move the wrong point via move_point.
+        ui.memory_mut(|m| m.data.remove::<usize>(grab_id));
     }
 
     ui.small(
@@ -186,25 +224,19 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     {
         // Resetting clears any stale selection tied to the old point list.
         ui.memory_mut(|m| m.data.insert_temp::<Option<usize>>(selected_id, None));
-        return Some(EditOutcome {
-            stack: stack.reset(OpKind::ToneCurve),
-            kind: OpKind::ToneCurve,
+        return Some(CurveEdit {
+            points: curve_math::identity_points(),
+            mode,
+            reset: true,
             commit: true,
         });
     }
 
     if changed {
-        let s = if curve_math::is_identity(&points) {
-            stack.reset(OpKind::ToneCurve)
-        } else {
-            stack.set_op(Op::ToneCurve(ToneCurve {
-                points,
-                mode: ferrolite_pipeline::CurveMode::Linear,
-            }))
-        };
-        return Some(EditOutcome {
-            stack: s,
-            kind: OpKind::ToneCurve,
+        return Some(CurveEdit {
+            points,
+            mode,
+            reset: false,
             commit,
         });
     }

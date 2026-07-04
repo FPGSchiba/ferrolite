@@ -152,6 +152,16 @@ static RETAIN_CANCELS: AtomicU64 = AtomicU64::new(0);
 static EVENTS_DRAINED: AtomicU64 = AtomicU64::new(0);
 static UPLOADS_APPLIED: AtomicU64 = AtomicU64::new(0);
 
+// Export (batch) diagnostics: an in-flight gauge plus cumulative done/failed and
+// the last item's wall time (ms). The sequential batch job bounds in-flight to ≤1
+// (see `export::batch`); the gauge exceeding 1 signals a concurrency regression —
+// which is exactly the pathology (many concurrent GPU renders + rav1e encodes on
+// the shared device) that froze the UI. Written on worker threads; Relaxed.
+static EXPORT_ACTIVE: AtomicU64 = AtomicU64::new(0);
+static EXPORT_DONE: AtomicU64 = AtomicU64::new(0);
+static EXPORT_FAILED: AtomicU64 = AtomicU64::new(0);
+static EXPORT_LAST_MS: AtomicU64 = AtomicU64::new(0);
+
 /// Current ingest phase, for the live `ingest:` line. `Idle` hides the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IngestPhase {
@@ -243,6 +253,42 @@ pub fn add_events(n: usize) {
 }
 pub fn add_uploads(n: usize) {
     add(&UPLOADS_APPLIED, n as u64);
+}
+
+/// One batch-export item started (bumps the in-flight gauge). Gated.
+pub fn export_item_begin() {
+    if enabled() {
+        EXPORT_ACTIVE.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// One batch-export item finished: drop the in-flight gauge (saturating, so it can
+/// never underflow), bump done/failed, and record its wall time (ms). Gated.
+pub fn export_item_end(ok: bool, ms: u64) {
+    if !enabled() {
+        return;
+    }
+    let _ = EXPORT_ACTIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_sub(1))
+    });
+    EXPORT_DONE.fetch_add(1, Ordering::Relaxed);
+    if !ok {
+        EXPORT_FAILED.fetch_add(1, Ordering::Relaxed);
+    }
+    EXPORT_LAST_MS.store(ms, Ordering::Relaxed);
+}
+
+pub fn export_active() -> u64 {
+    EXPORT_ACTIVE.load(Ordering::Relaxed)
+}
+pub fn export_done() -> u64 {
+    EXPORT_DONE.load(Ordering::Relaxed)
+}
+pub fn export_failed() -> u64 {
+    EXPORT_FAILED.load(Ordering::Relaxed)
+}
+pub fn export_last_ms() -> u64 {
+    EXPORT_LAST_MS.load(Ordering::Relaxed)
 }
 
 /// How a `request_thumbnail` call was resolved (see `state::request_thumbnail`).
@@ -354,6 +400,12 @@ pub struct Gauges {
     pub uploads_cap: usize,
     pub ingest_phase: IngestPhase,
     pub ingest_chan: u64,
+    /// Batch-export in-flight items (bounded to ≤1 by the sequential batch job).
+    pub export_active: u64,
+    pub export_done: u64,
+    pub export_failed: u64,
+    /// Wall time (ms) of the last completed export item.
+    pub export_last_ms: u64,
 }
 
 /// Everything the log/overlay render, precomputed once per tick.
@@ -426,12 +478,29 @@ pub fn build_snapshot(
     }
 }
 
+/// One-line batch-export status for the log/overlay. Empty until an export has run
+/// (so it never clutters the common case). Shows the in-flight gauge — which the
+/// sequential batch job bounds to 1; a value >1 means concurrent exports are back —
+/// plus cumulative done/failed and the last item's wall time (ms).
+pub fn format_export_line(active: u64, done: u64, failed: u64, last_ms: u64) -> String {
+    if active == 0 && done == 0 {
+        return String::new();
+    }
+    format!("\n export  active {active}  done {done} failed {failed}  last {last_ms}ms")
+}
+
 /// Render the multi-line ~1/sec log block (also reused, compacted, by the overlay).
 pub fn format_log(s: &Snapshot) -> String {
     let j = &s.jobs;
     let g = &s.g;
     let dedup =
         s.req_dedup_tex_f + s.req_dedup_pending_f + s.req_dedup_missing_f + s.req_dedup_uploading_f;
+    let export_line = format_export_line(
+        g.export_active,
+        g.export_done,
+        g.export_failed,
+        g.export_last_ms,
+    );
     let ingest_line = if g.ingest_phase != IngestPhase::Idle {
         format!(
             "\n ingest  phase {ph} {idn}/{itot}  chan {chan}",
@@ -451,7 +520,7 @@ pub fn format_log(s: &Snapshot) -> String {
          \x20      pending {tp}  uploading {tu}  handles {th}  missing {tm}  retain req {rc}\n\
          \x20cache tex h/s {thh:.0} m/s {thm:.0} ev/s {the:.0} | pix h/s {pxh:.0} m/s {pxm:.0} ev/s {pxe:.0}\n\
          \x20uploads {up}/{cap} cap  backlog {bk}\n\
-         \x20ingest active {ai}  done {idn}/{itot}{ingest_line}",
+         \x20ingest active {ai}  done {idn}/{itot}{ingest_line}{export_line}",
         dt = s.dt,
         fms = s.frame_ms,
         mx = s.max_frame_ms,
@@ -496,6 +565,7 @@ pub fn format_log(s: &Snapshot) -> String {
         idn = g.ingest_done,
         itot = g.ingest_total,
         ingest_line = ingest_line,
+        export_line = export_line,
     )
 }
 
@@ -595,6 +665,12 @@ impl Default for DiagState {
 pub fn format_overlay(s: &Snapshot) -> String {
     let j = &s.jobs;
     let g = &s.g;
+    let export_line = format_export_line(
+        g.export_active,
+        g.export_done,
+        g.export_failed,
+        g.export_last_ms,
+    );
     let ingest_line = if g.ingest_phase != IngestPhase::Idle {
         format!(
             "\n ingest  phase {ph} {idn}/{itot}  chan {chan}",
@@ -615,7 +691,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
          thumb pending {tp} uploading {tu} handles {th} missing {tm}\n\
          tex h/s {thh:.0} ev/s {the:.0} | pix h/s {pxh:.0} ev/s {pxe:.0}\n\
          uploads/f {up}/{cap}  backlog {bk}\n\
-         ingest {idn}/{itot} active {ai}{ingest_line}",
+         ingest {idn}/{itot} active {ai}{ingest_line}{export_line}",
         fms = s.frame_ms,
         mx = s.max_frame_ms,
         ev = s.ev_per_frame,
@@ -652,6 +728,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
         itot = g.ingest_total,
         ai = g.active_ingests,
         ingest_line = ingest_line,
+        export_line = export_line,
     )
 }
 
@@ -1397,6 +1474,10 @@ mod tests {
             uploads_cap: 16,
             ingest_phase: IngestPhase::Idle,
             ingest_chan: 0,
+            export_active: 0,
+            export_done: 0,
+            export_failed: 0,
+            export_last_ms: 0,
         }
     }
 
@@ -1482,6 +1563,39 @@ mod tests {
         assert!(out.contains("frame"), "overlay shows frame time");
         assert!(out.contains("active 6"), "overlay shows active jobs");
         assert!(out.contains("pending"), "overlay shows a pending gauge");
+    }
+
+    #[test]
+    fn format_export_line_hidden_until_export_runs_then_shows_gauges() {
+        // Common case: nothing exported yet → empty (no clutter in the overlay/log).
+        assert_eq!(format_export_line(0, 0, 0, 0), "");
+        // After exports run, show in-flight + cumulative counts + last item time.
+        let line = format_export_line(1, 3, 1, 4200);
+        assert!(line.contains("active 1"), "shows in-flight gauge");
+        assert!(line.contains("done 3"), "shows completed count");
+        assert!(line.contains("failed 1"), "shows failed count");
+        assert!(line.contains("last 4200ms"), "shows last item wall time");
+    }
+
+    #[test]
+    fn format_log_includes_export_line_when_active() {
+        let g = Gauges {
+            export_active: 1,
+            export_done: 2,
+            ..sample_gauges()
+        };
+        let s = build_snapshot(
+            1.0,
+            &AppCounters::default(),
+            &AppCounters::default(),
+            &AppCounters::default(),
+            ferrolite_jobs::JobStats::default(),
+            g,
+            6.2,
+            11.0,
+            false,
+        );
+        assert!(format_log(&s).contains("export  active 1  done 2"));
     }
 
     #[test]

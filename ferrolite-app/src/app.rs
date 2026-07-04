@@ -2936,6 +2936,10 @@ impl eframe::App for FerroliteApp {
                 uploads_cap: MAX_THUMB_UPLOADS_PER_FRAME,
                 ingest_phase: crate::diag::ingest_phase(),
                 ingest_chan: crate::diag::ingest_chan(),
+                export_active: crate::diag::export_active(),
+                export_done: crate::diag::export_done(),
+                export_failed: crate::diag::export_failed(),
+                export_last_ms: crate::diag::export_last_ms(),
             };
             let stats = self.state.jobs.stats();
             if let Some(snap) = self.diag.tick(

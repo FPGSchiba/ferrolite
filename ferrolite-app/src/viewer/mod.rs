@@ -107,6 +107,14 @@ pub struct ViewerState {
     /// or full is ready and the crossfade is complete with no tiles pending). When
     /// set the paint loop stops requesting repaints to avoid a busy-loop.
     pub idle: bool,
+    /// The real, per-frame-current `show_full` computed by `drive_viewer`
+    /// (`full_ready && factor >= 1.0 && tiles_settled`) — i.e. whether the full
+    /// (1:1 sparse) tier is ACTUALLY on screen this frame, as opposed to
+    /// `full_ready` alone (which is true even while tiles are still streaming
+    /// in after a pan/zoom). Consulted by `toggle_split_compare` to decide
+    /// whether enabling the split would dead-end on the full tier and thus
+    /// needs an auto-fit back to the preview tier.
+    pub showing_full: bool,
 
     /// Image dimensions in pixels, stored once the preview arrives (needed for
     /// the fit↔1:1 double-click toggle and any future fit-on-resize logic).
@@ -221,6 +229,7 @@ impl ViewerState {
             crossfading: false,
             crossfade_elapsed: 0.0,
             idle: false,
+            showing_full: false,
             image_dims: None,
             preview_handle: None,
             full_handle: None,

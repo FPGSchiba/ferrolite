@@ -151,19 +151,20 @@ impl FerroliteApp {
     ///
     /// The split only renders on the preview tier (`drive_viewer`'s
     /// `split_active = v.split_compare && !show_full`) — once the sparse
-    /// "full" tile tier has taken over (`show_full`, which settles to
-    /// `v.full_ready && !v.crossfading` once idle) the toggle would otherwise
-    /// be a dead click. So on an off→on transition while already at/near that
-    /// full tier, force the view back to fit so the preview tier (and thus the
-    /// divider) is immediately visible again.
+    /// "full" tile tier has taken over the toggle would otherwise be a dead
+    /// click. So on an off→on transition while the full tier is actually
+    /// showing on screen right now (`v.showing_full`, the real per-frame
+    /// `show_full` persisted by `drive_viewer` — NOT merely `full_ready`,
+    /// which stays true while tiles are still streaming in after a pan/zoom),
+    /// force the view back to fit so the preview tier (and thus the divider)
+    /// is immediately visible again.
     fn toggle_split_compare(&mut self) {
         if let Some(v) = self.state.viewer.as_mut() {
             let turning_on = !v.split_compare;
             v.split_compare = !v.split_compare;
             if v.split_compare {
                 v.split_pos = 0.5;
-                let show_full_now = v.full_ready && !v.crossfading;
-                if turning_on && show_full_now {
+                if turning_on && v.showing_full {
                     if let Some(dims) = v.image_dims {
                         v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
                         v.idle = false; // resume the drive loop so the fit takes effect
@@ -1376,6 +1377,12 @@ impl FerroliteApp {
         let factor = v.tick_crossfade(dt);
         let tiles_settled = matches!(tiles_pending, Some(0));
         let show_full = v.full_ready && factor >= 1.0 && tiles_settled;
+        // Persist the real, per-frame-current value so `toggle_split_compare`
+        // (which runs outside this per-frame borrow, e.g. from a keyboard
+        // shortcut or menu click) can consult an accurate "is the full tier
+        // actually on screen right now" signal instead of a `full_ready`-only
+        // proxy that stays true while tiles are still streaming in.
+        v.showing_full = show_full;
 
         // Producer convergence: the shown full view is fully rendered only once
         // the GPU-truth needed set has been established (the sparse shader painted

@@ -219,6 +219,12 @@ pub struct ViewerState {
     /// `cancel_loads`) or when superseded by a newer bake request, so a stale
     /// result can never overwrite a fresher one.
     pub lens_bake_handle: Option<JobHandle>,
+    /// True while the searchable camera+lens picker (Spec 4.4, U8 Task 13) is
+    /// open. Persisted here (not egui memory) so it survives the panel's
+    /// per-frame `Option` plumbing the same way `hsl_band` does.
+    pub lens_picker_open: bool,
+    /// The picker's search needle, kept across frames while open.
+    pub lens_picker_query: String,
 }
 
 impl ViewerState {
@@ -274,6 +280,8 @@ impl ViewerState {
             lens_vignette: None,
             lens_resolved_name: None,
             lens_bake_handle: None,
+            lens_picker_open: false,
+            lens_picker_query: String::new(),
         }
     }
 

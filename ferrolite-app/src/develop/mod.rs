@@ -11,6 +11,7 @@ pub mod history;
 pub mod hsl_widget;
 pub mod lens_bake;
 pub mod lens_match;
+pub mod lens_picker;
 pub mod ops_edit;
 pub mod ops_persist;
 pub mod preview_cache;

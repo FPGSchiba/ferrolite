@@ -34,6 +34,10 @@ pub struct FerroliteApp {
     /// Whether the Settings window (`crate::settings::ui::show`) is open.
     /// Opened by `Action::OpenSettings` (Ctrl+, global) or the File menu.
     show_settings: bool,
+    /// One-shot guard: set `true` the first frame that has a valid render state
+    /// (pipelines pre-warmed), after kicking off the initial display-profile
+    /// detect. Ensures the startup detect fires exactly once.
+    did_display_detect: bool,
 }
 
 impl FerroliteApp {
@@ -72,6 +76,7 @@ impl FerroliteApp {
             did_restore: false,
             show_help: false,
             show_settings: false,
+            did_display_detect: false,
         }
     }
 
@@ -1192,6 +1197,65 @@ impl FerroliteApp {
     /// and invalidate full-res tiles so they re-render. Never rebuilds pipelines.
     ///
     /// Wired to the Develop adjustment panel's working-space `ComboBox`.
+    /// Detect the window's monitor profile (cheap UI-thread OS call), then
+    /// parse + bake the display LUT off the UI thread on `ferrolite-jobs`.
+    /// Bumps `display_detect_gen` so stale results from superseded re-detects
+    /// are dropped when they arrive. The ONLY UI-thread work here is the
+    /// `monitor_profile::detect` OS call (microseconds); the file read, ICC
+    /// parse and LUT bake all run inside the Background job (CLAUDE.md §1).
+    fn redetect_display_profile(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        use raw_window_handle::HasWindowHandle;
+
+        self.state.display_detect_gen += 1;
+        let generation = self.state.display_detect_gen;
+        let mode = self.state.settings.display_profile.clone();
+        let working = self.state.working_space;
+        let tx = self.state.tx.clone();
+
+        // UI-thread OS call only (cheap): get the ICC source + monitor key.
+        let (detected, key) = match frame.window_handle() {
+            Ok(h) => crate::monitor_profile::detect(h.as_raw()),
+            Err(_) => (None, 0),
+        };
+        self.state.last_monitor_key = key;
+        let source = crate::settings::dto::resolve(&mode, detected);
+
+        // Off-thread: file read + ICC parse + LUT bake. Never on the UI thread.
+        self.state
+            .jobs
+            .submit(ferrolite_jobs::Priority::Background, move |_cancel| {
+                let (lut, name) = match source {
+                    None => (None, "sRGB (default)".to_string()),
+                    Some(src) => match crate::monitor_profile::source_to_bytes(src)
+                        .ok()
+                        .and_then(|b| ferrolite_color::DisplayProfile::parse(&b).ok())
+                    {
+                        Some(profile) => match ferrolite_color::bake_display_lut(
+                            working,
+                            &profile,
+                            ferrolite_color::DISPLAY_LUT_SIZE,
+                        ) {
+                            Ok(lut) => {
+                                let name = profile.name.clone();
+                                (Some(lut), name)
+                            }
+                            Err(e) => {
+                                eprintln!("ferrolite: display LUT bake failed: {e}");
+                                (None, "Not detected — using sRGB".to_string())
+                            }
+                        },
+                        None => (None, "Not detected — using sRGB".to_string()),
+                    },
+                };
+                let _ = tx.send(crate::events::AppEvent::DisplayProfileResolved {
+                    lut,
+                    name,
+                    generation,
+                });
+            });
+        ctx.request_repaint();
+    }
+
     fn apply_working_space(
         &mut self,
         ctx: &egui::Context,
@@ -1218,6 +1282,11 @@ impl FerroliteApp {
                     .set_display_matrix(&gpu.queue, ferrolite_color::working_to_display(ws));
             }
         }
+
+        // Re-bake the display LUT for the new working space when a monitor
+        // profile is active. In sRGB mode this resolves to `None` and the
+        // event handler restores the analytic matrix above — a cheap no-op.
+        self.redetect_display_profile(ctx, frame);
 
         let cam = self.camera_to_working();
         let pw = self.preview_to_working();
@@ -1769,6 +1838,24 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // One-shot startup display-profile detect, once the render state is valid
+        // (ViewerPipelines pre-warmed in `new`). Fires exactly once; the resulting
+        // LUT/matrix is applied when the off-thread bake job reports back.
+        if !self.did_display_detect && frame.wgpu_render_state().is_some() {
+            self.did_display_detect = true;
+            self.redetect_display_profile(ctx, frame);
+        } else if self.did_display_detect {
+            // Multi-monitor follow: cheap per-frame monitor-key check. When the
+            // window moves to a display with a different profile, re-detect+bake.
+            use raw_window_handle::HasWindowHandle;
+            if let Ok(h) = frame.window_handle() {
+                let (_src, key) = crate::monitor_profile::detect(h.as_raw());
+                if key != self.state.last_monitor_key {
+                    self.redetect_display_profile(ctx, frame);
+                }
+            }
+        }
+
         let diag_t0 = crate::diag::enabled().then(std::time::Instant::now);
 
         if crate::diag::enabled() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
@@ -1932,6 +2019,40 @@ impl eframe::App for FerroliteApp {
                         a.start_item(Some(name.clone()));
                     }
                     ctx.request_repaint();
+                    continue;
+                }
+                crate::events::AppEvent::DisplayProfileResolved {
+                    lut,
+                    name,
+                    generation,
+                } => {
+                    // Drop results superseded by a newer re-detect.
+                    if *generation == self.state.display_detect_gen {
+                        self.state.display_profile_name = name.clone();
+                        if let Some(rs) = frame.wgpu_render_state() {
+                            let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+                            let renderer = rs.renderer.read();
+                            if let Some(vp) =
+                                renderer.callback_resources.get::<viewer::ViewerPipelines>()
+                            {
+                                match lut {
+                                    Some(l) => vp.pipelines.set_display_lut(
+                                        &gpu.queue,
+                                        l.size,
+                                        &l.rgba16f,
+                                        ferrolite_color::DISPLAY_LUT_SHAPER_GAMMA,
+                                    ),
+                                    None => vp.pipelines.set_display_matrix(
+                                        &gpu.queue,
+                                        ferrolite_color::working_to_display(
+                                            self.state.working_space,
+                                        ),
+                                    ),
+                                }
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
                     continue;
                 }
                 _ => {}

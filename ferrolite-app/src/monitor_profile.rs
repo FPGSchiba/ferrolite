@@ -5,7 +5,6 @@
 //! `detect`/`source_to_bytes` are called from the window-move / startup
 //! detect flow wired up in Unit 5; `ProfileSource` is already consumed by
 //! `settings::dto::resolve` (Unit 4 Task 10).
-#![allow(dead_code)]
 
 use std::path::PathBuf;
 
@@ -13,6 +12,9 @@ use std::path::PathBuf;
 /// job thread (keeps file I/O off the UI thread).
 pub enum ProfileSource {
     Path(PathBuf),
+    /// Only constructed on macOS (ICC bytes copied from the display's
+    /// `CGColorSpace`); on other targets detection yields a `Path`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Bytes(Vec<u8>),
 }
 

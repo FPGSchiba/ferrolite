@@ -133,7 +133,6 @@ pub enum AppEvent {
     /// monitor-managed LUT path; `None` → sRGB fallback. `generation` guards
     /// against stale results from superseded re-detects. Handled in `app.rs`
     /// (needs GPU state); the `apply` fold ignores it.
-    #[allow(dead_code)] // constructed by the display-profile detect job (Unit 5)
     DisplayProfileResolved {
         lut: Option<ferrolite_color::DisplayLut>,
         name: String,

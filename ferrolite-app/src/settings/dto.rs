@@ -318,7 +318,6 @@ pub enum PersistedDisplayProfile {
 
 /// Resolve the effective profile source. `Srgb` → None (analytic sRGB path);
 /// `Custom` → the file; `Auto` → whatever detection found (may be None).
-#[allow(dead_code)] // wired into the detect flow in Unit 5
 pub fn resolve(
     mode: &PersistedDisplayProfile,
     detected: Option<ProfileSource>,

@@ -86,10 +86,10 @@ pub fn spawn_export(
     source_path: PathBuf,
     dest: PathBuf,
     image_id: i64,
-) {
+) -> ferrolite_jobs::JobHandle {
     let tx = state.tx.clone();
     let egui_ctx = egui_ctx.clone();
-    state.jobs.submit(Priority::Background, move |cancel| {
+    let handle = state.jobs.submit(Priority::Background, move |cancel| {
         // Resolve the source to a GPU pyramid. For a Standard image this uploads
         // the full-res pyramid on the worker thread (never the UI thread).
         let pyramid = match source {
@@ -141,4 +141,5 @@ pub fn spawn_export(
         });
         egui_ctx.request_repaint();
     });
+    handle
 }

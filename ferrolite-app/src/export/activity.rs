@@ -6,9 +6,6 @@ use ferrolite_jobs::JobHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
-    // Constructed by `new_single`; wired into `export/mod.rs::spawn_export` in a
-    // later task. Not yet reachable from the binary, hence `allow(dead_code)`.
-    #[allow(dead_code)]
     Single,
     Batch,
 }
@@ -25,13 +22,10 @@ pub struct ExportActivity {
     pub failed: usize,
     /// Output filename of the in-flight image (already basename + truncatable).
     /// Read by a later task's status-bar indicator; not yet consumed.
-    #[allow(dead_code)]
     pub current_name: Option<String>,
     /// Per-image render progress for the current image. Read by a later task's
     /// status-bar indicator; not yet consumed.
-    #[allow(dead_code)]
     pub tile_done: u32,
-    #[allow(dead_code)]
     pub tile_total: u32,
     /// Cancellation targets: the single export job, or the one batch job.
     pub handles: Vec<JobHandle>,
@@ -54,8 +48,6 @@ impl ExportActivity {
         }
     }
 
-    // Constructed by a later task's single-export flow (`export/mod.rs::spawn_export`).
-    #[allow(dead_code)]
     pub fn new_single(name: Option<String>) -> Self {
         Self {
             kind: ExportKind::Single,
@@ -96,16 +88,12 @@ impl ExportActivity {
     }
 
     /// A new image started: set its name and reset per-image tile progress.
-    /// Called by a later task's batch/single progress wiring; not yet consumed.
-    #[allow(dead_code)]
     pub fn start_item(&mut self, name: Option<String>) {
         self.current_name = name;
         self.tile_done = 0;
         self.tile_total = 0;
     }
 
-    /// Called by a later task's batch/single progress wiring; not yet consumed.
-    #[allow(dead_code)]
     pub fn set_tiles(&mut self, done: u32, total: u32) {
         self.tile_done = done;
         self.tile_total = total;

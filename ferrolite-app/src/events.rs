@@ -95,10 +95,19 @@ pub enum AppEvent {
     PreviewCacheMiss { image_id: i64 },
     /// Tile progress for the running single-file export.
     ExportProgress {
+        // The single active `ExportActivity` (there is only ever one running
+        // export) is updated regardless of which image is open, so this is
+        // discarded (`image_id: _`) at the one call site — same pattern as
+        // `ExportFinished`/`BatchItemFinished`.
+        #[allow(dead_code)]
         image_id: i64,
         done: u32,
         total: u32,
     },
+    /// A batch export started a new image (carries the output file basename for
+    /// the status-bar indicator's "current file"). Single export sets its name at
+    /// spawn, so it does not emit this.
+    ExportItemStarted { name: String },
     /// The single-file export finished (ok=false → failed/cancelled). `message`
     /// is the status-bar text (success path, warnings, or the error).
     ExportFinished {
@@ -223,6 +232,7 @@ impl AppState {
             // fold here.
             AppEvent::ExportProgress { .. } => None,
             AppEvent::ExportFinished { .. } => None,
+            AppEvent::ExportItemStarted { .. } => None, // handled in app.rs (sets current_name)
             AppEvent::BatchItemFinished {
                 image_id: _,
                 ok,

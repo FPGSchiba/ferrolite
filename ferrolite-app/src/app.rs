@@ -535,7 +535,8 @@ impl FerroliteApp {
 
         let working_space = self.state.working_space;
 
-        crate::export::spawn_export(
+        let current_name = dest.file_name().map(|s| s.to_string_lossy().to_string());
+        let handle = crate::export::spawn_export(
             &self.state,
             ctx,
             gpu,
@@ -548,7 +549,9 @@ impl FerroliteApp {
             dest,
             image_id,
         );
-        self.state.warning = Some("Exporting…".to_string());
+        let mut activity = crate::export::ExportActivity::new_single(current_name);
+        activity.handles = vec![handle];
+        self.state.export_activity = Some(activity);
     }
 
     /// Resolve output filenames and spawn one Background export job per queued
@@ -1900,17 +1903,12 @@ impl eframe::App for FerroliteApp {
                     ctx.request_repaint();
                 }
                 crate::events::AppEvent::ExportProgress {
-                    image_id,
+                    image_id: _,
                     done,
                     total,
                 } => {
-                    if self
-                        .state
-                        .viewer
-                        .as_ref()
-                        .is_some_and(|v| v.image_id == *image_id)
-                    {
-                        self.state.warning = Some(format!("Exporting… {done}/{total}"));
+                    if let Some(a) = self.state.export_activity.as_mut() {
+                        a.set_tiles(*done, *total);
                     }
                     ctx.request_repaint();
                     continue;
@@ -1920,9 +1918,19 @@ impl eframe::App for FerroliteApp {
                     ok,
                     message,
                 } => {
-                    // Surface success + warnings, or the failure, in the status bar.
-                    let _ = ok;
+                    if let Some(a) = self.state.export_activity.as_mut() {
+                        if a.kind == crate::export::ExportKind::Single {
+                            a.item_finished(*ok, message.clone());
+                        }
+                    }
                     self.state.warning = Some(message.clone());
+                    ctx.request_repaint();
+                    continue;
+                }
+                crate::events::AppEvent::ExportItemStarted { name } => {
+                    if let Some(a) = self.state.export_activity.as_mut() {
+                        a.start_item(Some(name.clone()));
+                    }
                     ctx.request_repaint();
                     continue;
                 }

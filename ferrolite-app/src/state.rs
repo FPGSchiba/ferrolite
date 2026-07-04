@@ -1747,4 +1747,31 @@ mod tests {
         );
         assert_eq!(s.selection_anchor, None);
     }
+
+    /// `batch_running` must be true only while a BATCH activity is in flight —
+    /// a single export must never lock the Export-module queue.
+    #[test]
+    fn batch_running_true_only_for_inflight_batch() {
+        let mut s = AppState::for_test();
+
+        s.export_activity = Some(crate::export::ExportActivity::new_single(None));
+        assert!(
+            !s.batch_running(),
+            "single export must not report batch_running"
+        );
+
+        s.export_activity = Some(crate::export::ExportActivity::new_batch(2));
+        assert!(
+            s.batch_running(),
+            "an in-flight batch must report batch_running"
+        );
+
+        let a = s.export_activity.as_mut().unwrap();
+        a.item_finished(true, "ok".into());
+        a.item_finished(true, "ok".into());
+        assert!(
+            !s.batch_running(),
+            "batch_running must go false once the batch is done"
+        );
+    }
 }

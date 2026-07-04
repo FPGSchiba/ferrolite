@@ -54,9 +54,35 @@ pub fn spawn_batch(
             &items,
             cancel,
             |item| {
+                // Announce the file now being written (output basename) for the
+                // status-bar indicator.
+                let name = item
+                    .dest
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let _ = tx.send(AppEvent::ExportItemStarted { name });
+                egui_ctx.request_repaint();
+
                 crate::diag::export_item_begin();
                 let t0 = std::time::Instant::now();
-                let (ok, message) = run_one(&gpu, item, working_space, &options, cancel);
+                let image_id = item.image_id;
+                let mut last = 0u32;
+                let mut progress = |done: u32, total: u32| {
+                    // Throttle repaints like the single-file path (every 8 tiles
+                    // + on completion) so progress advances without flooding.
+                    let _ = tx.send(AppEvent::ExportProgress {
+                        image_id,
+                        done,
+                        total,
+                    });
+                    if done == total || done.saturating_sub(last) >= 8 {
+                        last = done;
+                        egui_ctx.request_repaint();
+                    }
+                };
+                let (ok, message) =
+                    run_one(&gpu, item, working_space, &options, cancel, &mut progress);
                 crate::diag::export_item_end(ok, t0.elapsed().as_millis() as u64);
                 (ok, message)
             },
@@ -101,6 +127,7 @@ fn run_one(
     working_space: WorkingSpace,
     options: &ExportOptions,
     cancel: &CancelToken,
+    progress: &mut dyn FnMut(u32, u32),
 ) -> (bool, String) {
     if cancel.is_cancelled() {
         return (false, "Export cancelled".to_string());
@@ -135,7 +162,6 @@ fn run_one(
     );
     let pyramid = Arc::new(GpuPyramidSource::new(gpu, &linear));
     let stack = OpStack::default();
-    let mut noop = |_done: u32, _total: u32| {};
     let req = ExportRequest {
         ctx: gpu,
         pyramid: &pyramid,
@@ -146,7 +172,7 @@ fn run_one(
         dest: &item.dest,
         source_path: &item.path,
     };
-    match run_export(req, cancel, &mut noop) {
+    match run_export(req, cancel, progress) {
         Ok(outcome) => {
             let base = format!("Exported {}", outcome.dest.display());
             let msg = if outcome.warnings.is_empty() {

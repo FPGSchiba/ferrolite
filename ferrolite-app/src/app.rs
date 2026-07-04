@@ -2092,7 +2092,8 @@ impl eframe::App for FerroliteApp {
                             .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
                     )
                     .show(ctx, |ui| {
-                        if crate::library::develop_filter_bar::show(ui, &mut self.state) {
+                        let outcome = crate::library::develop_filter_bar::show(ui, &mut self.state);
+                        if outcome.changed {
                             self.state.dirty = true;
                             let mut pf = crate::settings::dto::PersistedFilter::from_filter(
                                 &self.state.filter,
@@ -2100,6 +2101,9 @@ impl eframe::App for FerroliteApp {
                             pf.include_subfolders = self.state.include_subfolders;
                             self.state.settings.filter = pf;
                             self.mark_settings_dirty();
+                        }
+                        if outcome.toggle_split {
+                            self.toggle_split_compare();
                         }
                     });
                 egui::TopBottomPanel::top("develop_filmstrip")

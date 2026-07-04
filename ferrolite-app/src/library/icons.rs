@@ -233,6 +233,43 @@ pub fn queued_badge(painter: &Painter, top_right: Pos2, size: f32, fg: Color32, 
     );
 }
 
+/// Draw a before/after "split-compare" glyph: a rounded-rect outline with a
+/// vertical center divider, the left half subtly filled to read as "before" —
+/// pure geometry, no font glyph (IBM Plex Sans has no `⇔` glyph).
+///
+/// `size` is the overall icon edge length (square, centred at `center`).
+pub fn split_compare(painter: &Painter, center: Pos2, size: f32, color: Color32) {
+    let rect = Rect::from_center_size(center, Vec2::splat(size));
+    let rounding = size * 0.18;
+
+    // Left half: a dim fill so it reads as the "before" side of the split. Only
+    // the outer (left) edge is rounded — the divider-side edge stays square so
+    // the fill reads as a clean vertical cut, not a separately rounded chip.
+    let left = Rect::from_min_max(rect.min, Pos2::new(center.x, rect.max.y));
+    painter.rect_filled(
+        left,
+        egui::Rounding {
+            nw: rounding,
+            sw: rounding,
+            ne: 0.0,
+            se: 0.0,
+        },
+        Color32::from_black_alpha(70),
+    );
+
+    // Outline.
+    painter.rect_stroke(rect, rounding, Stroke::new(1.3, color));
+
+    // Center divider.
+    painter.line_segment(
+        [
+            Pos2::new(center.x, rect.min.y),
+            Pos2::new(center.x, rect.max.y),
+        ],
+        Stroke::new(1.3, color),
+    );
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

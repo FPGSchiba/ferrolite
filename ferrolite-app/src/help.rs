@@ -84,6 +84,7 @@ pub fn show(ctx: &egui::Context, open: &mut bool, keymap: &Keymap) {
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .fixed_size(egui::vec2(480.0, 520.0))
+        .frame(egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::symmetric(18.0, 12.0)))
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 draw_about(ui);

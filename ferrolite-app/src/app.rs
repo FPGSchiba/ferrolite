@@ -2594,11 +2594,15 @@ impl eframe::App for FerroliteApp {
                         .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
                 )
                 .show(ctx, |ui| {
-                    outcome = Some(crate::develop::adjustment_panel::show(
-                        ui,
-                        &mut self.state,
-                        working_space,
-                    ));
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            outcome = Some(crate::develop::adjustment_panel::show(
+                                ui,
+                                &mut self.state,
+                                working_space,
+                            ));
+                        });
                 });
             if let Some(outcome) = outcome {
                 if let Some(ws) = outcome.working_space {

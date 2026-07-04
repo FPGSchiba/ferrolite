@@ -26,6 +26,11 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click_and_drag());
 
+    let selected_id = resp.id.with("selected_point");
+    let mut selected: Option<usize> = ui
+        .memory(|m| m.data.get_temp::<Option<usize>>(selected_id))
+        .unwrap_or(None);
+
     // Per-component reset affordance (top-right corner), consistent with the
     // slider's reset icon. See CLAUDE.md "Per-component reset" rule.
     let reset_rect = egui::Rect::from_min_max(
@@ -86,6 +91,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
 
     for (i, &p) in points.iter().enumerate() {
         let is_hovered = hovered_idx == Some(i);
+        let is_selected = selected == Some(i);
         let radius = if is_hovered { DOT_R_HOVER } else { DOT_R };
         painter.circle(
             to_screen(p),
@@ -93,6 +99,15 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
             theme::ACCENT_BRIGHT,
             egui::Stroke::new(1.0, theme::BG_BASE),
         );
+        if is_selected {
+            // Accent ring around the selected point so selection reads clearly
+            // and independently of hover state.
+            painter.circle_stroke(
+                to_screen(p),
+                radius + 3.0,
+                egui::Stroke::new(1.5, theme::ACCENT),
+            );
+        }
     }
 
     // Reset icon: dim when already at default; matches the slider's scheme.
@@ -109,15 +124,23 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
 
     let mut changed = false;
     let mut commit = false;
+    let mut deleted = false;
+
     if let Some(pos) = resp
         .interact_pointer_pos()
         .filter(|p| !reset_rect.contains(*p))
     {
         let norm = to_norm(pos);
         if resp.drag_started() || resp.clicked() {
-            // Grab the nearest existing point, else insert a new one.
             match curve_math::grab_or_insert(&points, norm, HIT_R) {
-                GrabOrInsert::Grab(idx) => ui.memory_mut(|m| m.data.insert_temp(resp.id, idx)),
+                GrabOrInsert::Grab(idx) => {
+                    ui.memory_mut(|m| m.data.insert_temp(resp.id, idx));
+                    if resp.clicked() && !resp.dragged() {
+                        // A plain click (not a drag) on an existing point selects it.
+                        selected = Some(idx);
+                        ui.memory_mut(|m| m.data.insert_temp(selected_id, selected));
+                    }
+                }
                 GrabOrInsert::Insert => {
                     // Insert at the clamped coordinate, then grab THAT point by its
                     // exact (bit-identical) value — nearest_point can resolve to a
@@ -141,6 +164,18 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     if resp.drag_stopped() {
         commit = true;
     }
+
+    // Double-click a point to delete it.
+    if resp.double_clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if let Some(idx) = curve_math::nearest_point(&points, to_norm(pos), HIT_R) {
+                points = curve_math::delete_point(&points, idx);
+                changed = true;
+                commit = true;
+                deleted = true;
+            }
+        }
+    }
     // Right-click a point to delete it.
     if resp.secondary_clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
@@ -148,9 +183,33 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
                 points = curve_math::delete_point(&points, idx);
                 changed = true;
                 commit = true;
+                deleted = true;
             }
         }
     }
+    // Delete/Backspace removes the selected point, if any.
+    if let Some(idx) = selected {
+        let delete_key_pressed =
+            ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        if delete_key_pressed {
+            points = curve_math::delete_point(&points, idx);
+            changed = true;
+            commit = true;
+            deleted = true;
+        }
+    }
+    if deleted {
+        // The selected index may now be out of range (or the deletion was a
+        // no-op on a protected endpoint); clear it either way so a stale
+        // index can't linger and drive a later Delete press.
+        selected = None;
+        ui.memory_mut(|m| m.data.insert_temp(selected_id, selected));
+    }
+
+    ui.small(
+        egui::RichText::new("Drag to adjust · double/right-click or Delete to remove a point")
+            .color(theme::TEXT_FAINT),
+    );
 
     if changed {
         let s = if curve_math::is_identity(&points) {

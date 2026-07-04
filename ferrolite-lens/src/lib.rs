@@ -5,5 +5,10 @@
 mod backend;
 mod types;
 
-pub use backend::{load_bundled, LensDb, LensfunDb};
+pub use backend::{load_bundled, LensDb, LensfunDb, MAX_LENS_HALO};
 pub use types::{LensError, LensMatch, LensQuery, VignetteMap, WarpGrid, GRID_N, VIGNETTE_LEN};
+
+/// Halo (pixels) a tiled lens-corrected pass must over-fetch. Ceil + capped.
+pub fn lens_halo(g: &WarpGrid) -> u32 {
+    (g.max_disp.ceil() as u32).min(MAX_LENS_HALO)
+}

@@ -28,11 +28,25 @@ pub struct Contrast {
     pub amount: f32,
 }
 
+/// Interpolation between tone-curve control points.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub enum CurveMode {
+    /// Piecewise linear (sharp corners at control points).
+    /// Legacy back-compat: sidecars without `mode` load as Linear.
+    #[default]
+    Linear,
+    /// Monotone cubic Hermite (smooth, monotonic, no overshoot).
+    Smooth,
+}
+
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct ToneCurve {
     /// Control points in [0,1]×[0,1] (x ascending). Identity = `[(0,0),(1,1)]`
     /// or empty. Baked to a 256-entry monotone LUT by `uniforms::curve_lut`.
     pub points: Vec<(f32, f32)>,
+    /// Interpolation mode. Absent in pre-feature sidecars → Linear (serde default).
+    #[serde(default)]
+    pub mode: CurveMode,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -299,6 +313,7 @@ mod tests {
         let s = OpStack::default()
             .set_op(Op::ToneCurve(ToneCurve {
                 points: vec![(0.0, 0.0), (1.0, 1.0)],
+                mode: CurveMode::Linear,
             }))
             .set_op(Op::Hsl(Hsl {
                 bands: [HslBand {
@@ -357,7 +372,10 @@ mod tests {
                     lum: 0.0,
                 }; 8],
             }))
-            .set_op(Op::ToneCurve(ToneCurve { points: vec![] }))
+            .set_op(Op::ToneCurve(ToneCurve {
+                points: vec![],
+                mode: CurveMode::Linear,
+            }))
             .set_op(Op::Contrast(Contrast { amount: 0.1 }))
             .set_op(Op::WhiteBalance(WhiteBalance {
                 temp: 0.0,
@@ -377,5 +395,23 @@ mod tests {
                 OpKind::Geometry,
             ]
         );
+    }
+
+    #[test]
+    fn tonecurve_without_mode_field_deserializes_as_linear() {
+        // A sidecar written before this feature has no `mode` key.
+        let json = r#"{ "points": [[0.0,0.0],[1.0,1.0]] }"#;
+        let tc: ToneCurve = serde_json::from_str(json).unwrap();
+        assert_eq!(tc.mode, CurveMode::Linear);
+    }
+
+    #[test]
+    fn tonecurve_mode_roundtrips() {
+        let tc = ToneCurve {
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+            mode: CurveMode::Smooth,
+        };
+        let s = serde_json::to_string(&tc).unwrap();
+        assert_eq!(serde_json::from_str::<ToneCurve>(&s).unwrap(), tc);
     }
 }

@@ -1336,6 +1336,63 @@ impl FerroliteApp {
         }
     }
 
+    /// Spec 4.4 (U9) Step 1: attempt the cheap in-memory lens auto-match for
+    /// `image_id`'s viewer, once both its EXIF (`meta_loaded`) and its loaded
+    /// op-stack (`ops_loaded`) are known. One-shot per open
+    /// (`lens_auto_match_attempted`) and gated on `lens_match::should_auto_match`
+    /// so an existing `LensCorrection` op (persisted, or added/cleared this
+    /// session) is never second-guessed.
+    ///
+    /// Deliberately does NOT call `ops_edit::set_lens_correction` or spawn a
+    /// bake: it only stores the `LensMatch` candidate on the viewer for the
+    /// panel to read as its seed. No op is created, so `has_edits`/the
+    /// catalog badge/the sidecar are all untouched until the user actually
+    /// toggles a correction — opt-in is preserved.
+    ///
+    /// The DB lookup itself is a bundled-XML string/table search (no I/O, no
+    /// GPU), the same cost class already run inline for the manual picker
+    /// (`find_lenses`) and documented as UI-thread-safe in `lens_bake.rs`'s
+    /// module doc — hence no job is spawned for this step.
+    fn try_auto_match_lens(&mut self, image_id: i64) {
+        let Some(v) = self.state.viewer.as_ref() else {
+            return;
+        };
+        if v.image_id != image_id || v.lens_auto_match_attempted {
+            return;
+        }
+        if !v.meta_loaded || !v.ops_loaded {
+            return; // wait for both prerequisites before attempting/giving up
+        }
+        // Gather everything the match needs as owned values before taking the
+        // exclusive borrow below (mirrors the borrow discipline used elsewhere
+        // in this loop, e.g. `maybe_spawn_lens_bake`).
+        let should_match = crate::develop::lens_match::should_auto_match(&v.op_stack);
+        let query = v
+            .meta
+            .as_ref()
+            .and_then(crate::develop::lens_match::query_from_metadata);
+
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        v.lens_auto_match_attempted = true; // one-shot regardless of outcome below
+        if !should_match {
+            return; // an explicit LensCorrection op already exists: don't guess
+        }
+        let Some(db) = self.state.lens_db.clone() else {
+            return; // DB unavailable: lens correction section is disabled
+        };
+        let Some(query) = query else {
+            return; // decode failed, no EXIF, or no focal length: can't query
+        };
+        let candidate = ferrolite_lens::LensDb::match_lens(db.as_ref(), &query);
+        if let Some(v) = self.state.viewer.as_mut() {
+            if v.image_id == image_id {
+                v.lens_auto_match = candidate;
+            }
+        }
+    }
+
     /// Re-apply the currently-resolved display tail to the viewer pipelines.
     /// LUT path when a monitor profile is active, else the analytic sRGB matrix.
     /// Synchronous — safe to call on every image reveal (no re-bake, no flash).
@@ -2134,6 +2191,7 @@ impl eframe::App for FerroliteApp {
                     continue;
                 }
                 crate::events::AppEvent::OpsLoaded { image_id, stack } => {
+                    let mut rebake: Option<ferrolite_pipeline::LensCorrection> = None;
                     if let Some(v) = self.state.viewer.as_mut() {
                         if v.image_id == *image_id && !v.ops_loaded {
                             v.ops_loaded = true;
@@ -2142,9 +2200,56 @@ impl eframe::App for FerroliteApp {
                                     crate::develop::history::History::new(stack.clone(), 100);
                                 self.set_preview_and_full(frame, stack.clone());
                             }
+                            // Spec 4.4 (U9) Step 2: a persisted correction (any
+                            // toggle enabled, with a resolvable lens key) needs
+                            // its warp/vignette re-baked from scratch — the
+                            // grids themselves are never persisted (spec §7.4).
+                            // Until the bake returns, `LensUniform.use_warp`
+                            // stays 0 (identity), so nothing renders wrong in
+                            // the meantime.
+                            if let Some(lc) = stack.lens_correction() {
+                                if crate::develop::lens_bake::needs_rebake_on_load(&lc) {
+                                    rebake = Some(lc);
+                                }
+                            }
                         }
                     }
+                    if let Some(lc) = rebake {
+                        if let Some(db) = self.state.lens_db.clone() {
+                            let image_id = *image_id;
+                            let handle = crate::develop::lens_bake::spawn_lens_bake(
+                                &self.state.jobs,
+                                &db,
+                                &self.state.tx,
+                                ctx,
+                                image_id,
+                                lc,
+                            );
+                            if let Some(v) = self.state.viewer.as_mut() {
+                                if v.image_id == image_id {
+                                    v.lens_bake_handle = Some(handle);
+                                }
+                            }
+                        }
+                    }
+                    // Spec 4.4 (U9) Step 1: try the cheap in-memory auto-match
+                    // now that the loaded stack is known (it may resolve before
+                    // or after MetaLoaded — both event handlers attempt it, and
+                    // `lens_auto_match_attempted` makes the attempt one-shot).
+                    self.try_auto_match_lens(*image_id);
                     self.state.dirty = true;
+                    continue;
+                }
+                crate::events::AppEvent::MetaLoaded { image_id, meta } => {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == *image_id && !v.meta_loaded {
+                            v.meta_loaded = true;
+                            v.meta = meta.clone();
+                        }
+                    }
+                    self.try_auto_match_lens(*image_id);
+                    self.state.dirty = true;
+                    ctx.request_repaint();
                     continue;
                 }
                 crate::events::AppEvent::IngestDone => {
@@ -2896,6 +3001,23 @@ impl eframe::App for FerroliteApp {
                     v.path.clone(),
                 );
                 v.ops_read_handle = Some(h);
+            }
+            // Spec 4.4 (U9): read this image's EXIF off-thread once per open so
+            // the lens panel/picker can seed real camera/lens values instead of
+            // placeholders, and so the auto-match (below, once both this AND
+            // OpsLoaded resolve) has something to query. The catalog does not
+            // carry focal_length/aperture/lens at all (see `meta_read`'s doc
+            // comment), so this is a real (lightweight) decode, never inline.
+            if !v.meta_loaded && v.meta_read_handle.is_none() {
+                let h = crate::develop::meta_read::spawn_meta_read(
+                    &self.state.jobs,
+                    &self.state.tx,
+                    ctx,
+                    v.image_id,
+                    v.path.clone(),
+                    v.kind,
+                );
+                v.meta_read_handle = Some(h);
             }
         }
 

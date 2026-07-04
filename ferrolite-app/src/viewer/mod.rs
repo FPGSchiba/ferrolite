@@ -225,6 +225,33 @@ pub struct ViewerState {
     pub lens_picker_open: bool,
     /// The picker's search needle, kept across frames while open.
     pub lens_picker_query: String,
+
+    // ── EXIF plumbing (Spec 4.4, U9) ───────────────────────────────────────
+    /// This image's decoded EXIF (make/model/focal_length/aperture/lens),
+    /// read off-thread by `develop::meta_read::spawn_meta_read` on open (the
+    /// catalog only caches make/model, not focal/aperture/lens — see that
+    /// module's doc comment). `None` until the read resolves, or forever on a
+    /// decode error; consumers must fall back to the existing constant
+    /// defaults in that case.
+    pub meta: Option<ferrolite_decode::Metadata>,
+    /// `true` once a `MetaLoaded` event for this image has been received
+    /// (successful or not) — a one-shot guard mirroring `ops_loaded`.
+    pub meta_loaded: bool,
+    /// Handle for the in-flight metadata-read job; cancelled on navigation.
+    pub meta_read_handle: Option<JobHandle>,
+    /// The cheap in-memory auto-match candidate (Spec 4.4 Task 14 Step 1):
+    /// computed once EXIF is available AND the loaded stack has no
+    /// `LensCorrection` op yet. Purely a seed for the panel's "no lens picked
+    /// yet" default (camera_hint + a pre-filled lens/crop) — storing it here
+    /// does NOT create an op or enable any correction, so `has_edits` is
+    /// unaffected (opt-in preserved). `None` when unmatched, DB-unavailable,
+    /// or a persisted `LensCorrection` op already exists (auto-match only
+    /// applies to a brand-new, never-edited stack).
+    pub lens_auto_match: Option<ferrolite_lens::LensMatch>,
+    /// `true` once the auto-match attempt has run for this image (whether or
+    /// not it found a candidate) — a one-shot guard so it re-runs at most once
+    /// per open, not every frame while `meta`/`ops_loaded` are both `Some`.
+    pub lens_auto_match_attempted: bool,
 }
 
 impl ViewerState {
@@ -282,6 +309,11 @@ impl ViewerState {
             lens_bake_handle: None,
             lens_picker_open: false,
             lens_picker_query: String::new(),
+            meta: None,
+            meta_loaded: false,
+            meta_read_handle: None,
+            lens_auto_match: None,
+            lens_auto_match_attempted: false,
         }
     }
 
@@ -354,6 +386,9 @@ impl ViewerState {
             h.cancel();
         }
         if let Some(h) = self.lens_bake_handle.as_ref() {
+            h.cancel();
+        }
+        if let Some(h) = self.meta_read_handle.as_ref() {
             h.cancel();
         }
     }

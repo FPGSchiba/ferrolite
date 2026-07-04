@@ -107,3 +107,77 @@ pub fn spawn_lens_bake(
         ctx.request_repaint();
     })
 }
+
+/// Decide whether a just-loaded (persisted) `OpStack` needs its lens-correction
+/// products re-baked on open. Pure so the on-open wiring (`OpsLoaded` handler
+/// in `app.rs`) can be exercised without a `JobSystem`/GPU. A re-bake is only
+/// worthwhile when there is a resolvable lens key AND at least one correction
+/// is actually enabled — a `LensCorrection` op with everything toggled off (or
+/// no `lens_id` at all) bakes to an all-`None` `LensBakeResult` identical to
+/// never baking, so skipping the job entirely avoids a pointless DB lookup on
+/// every single Develop open.
+pub fn needs_rebake_on_load(lc: &LensCorrection) -> bool {
+    lc.lens_id.is_some() && (lc.distortion.enabled || lc.tca.enabled || lc.vignetting.enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrolite_pipeline::Correction;
+
+    fn lc(lens_id: Option<&str>, dist: bool, tca: bool, vig: bool) -> LensCorrection {
+        LensCorrection {
+            lens_id: lens_id.map(String::from),
+            focal_len: 24.0,
+            aperture: 8.0,
+            crop_factor: 1.0,
+            distortion: Correction {
+                enabled: dist,
+                amount: 1.0,
+            },
+            tca: Correction {
+                enabled: tca,
+                amount: 1.0,
+            },
+            vignetting: Correction {
+                enabled: vig,
+                amount: 1.0,
+            },
+        }
+    }
+
+    #[test]
+    fn no_rebake_when_no_lens_matched() {
+        assert!(!needs_rebake_on_load(&lc(None, true, true, true)));
+    }
+
+    #[test]
+    fn no_rebake_when_lens_matched_but_all_corrections_off() {
+        assert!(!needs_rebake_on_load(&lc(
+            Some("EF 24-70"),
+            false,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn rebakes_when_lens_matched_and_distortion_enabled() {
+        assert!(needs_rebake_on_load(&lc(
+            Some("EF 24-70"),
+            true,
+            false,
+            false
+        )));
+    }
+
+    #[test]
+    fn rebakes_when_lens_matched_and_only_vignetting_enabled() {
+        assert!(needs_rebake_on_load(&lc(
+            Some("EF 24-70"),
+            false,
+            false,
+            true
+        )));
+    }
+}

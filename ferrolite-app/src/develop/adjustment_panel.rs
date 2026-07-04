@@ -9,15 +9,20 @@ use crate::widgets::slider::EguiSlider;
 use ferrolite_color::WorkingSpace;
 use ferrolite_pipeline::{Aspect, Correction, Geometry, LensCorrection, Op, OpKind, OpStack};
 
-/// Default focal length seeded for a brand-new `LensCorrection` op (no EXIF
-/// plumbing exists yet to seed this from the shot's actual focal length — see
-/// `develop::lens_match::query_from_metadata`, which is not yet wired to any
-/// metadata source in `ViewerState`). The advanced sub-area lets the author
-/// correct it immediately for the shot at hand.
+/// Fallback focal length seeded for a brand-new `LensCorrection` op ONLY when
+/// EXIF has no focal length (`ViewerState::meta` is `None`, still loading, or
+/// the decoded `Metadata.focal_length` is itself absent) — a real shot's
+/// focal length is preferred whenever it's available (Spec 4.4, U9). The
+/// advanced sub-area lets the author correct it immediately either way.
 const DEFAULT_FOCAL_LEN: f32 = 50.0;
-/// Default aperture seeded for a brand-new op; mirrors `query_from_metadata`'s
-/// f/8 fallback for the same reason (no EXIF aperture available here yet).
+/// Fallback aperture seeded for a brand-new op; mirrors `query_from_metadata`'s
+/// own f/8 fallback for the same "EXIF absent" case.
 const DEFAULT_APERTURE: f32 = 8.0;
+/// Fallback crop factor seeded for a brand-new op when no auto-match candidate
+/// is available yet (unmatched EXIF, DB unavailable, or the match hasn't
+/// resolved this frame) — 1.0 (full-frame) is the same neutral default
+/// `find_lenses`/`match_by_id` fall back to elsewhere in the lens pipeline.
+const DEFAULT_CROP_FACTOR: f32 = 1.0;
 
 pub struct EditOutcome {
     pub stack: OpStack,
@@ -243,11 +248,47 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             ui.weak("Lens database unavailable — corrections disabled.");
             return;
         };
-        let lc = stack.lens_correction().unwrap_or(LensCorrection {
+        // Seed a brand-new op (no `LensCorrection` in the stack yet) from real
+        // EXIF + the auto-match candidate (Spec 4.4, U9) rather than the
+        // hardcoded 50mm/f8/1.0 placeholders: focal/aperture come straight
+        // from the decoded `Metadata` when present, and lens_id/crop_factor
+        // come from the auto-match candidate `try_auto_match_lens` stored on
+        // the viewer (opt-in: reading it here does NOT enable anything — the
+        // corrections below all start `enabled: false`, same as before). Any
+        // EXIF/candidate field that's still missing (loading, decode failure,
+        // or genuinely absent) falls back to the same constants as before.
+        // Copied out as owned values up front (not held as borrows) so the
+        // rest of this closure can freely re-borrow `state.viewer` mutably.
+        let seed_camera_hint = state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.meta.as_ref())
+            .map(|m| format!("{} {}", m.make, m.model));
+        let seed_focal = state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.meta.as_ref())
+            .and_then(|m| m.focal_length);
+        let seed_aperture = state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.meta.as_ref())
+            .and_then(|m| m.aperture);
+        let seed_crop_factor = state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.lens_auto_match.as_ref())
+            .map(|m| m.crop_factor);
+        let auto_match_name = state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.lens_auto_match.as_ref())
+            .map(|m| m.display_name.clone());
+        let lc = stack.lens_correction().unwrap_or_else(|| LensCorrection {
             lens_id: None,
-            focal_len: DEFAULT_FOCAL_LEN,
-            aperture: DEFAULT_APERTURE,
-            crop_factor: 1.0,
+            focal_len: seed_focal.unwrap_or(DEFAULT_FOCAL_LEN),
+            aperture: seed_aperture.unwrap_or(DEFAULT_APERTURE),
+            crop_factor: seed_crop_factor.unwrap_or(DEFAULT_CROP_FACTOR),
             distortion: Correction::default(),
             tca: Correction::default(),
             vignetting: Correction::default(),
@@ -257,7 +298,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         let mut amount_dragged = false; // an Amount slider moved mid-drag (preview only)
         let mut amount_drag_stopped = false; // an Amount slider drag just released (commit)
 
-        // Matched-lens label + picker launcher + clear.
+        // Matched-lens label + picker launcher + clear. When no op exists yet
+        // (no `lens_id` picked/persisted), fall back to showing the Task-14
+        // auto-match candidate's name (`auto_match_name`, hoisted above) so
+        // the panel reflects the real EXIF match immediately on open, before
+        // the user has touched anything — still without creating an op
+        // (opt-in preserved).
         ui.horizontal(|ui| {
             let resolved = state
                 .viewer
@@ -266,7 +312,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             let label = match (&lc.lens_id, &resolved) {
                 (Some(_), Some(name)) => name.clone(),
                 (Some(id), None) => format!("{id} (unresolved)"),
-                (None, _) => "No lens matched".to_string(),
+                (None, _) => auto_match_name
+                    .clone()
+                    .map(|name| format!("{name} (suggested)"))
+                    .unwrap_or_else(|| "No lens matched".to_string()),
             };
             ui.label(label);
             if ui.small_button("Choose lens\u{2026}").clicked() {
@@ -285,9 +334,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         });
 
         // The picker modal itself (drawn as a separate egui::Window; only
-        // shown while `lens_picker_open`). camera_hint is empty until EXIF
-        // make/model is plumbed into ViewerState — find_lenses degrades
-        // gracefully to the lens's own calibration crop in that case.
+        // shown while `lens_picker_open`). camera_hint is the real EXIF
+        // make/model (Spec 4.4, U9, `seed_camera_hint` hoisted above) when
+        // available; empty until `meta` loads or when the decode failed —
+        // `find_lenses` degrades gracefully to the lens's own calibration
+        // crop in that case (unchanged behavior).
         let picker_open = state
             .viewer
             .as_ref()
@@ -299,7 +350,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                 .as_ref()
                 .map(|v| v.lens_picker_query.clone())
                 .unwrap_or_default();
-            if let Some(outcome) = lens_picker::show(ui.ctx(), db.as_ref(), "", &mut query) {
+            if let Some(outcome) = lens_picker::show(
+                ui.ctx(),
+                db.as_ref(),
+                seed_camera_hint.as_deref().unwrap_or(""),
+                &mut query,
+            ) {
                 if let Some(v) = state.viewer.as_mut() {
                     v.lens_picker_open = false;
                 }

@@ -148,6 +148,15 @@ pub enum AppEvent {
         image_id: i64,
         result: crate::develop::lens_bake::LensBakeResult,
     },
+    /// An off-thread EXIF metadata read (`develop::meta_read::spawn_meta_read`)
+    /// finished on Develop open. `meta = None` on a decode error — the panel
+    /// then falls back to its constant defaults. Handled in `app.rs` (drives
+    /// the cheap in-memory auto-match against `state.lens_db`); the `apply`
+    /// fold ignores it (no counters to update).
+    MetaLoaded {
+        image_id: i64,
+        meta: Option<ferrolite_decode::Metadata>,
+    },
 }
 
 impl AppState {
@@ -268,6 +277,9 @@ impl AppState {
             // Handled in `app.rs` (needs GPU state to upload the warp/vignette
             // textures and rebuild the tile producer); nothing to fold here.
             AppEvent::LensBaked { .. } => None,
+            // Handled in `app.rs` (drives the auto-match against `state.lens_db`
+            // and seeds the panel); nothing to fold here.
+            AppEvent::MetaLoaded { .. } => None,
         }
     }
 }

@@ -6,12 +6,12 @@
 
 use ferrolite_decode::Metadata;
 use ferrolite_lens::LensQuery;
+use ferrolite_pipeline::OpStack;
 
 /// A query needs at least camera make/model + a focal length (the correction
 /// model is focal-dependent). Aperture defaults to a mid value (f/8) when
 /// absent — vignetting is the only correction that consumes aperture;
 /// distortion/TCA don't, so a missing aperture must not block those.
-#[allow(dead_code)] // wired to the auto-match-on-open trigger + manual picker (later task)
 pub fn query_from_metadata(m: &Metadata) -> Option<LensQuery> {
     let focal = m.focal_length?;
     Some(LensQuery {
@@ -21,6 +21,18 @@ pub fn query_from_metadata(m: &Metadata) -> Option<LensQuery> {
         focal_len: focal,
         aperture: m.aperture.unwrap_or(8.0),
     })
+}
+
+/// Gate for the auto-match-on-open trigger (Spec 4.4 Task 14 Step 1): a
+/// candidate should only be computed for a stack that has NEVER had a
+/// `LensCorrection` op — i.e. a brand-new image, or one whose correction was
+/// explicitly cleared/reset by the user. Once a `LensCorrection` op exists
+/// (persisted or user-added this session), the auto-match must stay out of
+/// the way: recomputing it would silently overwrite an explicit `Clear` or a
+/// manually-picked-then-reset lens with a fresh guess. Pure so the on-open
+/// wiring in `app.rs` can be unit-tested without a `LensfunDb`/`JobSystem`.
+pub fn should_auto_match(stack: &OpStack) -> bool {
+    stack.lens_correction().is_none()
 }
 
 /// Load the bundled Lensfun DB once. On failure, logs to stderr and returns
@@ -83,5 +95,33 @@ mod tests {
     fn carries_none_lens_model_when_exif_has_no_lens() {
         let q = query_from_metadata(&meta(None, Some(35.0), Some(4.0))).unwrap();
         assert_eq!(q.lens_model, None);
+    }
+
+    #[test]
+    fn should_auto_match_true_for_a_fresh_stack() {
+        assert!(should_auto_match(&OpStack::default()));
+    }
+
+    #[test]
+    fn should_auto_match_false_once_a_lens_correction_op_exists() {
+        use ferrolite_pipeline::{Correction, LensCorrection};
+        let lc = LensCorrection {
+            lens_id: None,
+            focal_len: 24.0,
+            aperture: 8.0,
+            crop_factor: 1.0,
+            distortion: Correction {
+                enabled: true,
+                amount: 1.0,
+            },
+            tca: Correction::default(),
+            vignetting: Correction::default(),
+        };
+        let stack = OpStack::default().set_op(ferrolite_pipeline::Op::LensCorrection(lc));
+        assert!(
+            !should_auto_match(&stack),
+            "an existing LensCorrection op (even user-enabled with no lens_id) \
+             must not be silently overwritten by a fresh auto-match guess"
+        );
     }
 }

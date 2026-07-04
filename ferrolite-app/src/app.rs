@@ -901,11 +901,16 @@ impl FerroliteApp {
                     // unedited-but-color-managed.
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    // Lens bake products are wired in a later task (Plan D); until
+                    // then the producer binds the identity warp/vignette defaults
+                    // (no lens correction), which is byte-identical to pre-lens.
                     let tep = ferrolite_pipeline::TileEditPipeline::new(
                         ctx_arc,
                         pyramid,
                         v.op_stack.clone(),
                         cam,
+                        None,
+                        None,
                     );
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                     let version = v.opstack_version.max(1);
@@ -1140,8 +1145,14 @@ impl FerroliteApp {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let tep =
-                        ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, shown.clone(), cam);
+                    let tep = ferrolite_pipeline::TileEditPipeline::new(
+                        ctx_arc,
+                        pyr,
+                        shown.clone(),
+                        cam,
+                        None,
+                        None,
+                    );
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {

@@ -38,8 +38,12 @@ struct Lens {
 
 // Manual bilinear fetch of the two warp textures at normalized `base_uv`,
 // returning per-channel distorted source coords: `.rg = R uv`, `.ba = G uv`,
-// and B uv in the `out_b` out-param. Grid is n×n over [0,1] with texel centers
-// at the grid nodes; we map uv to grid space [0, n-1] and lerp the 4 neighbors.
+// and B uv in the `out_b` out-param. The grid is n×n and node `i` sits at
+// normalized coord `i/(n-1)` (NOT at texel centers `(i+0.5)/n`) — this matches
+// `ferrolite-lens::bake_geometry`, which divides each result coord by `n-1`. We
+// therefore invert with `g = base_uv * (n-1)` to grid space `[0, n-1]`, clamp,
+// and lerp the 4 neighboring nodes. The 1×1 identity grid degenerates safely
+// (`n-1 = 0` → clamp pins to node 0).
 fn warp_sample(base_uv: vec2<f32>, out_b: ptr<function, vec2<f32>>) -> vec4<f32> {
     let dims = textureDimensions(warp_a);
     let n = vec2<f32>(f32(dims.x), f32(dims.y));
@@ -101,8 +105,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b_final = mix(base_uv, bch_uv, lens.dist_amount);
 
     let r = textureSampleLevel(src, samp, r_final, 0.0).r;
-    let g = textureSampleLevel(src, samp, g_final, 0.0).g;
+    // Sample green once and reuse its alpha (green is the geometric reference, so
+    // alpha follows it) — avoids a second textureSampleLevel at `g_final`.
+    let g_sample = textureSampleLevel(src, samp, g_final, 0.0);
     let b = textureSampleLevel(src, samp, b_final, 0.0).b;
-    let alpha = textureSampleLevel(src, samp, g_final, 0.0).a;
-    textureStore(dst, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(r, g, b, alpha));
+    textureStore(dst, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<f32>(r, g_sample.g, b, g_sample.a));
 }

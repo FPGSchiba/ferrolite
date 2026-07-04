@@ -22,12 +22,13 @@ use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest, VignetteNode};
-use crate::op::{Aspect, CropRect, Geometry, OpStack};
+use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
-    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_halo,
-    sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform, LensUniform,
-    SharpenUniform, VignetteUniform, WbUniform,
+    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, lens_halo_px,
+    sharpen_halo, sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform,
+    HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
 };
+use ferrolite_lens::{VignetteMap, WarpGrid};
 
 pub struct TileEditPipeline {
     ctx: Arc<GpuContext>,
@@ -52,13 +53,25 @@ pub struct TileEditPipeline {
 }
 
 impl TileEditPipeline {
+    /// Construct the per-tile producer, baking the geometry transform and the
+    /// halo (max of the sharpen halo and the lens-warp halo) at construction.
+    ///
+    /// `warp_grid` / `vignette_map` are the app's CURRENT lens bake products (from
+    /// `ferrolite-lens`); pass `None` when no lens is matched or the bake has not
+    /// completed — the head then binds the identity warp / vignette defaults and
+    /// the shader takes the byte-identical no-correction path. When a grid is
+    /// present, the lens halo (over-fetch for the distortion displacement) is
+    /// folded into the haloed tile extent so per-tile borders stay seamless.
     pub fn new(
         ctx: Arc<GpuContext>,
         source: Arc<GpuPyramidSource>,
         stack: OpStack,
         camera_to_working: [[f32; 3]; 3],
+        warp_grid: Option<&WarpGrid>,
+        vignette_map: Option<&VignetteMap>,
     ) -> Self {
-        let halo = sharpen_halo(stack.sharpen());
+        let lc: Option<LensCorrection> = stack.lens_correction();
+        let halo = sharpen_halo(stack.sharpen()).max(lens_halo_px(lc.as_ref(), warp_grid));
         let geometry = stack.geometry().unwrap_or(Geometry {
             crop: CropRect::full(),
             angle_deg: 0.0,
@@ -160,6 +173,26 @@ impl TileEditPipeline {
             vec![hsl_id],
         );
 
+        // Bind the lens bake products (or leave the identity defaults). The head
+        // owns the warp grid + `LensUniform`; the vignette node owns the gain LUT
+        // and reads its lerp amount from the `vignette` cell. `set_warp`/
+        // `set_vignette` rebuild only the cached views (bake-time, not per frame),
+        // and the uniform writes are buffer-only — no pipeline rebuild.
+        if let Some(grid) = warp_grid {
+            head.set_warp(WarpGridTexture::upload(&ctx, grid));
+        }
+        head.set_lens_uniform(crate::uniforms::lens_uniform(
+            lc.as_ref(),
+            warp_grid.is_some(),
+        ));
+        if let Some(map) = vignette_map {
+            vignette_node.set_vignette(VignetteTexture::upload(&ctx, map));
+        }
+        vignette.set(VignetteUniform {
+            vig_amount: crate::uniforms::vignette_amount(lc.as_ref()),
+            pad: [0.0; 3],
+        });
+
         Self {
             ctx,
             graph,
@@ -190,13 +223,16 @@ impl TileEditPipeline {
     /// tone curve, HSL, sharpen amount) from `stack` and dirty the chain so the
     /// next `produce_tile` re-renders.
     ///
-    /// LIMITATION: the geometry transform (crop/rotate) and the sharpen **halo**
-    /// are fixed at construction (baked into the `GeometryHeadNode` and the haloed
-    /// extent). `set_stack` does NOT update them. If `stack.geometry()` changes or
-    /// `sharpen_halo(stack.sharpen())` differs from the current `halo()`, this
-    /// pipeline must be DISCARDED and rebuilt with `TileEditPipeline::new` — calling
-    /// `set_stack` alone will silently keep the old geometry/halo. (A later plan that
-    /// wires interactive edits is responsible for that rebuild decision.)
+    /// LIMITATION: the geometry transform (crop/rotate), the halo (max of the
+    /// sharpen and lens-warp halos), and the baked lens warp grid are fixed at
+    /// construction (baked into the `GeometryHeadNode` and the haloed extent).
+    /// `set_stack` does NOT update them. If `stack.geometry()` changes, the halo
+    /// changes, or the rebuild-relevant lens key changes (lens id / focal / aperture
+    /// / crop / enabled flags — anything that re-bakes the grid), this pipeline must
+    /// be DISCARDED and rebuilt with `TileEditPipeline::new` — calling `set_stack`
+    /// alone will silently keep the old geometry/halo/grid. `needs_full_rebuild` in
+    /// the app makes that decision. Amount-only lens changes are uniform updates via
+    /// the lens/vignette setters (no rebuild).
     pub fn set_stack(&mut self, stack: OpStack) {
         self.exposure.set(exposure_uniform(stack.exposure()));
         self.wb

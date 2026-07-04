@@ -383,6 +383,46 @@ impl Default for VignetteUniform {
     }
 }
 
+/// Build the `LensUniform` (per-channel amounts + `use_warp` flag) for the
+/// geometry pass from the op's `LensCorrection` and whether a real warp grid is
+/// bound. A disabled correction contributes amount 0 (identity for that channel
+/// group); `use_warp = 1` only when a grid is present, so with no grid the shader
+/// takes the byte-identical no-correction path regardless of the amounts.
+pub fn lens_uniform(lc: Option<&LensCorrection>, has_grid: bool) -> LensUniform {
+    match lc {
+        Some(l) => LensUniform {
+            dist_amount: if l.distortion.enabled {
+                l.distortion.amount
+            } else {
+                0.0
+            },
+            tca_amount: if l.tca.enabled { l.tca.amount } else { 0.0 },
+            vig_amount: if l.vignetting.enabled {
+                l.vignetting.amount
+            } else {
+                0.0
+            },
+            use_warp: if has_grid { 1 } else { 0 },
+        },
+        None => LensUniform {
+            dist_amount: 0.0,
+            tca_amount: 0.0,
+            vig_amount: 0.0,
+            use_warp: 0,
+        },
+    }
+}
+
+/// The vignette pass lerp amount from the op's `LensCorrection`. Zero (identity)
+/// unless vignetting is enabled. The vignette pass is separate from the geometry
+/// warp, so this drives `VignetteNode`, not the `LensUniform`.
+pub fn vignette_amount(lc: Option<&LensCorrection>) -> f32 {
+    match lc {
+        Some(l) if l.vignetting.enabled => l.vignetting.amount,
+        _ => 0.0,
+    }
+}
+
 /// The geometric halo (px) a tiled lens-corrected pass over-fetches. Zero unless
 /// distortion or TCA is enabled AND a grid is present.
 pub fn lens_halo_px(lc: Option<&LensCorrection>, grid: Option<&WarpGrid>) -> u32 {

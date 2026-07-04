@@ -1,6 +1,11 @@
 //! Shared golden-test helpers (mirrors ferrolite-vt/tests/common). Golden PNGs
 //! are authored on the dev GPU (set UPDATE_GOLDEN=1 or delete the fixture) and
 //! committed; in headless CI the GPU tests skip before reaching these.
+//!
+//! This module is compiled into every integration-test binary (`golden`,
+//! `color_golden`, `lens_golden`); each uses a different subset of the helpers,
+//! so unused-item warnings here are expected and suppressed.
+#![allow(dead_code)]
 
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;

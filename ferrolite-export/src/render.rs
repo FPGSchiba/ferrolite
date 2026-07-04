@@ -116,11 +116,15 @@ pub fn render_tiled(
     }
 
     // Build the per-tile edit pipeline ONCE for this export (CLAUDE.md GPU rule).
+    // Lens bake products are wired at a later task; export currently binds the
+    // identity warp/vignette defaults (no lens correction).
     let mut pipeline = TileEditPipeline::new(
         ctx.clone(),
         pyramid.clone(),
         stack.clone(),
         camera_to_working,
+        None,
+        None,
     );
 
     let m = working_to_output(working_space, output_space); // ferrolite_color::Mat3

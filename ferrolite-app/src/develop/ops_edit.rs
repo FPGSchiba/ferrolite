@@ -35,11 +35,34 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
     }
 }
 
-/// The full-res `TileEditPipeline` bakes geometry + the sharpen halo at
-/// construction; only a change to either requires discarding + rebuilding it.
-/// Color-only changes are applied via `TileEditPipeline::set_stack`.
+/// The rebuild-relevant lens fingerprint: everything that changes the baked
+/// warp grid (hence the halo). Deliberately EXCLUDES the per-correction
+/// `amount`s — those are uniform-only updates (`set_lens_uniform`), not a
+/// rebuild. `lens_id`/`focal_len`/`aperture`/`crop_factor` all feed the bake, so
+/// a change to any of them yields a new grid + halo and must rebuild.
+fn lens_rebuild_key(s: &OpStack) -> (Option<String>, bool, bool, u32, u32, u32) {
+    match s.lens_correction() {
+        Some(l) => (
+            l.lens_id,
+            l.distortion.enabled,
+            l.tca.enabled,
+            l.focal_len.to_bits(),
+            l.aperture.to_bits(),
+            l.crop_factor.to_bits(),
+        ),
+        None => (None, false, false, 0, 0, 0),
+    }
+}
+
+/// The full-res `TileEditPipeline` bakes geometry + the sharpen/lens halo and
+/// the warp grid at construction; only a change to geometry, the sharpen halo,
+/// or the rebuild-relevant lens key requires discarding + rebuilding it.
+/// Color-only changes (and lens/vignette Amount-only changes) are applied via
+/// `TileEditPipeline::set_stack` / the lens-uniform setters without a rebuild.
 pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
-    old.geometry() != new.geometry() || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
+    old.geometry() != new.geometry()
+        || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
+        || lens_rebuild_key(old) != lens_rebuild_key(new)
 }
 
 #[cfg(test)]
@@ -92,5 +115,35 @@ mod tests {
             aspect: ferrolite_pipeline::Aspect::Free,
         }));
         assert!(needs_full_rebuild(&base, &geo), "geometry change: rebuild");
+    }
+
+    #[test]
+    fn needs_full_rebuild_on_lens_enable_and_lens_change() {
+        let base = OpStack::default();
+        let lc = |dist_on: bool, id: &str| ferrolite_pipeline::LensCorrection {
+            lens_id: Some(id.into()),
+            focal_len: 24.0,
+            aperture: 8.0,
+            crop_factor: 1.0,
+            distortion: ferrolite_pipeline::Correction {
+                enabled: dist_on,
+                amount: 1.0,
+            },
+            tca: ferrolite_pipeline::Correction::default(),
+            vignetting: ferrolite_pipeline::Correction::default(),
+        };
+        let on = base.set_op(Op::LensCorrection(lc(true, "A")));
+        assert!(
+            needs_full_rebuild(&base, &on),
+            "enabling distortion changes the halo"
+        );
+        // Amount-only change must NOT rebuild:
+        let mut lc2 = on.lens_correction().unwrap();
+        lc2.distortion.amount = 0.5;
+        let amt = on.set_op(Op::LensCorrection(lc2));
+        assert!(!needs_full_rebuild(&on, &amt), "Amount is uniform-only");
+        // Different lens id → rebuild (new grid + halo):
+        let other = base.set_op(Op::LensCorrection(lc(true, "B")));
+        assert!(needs_full_rebuild(&on, &other));
     }
 }

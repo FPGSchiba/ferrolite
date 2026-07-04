@@ -18,9 +18,10 @@ impl EditTileProducer {
         Self { pipeline }
     }
 
-    /// Update the producer's op stack in place (color-only changes). Geometry /
-    /// halo-radius changes are baked at construction and require rebuilding the
-    /// whole producer, not this passthrough.
+    /// Update the producer's op stack in place (color-only changes). Geometry,
+    /// halo-radius, and the baked lens warp grid are fixed at construction and a
+    /// change to any of them requires rebuilding the whole producer (via
+    /// `needs_full_rebuild`), not this passthrough.
     pub fn set_stack(&mut self, stack: ferrolite_pipeline::OpStack) {
         self.pipeline.set_stack(stack);
     }

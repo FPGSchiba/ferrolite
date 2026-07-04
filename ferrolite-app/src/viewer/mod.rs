@@ -204,6 +204,21 @@ pub struct ViewerState {
     /// the Library thumbnail when leaving Develop. Set only in the app's
     /// `apply_edit`/undo/redo paths — NOT in the `OpsLoaded` load path.
     pub edits_dirty: bool,
+
+    // ── Lens correction bake (Spec 4.4, U7) ────────────────────────────────
+    /// The current lens bake products for this image's `LensCorrection`
+    /// (`None`/`None` = no lens matched, or distortion+TCA/vignetting
+    /// disabled — both render as identity). Threaded into `TileEditPipeline::
+    /// new` at every rebuild so full-res tiles apply the live correction.
+    pub lens_warp: Option<ferrolite_lens::WarpGrid>,
+    pub lens_vignette: Option<ferrolite_lens::VignetteMap>,
+    /// Human-readable resolved lens name for the panel label, or `None` when
+    /// `lens_id` didn't resolve (stale/unknown persisted key).
+    pub lens_resolved_name: Option<String>,
+    /// Handle for the in-flight lens-bake job; cancelled on navigation (in
+    /// `cancel_loads`) or when superseded by a newer bake request, so a stale
+    /// result can never overwrite a fresher one.
+    pub lens_bake_handle: Option<JobHandle>,
 }
 
 impl ViewerState {
@@ -255,6 +270,10 @@ impl ViewerState {
             prefetch_requested: false,
             prefetch_handles: Vec::new(),
             edits_dirty: false,
+            lens_warp: None,
+            lens_vignette: None,
+            lens_resolved_name: None,
+            lens_bake_handle: None,
         }
     }
 
@@ -324,6 +343,9 @@ impl ViewerState {
             h.cancel();
         }
         for h in &self.prefetch_handles {
+            h.cancel();
+        }
+        if let Some(h) = self.lens_bake_handle.as_ref() {
             h.cancel();
         }
     }

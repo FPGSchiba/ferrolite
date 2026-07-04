@@ -203,6 +203,13 @@ pub struct AppState {
     /// The monitor key the window was last seen on (0 = unknown / unsupported OS).
     #[allow(dead_code)] // compared on window-move to trigger re-detect (Unit 5)
     pub last_monitor_key: u64,
+
+    /// The shared Lensfun DB handle (Spec 4.4), loaded ONCE at startup via
+    /// `develop::lens_match::load_shared_db` — never per-image/per-frame
+    /// (CLAUDE.md rule 1). `None` when the bundled DB failed to load; the
+    /// lens-correction section (auto-match + manual picker + bake) is then
+    /// disabled rather than retried on every open.
+    pub lens_db: Option<Arc<ferrolite_lens::LensfunDb>>,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -285,6 +292,7 @@ impl AppState {
             display_detect_gen: 0,
             display_lut: None,
             last_monitor_key: 0,
+            lens_db: crate::develop::lens_match::load_shared_db(),
         })
     }
 
@@ -851,6 +859,9 @@ impl AppState {
             display_detect_gen: 0,
             display_lut: None,
             last_monitor_key: 0,
+            // Skip the bundled-DB load in unit tests (unnecessary I/O per test;
+            // no test in this module exercises lens matching/baking).
+            lens_db: None,
         }
     }
 

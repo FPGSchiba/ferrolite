@@ -901,16 +901,16 @@ impl FerroliteApp {
                     // unedited-but-color-managed.
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    // Lens bake products are wired in a later task (Plan D); until
-                    // then the producer binds the identity warp/vignette defaults
-                    // (no lens correction), which is byte-identical to pre-lens.
+                    // Thread the current lens bake (if any) into the fresh producer
+                    // (U7): `None` until a bake completes, which is byte-identical
+                    // to no lens correction (identity warp/vignette defaults).
                     let tep = ferrolite_pipeline::TileEditPipeline::new(
                         ctx_arc,
                         pyramid,
                         v.op_stack.clone(),
                         cam,
-                        None,
-                        None,
+                        v.lens_warp.as_ref(),
+                        v.lens_vignette.as_ref(),
                     );
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                     let version = v.opstack_version.max(1);
@@ -1051,6 +1051,72 @@ impl FerroliteApp {
         }
     }
 
+    /// An off-thread lens bake (`develop::lens_bake::spawn_lens_bake`) finished
+    /// (Spec 4.4, U7). Stores the fresh warp grid / vignette map / resolved name
+    /// on the viewer, then rebuilds the full-res tile producer so it picks up
+    /// the new grid/LUT (a lens bake ALWAYS changes the baked content — the
+    /// producer must be discarded and rebuilt, the same as a geometry/halo
+    /// change; there is no in-place "new bake, same shapes" case to special-case).
+    ///
+    /// Guarded on `image_id == current`: a bake for an image the user has since
+    /// navigated away from is dropped here even if it slipped past the
+    /// `lens_bake_handle` cancellation checkpoint in the job itself.
+    fn apply_lens_baked(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        result: &crate::develop::lens_bake::LensBakeResult,
+    ) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let cam = self.camera_to_working();
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        if v.image_id != image_id {
+            return; // superseded: navigated away before the bake finished
+        }
+        v.lens_warp = result.warp.clone();
+        v.lens_vignette = result.vignette.clone();
+        v.lens_resolved_name = result.resolved_name.clone();
+        v.lens_bake_handle = None;
+
+        // Rebuild the full-res producer (if the pyramid exists yet) so it binds
+        // the fresh grid/LUT. Mirrors the rebuild branch in `set_preview_and_full`.
+        let shown = if v.before_after {
+            ferrolite_pipeline::OpStack::default()
+        } else {
+            v.op_stack.clone()
+        };
+        if let Some(pyr) = v.pyramid.clone() {
+            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+            let tep = ferrolite_pipeline::TileEditPipeline::new(
+                ctx_arc,
+                pyr,
+                shown,
+                cam,
+                v.lens_warp.as_ref(),
+                v.lens_vignette.as_ref(),
+            );
+            v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+            v.opstack_version = v.opstack_version.wrapping_add(1);
+            let version = v.opstack_version;
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == image_id {
+                    if let Some(full) = g.full.as_mut() {
+                        full.set_producing(true);
+                        full.set_opstack_version(&g.ctx, version);
+                    }
+                }
+            }
+        }
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.idle = false; // wake the drive loop so producer tiles re-render
+        }
+    }
+
     /// Apply `stack` to both render tiers (GPU + memory only; no history/persist).
     /// Preview tier: build the EditPipeline once, reuse via set_stack; evaluate
     /// and swap the displayed single texture. Full-res tier: set_stack (color) or
@@ -1145,19 +1211,33 @@ impl FerroliteApp {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    // Thread the current lens bake (U7); `needs_full_rebuild`
+                    // already fires when the rebuild-relevant lens key changes,
+                    // so the grid/LUT this producer is BUILT with must be the
+                    // one matching `shown`'s lens_id/focal/aperture/crop/enabled
+                    // flags — i.e. the bake already stored on `v` by the
+                    // `LensBaked` handler for this same key.
                     let tep = ferrolite_pipeline::TileEditPipeline::new(
                         ctx_arc,
                         pyr,
                         shown.clone(),
                         cam,
-                        None,
-                        None,
+                        v.lens_warp.as_ref(),
+                        v.lens_vignette.as_ref(),
                     );
                     v.edit_producer = Some(viewer::EditTileProducer::new(tep));
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {
-                // Color-only change: update params in place.
+                // Color-only change: update params in place. Also covers a lens
+                // Amount-only change (no rebuild per `needs_full_rebuild`): the
+                // grid/LUT are unchanged, only the uniform lerp amounts move.
                 producer.set_stack(shown.clone());
+                let lc = shown.lens_correction();
+                producer.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                    lc.as_ref(),
+                    v.lens_warp.is_some(),
+                ));
+                producer.set_vig_amount(ferrolite_pipeline::vignette_amount(lc.as_ref()));
             }
             let version = v.opstack_version;
             let image_id = v.image_id;
@@ -1185,6 +1265,9 @@ impl FerroliteApp {
         stack: ferrolite_pipeline::OpStack,
         commit: bool,
     ) {
+        // Snapshot the pre-edit stack BEFORE `set_preview_and_full` overwrites
+        // `v.op_stack`, so a lens-key comparison below sees the real old/new.
+        let old_stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
         self.set_preview_and_full(frame, stack.clone());
         if !commit {
             return;
@@ -1200,7 +1283,57 @@ impl FerroliteApp {
         if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
             rec.has_edits = has_edits; // optimistic cache update (filmstrip badge)
         }
+        if kind == ferrolite_pipeline::OpKind::LensCorrection {
+            if let Some(old) = old_stack {
+                self.maybe_spawn_lens_bake(ctx, &old, &stack);
+            }
+        }
         self.persist_ops(ctx, image_id, path, stack);
+    }
+
+    /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the rebuild-relevant
+    /// lens key changed between `old`/`new` — the SAME key `needs_full_rebuild`
+    /// uses (lens id, distortion/tca enabled flags, focal/aperture/crop). This
+    /// deliberately excludes per-correction `amount`s: an Amount-only slider
+    /// drag must NOT re-run the DB lookup + bake (it's a uniform-only update
+    /// applied in `set_preview_and_full`'s non-rebuild branch), only a change
+    /// that would actually produce a different grid/LUT re-bakes.
+    fn maybe_spawn_lens_bake(
+        &mut self,
+        ctx: &egui::Context,
+        old: &ferrolite_pipeline::OpStack,
+        new: &ferrolite_pipeline::OpStack,
+    ) {
+        if crate::develop::ops_edit::lens_rebuild_key(old)
+            == crate::develop::ops_edit::lens_rebuild_key(new)
+        {
+            return; // Amount-only (or no) lens change: no bake needed.
+        }
+        let Some(db) = self.state.lens_db.clone() else {
+            return; // DB failed to load at startup: lens correction disabled.
+        };
+        let Some(lc) = new.lens_correction() else {
+            return; // LensCorrection op was removed entirely: nothing to bake.
+        };
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        // Cancel any in-flight bake for the previous key before superseding it.
+        if let Some(h) = v.lens_bake_handle.take() {
+            h.cancel();
+        }
+        let image_id = v.image_id;
+        let handle = crate::develop::lens_bake::spawn_lens_bake(
+            &self.state.jobs,
+            &db,
+            &self.state.tx,
+            ctx,
+            image_id,
+            lc,
+        );
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.lens_bake_handle = Some(handle);
+        }
     }
 
     /// Re-apply the currently-resolved display tail to the viewer pipelines.
@@ -2082,6 +2215,12 @@ impl eframe::App for FerroliteApp {
                         }
                         ctx.request_repaint();
                     }
+                    continue;
+                }
+                crate::events::AppEvent::LensBaked { image_id, result } => {
+                    self.apply_lens_baked(frame, *image_id, result);
+                    self.state.dirty = true;
+                    ctx.request_repaint();
                     continue;
                 }
                 _ => {}

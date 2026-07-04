@@ -138,6 +138,16 @@ pub enum AppEvent {
         name: String,
         generation: u64,
     },
+    /// An off-thread lens-correction bake (`lens_bake::spawn_lens_bake`) finished:
+    /// the warp grid + vignette map for the image's current `LensCorrection`
+    /// (or all-`None` when unmatched). Handled in `app.rs` (needs GPU state to
+    /// upload textures + rebuild the tile producer); guarded there on
+    /// `image_id == current` so a bake superseded by navigation is dropped. The
+    /// `apply` fold ignores it (no counters to update).
+    LensBaked {
+        image_id: i64,
+        result: crate::develop::lens_bake::LensBakeResult,
+    },
 }
 
 impl AppState {
@@ -255,6 +265,9 @@ impl AppState {
             // Handled in `app.rs` (needs GPU state to build/replace the display
             // LUT texture); nothing to fold here.
             AppEvent::DisplayProfileResolved { .. } => None,
+            // Handled in `app.rs` (needs GPU state to upload the warp/vignette
+            // textures and rebuild the tile producer); nothing to fold here.
+            AppEvent::LensBaked { .. } => None,
         }
     }
 }

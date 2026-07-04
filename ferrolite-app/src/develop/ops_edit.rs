@@ -40,7 +40,7 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
 /// `amount`s — those are uniform-only updates (`set_lens_uniform`), not a
 /// rebuild. `lens_id`/`focal_len`/`aperture`/`crop_factor` all feed the bake, so
 /// a change to any of them yields a new grid + halo and must rebuild.
-fn lens_rebuild_key(s: &OpStack) -> (Option<String>, bool, bool, u32, u32, u32) {
+pub(crate) fn lens_rebuild_key(s: &OpStack) -> (Option<String>, bool, bool, u32, u32, u32) {
     match s.lens_correction() {
         Some(l) => (
             l.lens_id,

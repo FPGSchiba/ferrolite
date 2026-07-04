@@ -6,7 +6,7 @@
 
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::TileCoord;
-use ferrolite_pipeline::TileEditPipeline;
+use ferrolite_pipeline::{LensUniform, TileEditPipeline};
 use ferrolite_vt::TileProducer;
 
 pub struct EditTileProducer {
@@ -31,6 +31,23 @@ impl EditTileProducer {
     /// producer, not this passthrough.
     pub fn set_color_matrix(&mut self, m: [[f32; 3]; 3]) {
         self.pipeline.set_color_matrix(m);
+    }
+
+    // ── Lens amount passthroughs (Spec 4.4, U7) ────────────────────────────
+    // Amount-only lens slider changes (distortion/tca/vignetting `amount`,
+    // NOT lens id / enabled flags / focal / aperture / crop — those change the
+    // baked grid/LUT and require discarding + rebuilding the whole producer
+    // via `needs_full_rebuild`, same as a geometry change). These two are
+    // plain uniform buffer writes; no pipeline rebuild.
+
+    /// Set the lens-correction amounts + `use_warp` flag (buffer write only).
+    pub fn set_lens_uniform(&mut self, lens: LensUniform) {
+        self.pipeline.set_lens_uniform(lens);
+    }
+
+    /// Set the vignette lerp amount (buffer write only; 0 = identity).
+    pub fn set_vig_amount(&mut self, amount: f32) {
+        self.pipeline.set_vig_amount(amount);
     }
 }
 

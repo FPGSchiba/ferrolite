@@ -3,6 +3,7 @@
 //! compute passes implement the edits. Photo tier (GPL-OK).
 mod gpu_pyramid;
 mod image;
+mod lens_bake;
 mod lens_gpu;
 mod nodes;
 mod op;
@@ -13,6 +14,7 @@ mod uniforms;
 
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
+pub use lens_bake::bake_products;
 pub use lens_gpu::{VignetteTexture, WarpGridTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{

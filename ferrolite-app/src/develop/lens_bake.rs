@@ -61,44 +61,24 @@ pub fn spawn_lens_bake(
         if cancel.is_cancelled() {
             return;
         }
-        let result = match lc.lens_id.as_deref().and_then(|id| db.match_by_id(id)) {
-            Some(m) => {
-                // `match_by_id` has no camera context, so its `crop_factor` is
-                // only the matched lens's OWN calibration crop — a fallback.
-                // The authoritative crop is `lc.crop_factor`, persisted at
-                // match time from the actual shooting camera body, and it's
-                // also what `lens_rebuild_key` fingerprints to decide whether
-                // to re-bake. Override before baking so the bake and the
-                // rebuild trigger agree on which crop drives the geometry/
-                // vignette computation.
-                let m = ferrolite_lens::LensMatch {
-                    crop_factor: lc.crop_factor,
-                    ..m
-                };
-                let warp = if lc.distortion.enabled || lc.tca.enabled {
-                    db.bake_geometry(&m, lc.focal_len, ferrolite_lens::GRID_N)
-                } else {
-                    None
-                };
-                if cancel.is_cancelled() {
-                    return;
-                }
-                let vignette = if lc.vignetting.enabled {
-                    db.bake_vignetting(&m, lc.focal_len, lc.aperture, ferrolite_lens::VIGNETTE_LEN)
-                } else {
-                    None
-                };
-                LensBakeResult {
-                    warp,
-                    vignette,
-                    resolved_name: Some(m.display_name),
-                }
-            }
-            None => LensBakeResult {
-                warp: None,
-                vignette: None,
-                resolved_name: None,
-            },
+        // Resolve the display name for the panel label (the shared bake helper
+        // returns only the GPU products, not the name).
+        let resolved_name = lc
+            .lens_id
+            .as_deref()
+            .and_then(|id| db.match_by_id(id))
+            .map(|m| m.display_name);
+        if cancel.is_cancelled() {
+            return;
+        }
+        // Delegate the resolve → crop-override → conditional bake to the shared
+        // `ferrolite-pipeline` primitive so the viewer, thumbnail, and export
+        // paths never drift. Off-thread here (inside the job), per CLAUDE.md §1.
+        let (warp, vignette) = ferrolite_pipeline::bake_products(db.as_ref(), &lc);
+        let result = LensBakeResult {
+            warp,
+            vignette,
+            resolved_name,
         };
         if cancel.is_cancelled() {
             return;

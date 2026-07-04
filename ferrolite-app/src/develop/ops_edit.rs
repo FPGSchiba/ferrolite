@@ -70,6 +70,31 @@ pub(crate) fn lens_rebuild_key(s: &OpStack) -> (Option<String>, bool, bool, u32,
     }
 }
 
+/// The bake-trigger lens fingerprint: everything that changes the baked
+/// PRODUCTS (`bake_products`'s warp grid AND vignette LUT) — i.e.
+/// `lens_rebuild_key` PLUS `vignetting.enabled`. This is deliberately a
+/// SEPARATE key from `lens_rebuild_key`: `bake_products` bakes the
+/// `VignetteMap` whenever `vignetting.enabled`, so a vignetting toggle must
+/// spawn a bake even though it has no halo/geometry impact and therefore must
+/// NOT force an immediate `TileEditPipeline` rebuild (that happens once,
+/// naturally, when the bake result lands in `apply_lens_baked` and rebinds
+/// the producer). Use this key to decide whether to spawn a bake; use
+/// `lens_rebuild_key` to decide whether to rebuild the full-res pipeline.
+pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32, u32) {
+    match s.lens_correction() {
+        Some(l) => (
+            l.lens_id,
+            l.distortion.enabled,
+            l.tca.enabled,
+            l.vignetting.enabled,
+            l.focal_len.to_bits(),
+            l.aperture.to_bits(),
+            l.crop_factor.to_bits(),
+        ),
+        None => (None, false, false, false, 0, 0, 0),
+    }
+}
+
 /// The full-res `TileEditPipeline` bakes geometry + the sharpen/lens halo and
 /// the warp grid at construction; only a change to geometry, the sharpen halo,
 /// or the rebuild-relevant lens key requires discarding + rebuilding it.
@@ -142,6 +167,67 @@ mod tests {
                 amount: 0.4,
                 radius: 2
             })
+        );
+    }
+
+    #[test]
+    fn lens_bake_key_includes_vignetting_but_rebuild_key_does_not() {
+        use ferrolite_pipeline::{Correction, LensCorrection};
+        let base_lc = LensCorrection {
+            lens_id: Some("EF 24-70".into()),
+            focal_len: 24.0,
+            aperture: 8.0,
+            crop_factor: 1.0,
+            distortion: Correction {
+                enabled: true,
+                amount: 1.0,
+            },
+            tca: Correction::default(),
+            vignetting: Correction {
+                enabled: false,
+                amount: 1.0,
+            },
+        };
+        let base = set_lens_correction(&OpStack::default(), base_lc.clone());
+
+        // Toggling vignetting.enabled: lens_bake_key changes, lens_rebuild_key doesn't.
+        let vig_on_lc = LensCorrection {
+            vignetting: Correction {
+                enabled: true,
+                amount: 1.0,
+            },
+            ..base_lc.clone()
+        };
+        let vig_on = set_lens_correction(&base, vig_on_lc);
+        assert_ne!(
+            lens_bake_key(&base),
+            lens_bake_key(&vig_on),
+            "vignetting toggle must change the bake key so a bake fires"
+        );
+        assert_eq!(
+            lens_rebuild_key(&base),
+            lens_rebuild_key(&vig_on),
+            "vignetting toggle must NOT change the halo-rebuild key"
+        );
+
+        // Amount-only change on vignetting: changes NEITHER key.
+        let amount_only_lc = LensCorrection {
+            vignetting: Correction {
+                enabled: true,
+                amount: 1.5,
+            },
+            ..vig_on.lens_correction().unwrap()
+        };
+        let amount_only = set_lens_correction(&vig_on, amount_only_lc);
+        assert_eq!(
+            lens_bake_key(&vig_on),
+            lens_bake_key(&amount_only),
+            "Amount-only change must not change the bake key"
+        );
+        assert_eq!(
+            lens_rebuild_key(&vig_on),
+            lens_rebuild_key(&amount_only),
+            "Amount-only change must not change the rebuild key"
         );
     }
 

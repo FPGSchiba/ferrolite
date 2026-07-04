@@ -1359,9 +1359,15 @@ impl FerroliteApp {
         self.persist_ops(ctx, image_id, path, stack);
     }
 
-    /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the rebuild-relevant
-    /// lens key changed between `old`/`new` — the SAME key `needs_full_rebuild`
-    /// uses (lens id, distortion/tca enabled flags, focal/aperture/crop). This
+    /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the bake-relevant lens
+    /// key (`ops_edit::lens_bake_key`: lens id, distortion/tca/vignetting
+    /// enabled flags, focal/aperture/crop) changed between `old`/`new`. This is
+    /// intentionally a DIFFERENT key from `needs_full_rebuild`'s
+    /// `lens_rebuild_key`, which excludes `vignetting.enabled` (a vignette
+    /// toggle has no halo/geometry impact, so it must not force an immediate
+    /// `TileEditPipeline` rebuild) — but `bake_products` DOES bake the
+    /// vignette LUT whenever `vignetting.enabled`, so the bake trigger must
+    /// still fire on that toggle or the LUT is never produced. This
     /// deliberately excludes per-correction `amount`s: an Amount-only slider
     /// drag must NOT re-run the DB lookup + bake (it's a uniform-only update
     /// applied in `set_preview_and_full`'s non-rebuild branch), only a change
@@ -1372,8 +1378,8 @@ impl FerroliteApp {
         old: &ferrolite_pipeline::OpStack,
         new: &ferrolite_pipeline::OpStack,
     ) {
-        if crate::develop::ops_edit::lens_rebuild_key(old)
-            == crate::develop::ops_edit::lens_rebuild_key(new)
+        if crate::develop::ops_edit::lens_bake_key(old)
+            == crate::develop::ops_edit::lens_bake_key(new)
         {
             return; // Amount-only (or no) lens change: no bake needed.
         }

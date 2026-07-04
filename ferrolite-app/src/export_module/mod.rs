@@ -24,7 +24,7 @@ pub fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             "Export queue — {} image(s)",
             state.export_queue.len()
         ));
-        let running = state.batch.as_ref().is_some_and(|b| !b.is_done());
+        let running = state.batch_running();
         ui.add_enabled_ui(!state.export_queue.is_empty() && !running, |ui| {
             if ui.button("Clear queue").clicked() {
                 state.queue_clear();

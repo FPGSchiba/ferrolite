@@ -36,6 +36,13 @@ rayon = "1.10"
 walkdir = "2.5"
 thiserror = "2.0"
 rfd = "0.15"
+# default-features off disables rav1e's NASM `asm` path (no C/NASM toolchain);
+# `threading` is re-enabled in ferrolite-export. Set here because a member crate's
+# `default-features = false` is ignored unless the workspace entry also opts out.
+ravif = { version = "0.11", default-features = false }
+zune-jpegxl = "0.4"
+zune-core = "0.4"
+jxl-oxide = "0.12"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

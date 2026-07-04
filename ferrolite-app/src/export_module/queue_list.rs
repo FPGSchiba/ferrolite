@@ -48,7 +48,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
     let rec_of =
         |id: i64| -> Option<&ferrolite_catalog::ImageRecord> { recs.iter().find(|r| r.id == id) };
 
-    let running = state.batch.as_ref().is_some_and(|b| !b.is_done());
+    let running = state.batch_running();
     let mut do_remove: Option<i64> = None;
     let mut cell_rects: Vec<egui::Rect> = Vec::new();
 

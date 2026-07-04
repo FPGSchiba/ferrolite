@@ -9,14 +9,18 @@ pub enum ExportFormat {
     Png,
     Tiff,
     WebP,
+    Avif,
+    JpegXl,
 }
 
 impl ExportFormat {
-    pub const ALL: [ExportFormat; 4] = [
+    pub const ALL: [ExportFormat; 6] = [
         ExportFormat::Jpeg,
         ExportFormat::Png,
         ExportFormat::Tiff,
         ExportFormat::WebP,
+        ExportFormat::Avif,
+        ExportFormat::JpegXl,
     ];
 
     /// Lower-case file extension (no dot).
@@ -26,6 +30,8 @@ impl ExportFormat {
             ExportFormat::Png => "png",
             ExportFormat::Tiff => "tif",
             ExportFormat::WebP => "webp",
+            ExportFormat::Avif => "avif",
+            ExportFormat::JpegXl => "jxl",
         }
     }
 
@@ -36,17 +42,27 @@ impl ExportFormat {
             ExportFormat::Png => "PNG",
             ExportFormat::Tiff => "TIFF",
             ExportFormat::WebP => "WebP (lossless)",
+            ExportFormat::Avif => "AVIF",
+            ExportFormat::JpegXl => "JPEG-XL (lossless)",
         }
     }
 
-    /// 16-bit output is supported only for TIFF and PNG (spec §8.2).
+    /// 16-bit output is supported for TIFF, PNG, and JPEG-XL.
     pub fn supports_16bit(self) -> bool {
-        matches!(self, ExportFormat::Tiff | ExportFormat::Png)
+        matches!(
+            self,
+            ExportFormat::Tiff | ExportFormat::Png | ExportFormat::JpegXl
+        )
     }
 
-    /// Only JPEG honors the quality setting (WebP is lossless; PNG/TIFF lossless).
+    /// JPEG and AVIF are lossy and honor the quality setting.
     pub fn supports_quality(self) -> bool {
-        matches!(self, ExportFormat::Jpeg)
+        matches!(self, ExportFormat::Jpeg | ExportFormat::Avif)
+    }
+
+    /// Only AVIF exposes the Effort (speed) control.
+    pub fn supports_effort(self) -> bool {
+        matches!(self, ExportFormat::Avif)
     }
 }
 
@@ -54,6 +70,26 @@ impl ExportFormat {
 pub enum BitDepth {
     Eight,
     Sixteen,
+}
+
+/// AVIF encode effort: speed-vs-size/quality tradeoff. Maps to
+/// ravif's speed (1 = slow/best … 10 = fast/worst). `Best` is deliberately 3,
+/// not 1 ("very very slow"), to avoid pathological export times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effort {
+    Fast,
+    Balanced,
+    Best,
+}
+
+impl Effort {
+    pub fn ravif_speed(self) -> u8 {
+        match self {
+            Effort::Fast => 10,
+            Effort::Balanced => 6,
+            Effort::Best => 3,
+        }
+    }
 }
 
 /// Optional output resize (spec §8.1).
@@ -78,6 +114,8 @@ pub struct ExportOptions {
     pub bit_depth: BitDepth,
     /// JPEG (and WebP if it were lossy) quality 1..=100. Ignored otherwise.
     pub quality: u8,
+    /// AVIF encode effort. Ignored for other formats.
+    pub effort: Effort,
     pub resize: ResizeSpec,
     pub copy_exif: bool,
     pub embed_icc: bool,
@@ -91,6 +129,7 @@ impl Default for ExportOptions {
             output_space: WorkingSpace::Srgb, // web-safe default (§8.2)
             bit_depth: BitDepth::Eight,
             quality: 90,
+            effort: Effort::Balanced,
             resize: ResizeSpec::None,
             copy_exif: true,
             embed_icc: true,
@@ -157,10 +196,44 @@ mod tests {
     }
 
     #[test]
+    fn six_formats_with_stable_extensions_and_labels() {
+        assert_eq!(ExportFormat::ALL.len(), 6);
+        assert_eq!(ExportFormat::Avif.extension(), "avif");
+        assert_eq!(ExportFormat::JpegXl.extension(), "jxl");
+        assert_eq!(ExportFormat::Avif.label(), "AVIF");
+        assert_eq!(ExportFormat::JpegXl.label(), "JPEG-XL (lossless)");
+        // AVIF is lossy → honors quality; JXL is lossless → does not.
+        assert!(ExportFormat::Avif.supports_quality());
+        assert!(!ExportFormat::JpegXl.supports_quality());
+        // JXL joins TIFF/PNG for 16-bit; AVIF is 8-bit only.
+        assert!(ExportFormat::JpegXl.supports_16bit());
+        assert!(!ExportFormat::Avif.supports_16bit());
+    }
+
+    #[test]
     fn extensions_are_stable() {
         assert_eq!(ExportFormat::Jpeg.extension(), "jpg");
         assert_eq!(ExportFormat::Png.extension(), "png");
         assert_eq!(ExportFormat::Tiff.extension(), "tif");
         assert_eq!(ExportFormat::WebP.extension(), "webp");
+    }
+
+    #[test]
+    fn effort_maps_to_ravif_speed() {
+        assert_eq!(Effort::Fast.ravif_speed(), 10);
+        assert_eq!(Effort::Balanced.ravif_speed(), 6);
+        assert_eq!(Effort::Best.ravif_speed(), 3);
+    }
+
+    #[test]
+    fn only_avif_supports_effort_and_default_is_balanced() {
+        for f in ExportFormat::ALL {
+            assert_eq!(
+                f.supports_effort(),
+                matches!(f, ExportFormat::Avif),
+                "{f:?}"
+            );
+        }
+        assert_eq!(ExportOptions::default().effort, Effort::Balanced);
     }
 }

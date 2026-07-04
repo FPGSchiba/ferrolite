@@ -21,3 +21,13 @@ half = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }
+# `asm` (a ravif default feature) enables rav1e's NASM-assembly path, whose build
+# script hard-panics when NASM is absent. Disable default features and re-enable
+# only `threading` to keep AVIF pure-Rust with no C/NASM toolchain. `threading` is
+# pure-Rust (rayon) and safe to keep.
+ravif = { workspace = true, default-features = false, features = ["threading"] }
+zune-jpegxl = { workspace = true }
+zune-core = { workspace = true }
+
+[dev-dependencies]
+jxl-oxide = { workspace = true }

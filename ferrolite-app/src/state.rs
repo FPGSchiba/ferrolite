@@ -115,9 +115,9 @@ pub struct AppState {
     /// open (spec §8.3).
     pub export_dialog: Option<crate::export::ExportDialogState>,
 
-    /// Aggregate progress + cancel handles for a running batch export (spec §8.4).
-    /// `None` when no batch is active.
-    pub batch: Option<crate::export::batch::BatchExportState>,
+    /// Live export activity (single or batch); `None` when no export has run this
+    /// session. Drives the status-bar indicator and the Export module's batch UI.
+    pub export_activity: Option<crate::export::ExportActivity>,
 
     /// Persisted export queue: ordered image_ids. Authoritative in-memory copy
     /// (the DB table is a cache — its loss never loses photos). Loaded at startup.
@@ -242,7 +242,7 @@ impl AppState {
             pending_remove: None,
             viewer: None,
             export_dialog: None,
-            batch: None,
+            export_activity: None,
             export_queue: Vec::new(),
             export_settings: settings.export.to_options(),
             export_dest: None,
@@ -750,6 +750,14 @@ impl AppState {
         self.persist_queue(|cat| cat.reorder_export_queue(&ordered));
     }
 
+    /// True while a BATCH export is running. Single export does not lock the
+    /// Export-module queue, so queue gates check this, not merely "an export runs".
+    pub fn batch_running(&self) -> bool {
+        self.export_activity
+            .as_ref()
+            .is_some_and(|a| a.kind == crate::export::ExportKind::Batch && !a.is_done())
+    }
+
     #[cfg(test)]
     pub fn for_test() -> Self {
         // Use a unique ID per test (thread + process) to avoid concurrent collision.
@@ -792,7 +800,7 @@ impl AppState {
             pending_remove: None,
             viewer: None,
             export_dialog: None,
-            batch: None,
+            export_activity: None,
             export_queue: Vec::new(),
             export_settings: ferrolite_export::ExportOptions::default(),
             export_dest: None,
@@ -1738,5 +1746,32 @@ mod tests {
             "empty grid leaves selection empty (no all-selected clear path)"
         );
         assert_eq!(s.selection_anchor, None);
+    }
+
+    /// `batch_running` must be true only while a BATCH activity is in flight —
+    /// a single export must never lock the Export-module queue.
+    #[test]
+    fn batch_running_true_only_for_inflight_batch() {
+        let mut s = AppState::for_test();
+
+        s.export_activity = Some(crate::export::ExportActivity::new_single(None));
+        assert!(
+            !s.batch_running(),
+            "single export must not report batch_running"
+        );
+
+        s.export_activity = Some(crate::export::ExportActivity::new_batch(2));
+        assert!(
+            s.batch_running(),
+            "an in-flight batch must report batch_running"
+        );
+
+        let a = s.export_activity.as_mut().unwrap();
+        a.item_finished(true, "ok".into());
+        a.item_finished(true, "ok".into());
+        assert!(
+            !s.batch_running(),
+            "batch_running must go false once the batch is done"
+        );
     }
 }

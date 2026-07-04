@@ -2,7 +2,7 @@
 //! dialog so the batch Export module's settings panel renders identical controls.
 
 use ferrolite_color::WorkingSpace;
-use ferrolite_export::{BitDepth, ExportFormat, ExportOptions, ResizeSpec};
+use ferrolite_export::{BitDepth, Effort, ExportFormat, ExportOptions, ResizeSpec};
 
 /// Draw every export option control into `ui`. Callers own the surrounding
 /// window/panel and any confirm/cancel affordances.
@@ -37,6 +37,15 @@ pub fn settings_form(ui: &mut egui::Ui, o: &mut ExportOptions) {
 
     ui.add_enabled_ui(o.format.supports_quality(), |ui| {
         ui.add(egui::Slider::new(&mut o.quality, 1..=100).text("Quality"));
+    });
+
+    ui.add_enabled_ui(o.format.supports_effort(), |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Effort");
+            ui.selectable_value(&mut o.effort, Effort::Fast, "Fast");
+            ui.selectable_value(&mut o.effort, Effort::Balanced, "Balanced");
+            ui.selectable_value(&mut o.effort, Effort::Best, "Best");
+        });
     });
 
     let mut mode = match o.resize {

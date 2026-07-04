@@ -10,6 +10,8 @@ pub enum PersistedFormat {
     Png,
     Tiff,
     WebP,
+    Avif,
+    JpegXl,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -26,12 +28,22 @@ pub enum PersistedResize {
     Percent(f32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum PersistedEffort {
+    Fast,
+    #[default]
+    Balanced,
+    Best,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PersistedExport {
     pub format: PersistedFormat,
     pub output_space: PersistedWorkingSpace,
     pub bit_depth: PersistedBitDepth,
     pub quality: u8,
+    #[serde(default)]
+    pub effort: PersistedEffort,
     pub resize: PersistedResize,
     pub copy_exif: bool,
     pub embed_icc: bool,
@@ -53,6 +65,8 @@ impl PersistedExport {
                 ExportFormat::Png => PersistedFormat::Png,
                 ExportFormat::Tiff => PersistedFormat::Tiff,
                 ExportFormat::WebP => PersistedFormat::WebP,
+                ExportFormat::Avif => PersistedFormat::Avif,
+                ExportFormat::JpegXl => PersistedFormat::JpegXl,
             },
             output_space: PersistedWorkingSpace::from_ws(o.output_space),
             bit_depth: match o.bit_depth {
@@ -60,6 +74,11 @@ impl PersistedExport {
                 BitDepth::Sixteen => PersistedBitDepth::Sixteen,
             },
             quality: o.quality,
+            effort: match o.effort {
+                ferrolite_export::Effort::Fast => PersistedEffort::Fast,
+                ferrolite_export::Effort::Balanced => PersistedEffort::Balanced,
+                ferrolite_export::Effort::Best => PersistedEffort::Best,
+            },
             resize: match o.resize {
                 ResizeSpec::None => PersistedResize::None,
                 ResizeSpec::LongEdge(p) => PersistedResize::LongEdge(p),
@@ -80,6 +99,8 @@ impl PersistedExport {
                 PersistedFormat::Png => ExportFormat::Png,
                 PersistedFormat::Tiff => ExportFormat::Tiff,
                 PersistedFormat::WebP => ExportFormat::WebP,
+                PersistedFormat::Avif => ExportFormat::Avif,
+                PersistedFormat::JpegXl => ExportFormat::JpegXl,
             },
             output_space: self.output_space.to_ws(),
             bit_depth: match self.bit_depth {
@@ -87,6 +108,11 @@ impl PersistedExport {
                 PersistedBitDepth::Sixteen => BitDepth::Sixteen,
             },
             quality: self.quality,
+            effort: match self.effort {
+                PersistedEffort::Fast => ferrolite_export::Effort::Fast,
+                PersistedEffort::Balanced => ferrolite_export::Effort::Balanced,
+                PersistedEffort::Best => ferrolite_export::Effort::Best,
+            },
             resize: match self.resize {
                 PersistedResize::None => ResizeSpec::None,
                 PersistedResize::LongEdge(p) => ResizeSpec::LongEdge(p),
@@ -351,5 +377,42 @@ mod tests {
         for m in [Module::Library, Module::Develop, Module::Export] {
             assert_eq!(PersistedModule::from_module(m).to_module(), m);
         }
+    }
+
+    #[test]
+    fn export_roundtrip_preserves_effort_and_new_formats() {
+        use ferrolite_export::{Effort, ExportFormat, ExportOptions};
+        for opts in [
+            ExportOptions {
+                format: ExportFormat::Avif,
+                effort: Effort::Best,
+                quality: 80,
+                ..ExportOptions::default()
+            },
+            ExportOptions {
+                format: ExportFormat::JpegXl,
+                bit_depth: ferrolite_export::BitDepth::Sixteen,
+                ..ExportOptions::default()
+            },
+            ExportOptions {
+                format: ExportFormat::Avif,
+                effort: Effort::Fast,
+                ..ExportOptions::default()
+            },
+        ] {
+            let round = PersistedExport::from_options(&opts).to_options();
+            assert_eq!(round, opts);
+        }
+    }
+
+    #[test]
+    fn legacy_export_json_without_effort_defaults_to_balanced() {
+        // A settings blob serialized before `effort` existed must still deserialize.
+        let legacy = r#"{
+            "format":"Jpeg","output_space":"Rec2020","bit_depth":"Eight",
+            "quality":90,"resize":"None","copy_exif":true,"embed_icc":true,"strip_metadata":false
+        }"#;
+        let parsed: PersistedExport = serde_json::from_str(legacy).expect("deserialize legacy");
+        assert_eq!(parsed.effort, PersistedEffort::Balanced);
     }
 }

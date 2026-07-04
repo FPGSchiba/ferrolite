@@ -6,11 +6,9 @@
 //! `ferrolite-jobs` Background job (CLAUDE.md responsiveness rules); only the
 //! existing per-frame `ThumbReady` upload touches the UI thread.
 //!
-//! This module is the reusable worker only (SDD Task 1 of 3). Nothing calls
-//! `spawn_regen_edited_thumbnail` yet — the Develop-leave transitions and the
-//! context-menu on-demand action (Tasks 2 and 3) wire it in. Hence the
-//! module-wide `dead_code` allow until those call sites land.
-#![allow(dead_code)]
+//! The Develop-leave transitions (`app.rs`) and the context-menu on-demand
+//! action wire `spawn_regen_edited_thumbnail` in; it renders the persisted edit
+//! stack — including lens corrections — so a grid thumbnail matches the edit.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -23,7 +21,11 @@ use ferrolite_decode::{decode_preview, ColorProfile};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::{FileKind, ImageBuffer, PixelFormat};
 use ferrolite_jobs::{JobSystem, Priority};
-use ferrolite_pipeline::{blit_to_rgba8, deserialize, EditPipeline, OpStack};
+use ferrolite_lens::LensfunDb;
+use ferrolite_pipeline::{
+    bake_products, blit_to_rgba8, deserialize, lens_uniform, vignette_amount, EditPipeline,
+    OpStack, VignetteTexture, WarpGridTexture,
+};
 
 use crate::events::AppEvent;
 use crate::viewer::load::preview_to_linear;
@@ -63,9 +65,11 @@ pub fn srgb_fallback_camera_to_working(working_space: WorkingSpace) -> [[f32; 3]
 /// GPU + I/O; MUST run inside a Background job. `EditPipeline` is built and
 /// dropped here (it is not `Send`). Any failure returns `Err(String)` so the
 /// caller logs and keeps the existing thumbnail — never panics.
+#[allow(clippy::too_many_arguments)]
 pub fn regenerate_edited_thumbnail_blocking(
     writer: &Arc<Mutex<Catalog>>,
     gpu: &Arc<GpuContext>,
+    lens_db: Option<&Arc<LensfunDb>>,
     image_id: i64,
     path: &Path,
     kind: FileKind,
@@ -78,7 +82,30 @@ pub fn regenerate_edited_thumbnail_blocking(
 
     // 2. Render the edit stack. Read output dims from the evaluated image — a
     //    crop/geometry op changes them.
-    let mut pipeline = EditPipeline::new(Arc::clone(gpu), &linear, stack, camera_to_working);
+    let mut pipeline =
+        EditPipeline::new(Arc::clone(gpu), &linear, stack.clone(), camera_to_working);
+
+    // 2b. Apply lens corrections so the thumbnail matches the edit (as crop/
+    //     rotate already do). Bake off-thread here (inside the Background job)
+    //     via the shared `bake_products` primitive — never on the UI thread
+    //     (CLAUDE.md §1). Skipped entirely when there's no db, no enabled
+    //     correction, or no matched lens (identity → byte-identical to no bake).
+    if let (Some(db), Some(lc)) = (lens_db, stack.lens_correction()) {
+        if lc.lens_id.is_some()
+            && (lc.distortion.enabled || lc.tca.enabled || lc.vignetting.enabled)
+        {
+            let (warp, vignette) = bake_products(db.as_ref(), &lc);
+            if let Some(w) = warp.as_ref() {
+                pipeline.set_warp(WarpGridTexture::upload(gpu, w));
+            }
+            pipeline.set_lens_uniform(lens_uniform(Some(&lc), warp.is_some()));
+            if let Some(v) = vignette.as_ref() {
+                pipeline.set_vignette(VignetteTexture::upload(gpu, v));
+            }
+            pipeline.set_vig_amount(vignette_amount(Some(&lc)));
+        }
+    }
+
     let out = pipeline.evaluate();
     let (w, h) = (out.width, out.height);
     let rgba = blit_to_rgba8(gpu, &out); // RGBA8 sRGB, row-unpadded, len w*h*4
@@ -118,6 +145,7 @@ pub fn spawn_regen_edited_thumbnail(
     tx: &std::sync::mpsc::Sender<AppEvent>,
     egui_ctx: &egui::Context,
     gpu: Arc<GpuContext>,
+    lens_db: Option<Arc<LensfunDb>>,
     image_id: i64,
     path: PathBuf,
     kind: FileKind,
@@ -138,6 +166,7 @@ pub fn spawn_regen_edited_thumbnail(
         match regenerate_edited_thumbnail_blocking(
             &writer,
             &gpu,
+            lens_db.as_ref(),
             image_id,
             &path,
             kind,

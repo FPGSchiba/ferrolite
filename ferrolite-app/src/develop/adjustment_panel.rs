@@ -373,47 +373,51 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             }
         }
 
-        // Three correction rows: Checkbox (toggle) + Amount slider, each with
-        // its OWN reset arrow (CLAUDE.md: per-control reset is load-bearing —
-        // every one of these three sliders must be independently resettable;
-        // `EguiSlider` always renders + wires `draw_reset_arrow` in its reset
-        // column, so each row gets one for free — resetting Amount to 1.0).
-        // Disabled (via `add_enabled_ui`) while its toggle is off.
+        // Three correction blocks, each TWO lines so the Amount slider gets
+        // the same full width as the Basic/Detail sliders (cramming the
+        // checkbox + label + slider onto one `ui.horizontal` row left the
+        // slider too small to use — author visual-test finding V2): line 1 is
+        // the toggle checkbox + correction name; line 2 is the full-width
+        // `EguiSlider` "Amount", disabled (via `add_enabled_ui`) while its
+        // toggle is off. Each Amount slider keeps its OWN reset arrow
+        // (CLAUDE.md: per-control reset is load-bearing — every one of these
+        // three sliders must be independently resettable; `EguiSlider` always
+        // renders + wires `draw_reset_arrow` in its reset column, so each row
+        // gets one for free — resetting Amount to 1.0).
         let row = |ui: &mut egui::Ui,
                    label: &str,
                    c: &mut Correction,
                    changed: &mut bool,
                    dragged: &mut bool,
                    drag_stopped: &mut bool| {
-            ui.horizontal(|ui| {
-                if ui.checkbox(&mut c.enabled, label).changed() {
-                    *changed = true;
-                }
-                ui.add_enabled_ui(c.enabled, |ui| {
-                    let r = ui.add(EguiSlider {
-                        label: "Amount",
-                        value: &mut c.amount,
-                        min: 0.0,
-                        max: 2.0,
-                        default: 1.0,
-                        step: 0.01,
-                        decimals: 2,
-                        unit: "",
-                        bipolar: false,
-                        signed: false,
-                    });
-                    if r.changed() {
-                        if r.drag_stopped() {
-                            *drag_stopped = true;
-                        } else if r.dragged() {
-                            *dragged = true;
-                        } else {
-                            // Click / double-click-reset / typed entry: commit immediately.
-                            *drag_stopped = true;
-                        }
-                    }
+            if ui.checkbox(&mut c.enabled, label).changed() {
+                *changed = true;
+            }
+            ui.add_enabled_ui(c.enabled, |ui| {
+                let r = ui.add(EguiSlider {
+                    label: "Amount",
+                    value: &mut c.amount,
+                    min: 0.0,
+                    max: 2.0,
+                    default: 1.0,
+                    step: 0.01,
+                    decimals: 2,
+                    unit: "",
+                    bipolar: false,
+                    signed: false,
                 });
+                if r.changed() {
+                    if r.drag_stopped() {
+                        *drag_stopped = true;
+                    } else if r.dragged() {
+                        *dragged = true;
+                    } else {
+                        // Click / double-click-reset / typed entry: commit immediately.
+                        *drag_stopped = true;
+                    }
+                }
             });
+            ui.add_space(4.0);
         };
         row(
             ui,

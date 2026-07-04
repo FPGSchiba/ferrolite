@@ -73,8 +73,7 @@ impl ExportActivity {
     }
 
     /// (completed + current-image tile fraction) / total, clamped to 0..=1.
-    /// Read by a later task's status-bar indicator; not yet consumed.
-    #[allow(dead_code)]
+    /// Read by the status-bar indicator.
     pub fn fraction(&self) -> f32 {
         if self.total == 0 {
             return 0.0;

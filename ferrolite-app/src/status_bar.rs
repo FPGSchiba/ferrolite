@@ -1,5 +1,6 @@
 //! The live status bar: selected-image EXIF, "N indexed", and job activity.
 
+use crate::export::{ExportActivity, ExportKind};
 use crate::state::AppState;
 
 /// Pure formatter for the right-hand activity string, so it is unit-testable.
@@ -21,6 +22,22 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
     let is_ingesting = state.active_ingests > 0;
     ui.horizontal_centered(|ui| {
         ui.monospace(selected_exif(state));
+        // Export activity indicator — visible in every view while an export runs
+        // (hidden once done; the Export module keeps the "Done" summary).
+        if let Some(a) = &state.export_activity {
+            if !a.is_done() {
+                ui.separator();
+                ui.label(egui::RichText::new(export_status_text(a)).size(11.0));
+                ui.add(egui::ProgressBar::new(a.fraction()).desired_width(70.0));
+                if ui
+                    .small_button("✕")
+                    .on_hover_text("Cancel export")
+                    .clicked()
+                {
+                    a.cancel_all();
+                }
+            }
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.monospace("GPU: idle"); // static until Plan 4
             ui.monospace("·");
@@ -72,6 +89,36 @@ fn selected_exif(state: &AppState) -> String {
     }
 }
 
+/// Truncate a filename to at most `max` chars, appending an ellipsis when cut.
+/// Char-based (never splits a multi-byte codepoint).
+pub fn truncate_name(name: &str, max: usize) -> String {
+    if name.chars().count() <= max {
+        return name.to_string();
+    }
+    let keep = max.saturating_sub(1);
+    let mut out: String = name.chars().take(keep).collect();
+    out.push('…');
+    out
+}
+
+/// Label text for the export indicator: filename (+ `completed/total` for a
+/// batch), plus `(K failed)` when any failed. Single omits the count (total = 1).
+pub fn export_status_text(a: &ExportActivity) -> String {
+    let name = a
+        .current_name
+        .as_deref()
+        .map(|n| truncate_name(n, 24))
+        .unwrap_or_else(|| "…".to_string());
+    let mut s = match a.kind {
+        ExportKind::Single => format!("Exporting {name}"),
+        ExportKind::Batch => format!("Exporting {name}  {}/{}", a.completed, a.total),
+    };
+    if a.failed > 0 {
+        s.push_str(&format!("  ({} failed)", a.failed));
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +146,54 @@ mod tests {
         // Once the ingest ends (active_ingests hits 0) the last pass's
         // done/total must not keep showing progress.
         assert_eq!(activity_text(false, 40, 40), "Idle");
+    }
+
+    #[test]
+    fn truncate_name_keeps_short_and_ellipsizes_long() {
+        assert_eq!(truncate_name("sunset.avif", 24), "sunset.avif");
+        let long = "a_very_long_filename_that_overflows.avif";
+        let t = truncate_name(long, 24);
+        assert_eq!(t.chars().count(), 24);
+        assert!(t.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_name_is_multibyte_safe() {
+        // 30 accented chars — must not panic on a char boundary and must cap at 24.
+        let s: String = "é".repeat(30);
+        let t = truncate_name(&s, 24);
+        assert_eq!(t.chars().count(), 24);
+    }
+
+    #[test]
+    fn export_status_text_single_shows_filename_only() {
+        let a = crate::export::ExportActivity::new_single(Some("hero.avif".into()));
+        assert_eq!(export_status_text(&a), "Exporting hero.avif");
+    }
+
+    #[test]
+    fn export_status_text_batch_shows_name_and_count() {
+        let mut a = crate::export::ExportActivity::new_batch(8);
+        a.completed = 3;
+        a.start_item(Some("sunset.avif".into()));
+        assert_eq!(export_status_text(&a), "Exporting sunset.avif  3/8");
+    }
+
+    #[test]
+    fn export_status_text_appends_failed_only_when_nonzero() {
+        let mut a = crate::export::ExportActivity::new_batch(8);
+        a.completed = 5;
+        a.failed = 1;
+        a.start_item(Some("x.avif".into()));
+        assert!(export_status_text(&a).ends_with("(1 failed)"));
+        let mut b = crate::export::ExportActivity::new_batch(8);
+        b.start_item(Some("x.avif".into()));
+        assert!(!export_status_text(&b).contains("failed"));
+    }
+
+    #[test]
+    fn export_status_text_missing_name_uses_placeholder() {
+        let a = crate::export::ExportActivity::new_batch(2);
+        assert!(export_status_text(&a).starts_with("Exporting …"));
     }
 }

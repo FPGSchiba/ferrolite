@@ -14,8 +14,8 @@ pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
 pub use nodes::{color_convert, upload_source};
 pub use op::{
-    Aspect, Contrast, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand, Op, OpKind, OpStack,
-    Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
+    Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,
+    LensCorrection, Op, OpKind, OpStack, Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, EditPipeline};
 pub use serialize::{deserialize, serialize};

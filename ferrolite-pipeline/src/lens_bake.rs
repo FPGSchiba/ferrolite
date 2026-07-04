@@ -57,7 +57,7 @@ pub fn bake_products(
 mod tests {
     use super::*;
     use crate::op::Correction;
-    use ferrolite_lens::{LensMatch, LensQuery};
+    use ferrolite_lens::{LensCaps, LensMatch, LensQuery};
 
     fn lc(lens_id: Option<&str>, dist: bool, tca: bool, vig: bool) -> LensCorrection {
         LensCorrection {
@@ -112,6 +112,11 @@ mod tests {
             _len: u32,
         ) -> Option<VignetteMap> {
             self.seen_crop.set(Some(m.crop_factor));
+            None
+        }
+        fn lens_caps(&self, _lens_id: &str, _focal: f32, _aperture: f32) -> Option<LensCaps> {
+            // Not exercised by these bake-routing tests; the app-side FB2
+            // panel is what actually calls `lens_caps`.
             None
         }
     }

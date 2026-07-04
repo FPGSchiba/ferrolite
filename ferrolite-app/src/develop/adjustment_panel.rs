@@ -2,11 +2,14 @@
 //! sections; one EguiSlider per op param; per-section + global reset. Emits a new
 //! OpStack via develop::ops_edit; the app applies it to both render tiers.
 
-use crate::develop::{curve_widget, hsl_widget, lens_picker, ops_edit, vignette_mode};
+use crate::develop::{
+    curve_widget, hsl_widget, lens_caps_ui, lens_picker, ops_edit, vignette_mode,
+};
 use crate::state::AppState;
 use crate::theme;
 use crate::widgets::slider::EguiSlider;
 use ferrolite_color::WorkingSpace;
+use ferrolite_lens::LensDb;
 use ferrolite_pipeline::{Aspect, Correction, Geometry, LensCorrection, Op, OpKind, OpStack};
 
 /// Fallback focal length seeded for a brand-new `LensCorrection` op ONLY when
@@ -401,6 +404,21 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             .map(|v| v.lens_vignette.is_some())
             .unwrap_or(false);
 
+        // Per-correction data availability for the matched lens at the
+        // current focal/aperture (FB2, `ferrolite_lens::LensDb::lens_caps`).
+        // `lens_caps` is a cheap in-memory interpolate-presence check (no I/O,
+        // no bake), so it's fine to call inline on the UI thread every render
+        // — same cost class as `find_lenses` in `lens_picker.rs` above.
+        // `None` when no lens is matched yet OR the persisted `lens_id`
+        // doesn't resolve (stale profile); either way the Distortion/TCA
+        // gates below fall back to the same "Needs a matched lens" hint as
+        // pre-FB2, since we can't claim specific missing data we didn't
+        // actually get to check.
+        let caps = new_lc
+            .lens_id
+            .as_deref()
+            .and_then(|id| db.lens_caps(id, new_lc.focal_len, new_lc.aperture));
+
         // Each slider keeps its OWN reset arrow (CLAUDE.md: per-control reset
         // is load-bearing — `EguiSlider` always renders + wires
         // `draw_reset_arrow` in its reset column, so every visible slider is
@@ -414,15 +432,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                               c: &mut Correction,
                               params: vignette_mode::VigSliderParams,
                               row_enabled: bool,
+                              hover_text: Option<&str>,
                               dragged: &mut bool,
                               drag_stopped: &mut bool,
                               toggled: &mut bool| {
             ui.horizontal(|ui| {
                 let cb = ui.add_enabled(row_enabled, egui::Checkbox::new(&mut c.enabled, ""));
-                let cb = if row_enabled {
-                    cb
-                } else {
-                    cb.on_disabled_hover_text("Needs a matched lens")
+                let cb = match hover_text {
+                    Some(text) if !row_enabled => cb.on_disabled_hover_text(text),
+                    _ => cb,
                 };
                 if cb.changed() {
                     *toggled = true;
@@ -454,24 +472,33 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             });
         };
 
+        let distortion_gate = lens_caps_ui::correction_row_gate(
+            has_lens,
+            caps,
+            lens_caps_ui::GatedCorrection::Distortion,
+        );
         let mut distortion_toggled = false;
         correction_row(
             ui,
             "Distortion",
             &mut new_lc.distortion,
             vignette_mode::PROFILE_PARAMS,
-            has_lens,
+            distortion_gate.enabled,
+            distortion_gate.hover_text,
             &mut amount_dragged,
             &mut amount_drag_stopped,
             &mut distortion_toggled,
         );
+        let tca_gate =
+            lens_caps_ui::correction_row_gate(has_lens, caps, lens_caps_ui::GatedCorrection::Tca);
         let mut tca_toggled = false;
         correction_row(
             ui,
             "TCA",
             &mut new_lc.tca,
             vignette_mode::PROFILE_PARAMS,
-            has_lens,
+            tca_gate.enabled,
+            tca_gate.hover_text,
             &mut amount_dragged,
             &mut amount_drag_stopped,
             &mut tca_toggled,
@@ -480,10 +507,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         let mut vignetting_toggled = false;
         correction_row(
             ui,
-            "Vignette",
+            lens_caps_ui::vignette_row_label(caps),
             &mut new_lc.vignetting,
             vignette_mode::slider_params(has_vignette_lut),
             true, // Vignetting row is always enabled (manual works lens-free).
+            None, // Never disabled, so there's nothing to hover-explain.
             &mut amount_dragged,
             &mut amount_drag_stopped,
             &mut vignetting_toggled,
@@ -559,7 +587,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                     }
                 });
                 if !has_lens {
-                    resp.response.on_hover_text("Needs a matched lens");
+                    resp.response
+                        .on_hover_text("Only affects profile corrections; needs a matched lens");
                 }
             });
         let advanced_changed = advanced_dragged || advanced_drag_stopped;

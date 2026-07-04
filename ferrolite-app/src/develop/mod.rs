@@ -10,6 +10,7 @@ pub mod histogram_widget;
 pub mod history;
 pub mod hsl_widget;
 pub mod lens_bake;
+pub mod lens_caps_ui;
 pub mod lens_match;
 pub mod lens_picker;
 pub mod meta_read;

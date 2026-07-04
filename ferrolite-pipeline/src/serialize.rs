@@ -21,8 +21,8 @@ pub fn deserialize(s: &str) -> Option<OpStack> {
 mod tests {
     use super::*;
     use crate::op::{
-        Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, HslBand, Op, Sharpen, ToneCurve,
-        WhiteBalance,
+        Aspect, Contrast, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand, Op, Sharpen,
+        ToneCurve, WhiteBalance,
     };
 
     #[test]
@@ -67,6 +67,7 @@ mod tests {
             .set_op(Op::Contrast(Contrast { amount: 0.3 }))
             .set_op(Op::ToneCurve(ToneCurve {
                 points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
+                mode: CurveMode::Linear,
             }))
             .set_op(Op::Hsl(Hsl {
                 bands: [HslBand {

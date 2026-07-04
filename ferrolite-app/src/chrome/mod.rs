@@ -3,9 +3,11 @@ pub mod icon;
 pub mod window_controls;
 
 use crate::module::Module;
+use crate::settings::keymap::{Action, Keymap};
 use crate::theme;
 use egui::{
-    pos2, vec2, Align, Align2, Context, FontId, Layout, PointerButton, Rect, Sense, UiBuilder,
+    pos2, vec2, Align, Align2, Button, Context, FontId, Layout, PointerButton, Rect, Sense,
+    UiBuilder,
 };
 
 /// A menu action selected from the title-bar menus, handled by the app.
@@ -14,6 +16,32 @@ pub enum MenuAction {
     ExportImage,
     AddToQueue,
     PurgePreviews,
+    Exit,
+    Undo,
+    Redo,
+    SelectAll,
+    PrevImage,
+    NextImage,
+    SwitchModule(Module),
+    ToggleSplit,
+    ZoomFit,
+    ZoomActual,
+    ToggleHistogram,
+    OpenHelp,
+    OpenSettings,
+}
+
+/// Build a menu `Button` labeled `text`, with the bound shortcut for `action`
+/// shown right-aligned (Task 4.2). Enabled state is `enabled`.
+fn menu_button(
+    ui: &mut egui::Ui,
+    keymap: &Keymap,
+    text: &str,
+    action: Action,
+    enabled: bool,
+) -> egui::Response {
+    let btn = Button::new(text).shortcut_text(keymap.chord(action).label());
+    ui.add_enabled(enabled, btn)
 }
 
 /// Render the borderless title bar contents. `ui` is the 30px top panel's ui.
@@ -25,12 +53,18 @@ pub enum MenuAction {
 /// (icon + wordmark) is PAINTED directly (so it never occludes the drag region),
 /// and only the interactive groups (menus, controls, tabs) use child UIs — they
 /// sit on top and win their own clicks.
+#[allow(clippy::too_many_arguments)]
 pub fn title_bar(
     ctx: &Context,
     ui: &mut egui::Ui,
     module: &mut Module,
     version: &str,
     export_enabled: bool,
+    viewer_open: bool,
+    keymap: &Keymap,
+    can_undo: bool,
+    can_redo: bool,
+    show_histogram: bool,
 ) -> Option<MenuAction> {
     let bar = ui.max_rect();
 
@@ -83,13 +117,33 @@ pub fn title_bar(
             ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
             ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
             ui.menu_button("File", |ui| {
+                if menu_button(ui, keymap, "Settings…", Action::OpenSettings, true).clicked() {
+                    action = Some(MenuAction::OpenSettings);
+                    ui.close_menu();
+                }
+                ui.separator();
                 if ui.button("Purge preview cache").clicked() {
                     action = Some(MenuAction::PurgePreviews);
                     ui.close_menu();
                 }
+                if ui.button("Exit").clicked() {
+                    action = Some(MenuAction::Exit);
+                    ui.close_menu();
+                }
             });
             ui.menu_button("Edit", |ui| {
-                ui.add_enabled(false, egui::Button::new("(no actions)"));
+                if menu_button(ui, keymap, "Undo", Action::Undo, can_undo).clicked() {
+                    action = Some(MenuAction::Undo);
+                    ui.close_menu();
+                }
+                if menu_button(ui, keymap, "Redo", Action::Redo, can_redo).clicked() {
+                    action = Some(MenuAction::Redo);
+                    ui.close_menu();
+                }
+                if menu_button(ui, keymap, "Select all", Action::SelectAll, true).clicked() {
+                    action = Some(MenuAction::SelectAll);
+                    ui.close_menu();
+                }
             });
             ui.menu_button("Photo", |ui| {
                 if ui
@@ -99,19 +153,92 @@ pub fn title_bar(
                     action = Some(MenuAction::ExportImage);
                     ui.close_menu();
                 }
-                if ui
-                    .add_enabled(export_enabled, egui::Button::new("Add to export queue"))
-                    .clicked()
+                if menu_button(
+                    ui,
+                    keymap,
+                    "Add to export queue",
+                    Action::AddToQueue,
+                    viewer_open,
+                )
+                .clicked()
                 {
                     action = Some(MenuAction::AddToQueue);
                     ui.close_menu();
                 }
+                if menu_button(ui, keymap, "Previous image", Action::PrevImage, viewer_open)
+                    .clicked()
+                {
+                    action = Some(MenuAction::PrevImage);
+                    ui.close_menu();
+                }
+                if menu_button(ui, keymap, "Next image", Action::NextImage, viewer_open).clicked() {
+                    action = Some(MenuAction::NextImage);
+                    ui.close_menu();
+                }
             });
-            for label in ["View", "Help"] {
-                let _ = ui.menu_button(label, |ui| {
-                    ui.add_enabled(false, egui::Button::new("(no actions)"));
-                });
-            }
+            ui.menu_button("View", |ui| {
+                if ui
+                    .selectable_label(*module == Module::Library, "Library")
+                    .clicked()
+                {
+                    action = Some(MenuAction::SwitchModule(Module::Library));
+                    ui.close_menu();
+                }
+                if ui
+                    .selectable_label(*module == Module::Develop, "Develop")
+                    .clicked()
+                {
+                    action = Some(MenuAction::SwitchModule(Module::Develop));
+                    ui.close_menu();
+                }
+                if ui
+                    .selectable_label(*module == Module::Export, "Export")
+                    .clicked()
+                {
+                    action = Some(MenuAction::SwitchModule(Module::Export));
+                    ui.close_menu();
+                }
+                ui.separator();
+                if menu_button(
+                    ui,
+                    keymap,
+                    "Before/After split",
+                    Action::ToggleSplitCompare,
+                    viewer_open,
+                )
+                .clicked()
+                {
+                    action = Some(MenuAction::ToggleSplit);
+                    ui.close_menu();
+                }
+                if ui.add_enabled(viewer_open, Button::new("Fit")).clicked() {
+                    action = Some(MenuAction::ZoomFit);
+                    ui.close_menu();
+                }
+                if ui.add_enabled(viewer_open, Button::new("1:1")).clicked() {
+                    action = Some(MenuAction::ZoomActual);
+                    ui.close_menu();
+                }
+                ui.separator();
+                let mut histogram_checked = show_histogram;
+                if ui
+                    .checkbox(&mut histogram_checked, "Show histogram")
+                    .clicked()
+                {
+                    action = Some(MenuAction::ToggleHistogram);
+                    ui.close_menu();
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                if menu_button(ui, keymap, "Keyboard shortcuts", Action::OpenHelp, true).clicked() {
+                    action = Some(MenuAction::OpenHelp);
+                    ui.close_menu();
+                }
+                if ui.button("About Ferrolite").clicked() {
+                    action = Some(MenuAction::OpenHelp);
+                    ui.close_menu();
+                }
+            });
         },
     );
 

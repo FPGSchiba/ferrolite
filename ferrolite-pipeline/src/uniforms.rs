@@ -34,10 +34,10 @@ pub fn contrast_gain_pivot(amount: f32) -> (f32, f32) {
 }
 
 /// Bake tone-curve control points into a 256-entry display-linear LUT.
-/// Points are clamped to [0,1], sorted by x, linearly interpolated, and held
+/// Points are clamped to [0,1], sorted by x, interpolated per `mode`, and held
 /// flat outside the control range; the result is forced monotone
 /// non-decreasing. Empty input is the identity ramp.
-pub fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
+pub fn curve_lut(points: &[(f32, f32)], mode: crate::op::CurveMode) -> [f32; 256] {
     let mut pts: Vec<(f32, f32)> = points
         .iter()
         .map(|&(x, y)| (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)))
@@ -46,11 +46,19 @@ pub fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
     if pts.is_empty() {
         pts = vec![(0.0, 0.0), (1.0, 1.0)];
     }
-
     let mut lut = [0.0f32; 256];
-    for (i, slot) in lut.iter_mut().enumerate() {
-        let x = i as f32 / 255.0;
-        *slot = curve_interp(&pts, x);
+    match mode {
+        crate::op::CurveMode::Linear => {
+            for (i, slot) in lut.iter_mut().enumerate() {
+                *slot = curve_interp_linear(&pts, i as f32 / 255.0);
+            }
+        }
+        crate::op::CurveMode::Smooth => {
+            let tangents = fritsch_carlson_tangents(&pts);
+            for (i, slot) in lut.iter_mut().enumerate() {
+                *slot = curve_interp_smooth(&pts, &tangents, i as f32 / 255.0);
+            }
+        }
     }
     for i in 1..256 {
         if lut[i] < lut[i - 1] {
@@ -61,7 +69,7 @@ pub fn curve_lut(points: &[(f32, f32)]) -> [f32; 256] {
 }
 
 /// Piecewise-linear sample of sorted control points; flat (clamped) outside.
-fn curve_interp(pts: &[(f32, f32)], x: f32) -> f32 {
+fn curve_interp_linear(pts: &[(f32, f32)], x: f32) -> f32 {
     if x <= pts[0].0 {
         return pts[0].1;
     }
@@ -79,6 +87,77 @@ fn curve_interp(pts: &[(f32, f32)], x: f32) -> f32 {
                 (x - x0) / (x1 - x0)
             };
             return y0 + t * (y1 - y0);
+        }
+    }
+    last.1
+}
+
+/// Fritsch–Carlson monotone tangents for control points (x ascending).
+fn fritsch_carlson_tangents(pts: &[(f32, f32)]) -> Vec<f32> {
+    let n = pts.len();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    // Secant slopes.
+    let mut d = vec![0.0f32; n - 1];
+    for i in 0..n - 1 {
+        let dx = pts[i + 1].0 - pts[i].0;
+        d[i] = if dx.abs() < 1e-9 {
+            0.0
+        } else {
+            (pts[i + 1].1 - pts[i].1) / dx
+        };
+    }
+    // Initial tangents (average of adjacent secants; ends = one-sided).
+    let mut m = vec![0.0f32; n];
+    m[0] = d[0];
+    m[n - 1] = d[n - 2];
+    for i in 1..n - 1 {
+        m[i] = (d[i - 1] + d[i]) / 2.0;
+    }
+    // Fritsch–Carlson limiter: enforce monotonicity / no overshoot.
+    for i in 0..n - 1 {
+        if d[i].abs() < 1e-9 {
+            m[i] = 0.0;
+            m[i + 1] = 0.0;
+        } else {
+            let alpha = m[i] / d[i];
+            let beta = m[i + 1] / d[i];
+            let s = alpha * alpha + beta * beta;
+            if s > 9.0 {
+                let tau = 3.0 / s.sqrt();
+                m[i] = tau * alpha * d[i];
+                m[i + 1] = tau * beta * d[i];
+            }
+        }
+    }
+    m
+}
+
+fn curve_interp_smooth(pts: &[(f32, f32)], m: &[f32], x: f32) -> f32 {
+    if x <= pts[0].0 {
+        return pts[0].1;
+    }
+    let last = pts[pts.len() - 1];
+    if x >= last.0 {
+        return last.1;
+    }
+    for i in 0..pts.len() - 1 {
+        let (x0, y0) = pts[i];
+        let (x1, y1) = pts[i + 1];
+        if x >= x0 && x <= x1 {
+            let h = x1 - x0;
+            if h.abs() < 1e-9 {
+                return y1;
+            }
+            let t = (x - x0) / h;
+            let t2 = t * t;
+            let t3 = t2 * t;
+            let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+            let h10 = t3 - 2.0 * t2 + t;
+            let h01 = -2.0 * t3 + 3.0 * t2;
+            let h11 = t3 - t2;
+            return h00 * y0 + h10 * h * m[i] + h01 * y1 + h11 * h * m[i + 1];
         }
     }
     last.1
@@ -323,7 +402,7 @@ mod tests {
 
     #[test]
     fn curve_lut_identity_is_a_linear_ramp() {
-        let lut = curve_lut(&[(0.0, 0.0), (1.0, 1.0)]);
+        let lut = curve_lut(&[(0.0, 0.0), (1.0, 1.0)], crate::op::CurveMode::Linear);
         assert!((lut[0] - 0.0).abs() < 1e-6);
         assert!((lut[255] - 1.0).abs() < 1e-6);
         assert!((lut[128] - 128.0 / 255.0).abs() < 1e-6);
@@ -331,14 +410,17 @@ mod tests {
 
     #[test]
     fn curve_lut_empty_points_is_identity() {
-        let lut = curve_lut(&[]);
+        let lut = curve_lut(&[], crate::op::CurveMode::Linear);
         assert!((lut[64] - 64.0 / 255.0).abs() < 1e-6);
     }
 
     #[test]
     fn curve_lut_pulls_midtones_down() {
         // A point below the diagonal at x=0.5 darkens the midtones.
-        let lut = curve_lut(&[(0.0, 0.0), (0.5, 0.25), (1.0, 1.0)]);
+        let lut = curve_lut(
+            &[(0.0, 0.0), (0.5, 0.25), (1.0, 1.0)],
+            crate::op::CurveMode::Linear,
+        );
         assert!(lut[128] < 128.0 / 255.0, "midpoint pulled below diagonal");
         assert!((lut[0] - 0.0).abs() < 1e-6);
         assert!((lut[255] - 1.0).abs() < 1e-6);
@@ -347,10 +429,58 @@ mod tests {
     #[test]
     fn curve_lut_is_monotone_non_decreasing() {
         // A non-monotone control set must still produce a non-decreasing LUT.
-        let lut = curve_lut(&[(0.0, 0.0), (0.5, 0.8), (1.0, 0.2)]);
+        let lut = curve_lut(
+            &[(0.0, 0.0), (0.5, 0.8), (1.0, 0.2)],
+            crate::op::CurveMode::Linear,
+        );
         for i in 1..256 {
             assert!(lut[i] >= lut[i - 1], "lut dipped at {i}");
         }
+    }
+
+    #[test]
+    fn linear_mode_matches_legacy_lut() {
+        // Linear must reproduce the pre-feature piecewise-linear LUT exactly.
+        let pts = [(0.0, 0.0), (0.5, 0.25), (1.0, 1.0)];
+        let lut = curve_lut(&pts, crate::op::CurveMode::Linear);
+        // midpoint pulled below diagonal, endpoints pinned (same asserts as the old test)
+        assert!(lut[128] < 128.0 / 255.0);
+        assert!((lut[0] - 0.0).abs() < 1e-6);
+        assert!((lut[255] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn smooth_passes_through_control_points() {
+        // At a control point's x, the smooth LUT equals its y (within LUT quantization).
+        let pts = [(0.0, 0.0), (0.5, 0.25), (1.0, 1.0)];
+        let lut = curve_lut(&pts, crate::op::CurveMode::Smooth);
+        let idx = (0.5f32 * 255.0).round() as usize; // x = 0.5
+        assert!(
+            (lut[idx] - 0.25).abs() < 0.02,
+            "smooth LUT hits the control point"
+        );
+    }
+
+    #[test]
+    fn smooth_is_monotonic_and_no_overshoot() {
+        let pts = [(0.0, 0.0), (0.3, 0.7), (0.7, 0.72), (1.0, 1.0)]; // steep then flat — classic overshoot trap
+        let lut = curve_lut(&pts, crate::op::CurveMode::Smooth);
+        for i in 1..256 {
+            assert!(
+                lut[i] >= lut[i - 1] - 1e-6,
+                "monotonic non-decreasing at {i}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&lut[i]),
+                "no overshoot outside [0,1] at {i}"
+            );
+        }
+        // No overshoot above the local max (0.72) in the flat middle region: sample x≈0.5
+        let mid = (0.5f32 * 255.0).round() as usize;
+        assert!(
+            lut[mid] <= 0.72 + 1e-3,
+            "monotone cubic must not bulge above neighboring control y"
+        );
     }
 
     #[test]

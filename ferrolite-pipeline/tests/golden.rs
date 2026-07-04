@@ -2,8 +2,8 @@ mod common;
 
 use ferrolite_gpu::GpuContext;
 use ferrolite_pipeline::{
-    blit_to_rgba8, upload_source, Aspect, Contrast, CropRect, EditPipeline, Exposure, Geometry,
-    GpuPyramidSource, Hsl, HslBand, Op, OpStack, Sharpen, TileEditPipeline, ToneCurve,
+    blit_to_rgba8, upload_source, Aspect, Contrast, CropRect, CurveMode, EditPipeline, Exposure,
+    Geometry, GpuPyramidSource, Hsl, HslBand, Op, OpStack, Sharpen, TileEditPipeline, ToneCurve,
     WhiteBalance,
 };
 use std::sync::Arc;
@@ -154,10 +154,26 @@ fn tone_curve_darken_midtones_matches_golden() {
     };
     let stack = OpStack::default().set_op(Op::ToneCurve(ToneCurve {
         points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
+        mode: CurveMode::Linear,
     }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "tone_curve.png");
+}
+
+#[test]
+fn tone_curve_smooth_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default().set_op(Op::ToneCurve(ToneCurve {
+        points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
+        mode: CurveMode::Smooth,
+    }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "tone_curve_smooth.png");
 }
 
 #[test]
@@ -231,6 +247,7 @@ fn full_seven_op_stack_matches_golden() {
         .set_op(Op::Contrast(Contrast { amount: 0.3 }))
         .set_op(Op::ToneCurve(ToneCurve {
             points: vec![(0.0, 0.0), (0.5, 0.4), (1.0, 1.0)],
+            mode: CurveMode::Linear,
         }))
         .set_op(Op::Hsl(Hsl {
             bands: [HslBand {

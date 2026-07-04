@@ -21,6 +21,19 @@ pub struct FerroliteApp {
     pending_texture_clear: bool,
     /// Per-frame diagnostics state (env-gated via `FERROLITE_DIAG`); see `diag.rs`.
     diag: crate::diag::DiagState,
+    /// Set by `mark_settings_dirty()` whenever `state.settings` is mutated;
+    /// cleared by `save_settings_if_dirty()`, which coalesces any number of
+    /// per-frame edits into a single off-thread write per frame.
+    settings_dirty: bool,
+    /// One-shot restore-session guard: set `true` on the first `update()` frame,
+    /// whether or not a restore actually happened, so the check runs exactly once.
+    did_restore: bool,
+    /// Whether the Help modal (`crate::help::show`) is open. Opened by
+    /// `Action::OpenHelp` (F1, global) or the Help menu.
+    show_help: bool,
+    /// Whether the Settings window (`crate::settings::ui::show`) is open.
+    /// Opened by `Action::OpenSettings` (Ctrl+, global) or the File menu.
+    show_settings: bool,
 }
 
 impl FerroliteApp {
@@ -47,13 +60,117 @@ impl FerroliteApp {
             ferrolite_pipeline::prewarm_shaders(&gpu);
         }
         let state = crate::state::AppState::new().expect("open catalog");
+        let thumb_size = state.settings.grid_size;
         Self {
             module: Module::default(),
-            thumb_size: 46.0,
+            thumb_size,
             state,
             crop_active_prev: false,
             pending_texture_clear: false,
             diag: crate::diag::DiagState::new(),
+            settings_dirty: false,
+            did_restore: false,
+            show_help: false,
+            show_settings: false,
+        }
+    }
+
+    /// Mark `state.settings` as changed so `save_settings_if_dirty()` writes
+    /// it off the UI thread at the end of this frame's `update()`. Every
+    /// settings mutation site must call this (see `settings::keymap::Keymap`
+    /// doc comment).
+    fn mark_settings_dirty(&mut self) {
+        self.settings_dirty = true;
+    }
+
+    /// Coalesced end-of-frame save: if `settings_dirty`, persist `state.settings`
+    /// off the UI thread (`crate::settings::persist::save`) and clear the flag.
+    /// Called once per `update()`.
+    fn save_settings_if_dirty(&mut self) {
+        if self.settings_dirty {
+            crate::settings::persist::save(&self.state.jobs, &self.state.settings);
+            self.settings_dirty = false;
+        }
+    }
+
+    /// Step the open viewer's edit history one step (undo when `undo`, else
+    /// redo), re-render the preview/full-res, mark the image dirty, and
+    /// persist the resulting op stack. Shared by the `Ctrl+Z`/`Ctrl+Shift+Z`/
+    /// `Ctrl+Y` keyboard path and the Edit menu's Undo/Redo items so both
+    /// route through the exact same logic.
+    fn apply_undo_redo(&mut self, ctx: &egui::Context, frame: &eframe::Frame, undo: bool) {
+        let result = self.state.viewer.as_mut().and_then(|v| {
+            if undo {
+                v.history.undo()
+            } else {
+                v.history.redo()
+            }
+        });
+        if let Some(stack) = result {
+            self.set_preview_and_full(frame, stack.clone());
+            if let Some(v) = self.state.viewer.as_mut() {
+                v.edits_dirty = true;
+            }
+            // Persist the resulting stack (undo/redo changes the on-disk state).
+            // Gather viewer scalars into locals before the iter_mut borrow.
+            if let Some(v) = self.state.viewer.as_ref() {
+                let (image_id, path) = (v.image_id, v.path.clone());
+                if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
+                    rec.has_edits = !stack.is_identity();
+                }
+                self.persist_ops(ctx, image_id, path, stack);
+            }
+        }
+    }
+
+    /// Move the open Develop viewer to the previous/next image in the current
+    /// image set, non-cyclic. Shared by the ←/→ keyboard path and the Photo
+    /// menu's Previous/Next image items.
+    fn navigate_step(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        dir: crate::viewer::nav::Step,
+    ) {
+        let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
+        if let Some(cur_id) = cur_id {
+            let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
+            if let Some(next_id) = crate::viewer::nav::neighbor_in_set(&ids, cur_id, dir) {
+                if let Some(rec) = self.state.images.iter().find(|r| r.id == next_id).cloned() {
+                    self.open_record(ctx, frame, &rec);
+                }
+            }
+        }
+    }
+
+    /// Toggle the open viewer's before/after SPLIT-compare (draggable
+    /// divider), mirroring the `develop_filter_bar` toggle button's click
+    /// handling exactly: flips `split_compare` and, only when turning it on,
+    /// resets `split_pos` to center. Shared by the `Y` keyboard shortcut, the
+    /// View menu's "Before/After split" item, and the filter-bar toggle button.
+    ///
+    /// The split only renders on the preview tier (`drive_viewer`'s
+    /// `split_active = v.split_compare && !show_full`) — once the sparse
+    /// "full" tile tier has taken over the toggle would otherwise be a dead
+    /// click. So on an off→on transition while the full tier is actually
+    /// showing on screen right now (`v.showing_full`, the real per-frame
+    /// `show_full` persisted by `drive_viewer` — NOT merely `full_ready`,
+    /// which stays true while tiles are still streaming in after a pan/zoom),
+    /// force the view back to fit so the preview tier (and thus the divider)
+    /// is immediately visible again.
+    fn toggle_split_compare(&mut self) {
+        if let Some(v) = self.state.viewer.as_mut() {
+            let turning_on = !v.split_compare;
+            v.split_compare = !v.split_compare;
+            if v.split_compare {
+                v.split_pos = 0.5;
+                if turning_on && v.showing_full {
+                    if let Some(dims) = v.image_dims {
+                        v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
+                        v.idle = false; // resume the drive loop so the fit takes effect
+                    }
+                }
+            }
         }
     }
 }
@@ -278,6 +395,16 @@ impl FerroliteApp {
         }
     }
 
+    /// True while any modal overlay is on screen (Help, Settings, the
+    /// remove-folder confirmation). Used to suppress the app's global
+    /// keyboard shortcuts underneath the modal so its own input handling
+    /// (e.g. Esc) is the only thing that reacts, and so shortcuts like
+    /// Enter/Ctrl+A don't leak through to the grid/viewer while a modal is
+    /// up. Extend this with new modals as they're added.
+    fn modal_active(&self) -> bool {
+        self.show_help || self.show_settings || self.state.pending_remove.is_some()
+    }
+
     /// If the current viewer's edit stack changed this session, spawn a
     /// Background job to regenerate its Library thumbnail from the in-memory
     /// stack, then clear the flag so re-entrant frames do not double-spawn.
@@ -318,10 +445,20 @@ impl FerroliteApp {
         );
     }
 
-    /// Open the single-file export dialog for the current viewer image.
+    /// Open the single-file export dialog for the current viewer image, seeded
+    /// once from `settings.export` (the same slot the Export module panel
+    /// writes to via `state.export_settings`) at the moment it opens. The
+    /// dialog is a plain floating `egui::Window` — NOT modal — so the
+    /// titlebar/module tabs stay reachable while it's open and the user could
+    /// switch to the Export module panel and change `state.export_settings`
+    /// before coming back. If that happens, `confirm_export` persists
+    /// whatever the user leaves in the dialog: benign last-writer-wins on a
+    /// preference value, not a data-loss risk.
     fn open_export_dialog(&mut self) {
         if self.state.viewer.is_some() {
-            self.state.export_dialog = Some(crate::export::ExportDialogState::default());
+            self.state.export_dialog = Some(crate::export::ExportDialogState {
+                options: self.state.settings.export.to_options(),
+            });
         }
     }
 
@@ -331,6 +468,18 @@ impl FerroliteApp {
             return;
         };
         let options = dialog.options;
+        // Guard the write: persist `dialog.options` (whatever the user left
+        // it as) as the new `settings.export`, but only mark dirty when it
+        // actually differs from what's persisted, so this can't become an
+        // unconditional per-frame write. If the Export module panel changed
+        // `state.export_settings` while this dialog was open, this is a
+        // last-writer-wins overwrite of that — benign, since both are just a
+        // preference value with no data-loss risk.
+        if self.state.settings.export.to_options() != options {
+            self.state.settings.export =
+                crate::settings::dto::PersistedExport::from_options(&options);
+            self.mark_settings_dirty();
+        }
 
         // Compute camera→working BEFORE any borrow of `self.state.viewer` is held,
         // since `camera_to_working()` itself immutably borrows `self`.
@@ -1048,6 +1197,9 @@ impl FerroliteApp {
             return;
         }
         self.state.working_space = ws;
+        self.state.settings.working_space =
+            crate::settings::dto::PersistedWorkingSpace::from_ws(ws);
+        self.mark_settings_dirty();
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -1225,6 +1377,12 @@ impl FerroliteApp {
         let factor = v.tick_crossfade(dt);
         let tiles_settled = matches!(tiles_pending, Some(0));
         let show_full = v.full_ready && factor >= 1.0 && tiles_settled;
+        // Persist the real, per-frame-current value so `toggle_split_compare`
+        // (which runs outside this per-frame borrow, e.g. from a keyboard
+        // shortcut or menu click) can consult an accurate "is the full tier
+        // actually on screen right now" signal instead of a `full_ready`-only
+        // proxy that stays true while tiles are still streaming in.
+        v.showing_full = show_full;
 
         // Producer convergence: the shown full view is fully rendered only once
         // the GPU-truth needed set has been established (the sparse shader painted
@@ -1253,15 +1411,12 @@ impl FerroliteApp {
         let interactive = !v.crop_active && (show_full || !v.split_compare);
 
         let canvas_rect = ui.available_rect_before_wrap();
+        // Split only renders on the preview tier; once `show_full` takes over it
+        // dead-ends here (silently — `toggle_split_compare` now forces a fit on
+        // enable, so this state is reached only via zooming/navigating in while
+        // already split, not via the toggle itself).
         let split_active = v.split_compare && !show_full;
         let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
-        if v.split_compare && show_full && !v.split_full_logged {
-            eprintln!("before/after split suppressed at 1:1 zoom; showing after-view");
-            v.split_full_logged = true;
-        }
-        if !show_full {
-            v.split_full_logged = false;
-        }
 
         // `paint` applies this frame's pan/zoom and clears `idle` when the view
         // moved, so read `idle` AFTER it to catch an interaction this frame.
@@ -1365,6 +1520,46 @@ impl FerroliteApp {
                 }
             }
         }
+    }
+
+    /// Draw the read-only, GPU-computed histogram as a floating, non-interactive
+    /// overlay anchored to the Develop canvas's top-right corner (spec 4.1 §7.1).
+    /// Data comes straight from `ViewerState::histogram` (already computed by
+    /// `maybe_update_histogram`'s GPU dispatch this frame or an earlier one) — this
+    /// is display placement only, no recompute. `Order::Middle` sits above the
+    /// canvas paint but below modal `Order::Foreground` windows (Help/Settings),
+    /// and `.interactable(false)` means canvas pan/zoom keeps working underneath it.
+    fn draw_histogram_overlay(&self, ui: &egui::Ui) {
+        const MARGIN: f32 = 12.0;
+        const WIDTH: f32 = 220.0;
+
+        let canvas_rect = ui.min_rect();
+        let bins = self
+            .state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.histogram.bins.as_deref());
+
+        let pos = egui::pos2(
+            canvas_rect.right() - WIDTH - MARGIN,
+            canvas_rect.top() + MARGIN,
+        );
+
+        egui::Area::new(egui::Id::new("develop_histogram_overlay"))
+            .order(egui::Order::Middle)
+            .fixed_pos(pos)
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_width(WIDTH);
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(160))
+                    .rounding(4.0)
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.set_width(WIDTH - 12.0);
+                        crate::develop::histogram_widget::show(ui, bins);
+                    });
+            });
     }
 
     /// The single image-open path: cancel the previously-open viewer's in-flight
@@ -1518,6 +1713,27 @@ impl eframe::App for FerroliteApp {
         // TextureCache::begin_frame): prevents destroying a texture still referenced by
         // this frame's paint jobs.
         self.state.textures.begin_frame();
+
+        // One-shot restore-session (opt-in via `settings.restore_session`), run on
+        // the very first frame. Reopens the last folder through the SAME job-based
+        // ingest path "Open folder…" uses (never a synchronous walk on the UI
+        // thread — CLAUDE.md) and then restores the last active module.
+        if !self.did_restore {
+            self.did_restore = true;
+            if self.state.settings.restore_session {
+                if let Some(folder) = self.state.settings.last_folder.clone() {
+                    if folder.is_dir() {
+                        crate::ingest::spawn_ingest(&mut self.state, ctx, folder);
+                        self.module = self.state.settings.last_module.to_module();
+                    } else {
+                        eprintln!(
+                            "ferrolite: restore-session skipped, folder missing: {}",
+                            folder.display()
+                        );
+                    }
+                }
+            }
+        }
 
         let diag_t0 = crate::diag::enabled().then(std::time::Instant::now);
 
@@ -1748,8 +1964,35 @@ impl eframe::App for FerroliteApp {
                     v.pyramid.is_some()
                         || (v.kind != ferrolite_image::FileKind::Raw && v.preview_source.is_some())
                 });
-                let menu_action =
-                    crate::chrome::title_bar(ctx, ui, &mut self.module, "v0.0.1", export_enabled);
+                let viewer_open = self.state.viewer.is_some();
+                let module_before = self.module;
+                let can_undo = self
+                    .state
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.history.can_undo());
+                let can_redo = self
+                    .state
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.history.can_redo());
+                let menu_action = crate::chrome::title_bar(
+                    ctx,
+                    ui,
+                    &mut self.module,
+                    "v0.0.1",
+                    export_enabled,
+                    viewer_open,
+                    &self.state.settings.keymap,
+                    can_undo,
+                    can_redo,
+                    self.state.settings.show_histogram,
+                );
+                if self.module != module_before {
+                    self.state.settings.last_module =
+                        crate::settings::dto::PersistedModule::from_module(self.module);
+                    self.mark_settings_dirty();
+                }
                 match menu_action {
                     Some(crate::chrome::MenuAction::ExportImage) => self.open_export_dialog(),
                     Some(crate::chrome::MenuAction::AddToQueue) => {
@@ -1773,6 +2016,57 @@ impl eframe::App for FerroliteApp {
                         );
                         self.state.warning = Some("Preview cache purged.".to_string());
                     }
+                    Some(crate::chrome::MenuAction::Exit) => {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    Some(crate::chrome::MenuAction::Undo) => {
+                        self.apply_undo_redo(ctx, frame, true);
+                    }
+                    Some(crate::chrome::MenuAction::Redo) => {
+                        self.apply_undo_redo(ctx, frame, false);
+                    }
+                    Some(crate::chrome::MenuAction::SelectAll) => {
+                        self.state.toggle_select_all();
+                    }
+                    Some(crate::chrome::MenuAction::PrevImage) => {
+                        self.navigate_step(ctx, frame, crate::viewer::nav::Step::Prev);
+                    }
+                    Some(crate::chrome::MenuAction::NextImage) => {
+                        self.navigate_step(ctx, frame, crate::viewer::nav::Step::Next);
+                    }
+                    Some(crate::chrome::MenuAction::SwitchModule(m)) => {
+                        self.module = m;
+                    }
+                    Some(crate::chrome::MenuAction::ToggleSplit) => {
+                        self.toggle_split_compare();
+                    }
+                    Some(crate::chrome::MenuAction::ZoomFit) => {
+                        if let Some(v) = self.state.viewer.as_mut() {
+                            if let Some(dims) = v.image_dims {
+                                v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
+                                v.idle = false;
+                            }
+                        }
+                    }
+                    Some(crate::chrome::MenuAction::ZoomActual) => {
+                        if let Some(v) = self.state.viewer.as_mut() {
+                            v.view = ferrolite_vt::ViewTransform {
+                                zoom: 1.0,
+                                pan: (0.0, 0.0),
+                            };
+                            v.idle = false;
+                        }
+                    }
+                    Some(crate::chrome::MenuAction::ToggleHistogram) => {
+                        self.state.settings.show_histogram = !self.state.settings.show_histogram;
+                        self.mark_settings_dirty();
+                    }
+                    Some(crate::chrome::MenuAction::OpenHelp) => {
+                        self.show_help = true;
+                    }
+                    Some(crate::chrome::MenuAction::OpenSettings) => {
+                        self.show_settings = true;
+                    }
                     None => {}
                 }
             });
@@ -1788,6 +2082,7 @@ impl eframe::App for FerroliteApp {
                             .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
                     )
                     .show(ctx, |ui| {
+                        let thumb_size_before = self.thumb_size;
                         let changed = crate::library::toolbar::show(
                             ui,
                             &mut self.thumb_size,
@@ -1795,6 +2090,16 @@ impl eframe::App for FerroliteApp {
                         );
                         if changed {
                             self.state.dirty = true;
+                            let mut pf = crate::settings::dto::PersistedFilter::from_filter(
+                                &self.state.filter,
+                            );
+                            pf.include_subfolders = self.state.include_subfolders;
+                            self.state.settings.filter = pf;
+                            self.mark_settings_dirty();
+                        }
+                        if self.thumb_size != thumb_size_before {
+                            self.state.settings.grid_size = self.thumb_size;
+                            self.mark_settings_dirty();
                         }
                     });
             }
@@ -1807,8 +2112,18 @@ impl eframe::App for FerroliteApp {
                             .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
                     )
                     .show(ctx, |ui| {
-                        if crate::library::develop_filter_bar::show(ui, &mut self.state) {
+                        let outcome = crate::library::develop_filter_bar::show(ui, &mut self.state);
+                        if outcome.changed {
                             self.state.dirty = true;
+                            let mut pf = crate::settings::dto::PersistedFilter::from_filter(
+                                &self.state.filter,
+                            );
+                            pf.include_subfolders = self.state.include_subfolders;
+                            self.state.settings.filter = pf;
+                            self.mark_settings_dirty();
+                        }
+                        if outcome.toggle_split {
+                            self.toggle_split_compare();
                         }
                     });
                 egui::TopBottomPanel::top("develop_filmstrip")
@@ -1845,7 +2160,11 @@ impl eframe::App for FerroliteApp {
 
         egui::TopBottomPanel::bottom("status")
             .exact_height(24.0)
-            .frame(egui::Frame::none().fill(theme::BG_TITLEBAR))
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::BG_TITLEBAR)
+                    .inner_margin(egui::Margin::symmetric(12.0, 0.0)),
+            )
             .show(ctx, |ui| {
                 crate::status_bar::show(ui, &self.state);
             });
@@ -1887,207 +2206,272 @@ impl eframe::App for FerroliteApp {
                         }),
                 )
                 .show(ctx, |ui| {
-                    crate::library::panel::show(ui, &mut self.state, ctx);
+                    if crate::library::panel::show(ui, &mut self.state, ctx) {
+                        self.mark_settings_dirty();
+                    }
                 });
         }
 
-        // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
-        // closed image's work stops competing with whatever is opened next.
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.maybe_regen_on_leave(ctx, frame);
-            if let Some(v) = self.state.viewer.take() {
-                v.cancel_loads();
-                self.cancel_viewer_tiles(frame, v.image_id);
-                self.module = crate::module::Module::Library;
-            }
-        }
-
-        // Enter opens the selected image in the viewer (library grid only, no
-        // viewer already open, exactly one image selected). Suppressed while the
-        // remove-confirmation modal is up or a text field holds focus (so a
-        // future search box's Enter won't pop the viewer).
-        if self.module.is_library()
-            && self.state.viewer.is_none()
-            && self.state.pending_remove.is_none()
-            && !ctx.wants_keyboard_input()
-            && ctx.input(|i| i.key_pressed(egui::Key::Enter))
-        {
-            if let Some(sel_id) = self.state.selected {
-                if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
-                    self.open_record(ctx, frame, &rec);
+        // All app-level keyboard shortcuts below are suppressed while a modal
+        // (Help, remove-confirmation, ...) is on screen — see `modal_active`.
+        // This keeps a modal's own key handling (e.g. Help's Esc) as the only
+        // thing that reacts to a keypress, and stops shortcuts like Enter or
+        // Ctrl+A from leaking through to the grid/viewer underneath.
+        if !self.modal_active() {
+            // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
+            // closed image's work stops competing with whatever is opened next.
+            if self
+                .state
+                .settings
+                .keymap
+                .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
+            {
+                self.maybe_regen_on_leave(ctx, frame);
+                if let Some(v) = self.state.viewer.take() {
+                    v.cancel_loads();
+                    self.cancel_viewer_tiles(frame, v.image_id);
+                    self.module = crate::module::Module::Library;
                 }
             }
-        }
 
-        // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
-        // Library grid only (no viewer, no modal, no text field focused).
-        if self.module.is_library()
-            && self.state.viewer.is_none()
-            && self.state.pending_remove.is_none()
-            && !ctx.wants_keyboard_input()
-            && ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::A))
-        {
-            self.state.toggle_select_all();
-        }
-
-        // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
-        // toggles. In Library (no viewer) they apply to the grid selection; in
-        // Develop or Library+viewer they apply to the open viewer image.
-        if self.state.pending_remove.is_none() && !ctx.wants_keyboard_input() {
-            use ferrolite_image::{Flag, Rating};
-
-            // --- 1. Read key intent ---
-            enum KeyIntent {
-                Rating(u8),
-                Flag(Flag),
-            }
-            let intent = ctx.input(|i| {
-                for n in 0..=5u8 {
-                    let key = match n {
-                        0 => egui::Key::Num0,
-                        1 => egui::Key::Num1,
-                        2 => egui::Key::Num2,
-                        3 => egui::Key::Num3,
-                        4 => egui::Key::Num4,
-                        _ => egui::Key::Num5,
-                    };
-                    if i.key_pressed(key) {
-                        return Some(KeyIntent::Rating(n));
-                    }
-                }
-                if i.key_pressed(egui::Key::I) {
-                    Some(KeyIntent::Flag(Flag::Pick))
-                } else if i.key_pressed(egui::Key::O) {
-                    Some(KeyIntent::Flag(Flag::Reject))
-                } else {
-                    None
-                }
-            });
-
-            if let Some(intent) = intent {
-                // --- 2. Resolve target image id ---
-                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                    self.state.selected
-                } else {
-                    self.state.viewer.as_ref().map(|v| v.image_id)
-                };
-
-                if let Some(target_id) = target_id {
-                    // --- 3. Look up current value ---
-                    let rec = self.state.images.iter().find(|r| r.id == target_id);
-                    let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
-                    let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
-
-                    // --- 4. Build toggled edit ---
-                    let edit = match intent {
-                        KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(Rating::new(
-                            crate::metadata::toggle_rating(cur_rating, n),
-                        )),
-                        KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
-                            crate::metadata::toggle_flag(cur_flag, f),
-                        ),
-                    };
-
-                    // --- 5. Apply ---
-                    if self.module.is_library() && self.state.viewer.is_none() {
-                        self.state.apply_metadata_edit(ctx, edit);
-                    } else {
-                        self.state
-                            .apply_metadata_edit_to_image(ctx, target_id, edit);
+            // Enter opens the selected image in the viewer (library grid only, no
+            // viewer already open, exactly one image selected). Suppressed while a
+            // modal is up or a text field holds focus (so a future search box's
+            // Enter won't pop the viewer).
+            if self.module.is_library()
+                && self.state.viewer.is_none()
+                && !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::OpenImage)
+            {
+                if let Some(sel_id) = self.state.selected {
+                    if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
+                        self.open_record(ctx, frame, &rec);
                     }
                 }
             }
 
-            // Q toggles export-queue membership for the same target image used
-            // by the rating/flag intents above (grid selection in Library-no-
-            // viewer, else the open viewer image). Kept as a parallel check
-            // rather than folded into `KeyIntent` so the rating/flag toggle
-            // logic above is untouched.
-            if ctx.input(|i| i.key_pressed(egui::Key::Q)) {
-                let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                    self.state.selected
-                } else {
-                    self.state.viewer.as_ref().map(|v| v.image_id)
-                };
-                if let Some(target_id) = target_id {
-                    let was_queued = self.state.queue_contains(target_id);
-                    self.state.queue_toggle(target_id);
-                    self.state.warning = Some(if was_queued {
-                        "Removed from export queue.".to_string()
+            // F1 opens the Help modal. Global: works regardless of module/viewer
+            // state, but suppressed while a text field holds focus or another
+            // modal is up (consistent with the neighboring shortcuts here).
+            if !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::OpenHelp)
+            {
+                self.show_help = true;
+            }
+
+            // Ctrl+, opens the Settings window. Global, same gating as Help
+            // above. Since this whole region is gated on `!self.modal_active()`
+            // (which now includes `show_settings`), the shortcut only opens
+            // Settings when no modal is already up — acceptable, since a
+            // modal already on screen has its own dismissal path.
+            if !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::OpenSettings)
+            {
+                self.show_settings = true;
+            }
+
+            // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
+            // Library grid only (no viewer, no modal, no text field focused).
+            if self.module.is_library()
+                && self.state.viewer.is_none()
+                && !ctx.wants_keyboard_input()
+                && self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::SelectAll)
+            {
+                self.state.toggle_select_all();
+            }
+
+            // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
+            // toggles. In Library (no viewer) they apply to the grid selection; in
+            // Develop or Library+viewer they apply to the open viewer image.
+            if !ctx.wants_keyboard_input() {
+                use ferrolite_image::{Flag, Rating};
+
+                // --- 1. Read key intent ---
+                enum KeyIntent {
+                    Rating(u8),
+                    Flag(Flag),
+                }
+                // Routed through the keymap (one lookup per Action, each its own
+                // `ctx.input` call inside `Keymap::pressed`); priority order (ratings
+                // 0..5, then Pick, then Reject) and "one intent per frame" preserved.
+                use crate::settings::keymap::Action;
+                let km = &self.state.settings.keymap;
+                let rating_actions = [
+                    Action::Rating0,
+                    Action::Rating1,
+                    Action::Rating2,
+                    Action::Rating3,
+                    Action::Rating4,
+                    Action::Rating5,
+                ];
+                let mut intent = None;
+                for (n, action) in rating_actions.into_iter().enumerate() {
+                    if km.pressed(ctx, action) {
+                        intent = Some(KeyIntent::Rating(n as u8));
+                        break;
+                    }
+                }
+                let intent = intent.or_else(|| {
+                    if km.pressed(ctx, Action::FlagPick) {
+                        Some(KeyIntent::Flag(Flag::Pick))
+                    } else if km.pressed(ctx, Action::FlagReject) {
+                        Some(KeyIntent::Flag(Flag::Reject))
                     } else {
-                        "Added to export queue.".to_string()
-                    });
+                        None
+                    }
+                });
+
+                if let Some(intent) = intent {
+                    // --- 2. Resolve target image id ---
+                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                        self.state.selected
+                    } else {
+                        self.state.viewer.as_ref().map(|v| v.image_id)
+                    };
+
+                    if let Some(target_id) = target_id {
+                        // --- 3. Look up current value ---
+                        let rec = self.state.images.iter().find(|r| r.id == target_id);
+                        let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
+                        let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
+
+                        // --- 4. Build toggled edit ---
+                        let edit = match intent {
+                            KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(
+                                Rating::new(crate::metadata::toggle_rating(cur_rating, n)),
+                            ),
+                            KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
+                                crate::metadata::toggle_flag(cur_flag, f),
+                            ),
+                        };
+
+                        // --- 5. Apply ---
+                        if self.module.is_library() && self.state.viewer.is_none() {
+                            self.state.apply_metadata_edit(ctx, edit);
+                        } else {
+                            self.state
+                                .apply_metadata_edit_to_image(ctx, target_id, edit);
+                        }
+                    }
+                }
+
+                // Q toggles export-queue membership for the same target image used
+                // by the rating/flag intents above (grid selection in Library-no-
+                // viewer, else the open viewer image). Kept as a parallel check
+                // rather than folded into `KeyIntent` so the rating/flag toggle
+                // logic above is untouched.
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::AddToQueue)
+                {
+                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
+                        self.state.selected
+                    } else {
+                        self.state.viewer.as_ref().map(|v| v.image_id)
+                    };
+                    if let Some(target_id) = target_id {
+                        let was_queued = self.state.queue_contains(target_id);
+                        self.state.queue_toggle(target_id);
+                        self.state.warning = Some(if was_queued {
+                            "Removed from export queue.".to_string()
+                        } else {
+                            "Added to export queue.".to_string()
+                        });
+                    }
                 }
             }
-        }
 
-        // Left/Right move between images while viewing (Develop), non-cyclic.
-        if self.module == crate::module::Module::Develop
-            && self.state.viewer.is_some()
-            && !ctx.wants_keyboard_input()
-        {
-            let dir = ctx.input(|i| {
-                if i.key_pressed(egui::Key::ArrowRight) {
+            // Left/Right move between images while viewing (Develop), non-cyclic.
+            if self.module == crate::module::Module::Develop
+                && self.state.viewer.is_some()
+                && !ctx.wants_keyboard_input()
+            {
+                let km = &self.state.settings.keymap;
+                let dir = if km.pressed(ctx, crate::settings::keymap::Action::NextImage) {
                     Some(crate::viewer::nav::Step::Next)
-                } else if i.key_pressed(egui::Key::ArrowLeft) {
+                } else if km.pressed(ctx, crate::settings::keymap::Action::PrevImage) {
                     Some(crate::viewer::nav::Step::Prev)
                 } else {
                     None
+                };
+                if let Some(dir) = dir {
+                    self.navigate_step(ctx, frame, dir);
                 }
-            });
-            if let Some(dir) = dir {
-                let cur_id = self.state.viewer.as_ref().map(|v| v.image_id);
-                if let Some(cur_id) = cur_id {
-                    let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
-                    if let Some(next_id) = crate::viewer::nav::neighbor_in_set(&ids, cur_id, dir) {
-                        if let Some(rec) =
-                            self.state.images.iter().find(|r| r.id == next_id).cloned()
-                        {
-                            self.open_record(ctx, frame, &rec);
-                        }
-                    }
-                }
-            }
 
-            // Before/After: `\` toggles showing the empty stack vs the live stack.
-            if ctx.input(|i| i.key_pressed(egui::Key::Backslash)) {
-                if let Some(v) = self.state.viewer.as_mut() {
-                    v.before_after = !v.before_after;
-                }
-                let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
-                self.set_preview_and_full(frame, stack); // re-evaluates with before_after
-            }
-
-            // Undo / Redo.
-            let (undo, redo) = ctx.input(|i| {
-                let z = i.key_pressed(egui::Key::Z);
-                let y = i.key_pressed(egui::Key::Y);
-                let cmd = i.modifiers.command;
-                let shift = i.modifiers.shift;
-                ((cmd && z && !shift), (cmd && y) || (cmd && z && shift))
-            });
-            if undo || redo {
-                let result = self.state.viewer.as_mut().and_then(|v| {
-                    if undo {
-                        v.history.undo()
-                    } else {
-                        v.history.redo()
-                    }
-                });
-                if let Some(stack) = result {
-                    self.set_preview_and_full(frame, stack.clone());
+                // Before/After: `\` shows the empty (before) stack while held, and
+                // reverts to the live stack on release.
+                //
+                // NOTE (Task 2.3 keymap routing, deliberate behavior change): the
+                // dispatch for this refactor explicitly routes `HoldBeforePeek`
+                // through `Keymap::held` (level-triggered), matching the keymap's
+                // own design — `Action::HoldBeforePeek` is documented as "Hold to
+                // show original (before)" and `held()` exists specifically for this
+                // action. The pre-refactor code actually toggled `before_after` on
+                // each `key_pressed` (an edge-triggered latch), which contradicted
+                // its own doc comment in `viewer/mod.rs` calling it "momentary".
+                // This routes it to the momentary/hold behavior the naming always
+                // implied: `before_after` now directly mirrors "is the chord held",
+                // only re-evaluating the preview on an actual state transition
+                // (press or release), not every frame it's held.
+                let hold_before = self
+                    .state
+                    .settings
+                    .keymap
+                    .held(ctx, crate::settings::keymap::Action::HoldBeforePeek);
+                let before_after_changed = self
+                    .state
+                    .viewer
+                    .as_ref()
+                    .is_some_and(|v| v.before_after != hold_before);
+                if before_after_changed {
                     if let Some(v) = self.state.viewer.as_mut() {
-                        v.edits_dirty = true;
+                        v.before_after = hold_before;
                     }
-                    // Persist the resulting stack (undo/redo changes the on-disk state).
-                    // Gather viewer scalars into locals before the iter_mut borrow.
-                    if let Some(v) = self.state.viewer.as_ref() {
-                        let (image_id, path) = (v.image_id, v.path.clone());
-                        if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
-                            rec.has_edits = !stack.is_identity();
-                        }
-                        self.persist_ops(ctx, image_id, path, stack);
-                    }
+                    let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
+                    self.set_preview_and_full(frame, stack); // re-evaluates with before_after
+                }
+
+                // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
+                // keymap's bound chord (defaults to Ctrl+Shift+Z) — kept for users
+                // used to the common Ctrl+Y redo convention.
+                let km = &self.state.settings.keymap;
+                let undo = km.pressed(ctx, crate::settings::keymap::Action::Undo);
+                let ctrl_y = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y));
+                let redo = km.pressed(ctx, crate::settings::keymap::Action::Redo) || ctrl_y;
+                if undo || redo {
+                    self.apply_undo_redo(ctx, frame, undo);
+                }
+
+                // Toggle before/after SPLIT-compare (draggable divider), mirroring
+                // the `develop_filter_bar` toggle button's click handling exactly:
+                // flips `split_compare` and, only when turning it on, resets
+                // `split_pos` to center. (Auto-fit-at-1:1 is a later task — not
+                // added here.)
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::ToggleSplitCompare)
+                {
+                    self.toggle_split_compare();
                 }
             }
         }
@@ -2234,11 +2618,15 @@ impl eframe::App for FerroliteApp {
                         .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
                 )
                 .show(ctx, |ui| {
-                    outcome = Some(crate::develop::adjustment_panel::show(
-                        ui,
-                        &mut self.state,
-                        working_space,
-                    ));
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            outcome = Some(crate::develop::adjustment_panel::show(
+                                ui,
+                                &mut self.state,
+                                working_space,
+                            ));
+                        });
                 });
             if let Some(outcome) = outcome {
                 if let Some(ws) = outcome.working_space {
@@ -2297,10 +2685,18 @@ impl eframe::App for FerroliteApp {
                             .color(theme::TEXT_FAINT),
                     );
                     ui.add_space(6.0);
+                    let before = self.state.export_settings;
                     crate::export::settings_form::settings_form(
                         ui,
                         &mut self.state.export_settings,
                     );
+                    if self.state.export_settings != before {
+                        self.state.settings.export =
+                            crate::settings::dto::PersistedExport::from_options(
+                                &self.state.export_settings,
+                            );
+                        self.mark_settings_dirty();
+                    }
                 });
         }
 
@@ -2337,6 +2733,9 @@ impl eframe::App for FerroliteApp {
                             self.crop_active_prev = crop_active;
                         }
                         self.drive_viewer(ui, frame);
+                        if self.state.settings.show_histogram {
+                            self.draw_histogram_overlay(ui);
+                        }
                         // Crop overlay: shown while the Geometry section is open.
                         // Gather all viewer data into locals BEFORE calling apply_edit
                         // (which needs &mut self) — mirrors the panel-outcome pattern.
@@ -2440,7 +2839,30 @@ impl eframe::App for FerroliteApp {
             }
         }
 
-        // Single-file export dialog (spec §8.3).
+        // Help modal (About + live keyboard-shortcut reference). Opened by
+        // F1 (`Action::OpenHelp`) or the Help menu.
+        {
+            let mut open = self.show_help;
+            crate::help::show(ctx, &mut open, &self.state.settings.keymap);
+            self.show_help = open;
+        }
+
+        // Settings window (General + Keyboard rebinding tabs). Opened by
+        // Ctrl+, (`Action::OpenSettings`) or the File menu.
+        {
+            let mut open = self.show_settings;
+            if crate::settings::ui::show(ctx, &mut open, &mut self.state.settings) {
+                self.mark_settings_dirty();
+            }
+            self.show_settings = open;
+        }
+
+        // Single-file export dialog (spec §8.3). Non-modal (see
+        // `open_export_dialog`): the Export module panel stays reachable while
+        // this is open. `dialog.options` is seeded once on open and edited
+        // in-place by the dialog widgets from then on — do NOT re-sync it from
+        // `state.export_settings` here, or every in-dialog edit gets reverted
+        // on the next frame (see the regression this comment replaced).
         if self.state.export_dialog.is_some() {
             let outcome = {
                 let dialog = self.state.export_dialog.as_mut().unwrap();
@@ -2504,6 +2926,13 @@ impl eframe::App for FerroliteApp {
                 }
             }
         }
+
+        // End-of-frame: persist any settings mutated this frame, off the UI
+        // thread. `settings_dirty` is set by the various settings-mutating call
+        // sites (export options, Library filter, confirm-before-remove,
+        // last-folder/module) whenever a value actually changes; this is a
+        // no-op on frames where nothing did.
+        self.save_settings_if_dirty();
     }
 
     /// Prevent the UI thread from blocking unboundedly on worker joins at close

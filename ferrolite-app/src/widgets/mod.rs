@@ -1,3 +1,4 @@
+pub mod curve;
 pub mod slider;
 pub use slider::EguiSlider;
 

@@ -3,23 +3,85 @@
 //! (those stay in the Library toolbar).
 
 use crate::library::filter_widgets as fw;
+use crate::library::icons;
+use crate::settings::keymap::Action;
 use crate::state::AppState;
 
-/// Returns true if a filter/sort field changed (caller sets `state.dirty`).
-pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> bool {
+/// Draw the before/after split-compare toggle: a painter icon + label button
+/// that lights up (accent background) while active, mirroring how
+/// `selectable_label` shows selection. Returns true if it was clicked (caller
+/// runs the shared `toggle_split_compare` path so `Y` / View menu / this
+/// button all behave identically).
+fn split_compare_button(
+    ui: &mut egui::Ui,
+    active: bool,
+    keymap: &crate::settings::keymap::Keymap,
+) -> bool {
+    let text = "Before/After";
+    let icon_size = 14.0;
+    let gap = 6.0;
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(13.0),
+        ui.visuals().text_color(),
+    );
+    let padding = egui::vec2(8.0, 4.0);
+    let size = egui::vec2(
+        icon_size + gap + galley.size().x + padding.x * 2.0,
+        (icon_size).max(galley.size().y) + padding.y * 2.0,
+    );
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+
+    if ui.is_rect_visible(rect) {
+        let hovered = resp.hovered();
+        if active {
+            ui.painter()
+                .rect_filled(rect, 3.0, crate::theme::ACCENT_BG_SEL);
+            ui.painter()
+                .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, crate::theme::ACCENT));
+        } else if hovered {
+            ui.painter()
+                .rect_filled(rect, 3.0, ui.visuals().faint_bg_color);
+        }
+        let icon_color = if active {
+            crate::theme::ACCENT_BRIGHT
+        } else {
+            ui.visuals().text_color()
+        };
+        let icon_center = egui::pos2(rect.left() + padding.x + icon_size * 0.5, rect.center().y);
+        icons::split_compare(ui.painter(), icon_center, icon_size, icon_color);
+        let text_pos = egui::pos2(
+            rect.left() + padding.x + icon_size + gap,
+            rect.center().y - galley.size().y * 0.5,
+        );
+        ui.painter().galley(text_pos, galley, icon_color);
+    }
+
+    resp.on_hover_text(format!(
+        "Split-compare original vs current edit ({})",
+        keymap.chord(Action::ToggleSplitCompare).label()
+    ))
+    .clicked()
+}
+
+/// What the filter bar did this frame: a filter/sort change (caller sets
+/// `state.dirty` + persists it) and/or a request to toggle before/after split
+/// (caller runs the shared `toggle_split_compare` path so this button behaves
+/// identically to the `Y` shortcut and the View menu item).
+pub struct FilterBarOutcome {
+    pub changed: bool,
+    pub toggle_split: bool,
+}
+
+pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> FilterBarOutcome {
     let mut changed = false;
+    let mut toggle_split = false;
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
-        if let Some(v) = state.viewer.as_mut() {
-            if ui
-                .selectable_label(v.split_compare, "\u{21D4} Before/After")
-                .on_hover_text("Split-compare the original against the current edit")
-                .clicked()
-            {
-                v.split_compare = !v.split_compare;
-                if v.split_compare {
-                    v.split_pos = 0.5;
-                }
+        if let Some(v) = state.viewer.as_ref() {
+            let active = v.split_compare;
+            if split_compare_button(ui, active, &state.settings.keymap) {
+                toggle_split = true;
             }
             ui.separator();
         }
@@ -37,5 +99,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> bool {
             &state.tags,
         );
     });
-    changed
+    FilterBarOutcome {
+        changed,
+        toggle_split,
+    }
 }

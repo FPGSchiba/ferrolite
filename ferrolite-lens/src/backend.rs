@@ -14,6 +14,10 @@ pub const MAX_LENS_HALO: u32 = 256;
 pub trait LensDb {
     fn match_lens(&self, q: &LensQuery) -> Option<LensMatch>;
     fn find_lenses(&self, camera_hint: &str, needle: &str) -> Vec<LensMatch>;
+    /// Re-resolve a previously-matched lens by its persisted `lens_id` (no EXIF
+    /// matching). Used by the bake job to turn a persisted `LensCorrection.lens_id`
+    /// back into a `LensMatch` on every open/edit, without re-running `match_lens`.
+    fn match_by_id(&self, lens_id: &str) -> Option<LensMatch>;
     fn bake_geometry(&self, m: &LensMatch, focal: f32, n: u32) -> Option<WarpGrid>;
     fn bake_vignetting(
         &self,
@@ -217,6 +221,29 @@ impl LensDb for LensfunDb {
             lens_id: lens.model.clone(),
             display_name: lens.model.clone(),
             crop_factor: crop,
+        })
+    }
+
+    fn match_by_id(&self, lens_id: &str) -> Option<LensMatch> {
+        // No camera is known on this path (we only have the persisted lens key,
+        // not the original EXIF camera model), so we cannot recover the actual
+        // camera's crop factor the way `resolve`/`match_lens` do. Mirror
+        // `find_lenses`'s documented fallback: use the lens's OWN calibration
+        // crop factor (`lens.crop_factor`, the format the lens was calibrated
+        // against, e.g. 1.0 for full-frame or 1.5/1.6 for APS-C primes) rather
+        // than defaulting to a hardcoded 1.0. This is very frequently correct in
+        // practice: DB lens entries with a crop-restricted mount (APS-C-only
+        // lenses) carry that crop in their own calibration, and full-frame
+        // lenses default to 1.0 either way. A future task could persist the
+        // camera's crop factor alongside `lens_id` in `LensCorrection` for an
+        // exact re-resolve; today's `LensCorrection.crop_factor` field is
+        // populated once at `match_lens` time and carried forward by the app,
+        // so this fallback is only reached if that value is somehow unavailable.
+        let lens = self.lens_by_id(lens_id)?;
+        Some(LensMatch {
+            lens_id: lens.model.clone(),
+            display_name: lens.model.clone(),
+            crop_factor: lens.crop_factor,
         })
     }
 
@@ -452,5 +479,33 @@ mod tests {
     fn find_lenses_search_returns_matches() {
         let hits = db().find_lenses("Canon", "24-70");
         assert!(hits.iter().any(|m| m.display_name.contains("24-70")));
+    }
+
+    #[test]
+    fn match_by_id_resolves_a_persisted_lens_id() {
+        let q = LensQuery {
+            camera_make: "Canon".into(),
+            camera_model: "Canon EOS 5D Mark III".into(),
+            lens_model: Some("Canon EF 24-70mm f/2.8L II USM".into()),
+            focal_len: 50.0,
+            aperture: 8.0,
+        };
+        let db = db();
+        let m = db.match_lens(&q).expect("known lens matches");
+        // Re-resolve by the persisted key alone (no camera/EXIF context).
+        let by_id = db
+            .match_by_id(&m.lens_id)
+            .expect("persisted lens_id re-resolves");
+        assert_eq!(by_id.lens_id, m.lens_id);
+        assert_eq!(by_id.display_name, m.display_name);
+        // No camera hint on this path: crop_factor falls back to the lens's own
+        // calibration crop (documented on `match_by_id`), which for this
+        // full-frame lens is ≈1.0, same as the camera-resolved crop above.
+        assert!(by_id.crop_factor > 0.9 && by_id.crop_factor < 1.1);
+    }
+
+    #[test]
+    fn match_by_id_unknown_key_is_none() {
+        assert!(db().match_by_id("Nonexistent Lens Key 9000").is_none());
     }
 }

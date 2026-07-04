@@ -373,15 +373,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             }
         }
 
-        // ── Layout C (MV2) ── A compact "chips" row of toggles for the three
-        // corrections, then a detail area below with a full-width Amount slider
-        // for each ENABLED correction.
+        // ── Layout D (MV3) ── One compact combined row per correction:
+        // `[checkbox: enabled]  <EguiSlider labelled with the correction name>`.
+        // The checkbox is the enable toggle (no text of its own — the slider's
+        // own label carries the name), and the slider is the Amount control,
+        // so this reads as `[x] Name ──●── value ↺` on a single line instead
+        // of MV2's separate chips row + full-width detail sliders (which the
+        // author found wrapped to two lines and didn't read as toggles).
         //
-        // Distortion + TCA need lens (Lensfun) data: their chips are DISABLED
-        // (greyed) with a hint when no lens is matched — a matched lens_id
-        // (persisted) OR the resolved name means we have profile data.
-        // Vignetting is ALWAYS enabled: it works lens-free via the parametric
-        // manual gain (MV1), so it can be toggled + adjusted with no lens.
+        // Distortion + TCA need lens (Lensfun) data: their ENTIRE row (checkbox
+        // + slider) is disabled/greyed with a hint when no lens is matched — a
+        // matched lens_id (persisted) OR the resolved name means we have
+        // profile data. Vignetting's row is ALWAYS enabled: it works lens-free
+        // via the parametric manual gain (MV1), so it can be toggled + adjusted
+        // with no lens.
         let has_lens = lc.lens_id.is_some()
             || state
                 .viewer
@@ -396,118 +401,107 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             .map(|v| v.lens_vignette.is_some())
             .unwrap_or(false);
 
-        let mut chips_changed = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Corrections:");
-            // A lens-gated chip: greyed + hinted when no lens is matched.
-            let chip = |ui: &mut egui::Ui, label: &str, c: &mut Correction, changed: &mut bool| {
-                let resp = ui
-                    .add_enabled(has_lens, egui::SelectableLabel::new(c.enabled, label))
-                    .on_disabled_hover_text("Select a lens to enable");
-                if resp.clicked() {
-                    c.enabled = !c.enabled;
-                    *changed = true;
-                }
-            };
-            chip(ui, "Distortion", &mut new_lc.distortion, &mut chips_changed);
-            chip(ui, "Transverse CA", &mut new_lc.tca, &mut chips_changed);
-            // Vignetting chip is always enabled (manual works lens-free).
-            let vresp = ui.selectable_label(new_lc.vignetting.enabled, "Vignetting");
-            if vresp.clicked() {
-                let now_on = !new_lc.vignetting.enabled;
-                new_lc.vignetting.enabled = now_on;
-                // On ENABLE in manual mode, seed the neutral 0.0 gain instead of
-                // the profile default 1.0 (which would be full brightening).
-                // Doing it at the toggle (not every frame) means a user CAN dial
-                // manual amount up to +1.0 without it snapping back (MV2).
-                if now_on
-                    && !has_vignette_lut
-                    && (new_lc.vignetting.amount - 1.0).abs() < f32::EPSILON
-                {
-                    new_lc.vignetting.amount = vignette_mode::MANUAL_PARAMS.default;
-                }
-                chips_changed = true;
-            }
-        });
-        if chips_changed {
-            changed = true;
-        }
-        ui.add_space(4.0);
-
-        // Detail area: a full-width Amount slider for each ENABLED correction.
-        // Each slider keeps its OWN reset arrow (CLAUDE.md: per-control reset is
-        // load-bearing — `EguiSlider` always renders + wires `draw_reset_arrow`
-        // in its reset column, so every visible slider is independently
-        // resettable). Distortion/TCA are unchanged (0..2, reset 1). The
-        // Vignetting slider is MODE-AWARE (MV2): profile-correction strength
-        // (0..2, reset 1, unipolar) when a profile LUT is bound, else a bipolar
-        // lens-free manual gain (-1..1, reset 0).
-        let amount_row = |ui: &mut egui::Ui,
-                          label: &str,
-                          value: &mut f32,
-                          params: vignette_mode::VigSliderParams,
-                          dragged: &mut bool,
-                          drag_stopped: &mut bool| {
-            let r = ui.add(EguiSlider {
-                label,
-                value,
-                min: params.min,
-                max: params.max,
-                default: params.default,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: params.bipolar,
-                signed: params.bipolar,
-            });
-            if r.changed() {
-                if r.drag_stopped() {
-                    *drag_stopped = true;
-                } else if r.dragged() {
-                    *dragged = true;
+        // Each slider keeps its OWN reset arrow (CLAUDE.md: per-control reset
+        // is load-bearing — `EguiSlider` always renders + wires
+        // `draw_reset_arrow` in its reset column, so every visible slider is
+        // independently resettable, checkbox-enabled or not). Distortion/TCA
+        // are unchanged (0..2, reset 1). The Vignetting slider is MODE-AWARE
+        // (MV2): profile-correction strength (0..2, reset 1, unipolar) when a
+        // profile LUT is bound, else a bipolar lens-free manual gain (-1..1,
+        // reset 0).
+        let correction_row = |ui: &mut egui::Ui,
+                              name: &str,
+                              c: &mut Correction,
+                              params: vignette_mode::VigSliderParams,
+                              row_enabled: bool,
+                              dragged: &mut bool,
+                              drag_stopped: &mut bool,
+                              toggled: &mut bool| {
+            ui.horizontal(|ui| {
+                let cb = ui.add_enabled(row_enabled, egui::Checkbox::new(&mut c.enabled, ""));
+                let cb = if row_enabled {
+                    cb
                 } else {
-                    // Click / double-click-reset / typed entry: commit immediately.
-                    *drag_stopped = true;
+                    cb.on_disabled_hover_text("Needs a matched lens")
+                };
+                if cb.changed() {
+                    *toggled = true;
                 }
-            }
+                ui.add_enabled_ui(row_enabled && c.enabled, |ui| {
+                    let r = ui.add(EguiSlider {
+                        label: name,
+                        value: &mut c.amount,
+                        min: params.min,
+                        max: params.max,
+                        default: params.default,
+                        step: 0.01,
+                        decimals: 2,
+                        unit: "",
+                        bipolar: params.bipolar,
+                        signed: params.bipolar,
+                    });
+                    if r.changed() {
+                        if r.drag_stopped() {
+                            *drag_stopped = true;
+                        } else if r.dragged() {
+                            *dragged = true;
+                        } else {
+                            // Click / double-click-reset / typed entry: commit immediately.
+                            *drag_stopped = true;
+                        }
+                    }
+                });
+            });
         };
 
-        let mut any_detail = false;
-        if new_lc.distortion.enabled {
-            any_detail = true;
-            amount_row(
-                ui,
-                "Distortion",
-                &mut new_lc.distortion.amount,
-                vignette_mode::PROFILE_PARAMS,
-                &mut amount_dragged,
-                &mut amount_drag_stopped,
-            );
+        let mut distortion_toggled = false;
+        correction_row(
+            ui,
+            "Distortion",
+            &mut new_lc.distortion,
+            vignette_mode::PROFILE_PARAMS,
+            has_lens,
+            &mut amount_dragged,
+            &mut amount_drag_stopped,
+            &mut distortion_toggled,
+        );
+        let mut tca_toggled = false;
+        correction_row(
+            ui,
+            "TCA",
+            &mut new_lc.tca,
+            vignette_mode::PROFILE_PARAMS,
+            has_lens,
+            &mut amount_dragged,
+            &mut amount_drag_stopped,
+            &mut tca_toggled,
+        );
+        let vignette_was_enabled = new_lc.vignetting.enabled;
+        let mut vignetting_toggled = false;
+        correction_row(
+            ui,
+            "Vignette",
+            &mut new_lc.vignetting,
+            vignette_mode::slider_params(has_vignette_lut),
+            true, // Vignetting row is always enabled (manual works lens-free).
+            &mut amount_dragged,
+            &mut amount_drag_stopped,
+            &mut vignetting_toggled,
+        );
+        if vignetting_toggled
+            && new_lc.vignetting.enabled
+            && !vignette_was_enabled
+            && !has_vignette_lut
+            && (new_lc.vignetting.amount - 1.0).abs() < f32::EPSILON
+        {
+            // On ENABLE in manual mode, seed the neutral 0.0 gain instead of
+            // the profile default 1.0 (which would be full brightening).
+            // Doing it at the toggle (not every frame) means a user CAN dial
+            // manual amount up to +1.0 without it snapping back (MV2).
+            new_lc.vignetting.amount = vignette_mode::MANUAL_PARAMS.default;
         }
-        if new_lc.tca.enabled {
-            any_detail = true;
-            amount_row(
-                ui,
-                "Transverse CA",
-                &mut new_lc.tca.amount,
-                vignette_mode::PROFILE_PARAMS,
-                &mut amount_dragged,
-                &mut amount_drag_stopped,
-            );
-        }
-        if new_lc.vignetting.enabled {
-            any_detail = true;
-            amount_row(
-                ui,
-                "Vignetting",
-                &mut new_lc.vignetting.amount,
-                vignette_mode::slider_params(has_vignette_lut),
-                &mut amount_dragged,
-                &mut amount_drag_stopped,
-            );
-        }
-        if !any_detail {
-            ui.weak("Enable a correction above to adjust it.");
+        if distortion_toggled || tca_toggled || vignetting_toggled {
+            changed = true;
         }
 
         // Advanced: focal length + aperture used by the bake (EXIF-seeded once
@@ -515,43 +509,57 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         // A focal/aperture edit changes the bake inputs, so it routes through
         // the same `changed` (bake-triggering) path as a toggle/lens pick,
         // never the Amount-only uniform path.
+        //
+        // Gated on `has_lens` (same predicate as Distortion/TCA above): focal
+        // length & aperture are inputs to the lens-PROFILE bake (they select
+        // the Lensfun calibration point), so they have no effect without a
+        // matched lens and no effect on manual vignette. Ungated, the author
+        // could drag these with no visible result ("changing focal/aperture
+        // does nothing"); greying them out with the same "needs a lens" hint
+        // makes that clear. Once a lens IS matched they still re-bake exactly
+        // as before (both fields are part of `lens_bake_key`).
         let mut advanced_dragged = false;
         let mut advanced_drag_stopped = false;
         egui::CollapsingHeader::new("Advanced")
             .id_salt("lens_corrections_advanced")
             .show(ui, |ui| {
-                let rf = ui.add(EguiSlider {
-                    label: "Focal",
-                    value: &mut new_lc.focal_len,
-                    min: 8.0,
-                    max: 800.0,
-                    default: DEFAULT_FOCAL_LEN,
-                    step: 1.0,
-                    decimals: 0,
-                    unit: " mm",
-                    bipolar: false,
-                    signed: false,
-                });
-                let ra = ui.add(EguiSlider {
-                    label: "Aperture",
-                    value: &mut new_lc.aperture,
-                    min: 1.0,
-                    max: 32.0,
-                    default: DEFAULT_APERTURE,
-                    step: 0.1,
-                    decimals: 1,
-                    unit: " f",
-                    bipolar: false,
-                    signed: false,
-                });
-                if rf.changed() || ra.changed() {
-                    if rf.drag_stopped() || ra.drag_stopped() {
-                        advanced_drag_stopped = true;
-                    } else if rf.dragged() || ra.dragged() {
-                        advanced_dragged = true;
-                    } else {
-                        advanced_drag_stopped = true;
+                let resp = ui.add_enabled_ui(has_lens, |ui| {
+                    let rf = ui.add(EguiSlider {
+                        label: "Focal",
+                        value: &mut new_lc.focal_len,
+                        min: 8.0,
+                        max: 800.0,
+                        default: DEFAULT_FOCAL_LEN,
+                        step: 1.0,
+                        decimals: 0,
+                        unit: " mm",
+                        bipolar: false,
+                        signed: false,
+                    });
+                    let ra = ui.add(EguiSlider {
+                        label: "Aperture",
+                        value: &mut new_lc.aperture,
+                        min: 1.0,
+                        max: 32.0,
+                        default: DEFAULT_APERTURE,
+                        step: 0.1,
+                        decimals: 1,
+                        unit: " f",
+                        bipolar: false,
+                        signed: false,
+                    });
+                    if rf.changed() || ra.changed() {
+                        if rf.drag_stopped() || ra.drag_stopped() {
+                            advanced_drag_stopped = true;
+                        } else if rf.dragged() || ra.dragged() {
+                            advanced_dragged = true;
+                        } else {
+                            advanced_drag_stopped = true;
+                        }
                     }
+                });
+                if !has_lens {
+                    resp.response.on_hover_text("Needs a matched lens");
                 }
             });
         let advanced_changed = advanced_dragged || advanced_drag_stopped;

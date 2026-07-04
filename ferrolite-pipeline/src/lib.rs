@@ -28,12 +28,15 @@ pub use tile_edit::TileEditPipeline;
 // Exception: `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
 pub use uniforms::{
     curve_lut, geometry_tile_uniform, lens_halo_px, sharpen_halo, ContrastUniform, ExposureUniform,
-    GeometryUniform, HslUniform, LensUniform, SharpenUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    GeometryUniform, HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
+    MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm.
+/// alongside the display-pipeline pre-warm. Nine passes: the seven original
+/// color/tone/geometry passes plus the two lens passes (geometry now carries the
+/// warp; `vignette` is the new radial-gain pass).
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
@@ -44,6 +47,7 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         ("hsl", include_str!("shaders/hsl.wgsl")),
         ("sharpen", include_str!("shaders/sharpen.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
+        ("vignette", include_str!("shaders/vignette.wgsl")),
     ] {
         let _ = ctx.shader_module(label, src);
     }

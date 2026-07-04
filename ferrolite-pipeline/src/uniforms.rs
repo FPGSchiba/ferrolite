@@ -365,6 +365,24 @@ pub struct LensUniform {
     pub use_warp: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct VignetteUniform {
+    /// Lerp factor between identity (gain 1.0) and the LUT gain. 0 = identity.
+    pub vig_amount: f32,
+    pub pad: [f32; 3],
+}
+
+impl Default for VignetteUniform {
+    /// Identity: `vig_amount = 0` → the pass multiplies rgb by 1.0.
+    fn default() -> Self {
+        Self {
+            vig_amount: 0.0,
+            pad: [0.0; 3],
+        }
+    }
+}
+
 /// The geometric halo (px) a tiled lens-corrected pass over-fetches. Zero unless
 /// distortion or TCA is enabled AND a grid is present.
 pub fn lens_halo_px(lc: Option<&LensCorrection>, grid: Option<&WarpGrid>) -> u32 {
@@ -688,6 +706,12 @@ mod tests {
     #[test]
     fn lens_uniform_is_16_byte_aligned() {
         assert_eq!(std::mem::size_of::<LensUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn vignette_uniform_default_is_identity_and_aligned() {
+        assert_eq!(VignetteUniform::default().vig_amount, 0.0);
+        assert_eq!(std::mem::size_of::<VignetteUniform>() % 16, 0);
     }
 
     #[test]

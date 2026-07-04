@@ -20,13 +20,13 @@ use ferrolite_image::{TileCoord, TILE_SIZE};
 
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
-use crate::lens_gpu::WarpGridTexture;
-use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest};
+use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
+use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest, VignetteNode};
 use crate::op::{Aspect, CropRect, Geometry, OpStack};
 use crate::uniforms::{
     color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_halo,
     sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform, LensUniform,
-    SharpenUniform, WbUniform,
+    SharpenUniform, VignetteUniform, WbUniform,
 };
 
 pub struct TileEditPipeline {
@@ -38,6 +38,9 @@ pub struct TileEditPipeline {
     head: Rc<GeometryHeadNode>,
     color_matrix_id: NodeId,
     color_matrix: Rc<Cell<ColorMatrixUniform>>,
+    vignette_id: NodeId,
+    vignette: Rc<Cell<VignetteUniform>>,
+    vignette_node: Rc<VignetteNode>,
     halo: u32,
     // Param cells (set from the stack; Plan 4 mutates via set_stack).
     exposure: Rc<Cell<ExposureUniform>>,
@@ -86,6 +89,13 @@ impl TileEditPipeline {
             vec![head_id],
         );
 
+        // Vignetting: scene-linear point op, before exposure (spec §6.2). It is
+        // point-wise, so its position in the per-tile color chain only needs to be
+        // scene-linear. Default `vig_amount = 0` → identity (tile-seam golden safe).
+        let vignette = Rc::new(Cell::new(VignetteUniform::default()));
+        let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone()));
+        let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
+
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
         let exposure_id = graph.add_node(
             Box::new(PointOpNode::new(
@@ -94,7 +104,7 @@ impl TileEditPipeline {
                 "exposure",
                 exposure.clone(),
             )),
-            vec![color_matrix_id],
+            vec![vignette_id],
         );
         let wb = Rc::new(Cell::new(crate::uniforms::wb_uniform(
             stack.white_balance(),
@@ -159,6 +169,9 @@ impl TileEditPipeline {
             head,
             color_matrix_id,
             color_matrix,
+            vignette_id,
+            vignette,
+            vignette_node,
             halo,
             exposure,
             wb,
@@ -222,6 +235,25 @@ impl TileEditPipeline {
     pub fn set_lens_uniform(&mut self, lens: LensUniform) {
         self.head.set_lens_uniform(lens);
         self.graph.mark_dirty(self.head_id);
+    }
+
+    /// Bind a freshly baked vignette gain LUT to the per-tile vignette pass
+    /// (bake-time; rebuilds the cached view, no pipeline rebuild).
+    pub fn set_vignette(&mut self, lut: VignetteTexture) {
+        self.vignette_node.set_vignette(lut);
+        self.graph.mark_dirty(self.vignette_id);
+    }
+
+    /// Set the vignette lerp amount (buffer write; no rebuild). 0 = identity.
+    pub fn set_vig_amount(&mut self, amount: f32) {
+        let u = VignetteUniform {
+            vig_amount: amount,
+            pad: [0.0; 3],
+        };
+        if u != self.vignette.get() {
+            self.vignette.set(u);
+            self.graph.mark_dirty(self.vignette_id);
+        }
     }
 
     /// Render the edited interior `TILE_SIZE`² for `coord` as an `Rgba16Float`

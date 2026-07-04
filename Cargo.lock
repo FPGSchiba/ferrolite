@@ -1220,6 +1220,7 @@ dependencies = [
 name = "ferrolite-color"
 version = "0.0.1"
 dependencies = [
+ "half",
  "moxcms",
  "serde",
  "thiserror 2.0.18",

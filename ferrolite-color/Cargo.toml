@@ -12,3 +12,4 @@ workspace = true
 moxcms = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+half = { workspace = true }

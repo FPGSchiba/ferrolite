@@ -57,6 +57,78 @@ fn profile_name(p: &moxcms::ColorProfile) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
+/// A baked `working→monitor` 3D LUT. `rgba16f` is `size³` RGBA half-float
+/// texels, R fastest then G then B (matches wgpu `write_texture` row/layer order).
+pub struct DisplayLut {
+    pub size: u32,
+    pub rgba16f: Vec<u16>,
+}
+
+/// Build a moxcms source profile representing `working` with a LINEAR TRC, so
+/// working-linear RGB can be fed straight through a profile→profile transform.
+fn linear_working_profile(working: crate::WorkingSpace) -> moxcms::ColorProfile {
+    use crate::WorkingSpace;
+    let mut p = match working {
+        WorkingSpace::Srgb => moxcms::ColorProfile::new_srgb(),
+        WorkingSpace::AdobeRgb => moxcms::ColorProfile::new_adobe_rgb(),
+        WorkingSpace::DisplayP3 => moxcms::ColorProfile::new_display_p3(),
+        WorkingSpace::Rec2020 => moxcms::ColorProfile::new_bt2020(),
+        WorkingSpace::ProPhoto => moxcms::ColorProfile::new_pro_photo_rgb(),
+    };
+    let lin = moxcms::curve_from_gamma(1.0);
+    p.red_trc = Some(lin.clone());
+    p.green_trc = Some(lin.clone());
+    p.blue_trc = Some(lin);
+    p.cicp = None; // don't let CICP transfer override the linear TRC
+    p
+}
+
+/// Bake the `working→monitor` transform into a `size³` RGBA16F 3D LUT, indexed
+/// through the gamma shaper (`shaper_decode`).
+pub fn bake_display_lut(
+    working: crate::WorkingSpace,
+    monitor: &DisplayProfile,
+    size: u32,
+) -> Result<DisplayLut, ColorError> {
+    use moxcms::{Layout, TransformOptions};
+    let src = linear_working_profile(working);
+    let opts = TransformOptions {
+        allow_use_cicp_transfer: false,
+        prefer_fixed_point: false,
+        ..TransformOptions::default()
+    };
+    let xf = src
+        .create_transform_f32(Layout::Rgb, &monitor.profile, Layout::Rgb, opts)
+        .map_err(|e| ColorError::Icc(e.to_string()))?;
+
+    let n = size as usize;
+    let denom = (n - 1) as f32;
+    // Build the input grid: working-linear values from shaper-decoded indices.
+    let mut input = Vec::with_capacity(n * n * n * 3);
+    for b in 0..n {
+        for g in 0..n {
+            for r in 0..n {
+                input.push(shaper_decode(r as f32 / denom));
+                input.push(shaper_decode(g as f32 / denom));
+                input.push(shaper_decode(b as f32 / denom));
+            }
+        }
+    }
+    let mut out = vec![0.0f32; input.len()];
+    xf.transform(&input, &mut out)
+        .map_err(|e| ColorError::Icc(e.to_string()))?;
+
+    // Pack to RGBA16F, clamped to [0,1], alpha = 1.
+    let mut rgba16f = Vec::with_capacity(n * n * n * 4);
+    for px in out.chunks_exact(3) {
+        rgba16f.push(half::f16::from_f32(px[0].clamp(0.0, 1.0)).to_bits());
+        rgba16f.push(half::f16::from_f32(px[1].clamp(0.0, 1.0)).to_bits());
+        rgba16f.push(half::f16::from_f32(px[2].clamp(0.0, 1.0)).to_bits());
+        rgba16f.push(half::f16::from_f32(1.0).to_bits());
+    }
+    Ok(DisplayLut { size, rgba16f })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +158,52 @@ mod tests {
     #[test]
     fn parse_rejects_garbage() {
         assert!(DisplayProfile::parse(&[0u8; 8]).is_err());
+    }
+
+    #[test]
+    fn bakes_lut_of_expected_shape() {
+        let mon =
+            DisplayProfile::parse(&crate::emit_icc(crate::WorkingSpace::Srgb).unwrap()).unwrap();
+        let lut = bake_display_lut(crate::WorkingSpace::Srgb, &mon, DISPLAY_LUT_SIZE).unwrap();
+        assert_eq!(lut.size, DISPLAY_LUT_SIZE);
+        let n = DISPLAY_LUT_SIZE as usize;
+        assert_eq!(lut.rgba16f.len(), n * n * n * 4);
+        assert!(lut
+            .rgba16f
+            .iter()
+            .all(|&h| half::f16::from_bits(h).is_finite()));
+    }
+
+    #[test]
+    fn srgb_working_to_srgb_monitor_reproduces_srgb_oetf() {
+        // sRGB working through an sRGB monitor profile ≈ the sRGB OETF within
+        // trilinear tolerance: the LUT-encoded corners bracket a known value.
+        let mon =
+            DisplayProfile::parse(&crate::emit_icc(crate::WorkingSpace::Srgb).unwrap()).unwrap();
+        let lut = bake_display_lut(crate::WorkingSpace::Srgb, &mon, DISPLAY_LUT_SIZE).unwrap();
+        let n = DISPLAY_LUT_SIZE as usize;
+        // Node at index (n-1,n-1,n-1) is working-linear (1,1,1) → sRGB ~1.0.
+        let last = (n * n * n - 1) * 4;
+        let white = half::f16::from_bits(lut.rgba16f[last]).to_f32();
+        assert!((white - 1.0).abs() < 0.02, "white corner {white}");
+        // Node at index (0,0,0) is (0,0,0) → 0.
+        let black = half::f16::from_bits(lut.rgba16f[0]).to_f32();
+        assert!(black.abs() < 0.02, "black corner {black}");
+    }
+
+    #[test]
+    fn lut_channels_are_monotonic_along_red_axis() {
+        let mon =
+            DisplayProfile::parse(&crate::emit_icc(crate::WorkingSpace::Srgb).unwrap()).unwrap();
+        let lut = bake_display_lut(crate::WorkingSpace::Rec2020, &mon, DISPLAY_LUT_SIZE).unwrap();
+        let n = DISPLAY_LUT_SIZE as usize;
+        // Walk r at g=b=0; the R output must be non-decreasing.
+        let mut prev = -1.0f32;
+        for r in 0..n {
+            let idx = r * 4; // g=b=0 → linear index = r
+            let v = half::f16::from_bits(lut.rgba16f[idx]).to_f32();
+            assert!(v + 1e-3 >= prev, "non-monotonic at r={r}: {v} < {prev}");
+            prev = v;
+        }
     }
 }

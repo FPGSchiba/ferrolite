@@ -14,9 +14,11 @@ use ferrolite_pipeline::GpuPyramidSource;
 use crate::events::AppEvent;
 use crate::state::AppState;
 
+pub mod activity;
 pub mod batch;
 pub mod settings_form;
 
+pub use activity::{ExportActivity, ExportKind};
 use settings_form::settings_form;
 
 /// The full-resolution source an export renders from. RAW images have a

@@ -111,7 +111,7 @@ pub enum AppEvent {
         message: String,
     },
     /// One image of a running batch export finished (ok=false → failed/cancelled).
-    /// Folded by `apply` into the aggregate `BatchExportState` counters.
+    /// Folded by `apply` into the aggregate `ExportActivity` counters.
     BatchItemFinished {
         // Reserved for a future per-image status indicator in the queue list
         // (Task 7); the aggregate fold below only needs `ok`/`message`.
@@ -228,15 +228,8 @@ impl AppState {
                 ok,
                 message,
             } => {
-                if let Some(b) = self.batch.as_mut() {
-                    b.completed += 1;
-                    if !ok {
-                        b.failed += 1;
-                        b.warnings.push(message);
-                    }
-                    if b.is_done() {
-                        b.handles.clear();
-                    }
+                if let Some(a) = self.export_activity.as_mut() {
+                    a.item_finished(ok, message);
                 }
                 None
             }
@@ -475,7 +468,7 @@ mod tests {
     #[test]
     fn batch_item_finished_folds_into_aggregate() {
         let mut s = AppState::for_test();
-        s.batch = Some(crate::export::batch::BatchExportState::new(2));
+        s.export_activity = Some(crate::export::ExportActivity::new_batch(2));
         s.apply(AppEvent::BatchItemFinished {
             image_id: 1,
             ok: true,
@@ -486,10 +479,10 @@ mod tests {
             ok: false,
             message: "disk full".into(),
         });
-        let b = s.batch.as_ref().unwrap();
-        assert_eq!(b.completed, 2);
-        assert_eq!(b.failed, 1);
-        assert!(b.is_done());
-        assert_eq!(b.warnings, vec!["disk full".to_string()]);
+        let a = s.export_activity.as_ref().unwrap();
+        assert_eq!(a.completed, 2);
+        assert_eq!(a.failed, 1);
+        assert!(a.is_done());
+        assert_eq!(a.warnings, vec!["disk full".to_string()]);
     }
 }

@@ -29,33 +29,6 @@ pub struct BatchItem {
     pub dest: PathBuf,
 }
 
-/// Aggregate progress + cancellation handles for a running batch.
-#[derive(Default)]
-pub struct BatchExportState {
-    pub total: usize,
-    pub completed: usize,
-    pub failed: usize,
-    pub handles: Vec<JobHandle>,
-    pub warnings: Vec<String>,
-}
-
-impl BatchExportState {
-    pub fn new(total: usize) -> Self {
-        Self {
-            total,
-            ..Default::default()
-        }
-    }
-    pub fn is_done(&self) -> bool {
-        self.completed >= self.total
-    }
-    pub fn cancel_all(&self) {
-        for h in &self.handles {
-            h.cancel();
-        }
-    }
-}
-
 /// Submit the batch as a **single** Background job that processes items **one at
 /// a time**. Returns the one job handle (for cancellation).
 ///

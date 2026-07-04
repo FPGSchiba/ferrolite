@@ -67,7 +67,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> Option<ExportModuleActio
         });
     state.export_help_open = help_open;
     ui.horizontal(|ui| {
-        let running = state.batch.as_ref().is_some_and(|b| !b.is_done());
+        let running = state.batch_running();
         let can_start = !running
             && !state.export_queue.is_empty()
             && state.export_dest.is_some()
@@ -80,7 +80,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) -> Option<ExportModuleActio
         if running && ui.button("Cancel").clicked() {
             action = Some(ExportModuleAction::Cancel);
         }
-        if let Some(b) = state.batch.as_ref() {
+        if let Some(b) = state
+            .export_activity
+            .as_ref()
+            .filter(|a| a.kind == crate::export::ExportKind::Batch)
+        {
             let msg = if b.is_done() {
                 format!(
                     "Done — {} exported, {} failed",

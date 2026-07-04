@@ -1,9 +1,9 @@
 //! The only module that names `lensfun`. `match_lens`/`bake_geometry`/
 //! `bake_vignetting`/`find_lenses` are all real (Tasks 2–4 landed).
 
-#[cfg(test)]
-use crate::types::GRID_N;
 use crate::types::{LensError, LensMatch, LensQuery, VignetteMap, WarpGrid};
+#[cfg(test)]
+use crate::types::{GRID_N, VIGNETTE_LEN};
 
 /// Max halo (px) a tiled lens-corrected pass over-fetches (mirrors MAX_SHARPEN_RADIUS).
 pub const MAX_LENS_HALO: u32 = 256;
@@ -127,6 +127,59 @@ fn bake_geometry_impl(lens: &lensfun::Lens, crop: f32, focal: f32, n: u32) -> Op
     })
 }
 
+/// Build a modifier over a square `dim x dim` image (`dim = 2*len - 1`, odd so
+/// the exact center sits on a pixel) and sample the **correction** gain along
+/// a horizontal radius from the center pixel out to the right edge.
+///
+/// # Confirmed lensfun 0.7.0 API (see `.superpowers/sdd/u2-report.md`)
+///
+/// There is no method that returns the vignetting gain LUT directly. The real
+/// applicator is `Modifier::apply_color_modification_f32`, which multiplies a
+/// caller-supplied pixel buffer by the per-pixel gain in place. We drive it
+/// with a buffer pre-filled with `1.0` so the output *is* the gain, sampling
+/// one physical pixel at a time (`width=1, rows=1`) at `(x, y_center)` for
+/// `x` running from the center out to the edge — this is the real polynomial
+/// evaluated by the real code path, not a re-derivation of the math.
+///
+/// `reverse=false` on the `Modifier` means `apply_color_modification_f32`
+/// takes the `DeVignetting` branch (mirrors upstream `reverse=false` in
+/// `mod-color.cpp`), i.e. it multiplies by `1/gain`, which *brightens* the
+/// (real) darkened corners — the correction curve `bake_vignetting` is meant
+/// to produce.
+fn bake_vignetting_impl(
+    lens: &lensfun::Lens,
+    crop: f32,
+    focal: f32,
+    aperture: f32,
+    len: u32,
+) -> Option<VignetteMap> {
+    if len < 2 {
+        return None;
+    }
+    // Odd square canvas so the center radius sample sits exactly on a pixel
+    // and the right edge sits exactly on the normalized r=1 inscribed circle.
+    let dim = 2 * len - 1;
+    let mut modifier = lensfun::Modifier::new(lens, focal, crop, dim, dim, false);
+    if !modifier.enable_vignetting_correction(lens, aperture, 1000.0) {
+        return None;
+    }
+
+    let center = (len - 1) as f32;
+    let mut radial = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let x = center + i as f32;
+        let mut px = [1.0f32];
+        if !modifier.apply_color_modification_f32(&mut px, x, center, 1, 1, 1) {
+            return None;
+        }
+        radial.push(px[0]);
+    }
+    if radial.iter().any(|g| !g.is_finite()) {
+        return None;
+    }
+    Some(VignetteMap { radial })
+}
+
 impl LensDb for LensfunDb {
     fn match_lens(&self, q: &LensQuery) -> Option<LensMatch> {
         let (lens, crop) = self.resolve(q)?;
@@ -137,8 +190,32 @@ impl LensDb for LensfunDb {
         })
     }
 
-    fn find_lenses(&self, _camera_hint: &str, _needle: &str) -> Vec<LensMatch> {
-        Vec::new() // Task 4
+    fn find_lenses(&self, camera_hint: &str, needle: &str) -> Vec<LensMatch> {
+        // Real fuzzy search over the lens model name (`Database::find_lenses`
+        // with `camera = None`). We deliberately do NOT resolve `camera_hint`
+        // to a specific `Camera` and pass it through: `Database::find_lenses`
+        // uses the camera only to hard-filter by mount compatibility, and a
+        // maker hint like "Canon" resolves ambiguously to whichever camera
+        // body `find_cameras` ranks first (e.g. a fixed-lens compact with a
+        // body-specific mount no interchangeable lens matches) — that would
+        // silently zero out results instead of narrowing them. The picker's
+        // `camera_hint` is used to pick each hit's reported crop factor
+        // (falling back to the lens's own calibration crop) rather than as a
+        // hard filter.
+        let camera = self
+            .db
+            .find_cameras(Some(camera_hint), "")
+            .into_iter()
+            .next();
+        self.db
+            .find_lenses(None, needle)
+            .into_iter()
+            .map(|lens| LensMatch {
+                lens_id: lens.model.clone(),
+                display_name: lens.model.clone(),
+                crop_factor: camera.map(|c| c.crop_factor).unwrap_or(lens.crop_factor),
+            })
+            .collect()
     }
     fn bake_geometry(&self, m: &LensMatch, focal: f32, n: u32) -> Option<WarpGrid> {
         let lens = self.lens_by_id(&m.lens_id)?;
@@ -146,12 +223,13 @@ impl LensDb for LensfunDb {
     }
     fn bake_vignetting(
         &self,
-        _m: &LensMatch,
-        _focal: f32,
-        _aperture: f32,
-        _len: u32,
+        m: &LensMatch,
+        focal: f32,
+        aperture: f32,
+        len: u32,
     ) -> Option<VignetteMap> {
-        None // Task 4
+        let lens = self.lens_by_id(&m.lens_id)?;
+        bake_vignetting_impl(lens, m.crop_factor, focal, aperture, len)
     }
 }
 
@@ -235,5 +313,35 @@ mod tests {
             max_disp: 9999.0,
         };
         assert_eq!(crate::lens_halo(&big), MAX_LENS_HALO);
+    }
+
+    #[test]
+    fn bake_vignetting_falls_off_toward_edges() {
+        let q = LensQuery {
+            camera_make: "Canon".into(),
+            camera_model: "Canon EOS 5D Mark III".into(),
+            lens_model: Some("Canon EF 24-70mm f/2.8L II USM".into()),
+            focal_len: 24.0,
+            aperture: 2.8, // wide open vignettes most
+        };
+        let db = db();
+        let m = db.match_lens(&q).unwrap();
+        let baked = db.bake_vignetting(&m, 24.0, 2.8, VIGNETTE_LEN);
+        assert!(
+            baked.is_some(),
+            "expected a real vignetting calibration for this lens/aperture"
+        );
+        if let Some(v) = baked {
+            assert_eq!(v.radial.len() as u32, VIGNETTE_LEN);
+            assert!(v.radial.iter().all(|g| g.is_finite() && *g > 0.0));
+            // Correction gain grows toward the edge (brightens the darkened corners).
+            assert!(v.radial[VIGNETTE_LEN as usize - 1] >= v.radial[0]);
+        }
+    }
+
+    #[test]
+    fn find_lenses_search_returns_matches() {
+        let hits = db().find_lenses("Canon", "24-70");
+        assert!(hits.iter().any(|m| m.display_name.contains("24-70")));
     }
 }

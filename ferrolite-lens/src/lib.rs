@@ -5,4 +5,5 @@
 mod backend;
 mod types;
 
+pub use backend::{load_bundled, LensDb, LensfunDb};
 pub use types::{LensError, LensMatch, LensQuery, VignetteMap, WarpGrid, GRID_N, VIGNETTE_LEN};

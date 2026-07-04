@@ -508,4 +508,49 @@ mod tests {
     fn match_by_id_unknown_key_is_none() {
         assert!(db().match_by_id("Nonexistent Lens Key 9000").is_none());
     }
+
+    #[test]
+    fn bake_geometry_result_depends_on_crop_factor_override() {
+        // Locks in the fix in `ferrolite-app`'s `spawn_lens_bake`: it must
+        // override `LensMatch::crop_factor` (the camera-less `match_by_id`
+        // fallback) with the persisted, camera-resolved `LensCorrection::
+        // crop_factor` before baking, since the two can legitimately differ
+        // (e.g. an APS-C-calibrated lens shot on a full-frame body via an
+        // adapter, or vice versa). This test proves the crop actually flows
+        // into the baked geometry, so an accidental revert back to always
+        // using `m.crop_factor` as returned by `match_by_id` would change
+        // this assertion's outcome.
+        let q = LensQuery {
+            camera_make: "Canon".into(),
+            camera_model: "Canon EOS 5D Mark III".into(),
+            lens_model: Some("Canon EF 24-70mm f/2.8L II USM".into()),
+            focal_len: 24.0,
+            aperture: 8.0,
+        };
+        let db = db();
+        let m = db.match_lens(&q).unwrap();
+
+        let full_frame = LensMatch {
+            crop_factor: 1.0,
+            ..m.clone()
+        };
+        let aps_c = LensMatch {
+            crop_factor: 1.6,
+            ..m
+        };
+
+        let g_full = db
+            .bake_geometry(&full_frame, 24.0, GRID_N)
+            .expect("distortion model exists");
+        let g_aps_c = db
+            .bake_geometry(&aps_c, 24.0, GRID_N)
+            .expect("distortion model exists");
+
+        assert_ne!(
+            g_full.coords, g_aps_c.coords,
+            "baking the same lens/focal with a different crop factor must \
+             produce different warp geometry — otherwise the app's crop \
+             override in spawn_lens_bake would be silently inert"
+        );
+    }
 }

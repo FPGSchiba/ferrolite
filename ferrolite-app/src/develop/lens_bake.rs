@@ -63,6 +63,18 @@ pub fn spawn_lens_bake(
         }
         let result = match lc.lens_id.as_deref().and_then(|id| db.match_by_id(id)) {
             Some(m) => {
+                // `match_by_id` has no camera context, so its `crop_factor` is
+                // only the matched lens's OWN calibration crop — a fallback.
+                // The authoritative crop is `lc.crop_factor`, persisted at
+                // match time from the actual shooting camera body, and it's
+                // also what `lens_rebuild_key` fingerprints to decide whether
+                // to re-bake. Override before baking so the bake and the
+                // rebuild trigger agree on which crop drives the geometry/
+                // vignette computation.
+                let m = ferrolite_lens::LensMatch {
+                    crop_factor: lc.crop_factor,
+                    ..m
+                };
                 let warp = if lc.distortion.enabled || lc.tca.enabled {
                     db.bake_geometry(&m, lc.focal_len, ferrolite_lens::GRID_N)
                 } else {

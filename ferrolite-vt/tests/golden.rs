@@ -414,3 +414,96 @@ fn display_tail_applies_matrix() {
     let golden = image::open(golden_path).unwrap().to_rgba8();
     assert!(common::max_abs_diff(&pixels, golden.as_raw()) <= TOL);
 }
+
+/// The 3D-LUT display path (`use_lut == 1`): an "identity-shaper" LUT whose node
+/// `(r,g,b)` stores exactly its own sample coordinate `(r/(n-1), g/(n-1), b/(n-1))`.
+/// Since the stored function is the identity, trilinear interpolation reproduces
+/// the sample coordinate exactly everywhere (not just at grid points), so
+/// `tail(lin) = LUT[shaper_encode(lin)] = shaper_encode(lin)`. Rendering a known
+/// image through this LUT and comparing against `shaper_encode(lin)` computed on
+/// the CPU proves the LUT path samples and applies correctly end-to-end on the GPU.
+#[test]
+fn lut_path_samples_identity_shaper_lut() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping golden (expected in headless CI)");
+        return;
+    };
+
+    let n = ferrolite_vt::LUT_SIZE as usize;
+    let denom = (n - 1) as f32;
+    let mut rgba16f = Vec::with_capacity(n * n * n * 4);
+    for b in 0..n {
+        for g in 0..n {
+            for r in 0..n {
+                // Output = the sample coordinate itself (idx), so tail(lin) = shaper_encode(lin).
+                rgba16f.push(half::f16::from_f32(r as f32 / denom).to_bits());
+                rgba16f.push(half::f16::from_f32(g as f32 / denom).to_bits());
+                rgba16f.push(half::f16::from_f32(b as f32 / denom).to_bits());
+                rgba16f.push(half::f16::from_f32(1.0).to_bits());
+            }
+        }
+    }
+
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let shaper_gamma = 2.2f32;
+    pipelines.set_display_lut(&ctx.queue, ferrolite_vt::LUT_SIZE, &rgba16f, shaper_gamma);
+
+    // A 4x4 image with a spread of known linear values per pixel, including 0.0,
+    // mid-range values, and >1.0 (to exercise the LUT path's clamp in shaper_encode).
+    let (iw, ih) = (4u32, 4u32);
+    let known: [[f32; 3]; 16] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0],
+        [0.5, 0.5, 0.5],
+        [0.25, 0.75, 0.1],
+        [0.9, 0.2, 0.6],
+        [0.05, 0.95, 0.5],
+        [1.5, 0.5, 0.5],
+        [0.5, 1.2, 0.5],
+        [0.5, 0.5, 2.0],
+        [0.33, 0.66, 0.99],
+        [0.01, 0.02, 0.03],
+        [0.7, 0.7, 0.7],
+        [0.2, 0.4, 0.8],
+        [0.8, 0.4, 0.2],
+        [0.15, 0.85, 0.45],
+        [0.6, 0.3, 0.9],
+    ];
+    let mut px = Vec::with_capacity((iw * ih * 4) as usize);
+    for [r, g, b] in known {
+        px.extend_from_slice(&[r, g, b, 1.0]);
+    }
+    let img = ferrolite_image::LinearRgbaF32::new(iw, ih, px).unwrap();
+
+    let (w, h) = (4u32, 4u32);
+    let view = ViewTransform::fit((iw, ih), (w as f32, h as f32));
+    let pixels =
+        VirtualTexture::render_to_image(&ctx, &img, &view, (w as f32, h as f32), w, h, &pipelines);
+
+    // Trilinear interpolation of a bilinear/identity-valued LUT is exact, but f16
+    // storage + Rgba8Unorm output quantization still introduce a small rounding
+    // error; a few /255 absorbs that without masking a real sampling bug.
+    const LUT_TOL: f32 = 3.0 / 255.0;
+    for (i, [r, g, b]) in known.iter().enumerate() {
+        let expected = [
+            r.clamp(0.0, 1.0).powf(1.0 / shaper_gamma),
+            g.clamp(0.0, 1.0).powf(1.0 / shaper_gamma),
+            b.clamp(0.0, 1.0).powf(1.0 / shaper_gamma),
+        ];
+        let base = i * 4;
+        let actual = [
+            pixels[base] as f32 / 255.0,
+            pixels[base + 1] as f32 / 255.0,
+            pixels[base + 2] as f32 / 255.0,
+        ];
+        for c in 0..3 {
+            assert!(
+                (actual[c] - expected[c]).abs() <= LUT_TOL,
+                "pixel {i} channel {c}: expected {:.4}, got {:.4} (lin={:?})",
+                expected[c],
+                actual[c],
+                known[i]
+            );
+        }
+    }
+}

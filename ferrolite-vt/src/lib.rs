@@ -12,7 +12,7 @@ mod view;
 
 pub use histogram::{bin_index, HistogramPipeline, HIST_BINS, HIST_CHANNELS, HIST_LEN};
 pub use page_table::{FeedbackBuffer, LevelLayout, PageTable};
-pub use pipelines::{DisplayPipelines, DisplayVariant};
+pub use pipelines::{DisplayPipelines, DisplayVariant, LUT_SIZE};
 pub use pool::{SlotAllocator, TilePool, NOT_RESIDENT};
 pub use producer::TileProducer;
 pub use residency::{needed_tiles, ResidencySet, VersionedResidency};

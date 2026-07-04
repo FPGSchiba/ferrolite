@@ -27,7 +27,8 @@ struct DisplayColorUniform {
     m: [[f32; 4]; 3],
     use_lut: u32,
     shaper_gamma: f32,
-    _pad: [f32; 2],
+    lut_size: f32,
+    _pad: f32,
 }
 
 /// Cube edge length of the display LUT texture. Mirrors
@@ -367,7 +368,8 @@ impl DisplayPipelines {
                     m: pack_display_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
                     use_lut: 0,
                     shaper_gamma: 2.2,
-                    _pad: [0.0, 0.0],
+                    lut_size: LUT_SIZE as f32,
+                    _pad: 0.0,
                 }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             },
@@ -444,7 +446,8 @@ impl DisplayPipelines {
                 m: pack_display_matrix(m),
                 use_lut: 0,
                 shaper_gamma: 2.2,
-                _pad: [0.0, 0.0],
+                lut_size: LUT_SIZE as f32,
+                _pad: 0.0,
             }),
         );
     }
@@ -496,7 +499,8 @@ impl DisplayPipelines {
                 m: pack_display_matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
                 use_lut: 1,
                 shaper_gamma,
-                _pad: [0.0, 0.0],
+                lut_size: size as f32,
+                _pad: 0.0,
             }),
         );
     }

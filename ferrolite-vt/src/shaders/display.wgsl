@@ -9,7 +9,7 @@ struct Transform {
 @group(0) @binding(1) var img_samp: sampler;
 @group(0) @binding(2) var<uniform> xf: Transform;
 
-struct DisplayColor { m: mat3x3<f32>, use_lut: u32, shaper_gamma: f32, _pad: vec2<f32> };
+struct DisplayColor { m: mat3x3<f32>, use_lut: u32, shaper_gamma: f32, lut_size: f32, _pad: f32 };
 @group(0) @binding(8) var<uniform> disp: DisplayColor;
 @group(0) @binding(9) var lut3d: texture_3d<f32>;
 @group(0) @binding(10) var lut_samp: sampler;
@@ -22,7 +22,10 @@ fn tail(lin: vec3<f32>) -> vec3<f32> {
     if (disp.use_lut == 0u) {
         return linear_to_srgb(disp.m * lin);
     }
-    return textureSampleLevel(lut3d, lut_samp, shaper_encode(lin), 0.0).rgb;
+    let c = shaper_encode(lin);
+    let s = disp.lut_size;
+    let coord = (c * (s - 1.0) + 0.5) / s;
+    return textureSampleLevel(lut3d, lut_samp, coord, 0.0).rgb;
 }
 
 struct VsOut {

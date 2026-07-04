@@ -147,25 +147,39 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
         }
     }
 
-    for (group_name, actions) in GROUPS {
-        ui.label(
-            egui::RichText::new(*group_name)
-                .strong()
-                .color(theme::ACCENT),
-        );
-        ui.add_space(2.0);
-        egui::Grid::new(("settings_keymap_grid", *group_name))
-            .num_columns(4)
-            .spacing(egui::vec2(12.0, 6.0))
-            .striped(false)
-            .show(ui, |ui| {
-                for action in *actions {
-                    draw_row(ui, settings, *action, &mut listen, &mut changed);
-                    ui.end_row();
-                }
-            });
-        ui.add_space(10.0);
-    }
+    // This tab's content is drawn inside `settings::ui`'s vertical
+    // `settings_content_scroll` ScrollArea. Its floating scrollbar overlays
+    // the right edge, on top of this grid's rightmost columns (the chord
+    // button and reset arrow) unless we reserve room for it — so the whole
+    // per-group grid is inset from the right by the scrollbar's width.
+    egui::Frame::none()
+        .inner_margin(egui::Margin {
+            left: 0.0,
+            right: 16.0,
+            top: 0.0,
+            bottom: 0.0,
+        })
+        .show(ui, |ui| {
+            for (group_name, actions) in GROUPS {
+                ui.label(
+                    egui::RichText::new(*group_name)
+                        .strong()
+                        .color(theme::ACCENT),
+                );
+                ui.add_space(2.0);
+                egui::Grid::new(("settings_keymap_grid", *group_name))
+                    .num_columns(4)
+                    .spacing(egui::vec2(12.0, 6.0))
+                    .striped(false)
+                    .show(ui, |ui| {
+                        for action in *actions {
+                            draw_row(ui, settings, *action, &mut listen, &mut changed);
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(10.0);
+            }
+        });
 
     set_listen_state(&ctx, listen);
     changed

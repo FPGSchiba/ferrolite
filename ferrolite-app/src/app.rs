@@ -1502,6 +1502,46 @@ impl FerroliteApp {
         }
     }
 
+    /// Draw the read-only, GPU-computed histogram as a floating, non-interactive
+    /// overlay anchored to the Develop canvas's top-right corner (spec 4.1 §7.1).
+    /// Data comes straight from `ViewerState::histogram` (already computed by
+    /// `maybe_update_histogram`'s GPU dispatch this frame or an earlier one) — this
+    /// is display placement only, no recompute. `Order::Middle` sits above the
+    /// canvas paint but below modal `Order::Foreground` windows (Help/Settings),
+    /// and `.interactable(false)` means canvas pan/zoom keeps working underneath it.
+    fn draw_histogram_overlay(&self, ui: &egui::Ui) {
+        const MARGIN: f32 = 12.0;
+        const WIDTH: f32 = 220.0;
+
+        let canvas_rect = ui.min_rect();
+        let bins = self
+            .state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.histogram.bins.as_deref());
+
+        let pos = egui::pos2(
+            canvas_rect.right() - WIDTH - MARGIN,
+            canvas_rect.top() + MARGIN,
+        );
+
+        egui::Area::new(egui::Id::new("develop_histogram_overlay"))
+            .order(egui::Order::Middle)
+            .fixed_pos(pos)
+            .interactable(false)
+            .show(ui.ctx(), |ui| {
+                ui.set_width(WIDTH);
+                egui::Frame::none()
+                    .fill(egui::Color32::from_black_alpha(160))
+                    .rounding(4.0)
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.set_width(WIDTH - 12.0);
+                        crate::develop::histogram_widget::show(ui, bins);
+                    });
+            });
+    }
+
     /// The single image-open path: cancel the previously-open viewer's in-flight
     /// tile jobs, open the new image's two-tier load, switch to Develop, and request
     /// a repaint so the viewer is drawn on the very next frame (otherwise egui would
@@ -2665,6 +2705,9 @@ impl eframe::App for FerroliteApp {
                             self.crop_active_prev = crop_active;
                         }
                         self.drive_viewer(ui, frame);
+                        if self.state.settings.show_histogram {
+                            self.draw_histogram_overlay(ui);
+                        }
                         // Crop overlay: shown while the Geometry section is open.
                         // Gather all viewer data into locals BEFORE calling apply_edit
                         // (which needs &mut self) — mirrors the panel-outcome pattern.

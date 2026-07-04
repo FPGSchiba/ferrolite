@@ -21,8 +21,8 @@ pub fn deserialize(s: &str) -> Option<OpStack> {
 mod tests {
     use super::*;
     use crate::op::{
-        Aspect, Contrast, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand, Op, Sharpen,
-        ToneCurve, WhiteBalance,
+        Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,
+        LensCorrection, Op, Sharpen, ToneCurve, WhiteBalance,
     };
 
     #[test]
@@ -92,5 +92,37 @@ mod tests {
             }));
         let text = serialize(&s);
         assert_eq!(deserialize(&text), Some(s));
+    }
+
+    #[test]
+    fn round_trips_lens_correction() {
+        let s = OpStack::default().set_op(Op::LensCorrection(LensCorrection {
+            lens_id: Some("Canon EF 24-70mm f/2.8L II USM".into()),
+            focal_len: 35.0,
+            aperture: 5.6,
+            crop_factor: 1.0,
+            distortion: Correction {
+                enabled: true,
+                amount: 0.8,
+            },
+            tca: Correction {
+                enabled: true,
+                amount: 1.0,
+            },
+            vignetting: Correction {
+                enabled: false,
+                amount: 1.0,
+            },
+        }));
+        assert_eq!(deserialize(&serialize(&s)), Some(s));
+    }
+
+    #[test]
+    fn old_sidecar_without_lens_correction_still_loads() {
+        // A stack written before this feature has no LensCorrection op.
+        let json = r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}}]}"#;
+        let s = deserialize(json).unwrap();
+        assert!(s.lens_correction().is_none());
+        assert_eq!(s.exposure(), Some(crate::op::Exposure { ev: 0.5 }));
     }
 }

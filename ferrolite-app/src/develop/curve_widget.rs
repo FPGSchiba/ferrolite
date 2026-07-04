@@ -1,191 +1,37 @@
-//! Interactive tone-curve widget. Pure point math in `curve_math`; this layer
-//! only paints + routes pointer events. Visual-tested (no unit tests).
+//! Thin tone-curve adapter over the reusable `widgets::curve::curve_editor`.
+//! Reads the current `ToneCurve` op (or identity + Smooth default for a
+//! not-yet-created curve) and maps the widget's `CurveEdit` back onto an
+//! `OpStack` edit. All interaction/paint logic lives in `widgets::curve`.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::curve_math::{self, GrabOrInsert};
+use crate::develop::curve_math;
 use crate::theme;
-use ferrolite_pipeline::{Op, OpKind, OpStack, ToneCurve};
-
-const SIZE: f32 = 260.0; // square edit area
-const HIT_R: f32 = 0.06; // normalized hit radius
-const DOT_R: f32 = 5.0; // idle point-dot radius
-const DOT_R_HOVER: f32 = 6.5; // enlarged radius for the hovered point
+use crate::widgets::curve::{curve_editor, CurveStyle};
+use ferrolite_pipeline::{CurveMode, Op, OpKind, OpStack, ToneCurve};
 
 pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
-    let mut points = stack
-        .tone_curve()
-        .map(|t| t.points)
+    let tc = stack.tone_curve();
+    let points = tc
+        .as_ref()
+        .map(|t| t.points.clone())
         .filter(|p| !p.is_empty())
         .unwrap_or_else(curve_math::identity_points);
+    // No curve op yet → a user's first edit should be Smooth (the new-curve
+    // default), not Linear (which only exists for pre-feature sidecars).
+    let mode = tc.as_ref().map(|t| t.mode).unwrap_or(CurveMode::Smooth);
 
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click_and_drag());
+    let edit = curve_editor(
+        ui,
+        "tone_curve",
+        &points,
+        mode,
+        &CurveStyle {
+            curve_color: theme::ACCENT,
+            point_color: theme::ACCENT_BRIGHT,
+        },
+    )?;
 
-    let selected_id = resp.id.with("selected_point");
-    let mut selected: Option<usize> = ui
-        .memory(|m| m.data.get_temp::<Option<usize>>(selected_id))
-        .unwrap_or(None);
-
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, theme::BG_BASE);
-    // Grid (quarters).
-    for i in 1..4 {
-        let f = i as f32 / 4.0;
-        painter.line_segment(
-            [
-                egui::pos2(rect.left() + f * SIZE, rect.top()),
-                egui::pos2(rect.left() + f * SIZE, rect.bottom()),
-            ],
-            egui::Stroke::new(1.0, theme::BORDER_STRONG),
-        );
-        painter.line_segment(
-            [
-                egui::pos2(rect.left(), rect.top() + f * SIZE),
-                egui::pos2(rect.right(), rect.top() + f * SIZE),
-            ],
-            egui::Stroke::new(1.0, theme::BORDER_STRONG),
-        );
-    }
-
-    // Coord transforms: image y is inverted on screen (0 at bottom).
-    let to_screen =
-        |p: (f32, f32)| egui::pos2(rect.left() + p.0 * SIZE, rect.bottom() - p.1 * SIZE);
-    let to_norm = |s: egui::Pos2| ((s.x - rect.left()) / SIZE, (rect.bottom() - s.y) / SIZE);
-
-    // Curve polyline.
-    let poly: Vec<egui::Pos2> = points.iter().map(|&p| to_screen(p)).collect();
-    painter.add(egui::Shape::line(
-        poly,
-        egui::Stroke::new(1.5, theme::ACCENT),
-    ));
-
-    // Hover highlight: the point the cursor is currently within HIT_R of.
-    let hovered_idx = resp
-        .hover_pos()
-        .and_then(|p| curve_math::nearest_point(&points, to_norm(p), HIT_R));
-
-    for (i, &p) in points.iter().enumerate() {
-        let is_hovered = hovered_idx == Some(i);
-        let is_selected = selected == Some(i);
-        let radius = if is_hovered { DOT_R_HOVER } else { DOT_R };
-        painter.circle(
-            to_screen(p),
-            radius,
-            theme::ACCENT_BRIGHT,
-            egui::Stroke::new(1.0, theme::BG_BASE),
-        );
-        if is_selected {
-            // Accent ring around the selected point so selection reads clearly
-            // and independently of hover state.
-            painter.circle_stroke(
-                to_screen(p),
-                radius + 3.0,
-                egui::Stroke::new(1.5, theme::ACCENT),
-            );
-        }
-    }
-
-    let mut changed = false;
-    let mut commit = false;
-    let mut deleted = false;
-
-    if let Some(pos) = resp.interact_pointer_pos() {
-        let norm = to_norm(pos);
-        if resp.drag_started() || resp.clicked() {
-            match curve_math::grab_or_insert(&points, norm, HIT_R) {
-                GrabOrInsert::Grab(idx) => {
-                    ui.memory_mut(|m| m.data.insert_temp(resp.id, idx));
-                    if resp.clicked() && !resp.dragged() {
-                        // A plain click (not a drag) on an existing point selects it.
-                        selected = Some(idx);
-                        ui.memory_mut(|m| m.data.insert_temp(selected_id, selected));
-                    }
-                }
-                GrabOrInsert::Insert => {
-                    // Insert at the clamped coordinate, then grab THAT point by its
-                    // exact (bit-identical) value — nearest_point can resolve to a
-                    // neighbor on a crowded curve.
-                    let inserted = (norm.0.clamp(0.0, 1.0), norm.1.clamp(0.0, 1.0));
-                    points = curve_math::insert_point(&points, norm);
-                    let idx = points.iter().position(|&q| q == inserted).unwrap_or(0);
-                    ui.memory_mut(|m| m.data.insert_temp(resp.id, idx));
-                    changed = true;
-                    commit = true;
-                }
-            }
-        }
-        if resp.dragged() {
-            if let Some(idx) = ui.memory(|m| m.data.get_temp::<usize>(resp.id)) {
-                points = curve_math::move_point(&points, idx, norm);
-                changed = true;
-            }
-        }
-    }
-    if resp.drag_stopped() {
-        commit = true;
-    }
-
-    // Double-click a point to delete it.
-    if resp.double_clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            if let Some(idx) = curve_math::nearest_point(&points, to_norm(pos), HIT_R) {
-                points = curve_math::delete_point(&points, idx);
-                changed = true;
-                commit = true;
-                deleted = true;
-            }
-        }
-    }
-    // Right-click a point to delete it.
-    if resp.secondary_clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            if let Some(idx) = curve_math::nearest_point(&points, to_norm(pos), HIT_R) {
-                points = curve_math::delete_point(&points, idx);
-                changed = true;
-                commit = true;
-                deleted = true;
-            }
-        }
-    }
-    // Delete/Backspace removes the selected point, if any.
-    if let Some(idx) = selected {
-        let delete_key_pressed =
-            ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
-        if delete_key_pressed {
-            points = curve_math::delete_point(&points, idx);
-            changed = true;
-            commit = true;
-            deleted = true;
-        }
-    }
-    if deleted {
-        // The selected index may now be out of range (or the deletion was a
-        // no-op on a protected endpoint); clear it either way so a stale
-        // index can't linger and drive a later Delete press.
-        selected = None;
-        ui.memory_mut(|m| m.data.insert_temp(selected_id, selected));
-        // Also clear the active grab/drag index stored under resp.id. If a
-        // point is deleted while a drag-grab index is still stashed there,
-        // the list can shrink such that the stale index is still in range,
-        // and a subsequent resp.dragged() would silently move the wrong
-        // point via move_point.
-        ui.memory_mut(|m| m.data.remove::<usize>(resp.id));
-    }
-
-    ui.small(
-        egui::RichText::new("Drag to adjust · double/right-click or Delete to remove a point")
-            .color(theme::TEXT_FAINT),
-    );
-
-    // Per-component reset affordance, styled like the Basic section's "Reset"
-    // (see CLAUDE.md "Per-component reset" rule). Dim/disabled at default.
-    let modified = !curve_math::is_identity(&points);
-    if ui
-        .add_enabled(modified, egui::Button::new("Reset").small())
-        .clicked()
-    {
-        // Resetting clears any stale selection tied to the old point list.
-        ui.memory_mut(|m| m.data.insert_temp::<Option<usize>>(selected_id, None));
+    if edit.reset {
         return Some(EditOutcome {
             stack: stack.reset(OpKind::ToneCurve),
             kind: OpKind::ToneCurve,
@@ -193,20 +39,20 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         });
     }
 
-    if changed {
-        let s = if curve_math::is_identity(&points) {
-            stack.reset(OpKind::ToneCurve)
-        } else {
-            stack.set_op(Op::ToneCurve(ToneCurve {
-                points,
-                mode: ferrolite_pipeline::CurveMode::Linear,
-            }))
-        };
+    if curve_math::is_identity(&edit.points) {
         return Some(EditOutcome {
-            stack: s,
+            stack: stack.reset(OpKind::ToneCurve),
             kind: OpKind::ToneCurve,
-            commit,
+            commit: edit.commit,
         });
     }
-    None
+
+    Some(EditOutcome {
+        stack: stack.set_op(Op::ToneCurve(ToneCurve {
+            points: edit.points,
+            mode: edit.mode,
+        })),
+        kind: OpKind::ToneCurve,
+        commit: edit.commit,
+    })
 }

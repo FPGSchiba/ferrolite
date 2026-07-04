@@ -3,11 +3,9 @@
 //! is generic over the caller's `id_source` so multiple curve editors can
 //! coexist on one screen (e.g. tone curve + future per-channel color curves).
 //!
-//! This module is the reusable widget only (Spec 4.1 CD2 Task 4/5 of the
-//! curve-spline-modes plan). Nothing calls `curve_editor` yet — the tone-curve
-//! adapter rewrite (Task 6) wires it in. Hence the module-wide `dead_code`
-//! allow until that call site lands.
-#![allow(dead_code)]
+//! This module is the reusable widget (Spec 4.1 CD2 Task 4/5 of the
+//! curve-spline-modes plan), wired in by the tone-curve adapter
+//! (`develop::curve_widget`, Task 6).
 
 use crate::develop::curve_math::{self, GrabOrInsert};
 use crate::theme;

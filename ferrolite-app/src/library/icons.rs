@@ -179,6 +179,18 @@ pub fn cross(painter: &Painter, center: Pos2, r: f32, color: Color32) {
     );
 }
 
+/// Draw a checkmark ("✓", done) centred at `center` with half-extent `r`, as a
+/// short down-stroke into a longer up-stroke. No font glyph.
+pub fn check(painter: &Painter, center: Pos2, r: f32, color: Color32) {
+    let stroke = Stroke::new(1.6, color);
+    // elbow low-left, tip up-right — a conventional tick.
+    let left = Pos2::new(center.x - r, center.y);
+    let elbow = Pos2::new(center.x - r * 0.25, center.y + r * 0.7);
+    let tip = Pos2::new(center.x + r, center.y - r * 0.7);
+    painter.line_segment([left, elbow], stroke);
+    painter.line_segment([elbow, tip], stroke);
+}
+
 /// Draw an "export to queue" glyph: a downward arrow landing into an open
 /// tray, centred at `center`. `size` is the overall icon height/width.
 ///

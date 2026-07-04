@@ -1955,6 +1955,23 @@ impl eframe::App for FerroliteApp {
         if !self.state.pending_uploads.is_empty() {
             ctx.request_repaint();
         }
+        // Auto-dismiss the finished-export indicator a few seconds after it
+        // completes so the status bar returns to normal on its own. `completed_at`
+        // is only set once an export is done, so a running export is untouched.
+        if let Some(done_at) = self
+            .state
+            .export_activity
+            .as_ref()
+            .and_then(|a| a.completed_at)
+        {
+            const EXPORT_DONE_LINGER: std::time::Duration = std::time::Duration::from_secs(4);
+            let elapsed = done_at.elapsed();
+            if elapsed >= EXPORT_DONE_LINGER {
+                self.state.export_activity = None;
+            } else {
+                ctx.request_repaint_after(EXPORT_DONE_LINGER - elapsed);
+            }
+        }
         let repaint_forced = !self.state.pending_uploads.is_empty();
         crate::diag::add_events(events_this_frame);
         crate::diag::add_uploads(uploads_this_frame);

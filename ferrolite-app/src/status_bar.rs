@@ -23,17 +23,50 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
     ui.horizontal_centered(|ui| {
         ui.monospace(selected_exif(state));
         // Export activity indicator — visible in every view while an export runs
-        // (hidden once done; the Export module keeps the "Done" summary).
+        // and briefly after (a "done" state that auto-dismisses; see app.rs). All
+        // icons are painter-drawn: IBM Plex Sans has no ✓/✕ glyph.
         if let Some(a) = &state.export_activity {
-            if !a.is_done() {
-                ui.separator();
+            ui.separator();
+            if a.is_done() {
+                // Completed: status icon + summary. Green check when all succeeded,
+                // red cross when anything failed.
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                if a.failed > 0 {
+                    crate::library::icons::cross(
+                        ui.painter(),
+                        rect.center(),
+                        5.0,
+                        crate::theme::SEMANTIC_RED,
+                    );
+                } else {
+                    crate::library::icons::check(
+                        ui.painter(),
+                        rect.center(),
+                        5.0,
+                        crate::theme::SEMANTIC_GREEN,
+                    );
+                }
+                ui.label(egui::RichText::new(export_done_text(a)).size(11.0));
+            } else {
                 ui.label(egui::RichText::new(export_status_text(a)).size(11.0));
                 ui.add(egui::ProgressBar::new(a.fraction()).desired_width(70.0));
-                if ui
-                    .small_button("✕")
-                    .on_hover_text("Cancel export")
-                    .clicked()
-                {
+                // Cancel: painter-drawn ✕ with a hover highlight, mirroring the
+                // queue-list remove button.
+                let (rect, resp) =
+                    ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                let hovered = resp.hovered();
+                if hovered {
+                    ui.painter()
+                        .rect_filled(rect, 3.0, crate::theme::ACCENT_BG_SEL);
+                }
+                let color = if hovered {
+                    crate::theme::TEXT_PRIMARY
+                } else {
+                    crate::theme::TEXT_DIM
+                };
+                crate::library::icons::cross(ui.painter(), rect.center(), 4.0, color);
+                if resp.on_hover_text("Cancel export").clicked() {
                     a.cancel_all();
                 }
             }
@@ -116,8 +149,31 @@ pub fn export_status_text(a: &ExportActivity) -> String {
     };
     if a.failed > 0 {
         s.push_str(&format!("  ({} failed)", a.failed));
+        return s;
     }
     s
+}
+
+/// Label text for the COMPLETED export (done state). Batch shows
+/// `succeeded/total`; single shows a terse status. `(K failed)` when any failed.
+pub fn export_done_text(a: &ExportActivity) -> String {
+    let ok = a.completed.saturating_sub(a.failed);
+    match a.kind {
+        ExportKind::Single => {
+            if a.failed > 0 {
+                "Export failed".to_string()
+            } else {
+                "Exported".to_string()
+            }
+        }
+        ExportKind::Batch => {
+            let mut s = format!("Exported {ok}/{}", a.total);
+            if a.failed > 0 {
+                s.push_str(&format!("  ({} failed)", a.failed));
+            }
+            s
+        }
+    }
 }
 
 #[cfg(test)]
@@ -196,6 +252,35 @@ mod tests {
     fn export_status_text_missing_name_uses_placeholder() {
         let a = crate::export::ExportActivity::new_batch(2);
         assert!(export_status_text(&a).starts_with("Exporting …"));
+    }
+
+    #[test]
+    fn export_done_text_single_ok_and_failed() {
+        let mut ok = crate::export::ExportActivity::new_single(Some("hero.avif".into()));
+        ok.item_finished(true, "ok".into());
+        assert_eq!(export_done_text(&ok), "Exported");
+        let mut bad = crate::export::ExportActivity::new_single(Some("hero.avif".into()));
+        bad.item_finished(false, "disk full".into());
+        assert_eq!(export_done_text(&bad), "Export failed");
+    }
+
+    #[test]
+    fn export_done_text_batch_counts_success_and_failed() {
+        let mut all_ok = crate::export::ExportActivity::new_batch(8);
+        for _ in 0..8 {
+            all_ok.item_finished(true, "ok".into());
+        }
+        assert_eq!(export_done_text(&all_ok), "Exported 8/8");
+
+        let mut partial = crate::export::ExportActivity::new_batch(8);
+        for _ in 0..6 {
+            partial.item_finished(true, "ok".into());
+        }
+        for _ in 0..2 {
+            partial.item_finished(false, "bad".into());
+        }
+        // 6 succeeded of 8, 2 failed.
+        assert_eq!(export_done_text(&partial), "Exported 6/8  (2 failed)");
     }
 
     #[test]

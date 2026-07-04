@@ -21,16 +21,19 @@ pub struct ExportActivity {
     pub completed: usize,
     pub failed: usize,
     /// Output filename of the in-flight image (already basename + truncatable).
-    /// Read by a later task's status-bar indicator; not yet consumed.
+    /// Shown by the status-bar indicator as the "current file".
     pub current_name: Option<String>,
-    /// Per-image render progress for the current image. Read by a later task's
-    /// status-bar indicator; not yet consumed.
+    /// Per-image render progress for the current image; drives the status-bar
+    /// progress bar via [`Self::fraction`].
     pub tile_done: u32,
     pub tile_total: u32,
     /// Cancellation targets: the single export job, or the one batch job.
     pub handles: Vec<JobHandle>,
     /// Per-image failure messages, rolled into the final summary.
     pub warnings: Vec<String>,
+    /// The moment the export first became [`Self::is_done`], used to auto-dismiss
+    /// the status-bar "done" indicator after a short delay. `None` while running.
+    pub completed_at: Option<std::time::Instant>,
 }
 
 impl ExportActivity {
@@ -45,6 +48,7 @@ impl ExportActivity {
             tile_total: 0,
             handles: Vec::new(),
             warnings: Vec::new(),
+            completed_at: None,
         }
     }
 
@@ -59,6 +63,7 @@ impl ExportActivity {
             tile_total: 0,
             handles: Vec::new(),
             warnings: Vec::new(),
+            completed_at: None,
         }
     }
 
@@ -98,12 +103,17 @@ impl ExportActivity {
         self.tile_total = total;
     }
 
-    /// One image finished; folds into the aggregate counts.
+    /// One image finished; folds into the aggregate counts. Stamps
+    /// `completed_at` the first moment the whole export becomes done, so the
+    /// status-bar "done" indicator can auto-dismiss.
     pub fn item_finished(&mut self, ok: bool, message: String) {
         self.completed += 1;
         if !ok {
             self.failed += 1;
             self.warnings.push(message);
+        }
+        if self.is_done() && self.completed_at.is_none() {
+            self.completed_at = Some(std::time::Instant::now());
         }
     }
 }
@@ -134,6 +144,18 @@ mod tests {
         assert_eq!(a.failed, 1);
         assert!(a.is_done());
         assert_eq!(a.warnings, vec!["disk full".to_string()]);
+    }
+
+    #[test]
+    fn completed_at_stamped_once_when_done() {
+        let mut a = ExportActivity::new_batch(2);
+        a.item_finished(true, "ok".into());
+        assert!(a.completed_at.is_none(), "not stamped mid-run");
+        a.item_finished(true, "ok".into());
+        let first = a.completed_at.expect("stamped when done");
+        // A further (spurious) fold must not move the timestamp.
+        a.item_finished(true, "ok".into());
+        assert_eq!(a.completed_at, Some(first), "stamp is set once");
     }
 
     #[test]

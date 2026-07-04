@@ -9,8 +9,21 @@ struct Transform {
 @group(0) @binding(1) var img_samp: sampler;
 @group(0) @binding(2) var<uniform> xf: Transform;
 
-struct DisplayColor { m: mat3x3<f32> };
+struct DisplayColor { m: mat3x3<f32>, use_lut: u32, shaper_gamma: f32, _pad: vec2<f32> };
 @group(0) @binding(8) var<uniform> disp: DisplayColor;
+@group(0) @binding(9) var lut3d: texture_3d<f32>;
+@group(0) @binding(10) var lut_samp: sampler;
+
+fn shaper_encode(c: vec3<f32>) -> vec3<f32> {
+    return pow(clamp(c, vec3(0.0), vec3(1.0)), vec3(1.0 / disp.shaper_gamma));
+}
+
+fn tail(lin: vec3<f32>) -> vec3<f32> {
+    if (disp.use_lut == 0u) {
+        return linear_to_srgb(disp.m * lin);
+    }
+    return textureSampleLevel(lut3d, lut_samp, shaper_encode(lin), 0.0).rgb;
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -45,7 +58,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4(0.05, 0.05, 0.05, 1.0);
     }
     let lin = textureSampleLevel(img_tex, img_samp, uv, 0.0).rgb;
-    return vec4(linear_to_srgb(disp.m * lin), 1.0);
+    return vec4(tail(lin), 1.0);
 }
 
 // ---- Rung 2: tiled mip pyramid + per-fragment LOD selection ----
@@ -109,7 +122,7 @@ fn fs_tiled(in: VsOut) -> @location(0) vec4<f32> {
     }
     let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
     let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
-    return vec4(linear_to_srgb(disp.m * lin), 1.0);
+    return vec4(tail(lin), 1.0);
 }
 
 // ---- Rung 4: page-table indirection + GPU feedback pass ----
@@ -178,5 +191,5 @@ fn fs_sparse(in: VsOut) -> @location(0) vec4<f32> {
     }
     let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
     let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
-    return vec4(linear_to_srgb(disp.m * lin), 1.0);
+    return vec4(tail(lin), 1.0);
 }

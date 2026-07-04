@@ -1480,6 +1480,35 @@ impl FerroliteApp {
                 egui::Color32::from_black_alpha(120),
                 egui::Stroke::new(1.5, egui::Color32::WHITE),
             );
+            // Side labels: which half is the unedited original vs. the current
+            // edit. Bottom corners keep them clear of the top-right histogram
+            // overlay and the mid-height divider handle. Left of the divider is
+            // the "before" (original), right is the "after" (edited).
+            let label_font = egui::FontId::proportional(12.0);
+            let label_pad = egui::vec2(6.0, 3.0);
+            let label_margin = 8.0;
+            let draw_side_label = |text: &str, right_aligned: bool| {
+                let galley = painter.layout_no_wrap(
+                    text.to_owned(),
+                    label_font.clone(),
+                    egui::Color32::WHITE,
+                );
+                let size = galley.size() + label_pad * 2.0;
+                let x = if right_aligned {
+                    canvas_rect.right() - label_margin - size.x
+                } else {
+                    canvas_rect.left() + label_margin
+                };
+                let min = egui::pos2(x, canvas_rect.bottom() - label_margin - size.y);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(min, size),
+                    3.0,
+                    egui::Color32::from_black_alpha(140),
+                );
+                painter.galley(min + label_pad, galley, egui::Color32::WHITE);
+            };
+            draw_side_label("Original", false);
+            draw_side_label("Edited", true);
             // Drag: a thin full-height strip around the divider owns the pointer.
             let hit = crate::develop::split::HANDLE_TOL;
             let strip = egui::Rect::from_min_max(

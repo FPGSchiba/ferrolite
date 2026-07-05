@@ -40,9 +40,10 @@ pub use uniforms::{
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Nine passes: the seven original
-/// color/tone/geometry passes plus the two lens passes (geometry now carries the
-/// warp; `vignette` is the new radial-gain pass).
+/// alongside the display-pipeline pre-warm. Ten passes: the seven original
+/// color/tone/geometry passes, the two lens passes (geometry now carries the
+/// warp; `vignette` is the radial-gain pass), plus `local-adjust` (the masked
+/// Light+Color point op).
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
@@ -54,6 +55,7 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         ("sharpen", include_str!("shaders/sharpen.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
+        ("local-adjust", include_str!("shaders/local_adjust.wgsl")),
     ] {
         let _ = ctx.shader_module(label, src);
     }

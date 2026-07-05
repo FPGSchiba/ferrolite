@@ -2,6 +2,7 @@
 //! Permissive dependency graph (no copyleft, no model weights) so it lifts into
 //! a game engine as a unit (map §3, D7). Grows module-by-module across P1 Plan 1.
 
+mod brush;
 mod buffer;
 mod composite;
 mod model;
@@ -10,6 +11,7 @@ mod shapes;
 mod stroke;
 mod vec;
 
+pub use brush::BrushRasterizer;
 pub use buffer::{MaskBuffer, MASK_FORMAT};
 pub use composite::{CompositeNode, CompositePass};
 pub use model::{

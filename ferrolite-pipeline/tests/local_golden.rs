@@ -4,8 +4,8 @@ use ferrolite_gpu::GpuContext;
 use ferrolite_image::{TileCoord, TILE_SIZE};
 use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Vec2 as MVec2};
 use ferrolite_pipeline::{
-    AdjustmentSet, EditPipeline, GpuPyramidSource, LocalAdjustments, MaskLayer, Op, OpStack,
-    TileEditPipeline,
+    sharpen_halo, AdjustmentSet, EditPipeline, GpuPyramidSource, LocalAdjustments, MaskLayer, Op,
+    OpStack, Sharpen, TileEditPipeline,
 };
 use std::sync::Arc;
 
@@ -249,6 +249,86 @@ fn tile_masked_adjustment_matches_preview_region_identity_geometry() {
 
     // Tile (0,0), identity geometry -> interior TILE_SIZE^2 must match the
     // whole-image top-left TILE_SIZE^2 region within tolerance.
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tiles = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    let tex = tiles.produce_tile(TileCoord { lod: 0, x: 0, y: 0 });
+    let tile = common::read_tile_linear(&ctx, &tex);
+
+    let mut max_d = 0.0f32;
+    for ty in 0..TILE_SIZE.min(sh) {
+        for tx in 0..TILE_SIZE.min(sw) {
+            for ch in 0..3 {
+                let ti = ((ty * TILE_SIZE + tx) * 4 + ch) as usize;
+                let wi = ((ty * sw + tx) * 4 + ch) as usize;
+                max_d = max_d.max((tile[ti] - whole[wi]).abs());
+            }
+        }
+    }
+    assert!(max_d < 0.02, "tile vs preview region drift {max_d}");
+}
+
+/// Regression guard for Task 9's `mask_origin = [coord*TILE_SIZE - halo, ...]`
+/// (set in `produce_tile`, `ferrolite-pipeline/src/tile_edit.rs`). The parity
+/// test above always runs with `halo == 0` (no Sharpen/lens), so it can never
+/// catch a regression that drops the `- self.halo as i32` term. This test adds
+/// a non-zero `Sharpen` (amount != 0 && radius != 0 => `sharpen_halo(..) > 0`,
+/// see `ferrolite-pipeline/src/uniforms.rs`) alongside a non-identity
+/// `LocalAdjustments` layer, so the tile is haloed AND the mask sample must be
+/// offset by that halo to land on the correct sub-region. If `- halo` were
+/// dropped, the mask would be sampled from the wrong global position and the
+/// tile interior would drift from the whole-image reference well beyond the
+/// float/driver tolerance used below.
+#[test]
+fn tile_masked_adjustment_with_sharpen_halo_matches_preview_region() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Source larger than one tile so the tile is a genuine sub-region.
+    let sw = TILE_SIZE + 40;
+    let sh = TILE_SIZE + 24;
+    let src = common::gradient(sw, sh);
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "lin".into(),
+            visible: true,
+            mask: MaskDefinition {
+                components: vec![(
+                    MaskComponent::LinearGradient {
+                        start: MVec2::new(0.0, 0.0),
+                        end: MVec2::new(1.0, 0.0),
+                    },
+                    CompositeMode::Add,
+                )],
+                invert: false,
+            },
+            adjustments: AdjustmentSet {
+                exposure: 0.8,
+                ..Default::default()
+            },
+        }],
+    };
+    let sharpen = Sharpen {
+        amount: 0.5,
+        radius: 3,
+    };
+    assert!(
+        sharpen_halo(Some(sharpen)) > 0,
+        "test setup must exercise halo > 0"
+    );
+    let stack = OpStack::default()
+        .set_op(Op::LocalAdjustments(la))
+        .set_op(Op::Sharpen(sharpen));
+
+    // Whole-image reference.
+    let mut preview = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole = common::read_image_linear(&ctx, &preview.evaluate());
+
+    // Tile (0,0), identity geometry -> interior TILE_SIZE^2 must match the
+    // whole-image top-left TILE_SIZE^2 region within tolerance, even though
+    // the sharpen halo makes this a genuinely haloed tile (halo > 0), so the
+    // mask must be sampled at `coord*TILE_SIZE - halo` to line up correctly.
     let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
     let mut tiles = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
     let tex = tiles.produce_tile(TileCoord { lod: 0, x: 0, y: 0 });

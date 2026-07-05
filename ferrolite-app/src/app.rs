@@ -50,6 +50,15 @@ impl FerroliteApp {
             // open will borrow from this holder instead of compiling a new pipeline.
             let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
             let pipelines = ferrolite_vt::DisplayPipelines::new(&gpu, rs.target_format);
+            // Build-once guard (CLAUDE.md GPU rule): every render pipeline used by
+            // the viewer is compiled exactly once, here, inside `DisplayPipelines::new`.
+            // No other call site may construct a pipeline — image open/navigation must
+            // only ever borrow from this pre-warmed holder.
+            debug_assert_eq!(
+                pipelines.pipelines_built(),
+                5,
+                "all display pipelines must be built once at pre-warm (build-once, CLAUDE.md GPU rule)"
+            );
             let histogram = ferrolite_vt::HistogramPipeline::new(&gpu);
             rs.renderer
                 .write()

@@ -4,7 +4,6 @@
 
 /// What the viewer presents this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 pub enum PresentSource {
     /// Rung-1 preview (transform-aware, smooth). Shown during interaction and
     /// while the full-res `back` buffer is still composing.
@@ -18,7 +17,6 @@ pub enum PresentSource {
 /// Select the present source. `interacting` = pan/zoom/slider this frame;
 /// `full_ready` = the sparse tier exists; `converged` = the pool is complete for
 /// the current transform+version (CPU-rect predicate); `crossfade` = the ramp [0,1].
-#[allow(dead_code)]
 pub fn present_source(
     interacting: bool,
     full_ready: bool,

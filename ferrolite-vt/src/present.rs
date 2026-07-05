@@ -45,13 +45,21 @@ impl PresentBuffers {
         (tex, view)
     }
 
-    pub fn resize(&mut self, ctx: &GpuContext, size: (u32, u32)) {
+    /// Resize both present buffers to `size`, reallocating fresh (blank) textures
+    /// for `front` and `back` when `size` actually differs from the current size.
+    /// No-ops (and returns `false`) when `size` is unchanged. Returns `true` when
+    /// it reallocated — callers MUST treat that as "both buffers are now blank"
+    /// and re-arm whatever one-shot compose+swap guard would otherwise skip
+    /// recomposing (e.g. because the view is still `converged`), or the canvas
+    /// will keep showing a blank/clear-color buffer until the next pan/zoom/edit.
+    pub fn resize(&mut self, ctx: &GpuContext, size: (u32, u32)) -> bool {
         if size == self.size {
-            return;
+            return false;
         }
         self.size = size;
         self.front = Self::alloc(ctx, size, self.format);
         self.back = Self::alloc(ctx, size, self.format);
+        true
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -80,8 +88,15 @@ mod tests {
         };
         let mut p = PresentBuffers::new(&ctx, (64, 64), wgpu::TextureFormat::Bgra8UnormSrgb);
         assert_eq!(p.size(), (64, 64));
-        p.resize(&ctx, (128, 96));
+        let resized = p.resize(&ctx, (128, 96));
         assert_eq!(p.size(), (128, 96));
+        assert!(resized, "actual size change must report true (reallocated)");
+        let resized_again = p.resize(&ctx, (128, 96));
+        assert_eq!(p.size(), (128, 96));
+        assert!(
+            !resized_again,
+            "no-op resize to the same size must report false"
+        );
     }
 
     #[test]

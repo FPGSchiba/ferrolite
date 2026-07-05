@@ -1794,6 +1794,13 @@ impl FerroliteApp {
         // Set true on the frame the compose+swap actually ran, so the caller can
         // (re)start the crossfade ramp exactly once per convergence.
         let mut swapped_this_frame = false;
+        // Set true when `g.present.resize` actually reallocated (canvas size
+        // changed), meaning `front`/`back` are now blank. `converged` frequently
+        // stays true across a resize (same zoom -> same tiles resident), so the
+        // compose+swap guard below would otherwise never re-fire and the canvas
+        // would show blank/clear-color until the next pan/zoom/edit. Re-armed
+        // below alongside the `!converged` re-arm.
+        let mut present_reallocated = false;
         if let (Some(rs), Some(v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
             // The view/viewport for feedback, prefetch, convergence, and the
             // off-screen compose. One-frame-latent (recorded by the PRIOR frame's
@@ -1815,7 +1822,7 @@ impl FerroliteApp {
                     (v.viewport.0 * ppp).round().max(1.0) as u32,
                     (v.viewport.1 * ppp).round().max(1.0) as u32,
                 );
-                g.present.resize(&g.ctx, phys);
+                present_reallocated = g.present.resize(&g.ctx, phys);
                 if Some(g.image_id) != open_id {
                     // Stale holder from a superseded viewer: stop its tile jobs.
                     if let Some(full) = g.full.as_mut() {
@@ -1900,7 +1907,11 @@ impl FerroliteApp {
         // the NEXT convergence recomposes the fresh transform+version; and, on the
         // frame the compose+swap actually ran, mark it done and (re)start the
         // crossfade ramp so the freshly-composed `front` fades in over the preview.
-        if !converged {
+        // Also re-arm on a canvas resize that reallocated the present buffers:
+        // `converged` frequently stays true across a resize, so without this the
+        // compose+swap below would never re-fire and the canvas would blit the
+        // now-blank buffers until the next pan/zoom/edit.
+        if !converged || present_reallocated {
             v.present_swapped = false;
         }
         if swapped_this_frame {

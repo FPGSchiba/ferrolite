@@ -1523,6 +1523,51 @@ impl VirtualTexture {
         pass.draw(0..3, 0..1);
     }
 
+    /// Compose the sparse tier into an off-screen `target` view (the present `back`
+    /// buffer). Records its own render pass on `encoder`. The pool must be converged
+    /// for a complete image (callers gate on `is_converged`). Mirrors the sparse
+    /// bind-group build in `prepare_sparse`; here the pass targets `target`.
+    // TODO(spec4.5 phase 4): consumed by off-screen present compose
+    #[allow(dead_code)]
+    pub fn compose_sparse_into(
+        &mut self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        view: &ViewTransform,
+        viewport: (f32, f32),
+    ) {
+        self.prepare_sparse(ctx, view, viewport);
+        let Some(s) = self.sparse.as_ref() else {
+            return;
+        };
+        let Some(bind) = s.bind_group.as_ref() else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-compose-sparse"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.02,
+                        g: 0.02,
+                        b: 0.02,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&s.pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     /// Rung 4: number of tiles still in flight (jobs submitted, not yet drained).
     /// `None` if this is not a sparse VT. Mirrors `streaming_pending`: used by the
     /// viewer to gate the crossfade swap and terminate the repaint loop. Note: 0

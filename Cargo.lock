@@ -1335,6 +1335,7 @@ version = "0.0.1"
 dependencies = [
  "bytemuck",
  "ferrolite-gpu",
+ "ferrolite-image",
  "half",
  "image",
  "serde",

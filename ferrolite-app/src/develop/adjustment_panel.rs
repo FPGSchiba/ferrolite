@@ -3,7 +3,7 @@
 //! OpStack via develop::ops_edit; the app applies it to both render tiers.
 
 use crate::develop::{
-    curve_widget, hsl_widget, lens_caps_ui, lens_picker, ops_edit, vignette_mode,
+    coverage, curve_widget, hsl_widget, lens_caps_ui, lens_picker, ops_edit, vignette_mode,
 };
 use crate::state::AppState;
 use crate::theme;
@@ -52,6 +52,39 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
     };
     let mut out: Option<EditOutcome> = None;
     let mut ws_change: Option<WorkingSpace> = None;
+
+    // ── Camera info + color-profile coverage status (Spec 4.6 §3) ──
+    // Read-only indicator (NOT an adjustable control → no per-control reset).
+    // Shows "make model"; when a RAW decoded without a usable camera matrix
+    // (sRGB fallback in effect), appends a warning chip + hover tooltip. All
+    // reads are O(1) — no decode/I/O is triggered from the UI thread.
+    if let Some(v) = state.viewer.as_ref() {
+        let status = coverage::camera_coverage(v.kind, v.full_ready, v.color_profile.is_fallback);
+        let name = v
+            .meta
+            .as_ref()
+            .map(|m| format!("{} {}", m.make, m.model).trim().to_string())
+            .filter(|s| !s.is_empty());
+        if name.is_some() || status != coverage::CoverageStatus::NotApplicable {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                if let Some(name) = &name {
+                    ui.label(egui::RichText::new(name).color(theme::TEXT_DIM).size(11.0));
+                }
+                if let Some(label) = status.chip_label() {
+                    let chip = ui.label(
+                        egui::RichText::new(label)
+                            .color(theme::SEMANTIC_RED)
+                            .size(11.0),
+                    );
+                    if let Some(tip) = status.tooltip() {
+                        chip.on_hover_text(tip);
+                    }
+                }
+            });
+            ui.add_space(4.0);
+        }
+    }
 
     // ── Save-state indicator ──
     // Edits auto-save: each commit calls persist_ops → spawn_ops_write off-thread.

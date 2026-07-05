@@ -50,6 +50,11 @@ windows = { version = "0.58", features = [
 [target.'cfg(target_os = "macos")'.dependencies]
 core-graphics = "0.24"
 core-foundation = "0.10"
+# Provides the `ForeignType` trait (`from_ptr`/`as_ptr`) that `core-graphics`'s
+# `CGColorSpace` implements; needed to wrap the raw `CGColorSpaceRef` from the
+# CGDisplayCopyColorSpace/CGColorSpaceCopyICCData FFI in monitor_profile.rs.
+# Version 0.3 unifies with core-graphics 0.24's own foreign-types dependency.
+foreign-types-shared = "0.3"
 
 [dev-dependencies]
 image = { workspace = true, features = ["png"] }

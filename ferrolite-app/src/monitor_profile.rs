@@ -92,6 +92,10 @@ mod macos_ffi {
     use core_graphics::color_space::CGColorSpace;
     use core_graphics::display::CGDirectDisplayID;
     use core_graphics::sys::CGColorSpaceRef;
+    // `from_ptr`/`as_ptr` on `CGColorSpace` come from the `ForeignType` trait
+    // (core-graphics implements `foreign_types_shared::ForeignType` for it); it
+    // must be in scope to call them.
+    use foreign_types_shared::ForeignType;
 
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {

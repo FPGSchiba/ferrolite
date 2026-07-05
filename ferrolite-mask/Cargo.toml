@@ -10,7 +10,6 @@ workspace = true
 
 [dependencies]
 ferrolite-gpu = { workspace = true }
-ferrolite-image = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 half = { workspace = true }
@@ -18,5 +17,4 @@ serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-pollster = { workspace = true }
 image = { workspace = true, features = ["png"] }

@@ -34,8 +34,8 @@ pub use tile_edit::TileEditPipeline;
 // Exception: `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
 pub use uniforms::{
     curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform, sharpen_halo, vignette_amount,
-    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, SharpenUniform,
-    VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
+    SharpenUniform, VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

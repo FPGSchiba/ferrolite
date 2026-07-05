@@ -461,6 +461,162 @@ pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
     }
 }
 
+/// Max hue rotation (degrees) per unit `AdjustmentSet::hue`. Local hue spans a
+/// full turn at ±1 (pragmatic; image science secondary, like `wb_multipliers`).
+pub const MAX_LOCAL_HUE_DEG: f32 = 180.0;
+
+/// GPU uniform for `local_adjust.wgsl`. `#[repr(C)]`, 16-byte aligned. Field order +
+/// padding MIRROR the WGSL `struct P` exactly. `mask_origin` lets the tile tier read
+/// a sub-region of a full-output mask (preview leaves it `[0,0]`).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LocalAdjustUniform {
+    pub exposure_gain: f32, // 2^exposure
+    pub contrast_gain: f32, // 1 + contrast
+    pub highlights: f32,
+    pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
+    pub saturation: f32, // 1 + saturation (mix factor)
+    pub hue_deg: f32,    // hue * MAX_LOCAL_HUE_DEG
+    pub wb_mul: [f32; 3],
+    pub color_amount: f32,
+    pub color_rgb: [f32; 3],
+    pub contrast_pivot: f32,
+    pub mask_origin: [i32; 2],
+    pub _pad: [f32; 2],
+}
+
+// `local_adjust_uniform`/`light_color_apply` are reserved for the Local Adjustments
+// pipeline node wired in a later task; only `LocalAdjustUniform` is re-exported today.
+#[allow(dead_code)]
+pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUniform {
+    LocalAdjustUniform {
+        exposure_gain: exposure_gain(a.exposure),
+        contrast_gain: 1.0 + a.contrast,
+        highlights: a.highlights,
+        shadows: a.shadows,
+        whites: a.whites,
+        blacks: a.blacks,
+        saturation: 1.0 + a.saturation,
+        hue_deg: a.hue * MAX_LOCAL_HUE_DEG,
+        wb_mul: wb_multipliers(a.temp, a.tint),
+        color_amount: a.color.amount,
+        color_rgb: [a.color.r, a.color.g, a.color.b],
+        contrast_pivot: CONTRAST_PIVOT,
+        mask_origin: [0, 0],
+        _pad: [0.0; 2],
+    }
+}
+
+fn luma709(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+fn rgb_to_hsl(c: [f32; 3]) -> [f32; 3] {
+    let (r, g, b) = (c[0], c[1], c[2]);
+    let mx = r.max(g.max(b));
+    let mn = r.min(g.min(b));
+    let l = (mx + mn) * 0.5;
+    let d = mx - mn;
+    if d <= 1e-6 {
+        return [0.0, 0.0, l];
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let mut h = if mx == r {
+        ((g - b) / d) % 6.0
+    } else if mx == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    h *= 60.0;
+    if h < 0.0 {
+        h += 360.0;
+    }
+    [h, s, l]
+}
+fn hsl_to_rgb(hsl: [f32; 3]) -> [f32; 3] {
+    let (h, s, l) = (hsl[0] / 360.0, hsl[1], hsl[2]);
+    if s <= 1e-6 {
+        return [l, l, l];
+    }
+    let q = if l < 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let p = 2.0 * l - q;
+    let hue = |t_in: f32| -> f32 {
+        let mut t = t_in;
+        if t < 0.0 {
+            t += 1.0;
+        }
+        if t > 1.0 {
+            t -= 1.0;
+        }
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 1.0 / 2.0 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    [hue(h + 1.0 / 3.0), hue(h), hue(h - 1.0 / 3.0)]
+}
+
+/// CPU reference for the Light+Color point op. `local_adjust.wgsl` mirrors this
+/// exactly (golden tolerance absorbs f16/driver drift). Order: exposure → tonal
+/// region gains → contrast → wb → saturation → hue → color swatch. Output clamped ≥0.
+#[allow(dead_code)]
+pub fn light_color_apply(rgb: [f32; 3], a: &crate::local::AdjustmentSet) -> [f32; 3] {
+    let u = local_adjust_uniform(a);
+    let mut c = [
+        rgb[0] * u.exposure_gain,
+        rgb[1] * u.exposure_gain,
+        rgb[2] * u.exposure_gain,
+    ];
+    let y = luma709(c);
+    let hi = smoothstep(0.5, 1.0, y);
+    let sh = 1.0 - smoothstep(0.0, 0.5, y);
+    let wh = smoothstep(0.7, 1.0, y);
+    let bl = 1.0 - smoothstep(0.0, 0.3, y);
+    let region = (1.0 + u.highlights * hi)
+        * (1.0 + u.shadows * sh)
+        * (1.0 + u.whites * wh)
+        * (1.0 + u.blacks * bl);
+    for v in &mut c {
+        *v *= region;
+    }
+    for v in &mut c {
+        *v = (*v - u.contrast_pivot) * u.contrast_gain + u.contrast_pivot;
+    }
+    for (v, m) in c.iter_mut().zip(u.wb_mul) {
+        *v *= m;
+    }
+    let y2 = luma709(c);
+    for v in &mut c {
+        *v = y2 + (*v - y2) * u.saturation;
+    }
+    if u.hue_deg != 0.0 {
+        let mut hsl = rgb_to_hsl([c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]);
+        hsl[0] = (hsl[0] + u.hue_deg).rem_euclid(360.0);
+        c = hsl_to_rgb(hsl);
+    }
+    if u.color_amount != 0.0 {
+        for (v, cr) in c.iter_mut().zip(u.color_rgb) {
+            *v += (cr - *v) * u.color_amount;
+        }
+    }
+    [c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +966,94 @@ mod tests {
             ..lc
         };
         assert_eq!(lens_halo_px(Some(&lc_on), Some(&g)), 30);
+    }
+
+    #[test]
+    fn light_color_identity_is_a_no_op() {
+        use crate::local::AdjustmentSet;
+        let c = light_color_apply([0.4, 0.5, 0.6], &AdjustmentSet::default());
+        assert!(
+            (c[0] - 0.4).abs() < 1e-6 && (c[1] - 0.5).abs() < 1e-6 && (c[2] - 0.6).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn light_color_exposure_plus_one_doubles() {
+        use crate::local::AdjustmentSet;
+        let c = light_color_apply(
+            [0.2, 0.2, 0.2],
+            &AdjustmentSet {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        );
+        assert!((c[0] - 0.4).abs() < 1e-4, "got {}", c[0]);
+    }
+
+    #[test]
+    fn light_color_contrast_pushes_away_from_pivot() {
+        use crate::local::AdjustmentSet;
+        // A value above the 0.18 pivot moves further up under positive contrast.
+        let c = light_color_apply(
+            [0.5, 0.5, 0.5],
+            &AdjustmentSet {
+                contrast: 0.5,
+                ..Default::default()
+            },
+        );
+        assert!(c[0] > 0.5, "above-pivot value brightened: {}", c[0]);
+    }
+
+    #[test]
+    fn light_color_full_desaturation_goes_grey() {
+        use crate::local::AdjustmentSet;
+        let c = light_color_apply(
+            [0.9, 0.1, 0.1],
+            &AdjustmentSet {
+                saturation: -1.0,
+                ..Default::default()
+            },
+        );
+        assert!(
+            (c[0] - c[1]).abs() < 1e-4 && (c[1] - c[2]).abs() < 1e-4,
+            "grey: {c:?}"
+        );
+    }
+
+    #[test]
+    fn light_color_warm_temp_raises_red_over_blue() {
+        use crate::local::AdjustmentSet;
+        let c = light_color_apply(
+            [0.5, 0.5, 0.5],
+            &AdjustmentSet {
+                temp: 0.8,
+                ..Default::default()
+            },
+        );
+        assert!(c[0] > c[2], "warm temp: r={} b={}", c[0], c[2]);
+    }
+
+    #[test]
+    fn local_adjust_uniform_is_identity_when_default() {
+        use crate::local::AdjustmentSet;
+        let u = local_adjust_uniform(&AdjustmentSet::default());
+        assert_eq!(u.exposure_gain, 1.0);
+        assert_eq!(u.contrast_gain, 1.0);
+        assert_eq!(u.wb_mul, [1.0, 1.0, 1.0]);
+        assert_eq!(std::mem::size_of::<LocalAdjustUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn reserved_fields_do_not_change_output() {
+        use crate::local::AdjustmentSet;
+        let a = AdjustmentSet {
+            texture: 1.0,
+            clarity: 1.0,
+            dehaze: 1.0,
+            sharpness: 1.0,
+            noise: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(light_color_apply([0.3, 0.4, 0.5], &a), [0.3, 0.4, 0.5]);
     }
 }

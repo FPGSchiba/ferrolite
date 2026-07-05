@@ -152,9 +152,6 @@ pub fn dab_alpha(dist: f32, radius: f32, hardness: f32, flow: f32) -> f32 {
         1.0
     } else if t >= 1.0 {
         0.0
-    } else if core >= 1.0 {
-        // Guarded above by t < 1.0, so this is the hard-edge inside.
-        1.0
     } else {
         1.0 - smoothstep(0.0, 1.0, (t - core) / (1.0 - core))
     };

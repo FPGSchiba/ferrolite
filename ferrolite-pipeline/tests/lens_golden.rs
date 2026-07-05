@@ -566,3 +566,95 @@ fn corrected_tiles_match_whole_image_at_seam() {
         "per-tile corrected render diverged from whole-image (diff {max_diff}) — lens halo broken?"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Golden 4: tiled MANUAL vignette matches the whole-image vignette (no grid).
+//
+// This is the regression guard for the per-tile vignette bug (Spec 4.4): the
+// tiled vignette pass used to compute its radius from each tile's OWN center, so
+// a full-res render showed a periodic grid of dark spots at the tile boundaries.
+// Here we render a whole image with a strong manual vignette via BOTH the
+// whole-image `EditPipeline` (correct reference) and the `TileEditPipeline`
+// (assembling every tile), and assert they match across the WHOLE image — which
+// only holds when the tiled vignette measures radius in full-output-image space.
+// Before the fix this test fails with a large `max_diff` (a visible dark-spot
+// grid, worst near tile centers/edges); after, it matches within tolerance.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tiled_manual_vignette_matches_whole_image() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+
+    // Multi-tile image so at least one full interior tile boundary exists.
+    // 300x200 → 2x1 tiles at LOD 0 (seam at x = 256). Flat mid-grey so the only
+    // spatial variation is the vignette gain (any per-tile pattern is obvious).
+    let (iw, ih) = (300u32, 200u32);
+    let flat = LinearRgbaF32::new(
+        iw,
+        ih,
+        (0..(iw * ih * 4))
+            .map(|i| if i % 4 == 3 { 1.0 } else { 0.5 })
+            .collect(),
+    )
+    .unwrap();
+
+    // Strong manual vignette, no lens (no warp/LUT bound), no geometry crop.
+    let stack = OpStack::default();
+
+    // Whole-image reference through EditPipeline.
+    let mut whole = EditPipeline::new(ctx.clone(), &flat, stack.clone(), IDENTITY);
+    whole.set_vig_manual(-0.8);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+
+    // Per-tile producer with the same manual vignette.
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &flat));
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    tep.set_vig_manual(-0.8);
+
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let mut max_diff = 0.0f32;
+    for tx in 0..2u32 {
+        let tile = tep.produce_tile(TileCoord {
+            lod: 0,
+            x: tx,
+            y: 0,
+        });
+        let tile_lin = common::read_tile_linear(&ctx, &tile);
+        for ly in 0..TILE_SIZE {
+            for lx in 0..TILE_SIZE {
+                let gx = tx * TILE_SIZE + lx;
+                let gy = ly;
+                if gx >= iw || gy >= ih {
+                    continue; // out-of-image tile padding
+                }
+                let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
+                let wi = ((gy * iw + gx) * 4) as usize;
+                for c in 0..3 {
+                    let d = (tile_lin[ti + c] - whole_lin[wi + c]).abs();
+                    max_diff = max_diff.max(d);
+                }
+            }
+        }
+    }
+    eprintln!("tiled-vs-whole manual-vignette max diff = {max_diff}");
+
+    // Sanity: the manual vignette actually did something (whole-image corner is
+    // meaningfully darker than the center), so a matching tiled render is a real
+    // proof of correctness, not a match of two no-ops.
+    let center = whole_lin[(((ih / 2) * iw + iw / 2) * 4) as usize];
+    let corner = whole_lin[0];
+    assert!(
+        corner < center - 0.1,
+        "manual=-0.8 must visibly darken the corner (center {center}, corner {corner})"
+    );
+
+    assert!(
+        max_diff <= SEAM_TOL,
+        "tiled manual-vignette render diverged from whole-image (diff {max_diff}) — \
+         per-tile vignette radius (dark-spot grid) not computed in full-image space?"
+    );
+}

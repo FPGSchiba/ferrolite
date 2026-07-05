@@ -787,6 +787,19 @@ pub(crate) struct TileRequest {
     pub halo: u32,
 }
 
+/// The current tile's output-space frame, written by `GeometryHeadNode` each
+/// `evaluate` and read by the downstream `VignetteNode` (same graph evaluate, so
+/// it is current). `origin` is the haloed tile's top-left in this LOD's output
+/// pixel space; `full_dims` is the full output image size at this LOD. The
+/// vignette pass uses these to compute its radius in whole-image coordinates so
+/// the tiled render matches the whole-image one (no per-tile vignette grid).
+/// Default `[0.0, 0.0]` is the whole-image sentinel (preview leaves it there).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct TileFrame {
+    pub origin: [f32; 2],
+    pub full_dims: [f32; 2],
+}
+
 /// Root node for the per-tile edit pipeline: samples the `GpuPyramidSource` LOD
 /// for the current `TileRequest` through the geometry transform (geometry at the
 /// head), producing a `(ext×ext)` haloed, geometrically-resampled tile in output
@@ -801,6 +814,7 @@ pub(crate) struct GeometryHeadNode {
     source: Arc<GpuPyramidSource>,
     geometry: Geometry,
     request: Rc<Cell<TileRequest>>,
+    frame: Rc<Cell<TileFrame>>,
     out: RefCell<Option<PipelineImage>>,
 }
 
@@ -810,6 +824,7 @@ impl GeometryHeadNode {
         source: Arc<GpuPyramidSource>,
         geometry: Geometry,
         request: Rc<Cell<TileRequest>>,
+        frame: Rc<Cell<TileFrame>>,
     ) -> Self {
         let bgl = geometry_bgl(&ctx.device); // reuse the geometry pass bind layout
         let module = ctx.shader_module("geometry", include_str!("shaders/geometry.wgsl"));
@@ -855,6 +870,7 @@ impl GeometryHeadNode {
             source,
             geometry,
             request,
+            frame,
             out: RefCell::new(None),
         }
     }
@@ -911,6 +927,14 @@ impl Node<PipelineImage> for GeometryHeadNode {
         let (ox, oy) = tile_pixel_origin(req.coord);
         let out_origin = (ox as f32 - req.halo as f32, oy as f32 - req.halo as f32);
         let u = geometry_tile_uniform(Some(self.geometry), sw, sh, out_origin, ext);
+        // Publish this tile's output-space frame for the downstream vignette pass:
+        // full output image dims at this LOD + the haloed tile origin, so the
+        // vignette radius is measured in whole-image space (seamless across tiles).
+        let (_, out_w, out_h) = crate::uniforms::geometry_uniform(Some(self.geometry), sw, sh);
+        self.frame.set(TileFrame {
+            origin: [out_origin.0, out_origin.1],
+            full_dims: [out_w as f32, out_h as f32],
+        });
         self.ctx
             .queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -1039,13 +1063,22 @@ pub(crate) struct VignetteNode {
     bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     params: Rc<Cell<VignetteUniform>>,
+    /// Shared with the `GeometryHeadNode` in the tiled pipeline: the head writes
+    /// the current tile's output frame each evaluate and this node reads it to fill
+    /// `full_dims`/`origin`. `None` on the whole-image preview path → those stay
+    /// zero → the shader takes the byte-identical per-texture radius branch.
+    frame: Option<Rc<Cell<TileFrame>>>,
     lut: RefCell<VignetteTexture>,
     lut_view: RefCell<wgpu::TextureView>,
     out: RefCell<Option<PipelineImage>>,
 }
 
 impl VignetteNode {
-    pub(crate) fn new(ctx: Arc<GpuContext>, params: Rc<Cell<VignetteUniform>>) -> Self {
+    pub(crate) fn new(
+        ctx: Arc<GpuContext>,
+        params: Rc<Cell<VignetteUniform>>,
+        frame: Option<Rc<Cell<TileFrame>>>,
+    ) -> Self {
         let bgl = vignette_bgl(&ctx.device);
         let module = ctx.shader_module("vignette", include_str!("shaders/vignette.wgsl"));
         let layout = ctx
@@ -1079,6 +1112,7 @@ impl VignetteNode {
             bgl,
             uniform_buf,
             params,
+            frame,
             lut: RefCell::new(lut),
             lut_view,
             out: RefCell::new(None),
@@ -1126,9 +1160,18 @@ impl Node<PipelineImage> for VignetteNode {
         let src = inputs[0];
         let dst = self.ensure_out(src.width, src.height);
 
+        // Merge the tiled full-image frame (if any) into the amount/manual params.
+        // On the preview path `frame` is `None`, so `full_dims`/`origin` stay at the
+        // params' defaults (zero) and the shader takes the whole-image branch.
+        let mut u = self.params.get();
+        if let Some(frame) = &self.frame {
+            let f = frame.get();
+            u.full_dims = f.full_dims;
+            u.origin = f.origin;
+        }
         self.ctx
             .queue
-            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&self.params.get()));
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
 
         let src_view = src
             .texture

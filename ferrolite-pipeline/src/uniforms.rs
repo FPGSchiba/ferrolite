@@ -375,15 +375,28 @@ pub struct VignetteUniform {
     /// identity. Negative darkens corners; positive brightens them. Independent
     /// of `vig_amount` — see `corr(r) * manual(r)` in vignette.wgsl.
     pub manual: f32,
+    /// Full OUTPUT-image dimensions (this LOD's pixel space). When both are > 0.5
+    /// the shader takes the GLOBAL path (radius from the full-image center); when
+    /// `[0.0, 0.0]` (the default sentinel, and the whole-image preview path) it
+    /// falls back to per-texture `textureDimensions(src)`. This is what lets the
+    /// TILED path compute a single seamless vignette instead of one per tile.
+    pub full_dims: [f32; 2],
+    /// This tile's haloed output-space top-left origin (added to `gid` before
+    /// normalizing by `full_dims`). Zero on the whole-image path.
+    pub origin: [f32; 2],
     pub pad: [f32; 2],
 }
 
 impl Default for VignetteUniform {
     /// Identity: `vig_amount = 0`, `manual = 0` → the pass multiplies rgb by 1.0.
+    /// `full_dims = [0.0, 0.0]` is the "whole-image" sentinel (per-texture radius),
+    /// so the default is byte-identical to the pre-tiling behavior.
     fn default() -> Self {
         Self {
             vig_amount: 0.0,
             manual: 0.0,
+            full_dims: [0.0, 0.0],
+            origin: [0.0, 0.0],
             pad: [0.0; 2],
         }
     }
@@ -758,6 +771,12 @@ mod tests {
     fn vignette_uniform_default_is_identity_and_aligned() {
         assert_eq!(VignetteUniform::default().vig_amount, 0.0);
         assert_eq!(VignetteUniform::default().manual, 0.0);
+        // `full_dims = [0,0]` is the whole-image sentinel: the shader falls back to
+        // per-texture dims, keeping the preview + all existing goldens byte-identical.
+        assert_eq!(VignetteUniform::default().full_dims, [0.0, 0.0]);
+        assert_eq!(VignetteUniform::default().origin, [0.0, 0.0]);
+        // 32 bytes, still 16-aligned (matches the 8-scalar WGSL `struct V`).
+        assert_eq!(std::mem::size_of::<VignetteUniform>(), 32);
         assert_eq!(std::mem::size_of::<VignetteUniform>() % 16, 0);
     }
 

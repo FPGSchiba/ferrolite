@@ -4,6 +4,8 @@
 
 mod buffer;
 mod model;
+mod pass;
+mod shapes;
 mod vec;
 
 pub use buffer::{MaskBuffer, MASK_FORMAT};
@@ -11,4 +13,5 @@ pub use model::{
     composite_scalar, BrushNode, CompositeMode, MaskComponent, MaskDefinition, MaskProvenance,
     RasterHandle, Stroke,
 };
+pub use shapes::{LinearGradientPass, LinearGradientUniform};
 pub use vec::{Rgb, Vec2};

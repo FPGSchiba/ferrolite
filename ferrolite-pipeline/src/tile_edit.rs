@@ -1,17 +1,34 @@
 //! `TileEditPipeline` — the per-tile, full-res GPU edit producer. For each
 //! requested tile it runs geometry-at-the-head (resampling the GPU-resident
 //! source for the haloed output tile) then the color chain (exposure→WB→contrast
-//! →tone-curve→HSL→sharpen) over the haloed buffer, and returns the interior
-//! `TILE_SIZE`² as an `Rgba16Float` `COPY_SRC` texture for the VT to copy into a
-//! pool slot. No CPU readback (spec §5.2).
+//! →tone-curve→HSL→LocalAdjustments→sharpen) over the haloed buffer, and returns
+//! the interior `TILE_SIZE`² as an `Rgba16Float` `COPY_SRC` texture for the VT to
+//! copy into a pool slot. No CPU readback (spec §5.2).
 //!
 //! Geometry is applied at the head (spec §8.4). For identity geometry the head is
 //! a 1:1 haloed copy, so the result is identical to the whole-image Plan-2 chain
 //! and to a whole-image render — this is what the tile-seam golden asserts. For
 //! non-identity geometry, Sharpen operates in output space rather than source
 //! space, an accepted pragmatic difference (architecture map §2).
+//!
+//! **LocalAdjustments — output-space mask, pragmatic limitation:** because
+//! geometry runs at the head, the entire color chain (including
+//! `LocalAdjustments`) operates in **output space**, not source space. The
+//! node's mask is composited ONCE per document at the full **output**
+//! resolution (`set_full_dims`, fixed at construction from
+//! `edited_output_dims`) and cached; each `produce_tile` call only updates the
+//! per-tile `mask_origin` (a cheap uniform write) so the shader samples the
+//! correct sub-region — the mask itself is never rebuilt per tile. For
+//! identity/translation geometry this is exact and matches the whole-image
+//! preview render bit-for-bit (within float tolerance). Under crop/rotate the
+//! mask anchors to the cropped/rotated **output** frame rather than the
+//! source frame — the same accepted difference already noted above for
+//! Sharpen. Materializing the mask at full output resolution is a pragmatic
+//! P1 memory/compute cost (one extra full-frame buffer per visible layer,
+//! rebuilt only when the layers change via `set_stack` → `invalidate`); a
+//! later optimization could stream/tile mask evaluation instead.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -21,6 +38,8 @@ use ferrolite_image::{TileCoord, TILE_SIZE};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
+use crate::local::LocalAdjustments;
+use crate::local_node::LocalAdjustmentsNode;
 use crate::nodes::{
     CurveNode, GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode,
 };
@@ -51,6 +70,9 @@ pub struct TileEditPipeline {
     contrast: Rc<Cell<ContrastUniform>>,
     tone_curve: Rc<Cell<[f32; 256]>>,
     hsl: Rc<Cell<HslUniform>>,
+    local_adjust_id: NodeId,
+    local_layers: Rc<RefCell<LocalAdjustments>>,
+    local_node: Rc<LocalAdjustmentsNode>,
     sharpen: Rc<Cell<SharpenUniform>>,
 }
 
@@ -72,6 +94,7 @@ impl TileEditPipeline {
         warp_grid: Option<&WarpGrid>,
         vignette_map: Option<&VignetteMap>,
     ) -> Self {
+        let (src_w, src_h) = source.level_size(0);
         let lc: Option<LensCorrection> = stack.lens_correction();
         let halo = sharpen_halo(stack.sharpen()).max(lens_halo_px(lc.as_ref(), warp_grid));
         let geometry = stack.geometry().unwrap_or(Geometry {
@@ -175,6 +198,12 @@ impl TileEditPipeline {
             )),
             vec![tone_curve_id],
         );
+        let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
+        let local_node = Rc::new(LocalAdjustmentsNode::new(ctx.clone(), local_layers.clone()));
+        let (out_w, out_h) = crate::edited_output_dims(&stack, src_w, src_h);
+        local_node.set_full_dims((out_w, out_h));
+        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![hsl_id]);
+
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_id = graph.add_node(
             Box::new(PointOpNode::new(
@@ -183,7 +212,7 @@ impl TileEditPipeline {
                 "sharpen",
                 sharpen.clone(),
             )),
-            vec![hsl_id],
+            vec![local_adjust_id],
         );
 
         // Bind the lens bake products (or leave the identity defaults). The head
@@ -224,6 +253,9 @@ impl TileEditPipeline {
             contrast,
             tone_curve,
             hsl,
+            local_adjust_id,
+            local_layers,
+            local_node,
             sharpen,
         }
     }
@@ -233,8 +265,8 @@ impl TileEditPipeline {
     }
 
     /// Re-derive the color-op param cells (exposure, white balance, contrast,
-    /// tone curve, HSL, sharpen amount) from `stack` and dirty the chain so the
-    /// next `produce_tile` re-renders.
+    /// tone curve, HSL, local adjustments, sharpen amount) from `stack` and
+    /// dirty the chain so the next `produce_tile` re-renders.
     ///
     /// LIMITATION: the geometry transform (crop/rotate), the halo (max of the
     /// sharpen and lens-warp halos), and the baked lens warp grid are fixed at
@@ -245,7 +277,10 @@ impl TileEditPipeline {
     /// be DISCARDED and rebuilt with `TileEditPipeline::new` — calling `set_stack`
     /// alone will silently keep the old geometry/halo/grid. `needs_full_rebuild` in
     /// the app makes that decision. Amount-only lens changes are uniform updates via
-    /// the lens/vignette setters (no rebuild).
+    /// the lens/vignette setters (no rebuild). The `LocalAdjustments` full-output
+    /// mask resolution (`set_full_dims`) is likewise derived from the stack's
+    /// geometry at construction time and fixed thereafter — a geometry/output-dims
+    /// change requires the same full rebuild, not just a `set_stack` call.
     pub fn set_stack(&mut self, stack: OpStack) {
         self.exposure.set(exposure_uniform(stack.exposure()));
         self.wb
@@ -259,6 +294,12 @@ impl TileEditPipeline {
                 .unwrap_or(crate::op::CurveMode::Linear),
         ));
         self.hsl.set(hsl_uniform(stack.hsl()));
+        let la = stack.local_adjustments().unwrap_or_default();
+        if *self.local_layers.borrow() != la {
+            *self.local_layers.borrow_mut() = la;
+            self.local_node.invalidate();
+            self.graph.mark_dirty(self.local_adjust_id);
+        }
         self.sharpen.set(sharpen_uniform(stack.sharpen()));
         self.graph.mark_dirty(self.head_id);
     }
@@ -329,7 +370,20 @@ impl TileEditPipeline {
             coord,
             halo: self.halo,
         });
+        // The color chain (including LocalAdjustments) runs over the haloed
+        // tile buffer of extent `haloed_tile_extent(halo)`, and
+        // `extract_interior` later copies the interior at offset `halo`. The
+        // full-output mask was composited once at construction (`set_full_dims`);
+        // shift the per-tile origin by `-halo` so `textureLoad(mask, mask_origin
+        // + xy)` in the apply shader lands on the correct full-output pixels for
+        // every haloed-buffer coordinate `xy`, including the halo border itself.
+        // This can be negative at the top/left output edges — fine, since the
+        // mask texture's `textureLoad` clamps out-of-bounds coordinates.
+        let gx = coord.x as i32 * TILE_SIZE as i32 - self.halo as i32;
+        let gy = coord.y as i32 * TILE_SIZE as i32 - self.halo as i32;
+        self.local_node.set_mask_origin([gx, gy]);
         self.graph.mark_dirty(self.head_id);
+        self.graph.mark_dirty(self.local_adjust_id);
         let haloed = self.graph.evaluate(self.output_id).clone();
         self.extract_interior(&haloed)
     }

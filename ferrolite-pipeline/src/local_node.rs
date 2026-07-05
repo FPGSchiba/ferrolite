@@ -149,14 +149,10 @@ impl LocalAdjustmentsNode {
         }
     }
 
-    // used by TileEditPipeline in a later task (Task 9)
-    #[allow(dead_code)]
     pub(crate) fn set_mask_origin(&self, origin: [i32; 2]) {
         *self.mask_origin.borrow_mut() = origin;
     }
 
-    // used by TileEditPipeline in a later task (Task 9)
-    #[allow(dead_code)]
     pub(crate) fn set_full_dims(&self, dims: (u32, u32)) {
         let mut fd = self.full_dims.borrow_mut();
         if *fd != Some(dims) {

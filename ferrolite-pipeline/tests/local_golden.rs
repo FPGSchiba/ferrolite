@@ -1,8 +1,12 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
+use ferrolite_image::{TileCoord, TILE_SIZE};
 use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Vec2 as MVec2};
-use ferrolite_pipeline::{AdjustmentSet, EditPipeline, LocalAdjustments, MaskLayer, Op, OpStack};
+use ferrolite_pipeline::{
+    AdjustmentSet, EditPipeline, GpuPyramidSource, LocalAdjustments, MaskLayer, Op, OpStack,
+    TileEditPipeline,
+};
 use std::sync::Arc;
 
 const W: u32 = 64;
@@ -198,4 +202,67 @@ fn local_adjust_edit_only_reevaluates_node_and_downstream() {
     let delta = pipe.eval_count() - before;
     // Only LocalAdjustments + Sharpen + Geometry re-run (upstream cached).
     assert_eq!(delta, 3, "expected 3 downstream re-evals, got {delta}");
+}
+
+/// Parity test for Task 9: `TileEditPipeline` composites the local-adjustments
+/// mask once at full output resolution and each tile samples its sub-region via
+/// `set_mask_origin`. For identity geometry the tile (0,0) interior must match
+/// the corresponding top-left region of a whole-image `EditPipeline` render
+/// (both in scene-linear space, before the display/tone-map + sRGB encode that
+/// `render_to_image`/`blit_to_rgba8` would apply).
+#[test]
+fn tile_masked_adjustment_matches_preview_region_identity_geometry() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Source larger than one tile so the tile is a genuine sub-region.
+    let sw = TILE_SIZE + 40;
+    let sh = TILE_SIZE + 24;
+    let src = common::gradient(sw, sh);
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "lin".into(),
+            visible: true,
+            mask: MaskDefinition {
+                components: vec![(
+                    MaskComponent::LinearGradient {
+                        start: MVec2::new(0.0, 0.0),
+                        end: MVec2::new(1.0, 0.0),
+                    },
+                    CompositeMode::Add,
+                )],
+                invert: false,
+            },
+            adjustments: AdjustmentSet {
+                exposure: 0.8,
+                ..Default::default()
+            },
+        }],
+    };
+    let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+
+    // Whole-image reference.
+    let mut preview = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole = common::read_image_linear(&ctx, &preview.evaluate());
+
+    // Tile (0,0), identity geometry -> interior TILE_SIZE^2 must match the
+    // whole-image top-left TILE_SIZE^2 region within tolerance.
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tiles = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    let tex = tiles.produce_tile(TileCoord { lod: 0, x: 0, y: 0 });
+    let tile = common::read_tile_linear(&ctx, &tex);
+
+    let mut max_d = 0.0f32;
+    for ty in 0..TILE_SIZE.min(sh) {
+        for tx in 0..TILE_SIZE.min(sw) {
+            for ch in 0..3 {
+                let ti = ((ty * TILE_SIZE + tx) * 4 + ch) as usize;
+                let wi = ((ty * sw + tx) * 4 + ch) as usize;
+                max_d = max_d.max((tile[ti] - whole[wi]).abs());
+            }
+        }
+    }
+    assert!(max_d < 0.02, "tile vs preview region drift {max_d}");
 }

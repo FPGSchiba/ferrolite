@@ -1705,19 +1705,24 @@ impl VirtualTexture {
         };
 
         let to_produce = s.versions.to_produce(needed);
+        let base_lod = s.layout.level_count().saturating_sub(1);
         let mut produced = 0;
         for coord in to_produce.into_iter().take(budget) {
-            // Allocate a slot, evicting an LRU resident if the pool is full.
+            // Allocate a slot, evicting an LRU resident (never the protected coarse
+            // base level) if the pool is full.
             let slot = match s.allocator.alloc(coord) {
                 Some(slot) => slot,
                 None => {
-                    if let Some(victim) = s.residency.lru() {
-                        s.allocator.free(victim);
-                        s.residency.forget(victim);
-                        s.versions.forget(victim);
-                        if let Some(idx) = flat_index(&s.layout, victim) {
-                            s.slots[idx] = NOT_RESIDENT;
-                        }
+                    let Some(victim) = s.residency.lru_except_lod(base_lod) else {
+                        // Only protected base tiles resident; don't evict the base.
+                        // Bounded: this tile is retried on a future frame.
+                        continue;
+                    };
+                    s.allocator.free(victim);
+                    s.residency.forget(victim);
+                    s.versions.forget(victim);
+                    if let Some(idx) = flat_index(&s.layout, victim) {
+                        s.slots[idx] = NOT_RESIDENT;
                     }
                     match s.allocator.alloc(coord) {
                         Some(slot) => slot,

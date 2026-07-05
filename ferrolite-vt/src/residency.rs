@@ -115,6 +115,11 @@ impl ResidencySet {
     pub fn lru(&self) -> Option<TileCoord> {
         self.order.first().copied()
     }
+    /// The least-recently-used resident tile whose lod is NOT `protect_lod`, if any.
+    /// Used so the protected coarse base level is never evicted.
+    pub fn lru_except_lod(&self, protect_lod: u32) -> Option<TileCoord> {
+        self.order.iter().copied().find(|t| t.lod != protect_lod)
+    }
     pub fn touch(&mut self, t: TileCoord) {
         if let Some(p) = self.order.iter().position(|&x| x == t) {
             self.order.remove(p);
@@ -317,6 +322,17 @@ mod tests {
         vr.mark(tc(0, 0, 0));
         vr.forget(tc(0, 0, 0));
         assert!(!vr.is_current(tc(0, 0, 0)));
+    }
+
+    #[test]
+    fn lru_except_lod_skips_protected_level() {
+        let mut r = ResidencySet::new(8);
+        r.insert(tc(3, 0, 0)); // base level (protected), oldest
+        r.insert(tc(0, 0, 0));
+        r.insert(tc(0, 1, 0));
+        // Plain LRU would be the base tile; the guarded one skips it.
+        assert_eq!(r.lru(), Some(tc(3, 0, 0)));
+        assert_eq!(r.lru_except_lod(3), Some(tc(0, 0, 0)));
     }
 
     #[test]

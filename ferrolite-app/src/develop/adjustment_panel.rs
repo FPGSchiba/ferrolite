@@ -16,7 +16,8 @@ use ferrolite_pipeline::{Aspect, Correction, Geometry, LensCorrection, Op, OpKin
 /// EXIF has no focal length (`ViewerState::meta` is `None`, still loading, or
 /// the decoded `Metadata.focal_length` is itself absent) — a real shot's
 /// focal length is preferred whenever it's available (Spec 4.4, U9). The
-/// advanced sub-area lets the author correct it immediately either way.
+/// per-component "Adjust" expander lets the author correct it immediately
+/// either way.
 const DEFAULT_FOCAL_LEN: f32 = 50.0;
 /// Fallback aperture seeded for a brand-new op; mirrors `query_from_metadata`'s
 /// own f/8 fallback for the same "EXIF absent" case.
@@ -245,7 +246,9 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
     });
 
     // ── Lens Corrections ── (Spec 4.4, U8): distortion/TCA/vignetting toggles +
-    // Amount, a matched-lens label + picker, and an advanced focal/aperture area.
+    // Amount, a matched-lens label + picker, and per-component "Adjust"
+    // expanders (Focal under Distortion, Aperture under Vignette when a
+    // profile is present) for the bake inputs they drive.
     egui::CollapsingHeader::new("Lens Corrections").show(ui, |ui| {
         let Some(db) = state.lens_db.clone() else {
             ui.weak("Lens database unavailable — corrections disabled.");
@@ -424,7 +427,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         // (separates the three corrections). Applied via explicit
         // `ui.add_space` calls inside `correction_row` below (not
         // `spacing_mut`) so the gap is local to each group and doesn't leak
-        // into surrounding sections (Advanced, Reset button, etc.).
+        // into surrounding sections (a per-component Adjust expander, the
+        // section Reset button, etc.).
         const TITLE_TO_CONTROL_GAP: f32 = 2.0;
         const BETWEEN_GROUP_GAP: f32 = 10.0;
         let has_lens = lc.lens_id.is_some()
@@ -532,11 +536,23 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
 
             // Restore ambient spacing before the (larger, explicit) gap
             // between groups so sibling widgets outside `correction_row`
-            // (e.g. the Vignette group after this one, or the Advanced
-            // section) aren't left with the zeroed spacing.
+            // (e.g. the Vignette group after this one, or a per-component
+            // "Adjust" expander) aren't left with the zeroed spacing.
             ui.spacing_mut().item_spacing.y = prev_spacing_y;
             ui.add_space(BETWEEN_GROUP_GAP);
         };
+
+        // Round 8 (author visual test): Focal and Aperture used to live in a
+        // standalone "Advanced" section at the bottom, which read as if they
+        // were their own independent effects. They aren't — Focal is an input
+        // to the Distortion (and, invisibly, TCA) bake, and Aperture only
+        // matters for PROFILE vignetting. Each now lives collapsed under an
+        // "Adjust" expander INSIDE the correction it actually drives, so the
+        // relationship is obvious from placement alone. Both still route
+        // through the same bake-triggering `changed`/commit path as before —
+        // only their location in the tree changed, not their wiring.
+        let mut adjust_dragged = false;
+        let mut adjust_drag_stopped = false;
 
         let distortion_gate = lens_caps_ui::correction_row_gate(
             has_lens,
@@ -555,6 +571,53 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             &mut amount_drag_stopped,
             &mut distortion_toggled,
         );
+        // Focal · Adjust — only when a lens is matched at all (same
+        // predicate as the Distortion/TCA gates above): focal selects the
+        // Lensfun calibration point, so it has no effect with no lens
+        // matched. The Distortion row above is already greyed in that case;
+        // omitting Focal entirely (rather than greying it) avoids a dead
+        // control with nothing to explain beyond what the row already says.
+        //
+        // The range is clamped to the matched lens's own calibrated focal
+        // range (FB3): letting the author drag it way outside that range
+        // (e.g. 800mm on a 14-54mm zoom) used to silently get clamped by
+        // Lensfun internally, which reads as "the correction does nothing".
+        // Falls back to the pre-FB3 default 8..800 range when the range
+        // can't be resolved.
+        if has_lens {
+            let focal_range = new_lc
+                .lens_id
+                .as_deref()
+                .and_then(|id| db.lens_focal_range(id));
+            let (focal_min, focal_max) = focal_range.unwrap_or((8.0, 800.0));
+            egui::CollapsingHeader::new(format!("Adjust \u{b7} Focal {:.0} mm", new_lc.focal_len))
+                .id_salt("lens_corrections_adjust_focal")
+                .show(ui, |ui| {
+                    let rf = ui
+                        .add(EguiSlider {
+                            label: "Focal",
+                            value: &mut new_lc.focal_len,
+                            min: focal_min,
+                            max: focal_max,
+                            default: DEFAULT_FOCAL_LEN,
+                            step: 1.0,
+                            decimals: 0,
+                            unit: " mm",
+                            bipolar: false,
+                            signed: false,
+                        })
+                        .on_hover_text("Affects Distortion and Transverse CA");
+                    if rf.changed() {
+                        if rf.drag_stopped() {
+                            adjust_drag_stopped = true;
+                        } else if rf.dragged() {
+                            adjust_dragged = true;
+                        } else {
+                            adjust_drag_stopped = true;
+                        }
+                    }
+                });
+        }
         let tca_gate =
             lens_caps_ui::correction_row_gate(has_lens, caps, lens_caps_ui::GatedCorrection::Tca);
         let mut tca_toggled = false;
@@ -594,63 +657,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             // manual amount up to +1.0 without it snapping back (MV2).
             new_lc.vignetting.amount = vignette_mode::MANUAL_PARAMS.default;
         }
-        if distortion_toggled || tca_toggled || vignetting_toggled {
-            changed = true;
-        }
-
-        // Advanced: focal length + aperture used by the bake (EXIF-seeded once
-        // that plumbing exists; editable now so the author can correct them).
-        // A focal/aperture edit changes the bake inputs, so it routes through
-        // the same `changed` (bake-triggering) path as a toggle/lens pick,
-        // never the Amount-only uniform path.
-        //
-        // Gated on `has_lens` (same predicate as Distortion/TCA above): focal
-        // length & aperture are inputs to the lens-PROFILE bake (they select
-        // the Lensfun calibration point), so they have no effect without a
-        // matched lens and no effect on manual vignette. Ungated, the author
-        // could drag these with no visible result ("changing focal/aperture
-        // does nothing"); greying them out with the same "needs a lens" hint
-        // makes that clear. Once a lens IS matched they still re-bake exactly
-        // as before (both fields are part of `lens_bake_key`).
-        let mut advanced_dragged = false;
-        let mut advanced_drag_stopped = false;
-        // The Focal slider's range is clamped to the matched lens's own
-        // calibrated focal range (FB3): letting the author drag it way
-        // outside that range (e.g. 800mm on a 14-54mm zoom) used to silently
-        // get clamped by Lensfun internally, which reads as "the correction
-        // does nothing". Falls back to the pre-FB3 default 8..800 range when
-        // no lens is matched or the range can't be resolved.
-        let focal_range = new_lc
-            .lens_id
-            .as_deref()
-            .and_then(|id| db.lens_focal_range(id));
-        let (focal_min, focal_max) = focal_range.unwrap_or((8.0, 800.0));
-        // Aperture only feeds profile VIGNETTING (distortion/TCA don't take
-        // aperture as an input at all) — when the matched lens has no
-        // vignetting profile (`caps.vignetting == false`), dragging Aperture
-        // has no visible effect, so grey it out with an explanatory hint
-        // rather than leaving it live and silently inert. `caps` is `None`
-        // when no lens is matched or the persisted id doesn't resolve; treat
-        // that the same as "no vignette profile" (nothing to drive).
-        let aperture_enabled = has_lens && caps.map(|c| c.vignetting).unwrap_or(false);
-        egui::CollapsingHeader::new("Advanced")
-            .id_salt("lens_corrections_advanced")
-            .show(ui, |ui| {
-                let resp = ui.add_enabled_ui(has_lens, |ui| {
-                    let rf = ui.add(EguiSlider {
-                        label: "Focal",
-                        value: &mut new_lc.focal_len,
-                        min: focal_min,
-                        max: focal_max,
-                        default: DEFAULT_FOCAL_LEN,
-                        step: 1.0,
-                        decimals: 0,
-                        unit: " mm",
-                        bipolar: false,
-                        signed: false,
-                    });
-                    let ra_resp = ui.add_enabled_ui(aperture_enabled, |ui| {
-                        ui.add(EguiSlider {
+        // Aperture · Adjust — ONLY when the matched lens has a vignetting
+        // PROFILE (`caps.vignetting == true`). Aperture is exclusively an
+        // input to profile vignetting (distortion/TCA don't take it at all),
+        // so for a manual-vignette lens (no profile) or no lens at all it has
+        // no effect whatsoever — rather than showing it greyed with an
+        // explanatory hint (the pre-round-8 approach), it's simply absent:
+        // there's nothing here for the author to be confused about.
+        let has_vignette_profile = caps.map(|c| c.vignetting).unwrap_or(false);
+        if has_vignette_profile {
+            egui::CollapsingHeader::new(format!("Adjust \u{b7} Aperture f/{:.1}", new_lc.aperture))
+                .id_salt("lens_corrections_adjust_aperture")
+                .show(ui, |ui| {
+                    let ra = ui
+                        .add(EguiSlider {
                             label: "Aperture",
                             value: &mut new_lc.aperture,
                             min: 1.0,
@@ -662,33 +682,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                             bipolar: false,
                             signed: false,
                         })
-                    });
-                    if !aperture_enabled {
-                        ra_resp.response.on_disabled_hover_text(
-                            "Aperture only affects vignetting; this lens has no vignette profile",
-                        );
-                    }
-                    let ra = ra_resp.inner;
-                    if rf.changed() || ra.changed() {
-                        if rf.drag_stopped() || ra.drag_stopped() {
-                            advanced_drag_stopped = true;
-                        } else if rf.dragged() || ra.dragged() {
-                            advanced_dragged = true;
+                        .on_hover_text("Affects profile Vignette strength only");
+                    if ra.changed() {
+                        if ra.drag_stopped() {
+                            adjust_drag_stopped = true;
+                        } else if ra.dragged() {
+                            adjust_dragged = true;
                         } else {
-                            advanced_drag_stopped = true;
+                            adjust_drag_stopped = true;
                         }
                     }
                 });
-                if !has_lens {
-                    resp.response
-                        .on_hover_text("Only affects profile corrections; needs a matched lens");
-                }
-            });
-        let advanced_changed = advanced_dragged || advanced_drag_stopped;
+        }
+        if distortion_toggled || tca_toggled || vignetting_toggled {
+            changed = true;
+        }
 
         // Emit: a toggle/lens-pick/focal/aperture change (`changed` or an
-        // advanced-field edit) always routes through `set_lens_correction`
-        // with `kind: LensCorrection`, so `apply_edit`'s existing
+        // Adjust-field edit) always routes through `set_lens_correction` with
+        // `kind: LensCorrection`, so `apply_edit`'s existing
         // `maybe_spawn_lens_bake` gate (keyed on `lens_rebuild_key`, U7)
         // decides bake-vs-not — this panel never calls the bake directly. An
         // Amount-only drag emits the SAME kind but never changes
@@ -696,10 +708,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         // it (uniform-only update via `set_preview_and_full`). Mid-drag frames
         // (focal/aperture/Amount) commit=false, same convention as every
         // other slider in this panel (`drag_stopped() || !dragged()`).
-        if changed || advanced_changed || amount_dragged || amount_drag_stopped {
+        let adjust_changed = adjust_dragged || adjust_drag_stopped;
+        if changed || adjust_changed || amount_dragged || amount_drag_stopped {
             let s = ops_edit::set_lens_correction(&stack, new_lc);
-            let any_dragging = advanced_dragged || amount_dragged;
-            let any_drag_stopped = advanced_drag_stopped || amount_drag_stopped;
+            let any_dragging = adjust_dragged || amount_dragged;
+            let any_drag_stopped = adjust_drag_stopped || amount_drag_stopped;
             let commit = changed || any_drag_stopped || !any_dragging;
             out = Some(EditOutcome {
                 stack: s,

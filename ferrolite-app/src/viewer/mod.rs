@@ -461,10 +461,12 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 ///
 /// Interaction (pan/zoom this frame) is detected HERE, so the present source is
 /// computed here too: `present_source(interacting, full_ready, converged,
-/// crossfade)` selects what the callback shows this frame — the rung-1 preview
-/// (during interaction / before the `front` buffer is composed), a crossfade
+/// present_swapped, crossfade)` selects what the callback shows this frame — the
+/// rung-1 preview (during interaction / before the `front` buffer is composed,
+/// or right after a resize reallocated it — see `present_swapped`), a crossfade
 /// toward the composed `front`, or the converged `front` alone. `full_ready`,
-/// `converged`, and `crossfade` are computed by `drive_viewer` and passed in.
+/// `converged`, `present_swapped`, and `crossfade` are computed by
+/// `drive_viewer` and passed in.
 ///
 /// Returns `(loading_preview, present_source)`: `loading_preview` is `true` while
 /// the preview is still loading so the caller can `request_repaint` for a prompt
@@ -480,6 +482,7 @@ pub fn paint(
     state: &mut ViewerState,
     full_ready: bool,
     converged: bool,
+    present_swapped: bool,
     crossfade: f32,
     interactive: bool,
 ) -> (bool, PresentSource) {
@@ -546,7 +549,13 @@ pub fn paint(
     }
 
     // Now that this frame's interaction is known, select what the callback shows.
-    let source = present_source(interacting, full_ready, converged, crossfade);
+    let source = present_source(
+        interacting,
+        full_ready,
+        converged,
+        present_swapped,
+        crossfade,
+    );
 
     if state.loaded {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(

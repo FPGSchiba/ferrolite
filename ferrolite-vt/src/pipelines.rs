@@ -52,7 +52,6 @@ pub enum DisplayVariant {
     Tiled,
     Streaming,
     Sparse,
-    // TODO(spec4.5 phase 4): consumed by the present blit
     Blit,
 }
 
@@ -618,8 +617,6 @@ impl DisplayPipelines {
 
     /// The blit bind-group layout (texture@0, sampler@1, alpha uniform@2).
     /// Reuse [`DisplayPipelines::sampler`] for the blit's sampler.
-    // TODO(spec4.5 phase 4): consumed by the present blit
-    #[allow(dead_code)]
     pub fn blit_layout(&self) -> &Arc<wgpu::BindGroupLayout> {
         &self.blit.0
     }

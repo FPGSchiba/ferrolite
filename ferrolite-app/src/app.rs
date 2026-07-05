@@ -1751,9 +1751,9 @@ impl FerroliteApp {
 /// plus a few zoom levels of the quad-binned (half-res) full image.
 const VIEWER_TILE_BUDGET: u32 = 256;
 
-/// Max edited tiles rendered per frame on the render thread (bounds GPU work;
-/// CLAUDE.md's GPU-frame-budget rule: pipelines run on the render thread but
-/// bounded, never unbounded per-frame work). Remaining needed tiles are
+/// Max edited tiles rendered per frame on the render thread (bounds GPU work
+/// per CLAUDE.md's GPU-frame-budget rule: pipelines run on the render thread
+/// but bounded, never unbounded per-frame work). Remaining needed tiles are
 /// produced on subsequent frames.
 ///
 /// Task 15: raised from 8 to 32. Production here only feeds the OFF-SCREEN
@@ -1966,14 +1966,22 @@ impl FerroliteApp {
         // after a swap, 1 once the ramp completes (or immediately once idle+ready).
         let factor = v.tick_crossfade(dt);
         let tiles_settled = matches!(tiles_pending, Some(0));
+        // Read AFTER the re-arm above (lines computing `present_swapped = false` on
+        // `!converged || present_reallocated`, and `= true` on `swapped_this_frame`),
+        // so this reflects whether `front` actually holds a valid composed image
+        // for the CURRENT converged state THIS frame. Feeding a stale (pre-re-arm)
+        // value to `present_source` would blit the just-blanked `front` for one
+        // frame on a canvas resize (spec 4.5 final review, I1).
+        let present_swapped = v.present_swapped;
         // The full (sparse) tier is actually on screen once it is composed+swapped
         // (`present_swapped`), the crossfade has completed, and its tiles are all
         // resident. Consulted by `toggle_split_compare` (via `showing_full`) to
         // decide whether enabling the split would dead-end on the full tier.
-        let show_full = v.full_ready && v.present_swapped && factor >= 1.0 && tiles_settled;
+        let show_full = v.full_ready && present_swapped && factor >= 1.0 && tiles_settled;
         // Present-source inputs handed to `viewer::paint` (which also folds in the
         // per-frame `interacting` it detects): the sparse tier exists, the pool is
-        // converged for the current transform+version, and the crossfade factor.
+        // converged for the current transform+version, `front` is valid
+        // (`present_swapped`), and the crossfade factor.
         let full_ready = v.full_ready;
         // Persist the real, per-frame-current value so `toggle_split_compare`
         // (which runs outside this per-frame borrow, e.g. from a keyboard
@@ -2020,8 +2028,15 @@ impl FerroliteApp {
         // moved, so read `idle` AFTER it to catch an interaction this frame. It
         // also folds this frame's `interacting` into the present source and returns
         // the chosen source so the repaint gate can keep the loop alive mid-fade.
-        let (loading_preview, present_source) =
-            viewer::paint(ui, v, full_ready, converged, factor, interactive);
+        let (loading_preview, present_source) = viewer::paint(
+            ui,
+            v,
+            full_ready,
+            converged,
+            present_swapped,
+            factor,
+            interactive,
+        );
         let idle = v.idle;
         let crossfading_present = matches!(present_source, viewer::PresentSource::Crossfade(_));
 

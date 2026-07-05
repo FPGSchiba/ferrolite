@@ -1527,8 +1527,6 @@ impl VirtualTexture {
     /// buffer). Records its own render pass on `encoder`. The pool must be converged
     /// for a complete image (callers gate on `is_converged`). Mirrors the sparse
     /// bind-group build in `prepare_sparse`; here the pass targets `target`.
-    // TODO(spec4.5 phase 4): consumed by off-screen present compose
-    #[allow(dead_code)]
     pub fn compose_sparse_into(
         &mut self,
         ctx: &GpuContext,
@@ -1716,6 +1714,14 @@ impl VirtualTexture {
                     let Some(victim) = s.residency.lru_except_lod(base_lod) else {
                         // Only protected base tiles resident; don't evict the base.
                         // Bounded: this tile is retried on a future frame.
+                        //
+                        // Invariant: the tile pool's budget (`VIEWER_TILE_BUDGET` in
+                        // ferrolite-app) MUST exceed the coarsest level's tile count
+                        // (the protected base). Otherwise every slot could end up
+                        // holding a protected base tile, `lru_except_lod` always
+                        // returns `None`, and production livelocks — retrying the
+                        // same non-producible tile forever without ever freeing a
+                        // slot for it.
                         continue;
                     };
                     s.allocator.free(victim);

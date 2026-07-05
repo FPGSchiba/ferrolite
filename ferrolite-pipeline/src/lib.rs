@@ -1,6 +1,7 @@
 //! ferrolite-pipeline — the photo edit DAG. An ordered `OpStack` document model
 //! and a retained GPU pipeline built on `ferrolite-gpu`'s generic executor; WGSL
 //! compute passes implement the edits. Photo tier (GPL-OK).
+mod coord;
 mod gpu_pyramid;
 mod image;
 mod lens_bake;
@@ -14,6 +15,7 @@ mod serialize;
 mod tile_edit;
 mod uniforms;
 
+pub use coord::display_to_source;
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
 pub use lens_bake::bake_products;

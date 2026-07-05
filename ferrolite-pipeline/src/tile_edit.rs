@@ -377,8 +377,14 @@ impl TileEditPipeline {
         // shift the per-tile origin by `-halo` so `textureLoad(mask, mask_origin
         // + xy)` in the apply shader lands on the correct full-output pixels for
         // every haloed-buffer coordinate `xy`, including the halo border itself.
-        // This can be negative at the top/left output edges — fine, since the
-        // mask texture's `textureLoad` clamps out-of-bounds coordinates.
+        // This can be negative at the top/left output edges (and can exceed the
+        // mask dims at the right/bottom edges). `textureLoad` does NOT clamp
+        // out-of-bounds coordinates under wgpu robustness (it returns 0), so the
+        // apply shader explicitly clamps the sampled coordinate to the mask's
+        // bounds, edge-replicating the mask across the halo. This matches the
+        // color halo, which `GeometryHeadNode` fills via ClampToEdge sampling of
+        // the source — so tiled Sharpen (which reads the halo) agrees with the
+        // whole-image render at image edges.
         let gx = coord.x as i32 * TILE_SIZE as i32 - self.halo as i32;
         let gy = coord.y as i32 * TILE_SIZE as i32 - self.halo as i32;
         self.local_node.set_mask_origin([gx, gy]);

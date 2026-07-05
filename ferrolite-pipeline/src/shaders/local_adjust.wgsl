@@ -73,7 +73,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
     let c = textureLoad(src, xy, 0);
-    let m = textureLoad(mask, p.mask_origin + xy, 0).r;
+    let mdims = vec2<i32>(textureDimensions(mask));
+    let mcoord = clamp(p.mask_origin + xy, vec2<i32>(0, 0), mdims - vec2<i32>(1, 1));
+    let m = textureLoad(mask, mcoord, 0).r;
     let out = mix(c.rgb, adjust(c.rgb), clamp(m, 0.0, 1.0));
     textureStore(dst, xy, vec4<f32>(out, c.a));
 }

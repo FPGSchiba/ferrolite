@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog", "ferrolite-jobs", "ferrolite-gpu", "ferrolite-vt", "ferrolite-pipeline", "ferrolite-color", "ferrolite-export", "ferrolite-previews", "ferrolite-lens"]
+members = ["ferrolite-app", "ferrolite-image", "ferrolite-decode", "ferrolite-catalog", "ferrolite-jobs", "ferrolite-gpu", "ferrolite-vt", "ferrolite-pipeline", "ferrolite-color", "ferrolite-export", "ferrolite-previews", "ferrolite-lens", "ferrolite-mask"]
 
 [workspace.package]
 edition = "2021"
@@ -19,6 +19,7 @@ ferrolite-color = { path = "ferrolite-color" }
 ferrolite-export = { path = "ferrolite-export" }
 ferrolite-previews = { path = "ferrolite-previews" }
 ferrolite-lens = { path = "ferrolite-lens" }
+ferrolite-mask = { path = "ferrolite-mask" }
 little_exif = "0.6"
 moxcms = "0.8"
 serde = { version = "1", features = ["derive"] }

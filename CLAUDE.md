@@ -33,6 +33,27 @@ explicit feedback** before merging, pushing/PR-ing, or otherwise finishing the b
 Do not present finish options as the final step — present them, then hold for the
 author's hands-on test results, and address any issues found before completing.
 
+**Always hand the author a concrete visual test plan (or an explicit "nothing to test").**
+When the workspace gate goes green, do not just say "please visually test" — produce a
+short, specific checklist so the author knows exactly whether hands-on testing is needed
+and what to look at. The plan MUST state one of:
+
+- **Nothing to visually test** — and *why* (e.g. "engine-only crate, not wired into the
+  running app; no UI or behavior reachable from FerroLite changed"). Point at any offline
+  artifacts worth an optional glance instead (e.g. committed golden PNGs), and name the
+  later phase where the real hands-on test lands.
+- **A numbered, reproducible checklist** — for each item: the exact steps to reach the
+  change in the running app (which module, panel, control, or gesture), the precise thing
+  to look for (expected appearance/behavior), and the failure signature that means it is
+  wrong. Cover the happy path plus the edges the automated tests can't judge (visual
+  correctness, interaction feel, responsiveness/no-freeze on open/navigation, per-control
+  reset). If a step needs a specific fixture (a particular RAW file, an edited image, a
+  non-RGGB/rung-1 file), say which.
+
+The point is that the author never has to reverse-engineer what changed to know if — and
+how — to test it. A branch is not finish-ready until this test plan (or the justified
+"nothing to test") has been handed over.
+
 ## Per-component reset (design, load-bearing)
 
 Every adjustable component in the editing UI MUST expose its own individual

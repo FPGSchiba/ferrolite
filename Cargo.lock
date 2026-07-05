@@ -1330,6 +1330,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferrolite-mask"
+version = "0.0.1"
+dependencies = [
+ "bytemuck",
+ "ferrolite-gpu",
+ "half",
+ "image",
+ "serde",
+ "serde_json",
+ "wgpu",
+]
+
+[[package]]
 name = "ferrolite-pipeline"
 version = "0.0.1"
 dependencies = [

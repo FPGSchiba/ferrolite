@@ -1,0 +1,20 @@
+[package]
+name = "ferrolite-mask"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferrolite-gpu = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+half = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+image = { workspace = true, features = ["png"] }

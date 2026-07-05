@@ -372,6 +372,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                     v.lens_picker_open = false;
                 }
                 if let lens_picker::PickerOutcome::Picked(m) = outcome {
+                    // Seed/clamp the focal length into the newly-picked
+                    // lens's own calibrated range: a focal carried over from
+                    // a previous (or default) lens can be way outside this
+                    // one's range (e.g. a stale 800mm on a 14-54mm zoom),
+                    // which Lensfun would silently clamp internally — making
+                    // the correction look like it "does nothing". Clamping
+                    // here instead keeps the visible slider value in sync
+                    // with what the bake will actually use. An EXIF-seeded
+                    // focal that's already in-range is left untouched. If the
+                    // range can't be resolved, leave focal as-is (unchanged
+                    // behavior).
+                    if let Some((min, max)) = db.lens_focal_range(&m.lens_id) {
+                        new_lc.focal_len = new_lc.focal_len.clamp(min, max);
+                    }
                     new_lc.lens_id = Some(m.lens_id);
                     new_lc.crop_factor = m.crop_factor;
                     if let Some(v) = state.viewer.as_mut() {
@@ -598,6 +612,25 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         // as before (both fields are part of `lens_bake_key`).
         let mut advanced_dragged = false;
         let mut advanced_drag_stopped = false;
+        // The Focal slider's range is clamped to the matched lens's own
+        // calibrated focal range (FB3): letting the author drag it way
+        // outside that range (e.g. 800mm on a 14-54mm zoom) used to silently
+        // get clamped by Lensfun internally, which reads as "the correction
+        // does nothing". Falls back to the pre-FB3 default 8..800 range when
+        // no lens is matched or the range can't be resolved.
+        let focal_range = new_lc
+            .lens_id
+            .as_deref()
+            .and_then(|id| db.lens_focal_range(id));
+        let (focal_min, focal_max) = focal_range.unwrap_or((8.0, 800.0));
+        // Aperture only feeds profile VIGNETTING (distortion/TCA don't take
+        // aperture as an input at all) — when the matched lens has no
+        // vignetting profile (`caps.vignetting == false`), dragging Aperture
+        // has no visible effect, so grey it out with an explanatory hint
+        // rather than leaving it live and silently inert. `caps` is `None`
+        // when no lens is matched or the persisted id doesn't resolve; treat
+        // that the same as "no vignette profile" (nothing to drive).
+        let aperture_enabled = has_lens && caps.map(|c| c.vignetting).unwrap_or(false);
         egui::CollapsingHeader::new("Advanced")
             .id_salt("lens_corrections_advanced")
             .show(ui, |ui| {
@@ -605,8 +638,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                     let rf = ui.add(EguiSlider {
                         label: "Focal",
                         value: &mut new_lc.focal_len,
-                        min: 8.0,
-                        max: 800.0,
+                        min: focal_min,
+                        max: focal_max,
                         default: DEFAULT_FOCAL_LEN,
                         step: 1.0,
                         decimals: 0,
@@ -614,18 +647,26 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                         bipolar: false,
                         signed: false,
                     });
-                    let ra = ui.add(EguiSlider {
-                        label: "Aperture",
-                        value: &mut new_lc.aperture,
-                        min: 1.0,
-                        max: 32.0,
-                        default: DEFAULT_APERTURE,
-                        step: 0.1,
-                        decimals: 1,
-                        unit: " f",
-                        bipolar: false,
-                        signed: false,
+                    let ra_resp = ui.add_enabled_ui(aperture_enabled, |ui| {
+                        ui.add(EguiSlider {
+                            label: "Aperture",
+                            value: &mut new_lc.aperture,
+                            min: 1.0,
+                            max: 32.0,
+                            default: DEFAULT_APERTURE,
+                            step: 0.1,
+                            decimals: 1,
+                            unit: " f",
+                            bipolar: false,
+                            signed: false,
+                        })
                     });
+                    if !aperture_enabled {
+                        ra_resp.response.on_disabled_hover_text(
+                            "Aperture only affects vignetting; this lens has no vignette profile",
+                        );
+                    }
+                    let ra = ra_resp.inner;
                     if rf.changed() || ra.changed() {
                         if rf.drag_stopped() || ra.drag_stopped() {
                             advanced_drag_stopped = true;

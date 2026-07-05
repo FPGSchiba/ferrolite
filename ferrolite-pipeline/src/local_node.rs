@@ -60,10 +60,6 @@ pub(crate) struct LocalAdjustmentsNode {
     cache: RefCell<Option<CachedMasks>>,
 }
 
-// `LocalAdjustmentsNode` is wired into `EditPipeline`/`TileEditPipeline` in a
-// later task (Task 7); until then nothing constructs it, so its API is
-// intentionally allowed to look unused here.
-#[allow(dead_code)]
 impl LocalAdjustmentsNode {
     pub(crate) fn new(ctx: Arc<GpuContext>, layers: Rc<RefCell<LocalAdjustments>>) -> Self {
         let apply_bgl = ctx
@@ -153,10 +149,14 @@ impl LocalAdjustmentsNode {
         }
     }
 
+    // used by TileEditPipeline in a later task (Task 9)
+    #[allow(dead_code)]
     pub(crate) fn set_mask_origin(&self, origin: [i32; 2]) {
         *self.mask_origin.borrow_mut() = origin;
     }
 
+    // used by TileEditPipeline in a later task (Task 9)
+    #[allow(dead_code)]
     pub(crate) fn set_full_dims(&self, dims: (u32, u32)) {
         let mut fd = self.full_dims.borrow_mut();
         if *fd != Some(dims) {

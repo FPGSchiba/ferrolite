@@ -111,3 +111,35 @@ fn empty_mask_layer_applies_globally() {
         "empty mask should apply the adjustment globally"
     );
 }
+
+#[test]
+fn local_adjust_edit_only_reevaluates_node_and_downstream() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let mut pipe = EditPipeline::new(
+        Arc::new(ctx),
+        &common::gradient(W, H),
+        OpStack::default(),
+        IDENTITY,
+    );
+    let _ = pipe.evaluate();
+    let before = pipe.eval_count();
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "m".into(),
+            visible: true,
+            mask: MaskDefinition::default(),
+            adjustments: AdjustmentSet {
+                exposure: 0.5,
+                ..Default::default()
+            },
+        }],
+    };
+    pipe.set_stack(OpStack::default().set_op(Op::LocalAdjustments(la)));
+    let _ = pipe.evaluate();
+    let delta = pipe.eval_count() - before;
+    // Only LocalAdjustments + Sharpen + Geometry re-run (upstream cached).
+    assert_eq!(delta, 3, "expected 3 downstream re-evals, got {delta}");
+}

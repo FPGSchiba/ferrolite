@@ -1,6 +1,6 @@
 //! `EditPipeline` + the `blit_to_rgba8` display/readback helper.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -10,6 +10,8 @@ use wgpu::util::DeviceExt;
 
 use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
+use crate::local::LocalAdjustments;
+use crate::local_node::LocalAdjustmentsNode;
 use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode, VignetteNode};
 use crate::op::OpStack;
 use crate::uniforms::{
@@ -40,6 +42,9 @@ pub struct EditPipeline {
     tone_curve: Rc<Cell<[f32; 256]>>,
     hsl_id: NodeId,
     hsl: Rc<Cell<HslUniform>>,
+    local_adjust_id: NodeId,
+    local_layers: Rc<RefCell<LocalAdjustments>>,
+    local_node: Rc<LocalAdjustmentsNode>,
     sharpen_id: NodeId,
     sharpen: Rc<Cell<SharpenUniform>>,
     geometry_id: NodeId,
@@ -126,6 +131,10 @@ impl EditPipeline {
         );
         let hsl_id = graph.add_node(Box::new(hsl_node), vec![tone_curve_id]);
 
+        let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
+        let local_node = Rc::new(LocalAdjustmentsNode::new(ctx.clone(), local_layers.clone()));
+        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![hsl_id]);
+
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_node = PointOpNode::new(
             ctx.clone(),
@@ -133,7 +142,7 @@ impl EditPipeline {
             "sharpen",
             sharpen.clone(),
         );
-        let sharpen_id = graph.add_node(Box::new(sharpen_node), vec![hsl_id]);
+        let sharpen_id = graph.add_node(Box::new(sharpen_node), vec![local_adjust_id]);
 
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
         let geometry = Rc::new(Cell::new(geo_uniform));
@@ -159,6 +168,9 @@ impl EditPipeline {
             tone_curve,
             hsl_id,
             hsl,
+            local_adjust_id,
+            local_layers,
+            local_node,
             sharpen_id,
             sharpen,
             geometry_id,
@@ -166,7 +178,7 @@ impl EditPipeline {
             geometry_node,
             src_w,
             src_h,
-            node_count: 10,
+            node_count: 11,
             stack,
         }
     }
@@ -262,6 +274,12 @@ impl EditPipeline {
         if h != self.hsl.get() {
             self.hsl.set(h);
             self.graph.mark_dirty(self.hsl_id);
+        }
+        let la = stack.local_adjustments().unwrap_or_default();
+        if *self.local_layers.borrow() != la {
+            *self.local_layers.borrow_mut() = la;
+            self.local_node.invalidate();
+            self.graph.mark_dirty(self.local_adjust_id);
         }
         let sh = sharpen_uniform(stack.sharpen());
         if sh != self.sharpen.get() {

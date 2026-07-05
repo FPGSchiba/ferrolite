@@ -21,7 +21,9 @@ use ferrolite_image::{TileCoord, TILE_SIZE};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
-use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest, VignetteNode};
+use crate::nodes::{
+    CurveNode, GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode,
+};
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
     color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, lens_halo_px,
@@ -82,12 +84,19 @@ impl TileEditPipeline {
             halo,
         }));
 
+        // Shared output-space frame: the geometry head WRITES the current tile's
+        // origin + full output dims each evaluate; the vignette node READS it so its
+        // radius is measured in full-image space (seamless, not per-tile). The graph
+        // runs head → vignette in the same evaluate, so the frame is always current.
+        let frame = Rc::new(Cell::new(TileFrame::default()));
+
         let mut graph = Graph::new();
         let head = Rc::new(GeometryHeadNode::new(
             ctx.clone(),
             source,
             geometry,
             request.clone(),
+            frame.clone(),
         ));
         let head_id = graph.add_node(Box::new(head.clone()), vec![]);
 
@@ -106,7 +115,11 @@ impl TileEditPipeline {
         // point-wise, so its position in the per-tile color chain only needs to be
         // scene-linear. Default `vig_amount = 0` → identity (tile-seam golden safe).
         let vignette = Rc::new(Cell::new(VignetteUniform::default()));
-        let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone()));
+        let vignette_node = Rc::new(VignetteNode::new(
+            ctx.clone(),
+            vignette.clone(),
+            Some(frame),
+        ));
         let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
 
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));

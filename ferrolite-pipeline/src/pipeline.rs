@@ -74,7 +74,10 @@ impl EditPipeline {
         // Vignetting sits scene-linear at the head, before exposure (spec §6.2).
         // Default `vig_amount = 0` → identity, so an uncorrected image is unchanged.
         let vignette = Rc::new(Cell::new(VignetteUniform::default()));
-        let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone()));
+        // Preview is a single whole-image texture, so it passes `None` for the
+        // tile frame → the vignette shader keeps its per-texture (whole-image)
+        // radius path, byte-identical to before the tiled fix.
+        let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone(), None));
         let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
 
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));

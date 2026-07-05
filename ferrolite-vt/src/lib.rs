@@ -15,7 +15,7 @@ pub use page_table::{FeedbackBuffer, LevelLayout, PageTable};
 pub use pipelines::{DisplayPipelines, DisplayVariant, LUT_SIZE};
 pub use pool::{SlotAllocator, TilePool, NOT_RESIDENT};
 pub use producer::TileProducer;
-pub use residency::{needed_tiles, ResidencySet, VersionedResidency};
+pub use residency::{needed_tiles, needed_tiles_prefetched, ResidencySet, VersionedResidency};
 pub use source::{PyramidTileSource, TileSource};
 pub use transform::ViewTransform;
 pub use view::VirtualTexture;

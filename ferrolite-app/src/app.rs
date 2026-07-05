@@ -928,7 +928,18 @@ impl FerroliteApp {
                     // `apply_preview_ready` until this color-correct reveal.)
                     v.loaded = true;
                     v.full_ready = true;
-                    v.begin_crossfade();
+                    // Task 15: do NOT start the crossfade here. `full_ready` alone
+                    // does not make `present_source` show anything but `Preview`
+                    // (it also requires `converged`, gated on the sparse pool being
+                    // fully resident — see `viewer::present::present_source`), and
+                    // the sparse pool is essentially never resident this early (the
+                    // tiles have not been produced yet). A ramp started here would
+                    // complete (150 ms) while fully invisible, so by the time
+                    // `drive_viewer`'s convergence swap fires — often much later —
+                    // the visible crossfade needs a FRESH ramp anyway. That fresh
+                    // ramp is started at the swap in `drive_viewer` (`v.present_swapped`
+                    // transition), which is the only crossfade trigger that actually
+                    // drives a visible preview→front fade.
                     // The full tier's dimensions (uprighted, half-res demosaic)
                     // are the reveal render's dims too. Fit to them; fall back to
                     // the image's own size if the canvas has not painted yet (the
@@ -1732,8 +1743,19 @@ impl FerroliteApp {
 const VIEWER_TILE_BUDGET: u32 = 256;
 
 /// Max edited tiles rendered per frame on the render thread (bounds GPU work;
-/// CLAUDE.md GPU rule). Remaining needed tiles are produced on subsequent frames.
-const MAX_PRODUCE_PER_FRAME: usize = 8;
+/// CLAUDE.md's GPU-frame-budget rule: pipelines run on the render thread but
+/// bounded, never unbounded per-frame work). Remaining needed tiles are
+/// produced on subsequent frames.
+///
+/// Task 15: raised from 8 to 32. Production here only feeds the OFF-SCREEN
+/// sparse pool that `drive_viewer` composes+swaps once converged (see
+/// `compose_sparse_into`) — none of it is presented mid-burst — so a larger
+/// per-frame burst is invisible to the user and just reaches convergence (and
+/// the visible swap) sooner. The value stays a bounded named const rather than
+/// unbounded so a single frame's production cannot blow the frame budget;
+/// the author profiles this bound in the next phase (Task 17) and will tune
+/// it further if 32 proves too expensive on slower GPUs.
+const MAX_PRODUCE_PER_FRAME: usize = 32;
 
 /// Spec 4.5 §4.2: prefetch ring for the sparse producer's needed set — the ring
 /// of tiles around the visible rect (plus the coarse base) produced ahead of a

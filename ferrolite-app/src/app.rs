@@ -1926,6 +1926,18 @@ impl FerroliteApp {
             return;
         };
 
+        // Task 17 (spec 4.5 §9): dev-mode viewer frame-time profiling hook.
+        // Entirely behind `diag::enabled()` — the branch not taken means zero
+        // added cost (no float math, no atomic store) on the hot pan/zoom path
+        // when diagnostics are off, matching every other recorder in `diag.rs`.
+        // Records this frame's `stable_dt` (ms) and the sparse producer's
+        // tiles-produced-this-frame count so the author can measure the
+        // ≤16.6 ms/frame budget on the dev GPU via the existing diag log/overlay
+        // (see `diag::format_viewer_line`); no new UI.
+        if crate::diag::enabled() {
+            crate::diag::record_viewer_frame(dt, produced_this_frame);
+        }
+
         // If the view changed (pan/zoom in `viewer::paint` already cleared `idle`,
         // but a programmatic change might not), `request_view_feedback` above may
         // have submitted new tile loads. Resume the drive loop so they drain + display.
@@ -3696,6 +3708,14 @@ impl eframe::App for FerroliteApp {
                 export_done: crate::diag::export_done(),
                 export_failed: crate::diag::export_failed(),
                 export_last_ms: crate::diag::export_last_ms(),
+                // Task 17 (spec 4.5 §9): last Develop `drive_viewer` frame time
+                // + this tick's max + last tiles-produced count. Recorded by
+                // `drive_viewer` only when diag is enabled; reads as 0.0/0
+                // otherwise (e.g. Library module, or diag off — this whole
+                // block is already gated on `diag_t0.is_some()`).
+                viewer_frame_ms: crate::diag::viewer_frame_ms(),
+                viewer_frame_max_ms: crate::diag::viewer_frame_max_ms(),
+                viewer_tiles_produced: crate::diag::viewer_tiles_produced(),
             };
             let stats = self.state.jobs.stats();
             if let Some(snap) = self.diag.tick(

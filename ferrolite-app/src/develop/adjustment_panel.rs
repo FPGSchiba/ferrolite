@@ -320,20 +320,29 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                     .map(|name| format!("{name} (suggested)"))
                     .unwrap_or_else(|| "No lens matched".to_string()),
             };
-            ui.label(label);
-            if ui.small_button("Choose lens\u{2026}").clicked() {
-                if let Some(v) = state.viewer.as_mut() {
-                    v.lens_picker_open = true;
-                    v.lens_picker_query.clear();
+            // Reserve space for the buttons first (right-aligned) so a long
+            // lens name can never push `Choose lens…`/`Clear` out of the
+            // panel; the name then gets whatever width remains and is
+            // truncated with an ellipsis (full name on hover) rather than
+            // expanding the row.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let has_lens = lc.lens_id.is_some();
+                if has_lens && ui.small_button("Clear").clicked() {
+                    new_lc.lens_id = None;
+                    if let Some(v) = state.viewer.as_mut() {
+                        v.lens_resolved_name = None;
+                    }
+                    changed = true;
                 }
-            }
-            if lc.lens_id.is_some() && ui.small_button("Clear").clicked() {
-                new_lc.lens_id = None;
-                if let Some(v) = state.viewer.as_mut() {
-                    v.lens_resolved_name = None;
+                if ui.small_button("Choose lens\u{2026}").clicked() {
+                    if let Some(v) = state.viewer.as_mut() {
+                        v.lens_picker_open = true;
+                        v.lens_picker_query.clear();
+                    }
                 }
-                changed = true;
-            }
+                ui.add(egui::Label::new(label.clone()).truncate())
+                    .on_hover_text(label);
+            });
         });
 
         // The picker modal itself (drawn as a separate egui::Window; only

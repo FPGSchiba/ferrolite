@@ -20,5 +20,8 @@ pub use shapes::{
     ColorRangePass, ColorRangeUniform, LinearGradientPass, LinearGradientUniform, LumaRangePass,
     LumaRangeUniform, RadialGradientPass, RadialGradientUniform, MAX_COLOR_SAMPLES,
 };
-pub use stroke::{max_dab_radius, stroke_dabs, Dab, SPACING_FRAC};
+pub use stroke::{
+    composite_dabs, dab_alpha, halo_px, max_dab_radius, stroke_dabs, Dab, StrokeCursor,
+    SPACING_FRAC,
+};
 pub use vec::{Rgb, Vec2};

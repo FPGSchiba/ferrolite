@@ -110,6 +110,77 @@ pub fn stroke_dabs(stroke: &Stroke, spacing_frac: f32) -> Vec<Dab> {
     dabs
 }
 
+/// A pointer-sample cursor: tracks how many dabs of a growing stroke have been
+/// stamped, so incremental stamping submits only the new suffix (design §4.3).
+/// Relies on `stroke_dabs` being append-stable.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StrokeCursor {
+    emitted: usize,
+}
+
+impl StrokeCursor {
+    pub fn new() -> Self {
+        Self { emitted: 0 }
+    }
+
+    /// The dabs of `all_dabs` not yet emitted; advances the cursor to the end.
+    pub fn advance<'a>(&mut self, all_dabs: &'a [Dab]) -> &'a [Dab] {
+        let start = self.emitted.min(all_dabs.len());
+        self.emitted = all_dabs.len();
+        &all_dabs[start..]
+    }
+
+    /// Re-emit from the start on the next `advance` (e.g. buffer was cleared).
+    pub fn reset(&mut self) {
+        self.emitted = 0;
+    }
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Dab coverage at normalized distance `dist` (the WGSL mirrors this exactly).
+pub fn dab_alpha(dist: f32, radius: f32, hardness: f32, flow: f32) -> f32 {
+    if radius <= 0.0 {
+        return 0.0;
+    }
+    let t = dist / radius;
+    let core = hardness.clamp(0.0, 1.0);
+    let ring = if t < core {
+        1.0
+    } else if t >= 1.0 {
+        0.0
+    } else if core >= 1.0 {
+        // Guarded above by t < 1.0, so this is the hard-edge inside.
+        1.0
+    } else {
+        1.0 - smoothstep(0.0, 1.0, (t - core) / (1.0 - core))
+    };
+    ring * flow.clamp(0.0, 1.0)
+}
+
+/// Fold dab `alphas` onto `base` in order: paint = "over", erase = multiplicative.
+pub fn composite_dabs(alphas: &[f32], base: f32, erase: bool) -> f32 {
+    alphas.iter().fold(base, |acc, &a| {
+        if erase {
+            acc * (1.0 - a)
+        } else {
+            acc + (1.0 - acc) * a
+        }
+    })
+}
+
+/// Pixel halo for a normalized `halo_norm` (= max dab radius) at a level. Uses
+/// the larger axis so a normalized-circular dab is fully covered on both axes.
+pub fn halo_px(halo_norm: f32, level_w: u32, level_h: u32) -> u32 {
+    if halo_norm <= 0.0 {
+        return 0;
+    }
+    (halo_norm * level_w.max(level_h) as f32).ceil() as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +297,113 @@ mod tests {
         ];
         assert!((max_dab_radius(&strokes) - 0.25).abs() < 1e-6);
         assert_eq!(max_dab_radius(&[]), 0.0);
+    }
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-5
+    }
+
+    #[test]
+    fn cursor_yields_only_new_dabs() {
+        let dabs = vec![
+            Dab {
+                pos: Vec2::new(0.0, 0.0),
+                radius: 0.1,
+                hardness: 0.5,
+                flow: 1.0,
+            },
+            Dab {
+                pos: Vec2::new(0.1, 0.0),
+                radius: 0.1,
+                hardness: 0.5,
+                flow: 1.0,
+            },
+            Dab {
+                pos: Vec2::new(0.2, 0.0),
+                radius: 0.1,
+                hardness: 0.5,
+                flow: 1.0,
+            },
+        ];
+        let mut cur = StrokeCursor::new();
+        assert_eq!(cur.advance(&dabs[..1]).len(), 1); // first sample: 1 new
+        assert_eq!(cur.advance(&dabs[..1]).len(), 0); // no growth: 0 new
+        assert_eq!(cur.advance(&dabs).len(), 2); // grew to 3: 2 new
+        assert_eq!(cur.advance(&dabs).len(), 0); // stable
+    }
+
+    #[test]
+    fn cursor_reset_reemits_from_start() {
+        let dabs = vec![Dab {
+            pos: Vec2::new(0.0, 0.0),
+            radius: 0.1,
+            hardness: 0.5,
+            flow: 1.0,
+        }];
+        let mut cur = StrokeCursor::new();
+        assert_eq!(cur.advance(&dabs).len(), 1);
+        cur.reset();
+        assert_eq!(cur.advance(&dabs).len(), 1);
+    }
+
+    #[test]
+    fn dab_alpha_is_full_in_core_and_zero_outside() {
+        // hardness 0.5 -> full inside t<=0.5, zero at/after t>=1.
+        assert!(approx(dab_alpha(0.0, 0.1, 0.5, 1.0), 1.0)); // center
+        assert!(approx(dab_alpha(0.04, 0.1, 0.5, 1.0), 1.0)); // t=0.4 in core
+        assert!(approx(dab_alpha(0.1, 0.1, 0.5, 1.0), 0.0)); // t=1 edge
+        assert!(approx(dab_alpha(0.2, 0.1, 0.5, 1.0), 0.0)); // outside
+    }
+
+    #[test]
+    fn dab_alpha_scales_by_flow() {
+        assert!(approx(dab_alpha(0.0, 0.1, 0.5, 0.3), 0.3));
+    }
+
+    #[test]
+    fn dab_alpha_zero_radius_is_zero() {
+        assert!(approx(dab_alpha(0.0, 0.0, 0.5, 1.0), 0.0));
+    }
+
+    #[test]
+    fn dab_alpha_hard_edge_when_hardness_one() {
+        assert!(approx(dab_alpha(0.09, 0.1, 1.0, 1.0), 1.0)); // t=0.9 < 1
+        assert!(approx(dab_alpha(0.1, 0.1, 1.0, 1.0), 0.0)); // t=1
+    }
+
+    #[test]
+    fn dab_alpha_softens_between_core_and_edge() {
+        // t=0.75 with core 0.5 -> smoothstep midpoint -> 1 - 0.5 = 0.5.
+        let a = dab_alpha(0.075, 0.1, 0.5, 1.0);
+        assert!(a > 0.45 && a < 0.55, "got {a}");
+    }
+
+    #[test]
+    fn composite_dabs_paint_is_over() {
+        // over(0, 0.5) = 0.5; over(0.5, 0.5) = 0.75.
+        assert!(approx(composite_dabs(&[0.5, 0.5], 0.0, false), 0.75));
+    }
+
+    #[test]
+    fn composite_dabs_erase_is_multiplicative() {
+        // start 1.0, erase 0.5 -> 0.5, erase 0.5 -> 0.25.
+        assert!(approx(composite_dabs(&[0.5, 0.5], 1.0, true), 0.25));
+    }
+
+    #[test]
+    fn composite_dabs_split_equals_whole() {
+        let all = [0.3, 0.7, 0.2];
+        let whole = composite_dabs(&all, 0.0, false);
+        let split = composite_dabs(&all[2..], composite_dabs(&all[..2], 0.0, false), false);
+        assert!(approx(whole, split));
+    }
+
+    #[test]
+    fn halo_px_ceils_over_the_larger_axis() {
+        // 0.1 * max(200, 100) = 20 -> 20.
+        assert_eq!(halo_px(0.1, 200, 100), 20);
+        // 0.101 * 200 = 20.2 -> ceil 21.
+        assert_eq!(halo_px(0.101, 200, 100), 21);
+        assert_eq!(halo_px(0.0, 200, 100), 0);
     }
 }

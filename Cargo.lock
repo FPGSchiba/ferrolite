@@ -1212,6 +1212,7 @@ dependencies = [
 name = "ferrolite-app"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "core-foundation 0.10.1",
  "core-graphics 0.24.0",
  "eframe",

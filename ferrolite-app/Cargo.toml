@@ -32,6 +32,7 @@ ferrolite-lens = { workspace = true }
 ferrolite-pipeline = { path = "../ferrolite-pipeline" }
 ferrolite-previews = { workspace = true }
 ferrolite-vt = { workspace = true }
+bytemuck = { workspace = true }
 half = { workspace = true }
 image = { workspace = true, features = ["jpeg", "png", "tiff", "webp"] }
 rayon = { workspace = true }

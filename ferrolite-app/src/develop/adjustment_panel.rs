@@ -340,8 +340,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                         v.lens_picker_query.clear();
                     }
                 }
-                ui.add(egui::Label::new(label.clone()).truncate())
-                    .on_hover_text(label);
+                // A truncated egui `Label` already shows the full text on hover;
+                // adding an explicit `on_hover_text` here rendered the tooltip
+                // TWICE. Keep only the built-in one (name shown once on hover).
+                ui.add(egui::Label::new(label).truncate());
             });
         });
 

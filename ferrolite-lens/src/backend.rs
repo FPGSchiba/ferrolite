@@ -31,6 +31,14 @@ pub trait LensDb {
     /// can't drive. Resolves `lens_id` the same way [`LensDb::bake_geometry`]/
     /// [`LensDb::bake_vignetting`] do; returns `None` if it doesn't resolve.
     fn lens_caps(&self, lens_id: &str, focal: f32, aperture: f32) -> Option<LensCaps>;
+    /// The lens's calibrated focal range in mm, `(min_focal, max_focal)`.
+    /// Lets the app clamp the Advanced Focal slider to values Lensfun can
+    /// actually resolve for this lens, instead of silently clamping a
+    /// way-out-of-range value internally (which reads as "the correction does
+    /// nothing"). Resolves `lens_id` the same way [`LensDb::bake_geometry`]
+    /// does; returns `None` if it doesn't resolve. A prime lens reports
+    /// `min == max`.
+    fn lens_focal_range(&self, lens_id: &str) -> Option<(f32, f32)>;
 }
 
 /// Opaque wrapper around a loaded `lensfun::Database`.
@@ -321,6 +329,39 @@ impl LensDb for LensfunDb {
                 .interpolate_vignetting(focal, aperture, 1000.0)
                 .is_some(),
         })
+    }
+
+    fn lens_focal_range(&self, lens_id: &str) -> Option<(f32, f32)> {
+        let lens = self.lens_by_id(lens_id)?;
+        // `lensfun::Lens` DOES carry `focal_min`/`focal_max` fields, but this
+        // crate's XML loader never populates them (confirmed by reading
+        // `db.rs`: no `focal_min`/`focal_max` assignment anywhere) and
+        // `Lens::guess_parameters` — the upstream method that would derive
+        // them from the model name or calibration data — is never called
+        // during `load_bundled`. Both fields read back as `0.0` for every
+        // lens in the bundled DB, confirmed empirically (a real zoom's
+        // `focal_min`/`focal_max` were both 0.0). So we derive the range
+        // ourselves from the `focal` value recorded on each of the lens's
+        // own calibration entries (distortion/TCA/vignetting) — the same
+        // fallback `guess_parameters` itself would use. A prime lens (one
+        // calibration focal, or all entries at the same focal) naturally
+        // yields `min == max`.
+        let focals = lens
+            .calib_distortion
+            .iter()
+            .map(|c| c.focal)
+            .chain(lens.calib_tca.iter().map(|c| c.focal))
+            .chain(lens.calib_vignetting.iter().map(|c| c.focal));
+        let mut min = f32::MAX;
+        let mut max = f32::MIN;
+        for f in focals {
+            min = min.min(f);
+            max = max.max(f);
+        }
+        if min > max {
+            return None; // no calibration entries at all for this lens
+        }
+        Some((min, max))
     }
 }
 
@@ -684,5 +725,41 @@ mod tests {
         assert!(db()
             .lens_caps("Nonexistent Lens Key 9000", 24.0, 2.8)
             .is_none());
+    }
+
+    #[test]
+    fn lens_focal_range_reports_zoom_range_for_olympus_14_54() {
+        // Confirmed present in the bundled DB: a real zoom, so min != max.
+        let hits = db().find_lenses("", "Olympus Zuiko Digital 14-54mm f/2.8-3.5");
+        let hit = hits
+            .iter()
+            .find(|m| m.display_name.contains("14-54"))
+            .expect("bundled DB has the Olympus Zuiko Digital 14-54mm f/2.8-3.5");
+        let (min, max) = db()
+            .lens_focal_range(&hit.lens_id)
+            .expect("lens_id resolves");
+        assert!((min - 14.0).abs() < 1.0, "min_focal ≈ 14mm, got {min}");
+        assert!((max - 54.0).abs() < 1.0, "max_focal ≈ 54mm, got {max}");
+    }
+
+    #[test]
+    fn lens_focal_range_reports_a_single_value_for_a_prime() {
+        // "FE 24mm f/2.8 G" is a prime; min == max.
+        let hits = db().find_lenses("", "FE 24mm f/2.8 G");
+        let hit = hits
+            .iter()
+            .find(|m| m.display_name == "FE 24mm f/2.8 G")
+            .expect("bundled DB has the Sony FE 24mm f/2.8 G");
+        let (min, max) = db()
+            .lens_focal_range(&hit.lens_id)
+            .expect("lens_id resolves");
+        assert!((min - 24.0).abs() < 1.0, "min_focal ≈ 24mm, got {min}");
+        assert!((max - 24.0).abs() < 1.0, "max_focal ≈ 24mm, got {max}");
+        assert!((min - max).abs() < f32::EPSILON, "a prime has min == max");
+    }
+
+    #[test]
+    fn lens_focal_range_unknown_lens_id_is_none() {
+        assert!(db().lens_focal_range("Nonexistent Lens Key 9000").is_none());
     }
 }

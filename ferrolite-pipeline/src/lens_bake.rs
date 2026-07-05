@@ -119,6 +119,11 @@ mod tests {
             // panel is what actually calls `lens_caps`.
             None
         }
+        fn lens_focal_range(&self, _lens_id: &str) -> Option<(f32, f32)> {
+            // Not exercised by these bake-routing tests; the app-side focal
+            // guardrail is what actually calls `lens_focal_range`.
+            None
+        }
     }
 
     #[test]

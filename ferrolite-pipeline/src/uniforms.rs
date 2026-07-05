@@ -487,9 +487,8 @@ pub struct LocalAdjustUniform {
     pub _pad: [f32; 2],
 }
 
-// `local_adjust_uniform`/`light_color_apply` are reserved for the Local Adjustments
-// pipeline node wired in a later task; only `LocalAdjustUniform` is re-exported today.
-#[allow(dead_code)]
+/// `light_color_apply` (below) is still test-only; `local_adjust_uniform` is now
+/// consumed by `LocalAdjustmentsNode`.
 pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUniform {
     LocalAdjustUniform {
         exposure_gain: exposure_gain(a.exposure),

@@ -6,6 +6,7 @@ mod image;
 mod lens_bake;
 mod lens_gpu;
 mod local;
+mod local_node;
 mod nodes;
 mod op;
 mod pipeline;

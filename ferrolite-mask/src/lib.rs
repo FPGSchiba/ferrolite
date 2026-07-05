@@ -14,7 +14,7 @@ pub use model::{
     RasterHandle, Stroke,
 };
 pub use shapes::{
-    LinearGradientPass, LinearGradientUniform, LumaRangePass, LumaRangeUniform, RadialGradientPass,
-    RadialGradientUniform,
+    ColorRangePass, ColorRangeUniform, LinearGradientPass, LinearGradientUniform, LumaRangePass,
+    LumaRangeUniform, RadialGradientPass, RadialGradientUniform, MAX_COLOR_SAMPLES,
 };
 pub use vec::{Rgb, Vec2};

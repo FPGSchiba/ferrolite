@@ -1,7 +1,7 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_mask::{LinearGradientPass, LumaRangePass, RadialGradientPass, Vec2};
+use ferrolite_mask::{ColorRangePass, LinearGradientPass, LumaRangePass, RadialGradientPass, Vec2};
 use std::sync::Arc;
 
 const W: u32 = 64;
@@ -73,4 +73,36 @@ fn luma_range_matches_golden() {
     let mid = values[((H / 2) * W) as usize];
     assert!(mid > 0.99, "mid-tone row should be fully selected");
     common::assert_mask_golden(&values, W, H, "luma_range.png");
+}
+
+#[test]
+fn color_range_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Left half red, right half green.
+    let input = common::upload_rgba16f(&ctx, W, H, |x, _y| {
+        if x < W / 2 {
+            [1.0, 0.0, 0.0, 1.0]
+        } else {
+            [0.0, 1.0, 0.0, 1.0]
+        }
+    });
+    let view = input.create_view(&wgpu::TextureViewDescriptor::default());
+    let pass = ColorRangePass::new(ctx.clone());
+    // Select near-red only.
+    let mask = pass.run(
+        &[ferrolite_mask::Rgb::new(1.0, 0.0, 0.0)],
+        0.3,
+        0.1,
+        &view,
+        W,
+        H,
+    );
+    let values = common::read_r32f(&ctx, &mask);
+    assert!(values[0] > 0.99, "red region selected");
+    assert!(values[(W - 1) as usize] < 0.01, "green region rejected");
+    common::assert_mask_golden(&values, W, H, "color_range.png");
 }

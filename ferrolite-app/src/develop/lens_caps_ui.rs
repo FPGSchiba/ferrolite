@@ -88,6 +88,26 @@ pub fn vignette_row_label(caps: Option<LensCaps>) -> &'static str {
     }
 }
 
+/// Build the title-line text for a correction group (widget v2, FB "author
+/// visual-test round 5"): the plain correction name when available, or the
+/// name with the gate's disabled reason appended inline (" — reason") when
+/// it isn't. This is the ONLY thing that changed about availability
+/// surfacing — the gate truth table itself (`correction_row_gate`) is
+/// unchanged; this just renders its `hover_text` inline instead of (or in
+/// addition to) on hover, since a hover-only reason was easy to miss.
+///
+/// `name` is the plain correction name ("Distortion", "TCA", or the
+/// `vignette_row_label` result for Vignette). `enabled` + `hover_text` come
+/// straight from a `RowGate` (or `true`/`None` for Vignette, which has no
+/// gate). Pass the pieces rather than a `RowGate` so Vignette — which has no
+/// `RowGate` at all — can reuse the same title builder.
+pub fn correction_title(name: &str, enabled: bool, hover_text: Option<&str>) -> String {
+    match (enabled, hover_text) {
+        (false, Some(reason)) => format!("{name} \u{2014} {reason}"),
+        _ => name.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,5 +190,42 @@ mod tests {
     #[test]
     fn vignette_label_is_manual_when_caps_is_none() {
         assert_eq!(vignette_row_label(None), "Vignette (manual)");
+    }
+
+    #[test]
+    fn correction_title_is_plain_name_when_enabled() {
+        assert_eq!(correction_title("Distortion", true, None), "Distortion");
+    }
+
+    #[test]
+    fn correction_title_appends_reason_when_disabled_with_hover_text() {
+        assert_eq!(
+            correction_title("Distortion", false, Some("Needs a matched lens")),
+            "Distortion \u{2014} Needs a matched lens"
+        );
+        assert_eq!(
+            correction_title("Transverse CA", false, Some("No TCA data for this lens")),
+            "Transverse CA \u{2014} No TCA data for this lens"
+        );
+    }
+
+    #[test]
+    fn correction_title_ignores_hover_text_when_enabled() {
+        // Defensive: enabled rows never carry hover_text in practice
+        // (`correction_row_gate` only sets it alongside `enabled: false`),
+        // but the title builder should still prefer the plain name if ever
+        // called with both set, rather than surface a stale/contradictory reason.
+        assert_eq!(
+            correction_title("Distortion", true, Some("stale reason")),
+            "Distortion"
+        );
+    }
+
+    #[test]
+    fn correction_title_is_plain_name_when_disabled_without_hover_text() {
+        // Vignette-shaped inputs: always enabled in practice, but if ever
+        // called disabled with no reason, fall back to the plain name rather
+        // than panicking or emitting a dangling " — ".
+        assert_eq!(correction_title("Vignette", false, None), "Vignette");
     }
 }

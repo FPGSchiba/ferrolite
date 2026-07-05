@@ -376,20 +376,32 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
             }
         }
 
-        // ── Layout D (MV3) ── One compact combined row per correction:
-        // `[checkbox: enabled]  <EguiSlider labelled with the correction name>`.
-        // The checkbox is the enable toggle (no text of its own — the slider's
-        // own label carries the name), and the slider is the Amount control,
-        // so this reads as `[x] Name ──●── value ↺` on a single line instead
-        // of MV2's separate chips row + full-width detail sliders (which the
-        // author found wrapped to two lines and didn't read as toggles).
+        // ── Layout v2 (round 5) ── Title-above-row group per correction:
+        //   Line 1 (title): the correction name, full-width, left-aligned to
+        //     the checkbox below. Availability is now surfaced INLINE here
+        //     (greyed + " — reason", via `lens_caps_ui::correction_title`)
+        //     instead of hover-only — a hover-only reason was easy to miss.
+        //   Line 2 (control): `[checkbox] + <EguiSlider, empty label> + value + reset`.
+        // Long names ("Transverse CA") no longer crowd the slider (MV3's
+        // single-row layout wrapped them awkwardly), and the slider spans the
+        // full width under the title since its label column collapses when
+        // empty (see `EguiSlider`/`widgets::slider`).
         //
-        // Distortion + TCA need lens (Lensfun) data: their ENTIRE row (checkbox
-        // + slider) is disabled/greyed with a hint when no lens is matched — a
-        // matched lens_id (persisted) OR the resolved name means we have
-        // profile data. Vignetting's row is ALWAYS enabled: it works lens-free
-        // via the parametric manual gain (MV1), so it can be toggled + adjusted
-        // with no lens.
+        // Distortion + TCA need lens (Lensfun) data: the row (title + control)
+        // is disabled/greyed when no lens is matched — a matched lens_id
+        // (persisted) OR the resolved name means we have profile data.
+        // Vignetting's row is ALWAYS enabled: it works lens-free via the
+        // parametric manual gain (MV1), so it can be toggled + adjusted with
+        // no lens.
+        //
+        // Spacing (author-specified): TIGHT between a group's title and its
+        // control line (they must read as one unit), LARGER between groups
+        // (separates the three corrections). Applied via explicit
+        // `ui.add_space` calls inside `correction_row` below (not
+        // `spacing_mut`) so the gap is local to each group and doesn't leak
+        // into surrounding sections (Advanced, Reset button, etc.).
+        const TITLE_TO_CONTROL_GAP: f32 = 2.0;
+        const BETWEEN_GROUP_GAP: f32 = 10.0;
         let has_lens = lc.lens_id.is_some()
             || state
                 .viewer
@@ -436,6 +448,28 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                               dragged: &mut bool,
                               drag_stopped: &mut bool,
                               toggled: &mut bool| {
+            // Zero the ambient vertical item_spacing (egui default 3.0) for
+            // this group so the two explicit `add_space` calls below are the
+            // ONLY vertical gaps in play — otherwise the default would stack
+            // on top of them and the tight title↔control gap would read the
+            // same as the loose between-group gap.
+            let prev_spacing_y = ui.spacing().item_spacing.y;
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            // Line 1: title, greyed + reason inline when unavailable (still
+            // ALSO exposed as `on_disabled_hover_text` on the checkbox below
+            // for parity with the rest of the panel's disabled controls).
+            let title = lens_caps_ui::correction_title(name, row_enabled, hover_text);
+            let title_text = if row_enabled {
+                egui::RichText::new(title)
+            } else {
+                egui::RichText::new(title).color(theme::TEXT_DIM)
+            };
+            ui.label(title_text);
+            ui.add_space(TITLE_TO_CONTROL_GAP);
+
+            // Line 2: checkbox + full-width slider (empty label — the title
+            // above already carries the name) + value + reset.
             ui.horizontal(|ui| {
                 let cb = ui.add_enabled(row_enabled, egui::Checkbox::new(&mut c.enabled, ""));
                 let cb = match hover_text {
@@ -447,7 +481,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                 }
                 ui.add_enabled_ui(row_enabled && c.enabled, |ui| {
                     let r = ui.add(EguiSlider {
-                        label: name,
+                        label: "",
                         value: &mut c.amount,
                         min: params.min,
                         max: params.max,
@@ -470,6 +504,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
                     }
                 });
             });
+
+            // Restore ambient spacing before the (larger, explicit) gap
+            // between groups so sibling widgets outside `correction_row`
+            // (e.g. the Vignette group after this one, or the Advanced
+            // section) aren't left with the zeroed spacing.
+            ui.spacing_mut().item_spacing.y = prev_spacing_y;
+            ui.add_space(BETWEEN_GROUP_GAP);
         };
 
         let distortion_gate = lens_caps_ui::correction_row_gate(
@@ -494,7 +535,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         let mut tca_toggled = false;
         correction_row(
             ui,
-            "TCA",
+            "Transverse CA",
             &mut new_lc.tca,
             vignette_mode::PROFILE_PARAMS,
             tca_gate.enabled,

@@ -87,7 +87,13 @@ impl<'a> Widget for EguiSlider<'a> {
         let (rect, mut response) =
             ui.allocate_exact_size(vec2(full, ROW_H), Sense::click_and_drag());
 
-        let track_left = rect.left() + LABEL_W + 8.0;
+        // Empty label ("" — used when a title line above the row already
+        // carries the name, e.g. the Lens Corrections group rows) collapses
+        // the label column entirely so the track spans the full width
+        // instead of reserving `LABEL_W` for nothing. Value + reset columns
+        // are unaffected either way (per-control reset stays load-bearing).
+        let label_w = if self.label.is_empty() { 0.0 } else { LABEL_W };
+        let track_left = rect.left() + label_w + 8.0;
         let track_right = rect.right() - VALUE_W - 8.0 - RESET_W;
         let track_w = (track_right - track_left).max(1.0);
         let mid_y = rect.center().y;
@@ -165,14 +171,16 @@ impl<'a> Widget for EguiSlider<'a> {
 
         {
             let painter = ui.painter();
-            // label
-            painter.text(
-                pos2(rect.left() + 4.0, mid_y),
-                egui::Align2::LEFT_CENTER,
-                self.label,
-                egui::FontId::proportional(11.0),
-                LABEL,
-            );
+            // label (skipped when empty — the label column is collapsed above)
+            if !self.label.is_empty() {
+                painter.text(
+                    pos2(rect.left() + 4.0, mid_y),
+                    egui::Align2::LEFT_CENTER,
+                    self.label,
+                    egui::FontId::proportional(11.0),
+                    LABEL,
+                );
+            }
             // base track line
             painter.line_segment(
                 [pos2(track_left, mid_y), pos2(track_right, mid_y)],

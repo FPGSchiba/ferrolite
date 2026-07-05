@@ -6,6 +6,7 @@ use ferrolite_gpu::GpuContext;
 use ferrolite_image::{TileCoord, TILE_SIZE};
 use ferrolite_jobs::JobSystem;
 use ferrolite_vt::{PyramidTileSource, TileSource, ViewTransform, VirtualTexture};
+use wgpu::util::DeviceExt;
 
 const TOL: u8 = 4; // absorbs driver float differences
 
@@ -381,6 +382,401 @@ fn rung4_feedback_makes_center_tile_resident() {
     );
 }
 
+/// A `TileProducer` that writes a solid color keyed on the tile's LOD (not its
+/// x/y), so adjacent LODs are visibly and numerically distinct. Used to force
+/// specific LODs resident directly (bypassing the feedback round-trip, which
+/// only ever marks the picked LOD, never the coarser blend partner) with colors
+/// chosen so the trilinear blend between them is unambiguous in the golden.
+struct LevelTintProducer;
+impl ferrolite_vt::TileProducer for LevelTintProducer {
+    fn produce(
+        &mut self,
+        ctx: &ferrolite_gpu::GpuContext,
+        coord: ferrolite_image::TileCoord,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        // lod 2 -> pure red, lod 3 -> pure blue; any other lod (unused here) -> white.
+        let (r, g, b) = match coord.lod {
+            2 => (1.0, 0.0, 0.0),
+            3 => (0.0, 0.0, 1.0),
+            _ => (1.0, 1.0, 1.0),
+        };
+        let n = (TILE_SIZE * TILE_SIZE) as usize;
+        let texel = [
+            half::f16::from_f32(r),
+            half::f16::from_f32(g),
+            half::f16::from_f32(b),
+            half::f16::from_f32(1.0),
+        ];
+        let mut texels = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            texels.extend_from_slice(&texel);
+        }
+        ctx.device.create_texture_with_data(
+            &ctx.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("level-tint-producer-tile"),
+                size: wgpu::Extent3d {
+                    width: TILE_SIZE,
+                    height: TILE_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&texels),
+        )
+    }
+}
+
+/// Trilinear LOD blend (Task 4): `fs_sparse` samples the picked LOD and the
+/// next-coarser resident LOD and blends by `fract(log2 d)`, instead of hard
+/// LOD selection. Renders at a fractional-LOD zoom (`lf ≈ 2.5`, so `lo=2`,
+/// `hi=3`, blend factor `fract(2.5)=0.5`) with lod 2 forced pure red and lod 3
+/// forced pure blue (via `LevelTintProducer`, bypassing the real pyramid
+/// content so the two source levels are unambiguously distinct) — a correct
+/// 50/50 blend renders magenta (`(0.5, 0, 0.5)`); hard LOD selection (the
+/// pre-Task-4 behavior) would render solid red or solid blue instead. Compares
+/// against a committed reference PNG within the existing tolerance.
+///
+/// Deliberately does NOT call `request_view_feedback` between the producer
+/// pre-fill and the golden render: that reconcile evicts anything not in the
+/// shader's feedback set, and `fs_sparse` only ever marks the *picked* (lo)
+/// LOD — never the coarser blend partner (`hi`) — so reconciling here would
+/// evict `hi` and collapse the test back to a single-level render. The
+/// feedback-mark invariant itself (tiles the shader wants get marked and,
+/// over repeated frames, loaded) is covered by `rung4_feedback_makes_center_tile_resident`.
+#[test]
+fn sparse_trilinear_blends_adjacent_levels() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping golden");
+        return;
+    };
+
+    // 1200x900 -> pyramid levels: 1200x900, 600x450, 300x225, 150x112 (4 levels,
+    // lod 3 is the last since both dims are <=256). lo=2 (300x225, still >256 on
+    // width so 2x1 tiles) and hi=3 (150x112, single tile) are both valid indices
+    // (< level_count), so the blend does not degenerate to a single level. The
+    // base image content is irrelevant here (the producer overrides lod 2/3
+    // tiles with solid tints below); a flat image keeps level dims deterministic.
+    let (iw, ih) = (1200u32, 900u32);
+    let img = ferrolite_image::LinearRgbaF32::black(iw, ih);
+    let src = PyramidTileSource::new(img);
+    assert_eq!(
+        src.level_count(),
+        4,
+        "expected a 4-level pyramid at 1200x900"
+    );
+
+    let (w, h) = (128u32, 128u32);
+    // zoom = 2^-2.5 so that d = 1/zoom = 2^2.5 and lf = log2(d) = 2.5 uniformly
+    // across the frame (the screen->image mapping is affine, no perspective).
+    let view = ViewTransform {
+        zoom: 2f32.powf(-2.5),
+        pan: (0.0, 0.0),
+    };
+
+    let total: u32 = (0..src.level_count())
+        .map(|lod| {
+            let (lw, lh) = src.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(1));
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let src_arc: Arc<dyn TileSource + Send + Sync> = Arc::new(src);
+
+    let mut vt = VirtualTexture::sparse(
+        &ctx,
+        Arc::clone(&src_arc),
+        Arc::clone(&jobs),
+        total,
+        &pipelines,
+    );
+    let mut producer = LevelTintProducer;
+
+    // Force BOTH the lo (lod 2) and hi (lod 3) tiles under the viewport center
+    // resident directly via the producer path — the feedback loop alone only
+    // ever marks the picked (lo) LOD, never the coarser blend partner, so it
+    // cannot converge both levels on its own.
+    let lo_tiles: Vec<TileCoord> = {
+        let (cols, rows) = {
+            let (lw, lh) = src_arc.level_size(2);
+            (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE))
+        };
+        (0..rows)
+            .flat_map(|y| (0..cols).map(move |x| TileCoord { lod: 2, x, y }))
+            .collect()
+    };
+    let hi_tiles: Vec<TileCoord> = {
+        let (cols, rows) = {
+            let (lw, lh) = src_arc.level_size(3);
+            (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE))
+        };
+        (0..rows)
+            .flat_map(|y| (0..cols).map(move |x| TileCoord { lod: 3, x, y }))
+            .collect()
+    };
+    let mut needed = lo_tiles.clone();
+    needed.extend(hi_tiles.clone());
+    let made = vt.produce_view(&ctx, &mut producer, &needed, needed.len());
+    assert_eq!(made, needed.len(), "all lo/hi tiles produced");
+    for t in &needed {
+        assert!(vt.is_resident(*t), "tile {t:?} should be resident");
+    }
+
+    // Render the golden frame the same way `render_sparse_frame` does (marking
+    // feedback as a side effect, which we deliberately do not reconcile — see
+    // the doc comment above), then read back the pixels for comparison.
+    let target = ctx.render_target(w, h, wgpu::TextureFormat::Rgba8Unorm);
+    let tview = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-trilinear-golden"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &tview,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        vt.render_sparse(&ctx, &mut pass, &view, (w as f32, h as f32));
+    }
+    ctx.queue.submit([enc.finish()]);
+    let pixels = ctx.read_rgba8(&target, w, h);
+
+    let golden_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/refs/trilinear_sparse.png"
+    );
+    if std::env::var("UPDATE_GOLDEN").is_ok() || !std::path::Path::new(golden_path).exists() {
+        std::fs::create_dir_all(std::path::Path::new(golden_path).parent().unwrap()).unwrap();
+        image::save_buffer(golden_path, &pixels, w, h, image::ColorType::Rgba8).unwrap();
+        eprintln!("wrote golden {golden_path}");
+        return;
+    }
+    let golden = image::open(golden_path).unwrap().to_rgba8();
+    assert_eq!(golden.dimensions(), (w, h));
+    assert!(
+        common::max_abs_diff(&pixels, golden.as_raw()) <= TOL,
+        "trilinear-blended render drifted from golden beyond tolerance"
+    );
+}
+
+/// Golden proving the off-screen "swapchain" indirection is a no-op when the
+/// sparse pool is converged (Task 8, spec 4.5 §4.2): (A) `draw_sparse` directly
+/// to an offscreen target, vs (B) `compose_sparse_into` a `PresentBuffers.back`,
+/// `swap()`, then blit `front` (alpha 1.0, via the `DisplayVariant::Blit`
+/// pipeline) into a second offscreen target of the same format. If A and B
+/// match within tolerance, presenting through the buffered blit changes nothing
+/// visually versus today's direct draw — it only defers *when* the pixels reach
+/// the screen.
+#[test]
+fn blit_front_matches_direct_sparse_when_converged() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping golden (expected in headless CI)");
+        return;
+    };
+
+    // Small multi-tile gradient so the sparse pool has more than one level/tile
+    // to converge (mirrors the rung-4 / trilinear golden setup above).
+    let (iw, ih) = (600u32, 500u32);
+    let mut px = Vec::new();
+    for y in 0..ih {
+        for x in 0..iw {
+            px.extend_from_slice(&[x as f32 / iw as f32, y as f32 / ih as f32, 0.25, 1.0]);
+        }
+    }
+    let img = ferrolite_image::LinearRgbaF32::new(iw, ih, px).unwrap();
+    let src = PyramidTileSource::new(img);
+    let level_count = src.level_count();
+
+    let target_format = wgpu::TextureFormat::Rgba8Unorm;
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, target_format);
+    let src_arc: Arc<dyn TileSource + Send + Sync> = Arc::new(src);
+
+    // Every tile of every level, so the pool is converged regardless of view.
+    let total: u32 = (0..level_count)
+        .map(|lod| {
+            let (lw, lh) = src_arc.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let all_tiles: Vec<TileCoord> = (0..level_count)
+        .flat_map(|lod| {
+            let (lw, lh) = src_arc.level_size(lod);
+            let (cols, rows) = (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE));
+            (0..rows).flat_map(move |y| (0..cols).map(move |x| TileCoord { lod, x, y }))
+        })
+        .collect();
+
+    let jobs = Arc::new(JobSystem::new(1));
+    let mut vt = VirtualTexture::sparse(
+        &ctx,
+        Arc::clone(&src_arc),
+        Arc::clone(&jobs),
+        total,
+        &pipelines,
+    );
+    let mut producer = SolidProducer;
+    let made = vt.produce_view(&ctx, &mut producer, &all_tiles, all_tiles.len());
+    assert_eq!(made, all_tiles.len(), "every tile of every level produced");
+    for t in &all_tiles {
+        assert!(
+            vt.is_resident(*t),
+            "tile {t:?} should be resident (converged pool)"
+        );
+    }
+
+    let (w, h) = (128u32, 128u32);
+    let view = ViewTransform::fit((iw, ih), (w as f32, h as f32));
+
+    // --- Path A: draw_sparse directly to an offscreen target. ---
+    let target_a = ctx.render_target(w, h, target_format);
+    let view_a = target_a.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut enc_a = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc_a.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-direct-sparse"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view_a,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.02,
+                        g: 0.02,
+                        b: 0.02,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        vt.render_sparse(&ctx, &mut pass, &view, (w as f32, h as f32));
+    }
+    ctx.queue.submit([enc_a.finish()]);
+    let image_a = ctx.read_rgba8(&target_a, w, h);
+
+    // --- Path B: compose_sparse_into PresentBuffers.back, swap, blit front. ---
+    let mut present = ferrolite_vt::PresentBuffers::new(&ctx, (w, h), target_format);
+    let mut enc_b = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    vt.compose_sparse_into(
+        &ctx,
+        &mut enc_b,
+        present.back_view(),
+        &view,
+        (w as f32, h as f32),
+    );
+    ctx.queue.submit([enc_b.finish()]);
+    present.swap();
+
+    // Blit `front` (alpha 1.0) into a second offscreen target via the Blit
+    // pipeline. Clear to opaque first: ALPHA_BLENDING with alpha=1.0 fully
+    // overwrites, but clearing keeps the pass well-defined regardless.
+    let target_b = ctx.render_target(w, h, target_format);
+    let view_b = target_b.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let alpha_buf = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("blit-params"),
+            contents: bytemuck::bytes_of(&BlitParams {
+                alpha: 1.0,
+                _pad0: [0.0; 3],
+                _pad1: [0.0; 4],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    let blit_bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("blit-bind"),
+        layout: pipelines.blit_layout(),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(present.front_view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(pipelines.sampler()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: alpha_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut enc_blit = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc_blit.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-blit-front"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view_b,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(pipelines.pipeline(ferrolite_vt::DisplayVariant::Blit));
+        pass.set_bind_group(0, &blit_bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    ctx.queue.submit([enc_blit.finish()]);
+    let image_b = ctx.read_rgba8(&target_b, w, h);
+
+    let diff = common::max_abs_diff(&image_a, &image_b);
+    eprintln!("blit_front_matches_direct_sparse max_abs_diff = {diff}");
+    assert!(
+        diff <= TOL,
+        "blit(front) diverged from the direct sparse draw beyond tolerance (diff={diff})"
+    );
+}
+
+/// Uniform matching `present.wgsl`'s `struct BlitParams { alpha: f32, _pad:
+/// vec3<f32> }` layout, used to drive the blit pipeline directly from a golden
+/// test (no app-side wrapper exists yet). WGSL aligns `vec3<f32>` to 16 bytes,
+/// so the struct is 32 bytes total: `alpha` at offset 0 (padded to 16), then
+/// `_pad` at offset 16..28 (padded to 32).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlitParams {
+    alpha: f32,
+    _pad0: [f32; 3],
+    _pad1: [f32; 4],
+}
+
 /// The working→display matrix uniform is applied before the sRGB OETF. A
 /// channel-swap matrix must visibly change the rendered output, proving the
 /// tail is wired end-to-end (bind group + layout + shader).
@@ -506,4 +902,139 @@ fn lut_path_samples_identity_shaper_lut() {
             );
         }
     }
+}
+
+/// Task 9: `is_converged` is the immediate CPU-rect convergence predicate — it
+/// must report `false` for a freshly-built sparse VT (nothing produced yet) and
+/// `true` once every tile `needed_tiles` reports for the fit view has been
+/// produced via the stub producer. Mirrors the `producer_fills_requested_tiles`
+/// setup above (no photo/pyramid dependency beyond the test-only pyramid source).
+#[test]
+fn fresh_sparse_is_not_converged_then_converges_after_producing() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+
+    let (iw, ih) = (600u32, 500u32);
+    let img = ferrolite_image::LinearRgbaF32::black(iw, ih);
+    let src: Arc<dyn TileSource + Send + Sync> = Arc::new(PyramidTileSource::new(img));
+    let total: u32 = (0..src.level_count())
+        .map(|lod| {
+            let (lw, lh) = src.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(1));
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let mut vt =
+        VirtualTexture::sparse(&ctx, Arc::clone(&src), Arc::clone(&jobs), total, &pipelines);
+    let mut producer = SolidProducer;
+
+    let (w, h) = (128.0f32, 128.0f32);
+    let view = ViewTransform::fit((iw, ih), (w, h));
+
+    // Nothing produced yet: not converged.
+    assert!(
+        !vt.is_converged(&view, (w, h)),
+        "a freshly built sparse VT must not be converged before anything is produced"
+    );
+
+    // Produce every tile the CPU rect estimate says this view needs, using the
+    // same level_count the VT itself was built with (`sparse` caps at MAX_LEVELS,
+    // which a 600x500 pyramid never reaches, so plain `level_count()` matches).
+    let level_count = src.level_count();
+    let needed = ferrolite_vt::needed_tiles((iw, ih), &view, (w, h), level_count);
+    let made = vt.produce_view(&ctx, &mut producer, &needed, needed.len());
+    assert_eq!(made, needed.len(), "every rect-needed tile produced");
+
+    assert!(
+        vt.is_converged(&view, (w, h)),
+        "after producing every needed tile, the view must be converged"
+    );
+}
+
+/// Task 10: `needed_prefetched` delegates to `residency::needed_tiles_prefetched`
+/// — its result must be a superset of the plain visible `needed_tiles` set (at
+/// least as long) and include every tile of the coarsest pyramid level (the
+/// protected base). Empty on a non-sparse VT is covered by construction (sparse
+/// VTs always return the delegated, non-empty set for a non-degenerate view).
+#[test]
+fn needed_prefetched_covers_visible_and_coarse_base() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+
+    let (iw, ih) = (600u32, 500u32);
+    let img = ferrolite_image::LinearRgbaF32::black(iw, ih);
+    let src = PyramidTileSource::new(img);
+    let level_count = src.level_count();
+    let src_arc: Arc<dyn TileSource + Send + Sync> = Arc::new(src);
+    let total: u32 = (0..level_count)
+        .map(|lod| {
+            let (lw, lh) = src_arc.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(1));
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let vt = VirtualTexture::sparse(
+        &ctx,
+        Arc::clone(&src_arc),
+        Arc::clone(&jobs),
+        total,
+        &pipelines,
+    );
+
+    let (w, h) = (128.0f32, 128.0f32);
+    let view = ViewTransform::fit((iw, ih), (w, h));
+
+    let visible = ferrolite_vt::needed_tiles((iw, ih), &view, (w, h), level_count);
+    let prefetched = vt.needed_prefetched(&view, (w, h), 1);
+
+    assert!(
+        prefetched.len() >= visible.len(),
+        "prefetched must be at least as large as the visible needed set"
+    );
+    for t in &visible {
+        assert!(
+            prefetched.contains(t),
+            "prefetched must include every visible tile {t:?}"
+        );
+    }
+
+    // Every tile of the coarsest level (the protected base) must be present.
+    let base_lod = level_count - 1;
+    let (cols, rows) = {
+        let (lw, lh) = src_arc.level_size(base_lod);
+        (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE))
+    };
+    for y in 0..rows {
+        for x in 0..cols {
+            assert!(
+                prefetched.contains(&TileCoord {
+                    lod: base_lod,
+                    x,
+                    y
+                }),
+                "coarse base tile ({x},{y}) must be prefetched"
+            );
+        }
+    }
+}
+
+/// Task 10: `needed_prefetched` is empty on a non-sparse `VirtualTexture` (e.g.
+/// the single-texture rung), never panics.
+#[test]
+fn needed_prefetched_empty_on_non_sparse() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let img = common::split_image();
+    let vt = VirtualTexture::single_texture(&ctx, &img, &pipelines);
+    let view = ViewTransform::fit((img.width, img.height), (64.0, 64.0));
+    assert!(vt.needed_prefetched(&view, (64.0, 64.0), 1).is_empty());
 }

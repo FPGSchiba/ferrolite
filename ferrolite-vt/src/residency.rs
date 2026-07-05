@@ -36,6 +36,59 @@ pub fn needed_tiles(
     out
 }
 
+/// The visible needed set (visibility priority) expanded by a `ring` of tiles on
+/// each side at the same LOD, plus every tile of the coarsest level (the protected
+/// base that guarantees a resident coarse fallback). De-duplicated, visible-first.
+pub fn needed_tiles_prefetched(
+    image: (u32, u32),
+    view: &ViewTransform,
+    viewport: (f32, f32),
+    level_count: u32,
+    ring: u32,
+) -> Vec<TileCoord> {
+    let mut out = needed_tiles(image, view, viewport, level_count);
+    let mut seen: std::collections::HashSet<TileCoord> = out.iter().copied().collect();
+
+    // Ring: expand the visible bounding box at the chosen LOD by `ring` tiles.
+    if ring > 0 {
+        if let (Some(&first), Some(&last)) = (out.first(), out.last()) {
+            let lod = first.lod;
+            let (cols, rows) = tiles_per_level(image.0, image.1, lod);
+            let x0 = first.x.saturating_sub(ring);
+            let y0 = first.y.saturating_sub(ring);
+            let x1 = (last.x + ring).min(cols.saturating_sub(1));
+            let y1 = (last.y + ring).min(rows.saturating_sub(1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let t = TileCoord { lod, x, y };
+                    if seen.insert(t) {
+                        out.push(t);
+                    }
+                }
+            }
+        }
+    }
+
+    // Protected coarse base: every tile of the coarsest level.
+    if level_count > 0 {
+        let base_lod = level_count - 1;
+        let (cols, rows) = tiles_per_level(image.0, image.1, base_lod);
+        for y in 0..rows {
+            for x in 0..cols {
+                let t = TileCoord {
+                    lod: base_lod,
+                    x,
+                    y,
+                };
+                if seen.insert(t) {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// LRU set of resident tiles under a fixed tile-count budget.
 pub struct ResidencySet {
     capacity: usize,
@@ -61,6 +114,11 @@ impl ResidencySet {
     /// The least-recently-used resident tile, if any (front of the order).
     pub fn lru(&self) -> Option<TileCoord> {
         self.order.first().copied()
+    }
+    /// The least-recently-used resident tile whose lod is NOT `protect_lod`, if any.
+    /// Used so the protected coarse base level is never evicted.
+    pub fn lru_except_lod(&self, protect_lod: u32) -> Option<TileCoord> {
+        self.order.iter().copied().find(|t| t.lod != protect_lod)
     }
     pub fn touch(&mut self, t: TileCoord) {
         if let Some(p) = self.order.iter().position(|&x| x == t) {
@@ -264,5 +322,59 @@ mod tests {
         vr.mark(tc(0, 0, 0));
         vr.forget(tc(0, 0, 0));
         assert!(!vr.is_current(tc(0, 0, 0)));
+    }
+
+    #[test]
+    fn lru_except_lod_skips_protected_level() {
+        let mut r = ResidencySet::new(8);
+        r.insert(tc(3, 0, 0)); // base level (protected), oldest
+        r.insert(tc(0, 0, 0));
+        r.insert(tc(0, 1, 0));
+        // Plain LRU would be the base tile; the guarded one skips it.
+        assert_eq!(r.lru(), Some(tc(3, 0, 0)));
+        assert_eq!(r.lru_except_lod(3), Some(tc(0, 0, 0)));
+    }
+
+    #[test]
+    fn prefetched_includes_ring_and_full_coarse_base() {
+        let image = (2048u32, 2048u32);
+        let vp = (256.0f32, 256.0f32);
+        let level_count = 4u32;
+        let view = ViewTransform {
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+        };
+
+        let base = needed_tiles(image, &view, vp, level_count);
+        let pref = needed_tiles_prefetched(image, &view, vp, level_count, 1);
+
+        // Superset of the plain needed set.
+        for t in &base {
+            assert!(
+                pref.contains(t),
+                "prefetched must include every visible tile {t:?}"
+            );
+        }
+        // Visible tiles are first (visibility priority).
+        assert_eq!(&pref[..base.len()], &base[..]);
+        // Every tile of the coarsest level is present (the protected base).
+        let (cols, rows) = tiles_per_level(image.0, image.1, level_count - 1);
+        for y in 0..rows {
+            for x in 0..cols {
+                assert!(
+                    pref.contains(&TileCoord {
+                        lod: level_count - 1,
+                        x,
+                        y
+                    }),
+                    "coarse base tile ({x},{y}) must be prefetched"
+                );
+            }
+        }
+        // No duplicates.
+        let mut seen = std::collections::HashSet::new();
+        for t in &pref {
+            assert!(seen.insert(*t), "no duplicate {t:?}");
+        }
     }
 }

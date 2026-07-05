@@ -5,9 +5,11 @@ pub mod callback;
 pub mod edit_producer;
 pub mod load;
 pub mod nav;
+pub mod present;
 
 pub use callback::{PreviewWhich, ViewerCallback, ViewerGpu, ViewerPipelines};
 pub use edit_producer::EditTileProducer;
+pub use present::{present_source, PresentSource};
 
 use std::path::PathBuf;
 
@@ -101,6 +103,18 @@ pub struct ViewerState {
     pub full_ready: bool,
     /// True while the preview→full crossfade ramp is advancing.
     pub crossfading: bool,
+    /// The `(opstack_version, view)` the CURRENT composed `front` buffer was
+    /// composed at (spec 4.5 §4.2), or `None` when `front` is invalid / never
+    /// composed (fresh open, or just reallocated by a canvas resize). Keys the
+    /// off-screen compose+swap: the swap fires when the pool is converged AND
+    /// this key does not match the current `(opstack_version, view)` (front is
+    /// stale or missing), and `paint` presents `Front` only when this key
+    /// matches the current state — otherwise `Preview`. This replaces the old
+    /// transient `present_swapped` bool: an edit bumps `opstack_version` and a
+    /// pan/zoom changes `view`, so the key mismatches immediately (no reliance on
+    /// observing a `!converged` frame), which is why edits and the split now show
+    /// without a zoom nudge.
+    pub present_key: Option<(u64, ferrolite_vt::ViewTransform)>,
     /// Seconds elapsed into the active crossfade.
     pub crossfade_elapsed: f32,
     /// Terminal state: nothing more will load (preview failed AND/OR full failed,
@@ -275,6 +289,7 @@ impl ViewerState {
             full_requested: false,
             full_ready: false,
             crossfading: false,
+            present_key: None,
             crossfade_elapsed: 0.0,
             idle: false,
             showing_full: false,
@@ -447,10 +462,21 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 
 /// Paint the viewer's central canvas: fill black, read scroll/drag input into
 /// the view transform, record the viewport size, and (once the rung-1 preview
-/// texture is loaded) enqueue the egui↔wgpu paint callback. `show_full` selects
-/// the sparse full-res VT over the preview (swap-on-ready crossfade). Returns
-/// `true` while the preview is still loading so the caller can `request_repaint`
-/// for a prompt first pixel.
+/// texture is loaded) enqueue the egui↔wgpu paint callback.
+///
+/// Interaction (pan/zoom this frame) is detected HERE, so the present source is
+/// computed here too: `present_source(interacting, split, full_ready,
+/// front_valid, crossfade)` selects what the callback shows this frame — the
+/// rung-1 preview (during interaction, while the before/after split is active,
+/// before the `front` buffer is composed, or when `front` is stale/blank — see
+/// `front_valid`), a crossfade toward the composed `front`, or the converged
+/// `front` alone. `full_ready`, `front_valid`, and `crossfade` are computed by
+/// `drive_viewer` and passed in; `split` is read from `state.split_compare` here.
+///
+/// Returns `(loading_preview, present_source)`: `loading_preview` is `true` while
+/// the preview is still loading so the caller can `request_repaint` for a prompt
+/// first pixel; `present_source` is returned so the caller can gate repaints on
+/// an active crossfade.
 ///
 /// When `interactive == false` (e.g. the crop tool is active) the canvas
 /// pan/zoom/double-click interaction is SKIPPED entirely — the drag interaction
@@ -459,9 +485,11 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 pub fn paint(
     ui: &mut egui::Ui,
     state: &mut ViewerState,
-    show_full: bool,
+    full_ready: bool,
+    front_valid: bool,
+    crossfade: f32,
     interactive: bool,
-) -> bool {
+) -> (bool, PresentSource) {
     let rect = ui.available_rect_before_wrap();
     // Scope the painter so it drops before any `ui.put` / mutable-borrow calls
     // further down (the `!state.loaded` spinner branch needs `ui` mutably).
@@ -476,6 +504,10 @@ pub fn paint(
     // Pointer interaction over the canvas: drag pans, scroll zooms about cursor.
     // Skipped when non-interactive so the crop overlay owns input over this area
     // (no competing `viewer-canvas` drag registered, no scroll/drag read).
+    // `interacting` records a pan/zoom/double-click THIS frame, which forces the
+    // present source back to the smooth preview (the composed `front` is stale
+    // for the new transform until the pool reconverges).
+    let mut interacting = false;
     if interactive && state.loaded {
         let resp = ui.interact(
             rect,
@@ -487,6 +519,7 @@ pub fn paint(
             state.view = apply_pan(state.view, (d.x, d.y));
             // The view moved: new tiles may be needed, so wake the drive loop.
             state.idle = false;
+            interacting = true;
         }
         let scroll = ui.input(|i| i.raw_scroll_delta.y);
         if scroll.abs() > f32::EPSILON {
@@ -496,6 +529,7 @@ pub fn paint(
                 state.view = apply_zoom(state.view, scroll / 50.0, cursor, viewport);
                 // Zoom changes the visible LOD/tiles: wake the drive loop.
                 state.idle = false;
+                interacting = true;
             }
         }
         // Double-click toggles between fit-to-screen and 1:1 (zoom = 1.0, centered).
@@ -512,10 +546,17 @@ pub fn paint(
                     state.view = fit;
                 }
                 state.idle = false;
+                interacting = true;
                 ui.ctx().request_repaint();
             }
         }
     }
+
+    // Now that this frame's interaction is known, select what the callback shows.
+    // The before/after SPLIT is a preview-tier-only compare, so fold it in here:
+    // while it is active the composed full `front` must never take over.
+    let split = state.split_compare;
+    let source = present_source(interacting, split, full_ready, front_valid, crossfade);
 
     if state.loaded {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(
@@ -524,11 +565,11 @@ pub fn paint(
                 image_id: state.image_id,
                 view: state.view,
                 viewport,
-                show_full,
+                present_source: source,
                 which: crate::viewer::PreviewWhich::After,
             },
         ));
-        false
+        (false, source)
     } else {
         // First pixel not ready yet: show a spinner + "Loading…" so the decode
         // wait reads as working, and keep animating so it spins + we pick up the
@@ -547,7 +588,7 @@ pub fn paint(
             egui::FontId::proportional(12.0),
             crate::theme::TEXT_DIM,
         );
-        true
+        (true, source)
     }
 }
 

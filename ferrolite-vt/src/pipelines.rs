@@ -52,9 +52,10 @@ pub enum DisplayVariant {
     Tiled,
     Streaming,
     Sparse,
+    Blit,
 }
 
-/// Cache of the reusable, image-independent GPU objects for all four display
+/// Cache of the reusable, image-independent GPU objects for all five display
 /// variants: one shared shader module + sampler, and a `(BindGroupLayout,
 /// RenderPipeline)` per variant. Build once via [`DisplayPipelines::new`] and
 /// reuse across every image open.
@@ -71,6 +72,8 @@ pub struct DisplayPipelines {
     tiled: (Arc<wgpu::BindGroupLayout>, Arc<wgpu::RenderPipeline>),
     streaming: (Arc<wgpu::BindGroupLayout>, Arc<wgpu::RenderPipeline>),
     sparse: (Arc<wgpu::BindGroupLayout>, Arc<wgpu::RenderPipeline>),
+    blit: (Arc<wgpu::BindGroupLayout>, Arc<wgpu::RenderPipeline>),
+    pipelines_built: u32,
 }
 
 impl DisplayPipelines {
@@ -361,6 +364,76 @@ impl DisplayPipelines {
         });
         let sparse_pipeline = mk(&sparse_bgl, "vs_main", "fs_sparse");
 
+        // --- Blit (present): fullscreen triangle sampling one already-encoded
+        // color texture, from a SECOND shader module (`present.wgsl`). Uses
+        // alpha blending (unlike the four display variants above) so a
+        // `Crossfade(f)` blit composites over a previously drawn preview. ---
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vt-present"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/present.wgsl").into()),
+        });
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("vt-blit-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("vt-blit-pl"),
+            bind_group_layouts: &[&blit_bgl],
+            push_constant_ranges: &[],
+        });
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("vt-blit-pipeline"),
+            layout: Some(&blit_pl),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: "vs_blit",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: "fs_blit",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let display_matrix = Arc::new(device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
                 label: Some("vt-display-matrix"),
@@ -415,7 +488,15 @@ impl DisplayPipelines {
             tiled: (Arc::new(tiled_layout), Arc::new(tiled_pipeline)),
             streaming: (Arc::new(streaming_layout), Arc::new(streaming_pipeline)),
             sparse: (Arc::new(sparse_bgl), Arc::new(sparse_pipeline)),
+            blit: (Arc::new(blit_bgl), Arc::new(blit_pipeline)),
+            pipelines_built: 5,
         }
+    }
+
+    /// Count of render pipelines compiled by [`DisplayPipelines::new`] (5:
+    /// single, tiled, streaming, sparse, blit).
+    pub fn pipelines_built(&self) -> u32 {
+        self.pipelines_built
     }
 
     /// The target color format these pipelines render to.
@@ -519,6 +600,7 @@ impl DisplayPipelines {
             DisplayVariant::Tiled => &self.tiled.0,
             DisplayVariant::Streaming => &self.streaming.0,
             DisplayVariant::Sparse => &self.sparse.0,
+            DisplayVariant::Blit => &self.blit.0,
         }
     }
 
@@ -529,13 +611,30 @@ impl DisplayPipelines {
             DisplayVariant::Tiled => &self.tiled.1,
             DisplayVariant::Streaming => &self.streaming.1,
             DisplayVariant::Sparse => &self.sparse.1,
+            DisplayVariant::Blit => &self.blit.1,
         }
+    }
+
+    /// The blit bind-group layout (texture@0, sampler@1, alpha uniform@2).
+    /// Reuse [`DisplayPipelines::sampler`] for the blit's sampler.
+    pub fn blit_layout(&self) -> &Arc<wgpu::BindGroupLayout> {
+        &self.blit.0
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::pack_display_matrix;
+
+    #[test]
+    fn builds_exactly_five_pipelines() {
+        let Some(ctx) = ferrolite_gpu::GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping");
+            return;
+        };
+        let p = super::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Bgra8UnormSrgb);
+        assert_eq!(p.pipelines_built(), 5, "single+tiled+streaming+sparse+blit");
+    }
 
     #[test]
     fn pack_identity_columns() {

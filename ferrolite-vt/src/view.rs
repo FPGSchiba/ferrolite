@@ -1523,6 +1523,49 @@ impl VirtualTexture {
         pass.draw(0..3, 0..1);
     }
 
+    /// Compose the sparse tier into an off-screen `target` view (the present `back`
+    /// buffer). Records its own render pass on `encoder`. The pool must be converged
+    /// for a complete image (callers gate on `is_converged`). Mirrors the sparse
+    /// bind-group build in `prepare_sparse`; here the pass targets `target`.
+    pub fn compose_sparse_into(
+        &mut self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        view: &ViewTransform,
+        viewport: (f32, f32),
+    ) {
+        self.prepare_sparse(ctx, view, viewport);
+        let Some(s) = self.sparse.as_ref() else {
+            return;
+        };
+        let Some(bind) = s.bind_group.as_ref() else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-compose-sparse"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.02,
+                        g: 0.02,
+                        b: 0.02,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(&s.pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+
     /// Rung 4: number of tiles still in flight (jobs submitted, not yet drained).
     /// `None` if this is not a sparse VT. Mirrors `streaming_pending`: used by the
     /// viewer to gate the crossfade swap and terminate the repaint loop. Note: 0
@@ -1555,6 +1598,39 @@ impl VirtualTexture {
         self.sparse
             .as_ref()
             .is_some_and(|s| !s.last_needed.is_empty())
+    }
+
+    /// Rung 4: is the visible view fully resident at the current opstack version?
+    /// Uses the immediate CPU `needed_tiles` rect (not the 1-frame-latent feedback),
+    /// so callers can gate the present swap without waiting a frame. `false` if not sparse.
+    pub fn is_converged(&self, view: &ViewTransform, viewport: (f32, f32)) -> bool {
+        let Some(s) = self.sparse.as_ref() else {
+            return false;
+        };
+        let level_count = s.layout.level_count();
+        let needed = crate::residency::needed_tiles(s.image_dims, view, viewport, level_count);
+        s.versions.to_produce(&needed).is_empty()
+    }
+
+    /// Rung 4: the prefetched needed set (visible + `ring` + coarse base) for `view`,
+    /// visible-first. Feeds `produce_view` so the swap converges fast and pans/zooms
+    /// have neighbouring + coarse tiles ready. Empty on a non-sparse VT.
+    pub fn needed_prefetched(
+        &self,
+        view: &ViewTransform,
+        viewport: (f32, f32),
+        ring: u32,
+    ) -> Vec<TileCoord> {
+        let Some(s) = self.sparse.as_ref() else {
+            return Vec::new();
+        };
+        crate::residency::needed_tiles_prefetched(
+            s.image_dims,
+            view,
+            viewport,
+            s.layout.level_count(),
+            ring,
+        )
     }
 
     /// Rung 4: cancel every in-flight tile-load job. Called on navigation so a
@@ -1627,19 +1703,32 @@ impl VirtualTexture {
         };
 
         let to_produce = s.versions.to_produce(needed);
+        let base_lod = s.layout.level_count().saturating_sub(1);
         let mut produced = 0;
         for coord in to_produce.into_iter().take(budget) {
-            // Allocate a slot, evicting an LRU resident if the pool is full.
+            // Allocate a slot, evicting an LRU resident (never the protected coarse
+            // base level) if the pool is full.
             let slot = match s.allocator.alloc(coord) {
                 Some(slot) => slot,
                 None => {
-                    if let Some(victim) = s.residency.lru() {
-                        s.allocator.free(victim);
-                        s.residency.forget(victim);
-                        s.versions.forget(victim);
-                        if let Some(idx) = flat_index(&s.layout, victim) {
-                            s.slots[idx] = NOT_RESIDENT;
-                        }
+                    let Some(victim) = s.residency.lru_except_lod(base_lod) else {
+                        // Only protected base tiles resident; don't evict the base.
+                        // Bounded: this tile is retried on a future frame.
+                        //
+                        // Invariant: the tile pool's budget (`VIEWER_TILE_BUDGET` in
+                        // ferrolite-app) MUST exceed the coarsest level's tile count
+                        // (the protected base). Otherwise every slot could end up
+                        // holding a protected base tile, `lru_except_lod` always
+                        // returns `None`, and production livelocks — retrying the
+                        // same non-producible tile forever without ever freeing a
+                        // slot for it.
+                        continue;
+                    };
+                    s.allocator.free(victim);
+                    s.residency.forget(victim);
+                    s.versions.forget(victim);
+                    if let Some(idx) = flat_index(&s.layout, victim) {
+                        s.slots[idx] = NOT_RESIDENT;
                     }
                     match s.allocator.alloc(coord) {
                         Some(slot) => slot,

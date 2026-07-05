@@ -162,6 +162,52 @@ static EXPORT_DONE: AtomicU64 = AtomicU64::new(0);
 static EXPORT_FAILED: AtomicU64 = AtomicU64::new(0);
 static EXPORT_LAST_MS: AtomicU64 = AtomicU64::new(0);
 
+// Task 17 (spec 4.5 §9): dev-only viewer frame-time profiling. `drive_viewer`
+// records the last frame's `stable_dt` (µs, fixed-point) and the sparse
+// producer's tiles-produced-this-frame count so the author can measure the
+// ≤16.6 ms/frame pan/zoom budget on the dev GPU. Written on the UI thread only
+// (Relaxed is a strength/ordering no-op there); read back into `Gauges` at the
+// tick site. All writes are behind `diag::enabled()` at the call site in
+// `app.rs`, so this is dead weight (a few Relaxed stores, no alloc/format) only
+// while diagnostics are on — zero cost otherwise.
+static VIEWER_FRAME_US: AtomicU64 = AtomicU64::new(0);
+static VIEWER_FRAME_MAX_US: AtomicU64 = AtomicU64::new(0);
+static VIEWER_TILES_PRODUCED: AtomicU64 = AtomicU64::new(0);
+
+/// Record one `drive_viewer` frame's timing + producer output. Callers MUST
+/// guard this with `diag::enabled()` themselves (mirrors every other recorder
+/// in this module) so the caller's hot path never even computes `dt_ms`'s
+/// microsecond conversion when diagnostics are off.
+pub fn record_viewer_frame(dt_secs: f32, tiles_produced: usize) {
+    let us = (dt_secs as f64 * 1_000_000.0).round().max(0.0) as u64;
+    VIEWER_FRAME_US.store(us, Ordering::Relaxed);
+    VIEWER_FRAME_MAX_US.fetch_max(us, Ordering::Relaxed);
+    VIEWER_TILES_PRODUCED.store(tiles_produced as u64, Ordering::Relaxed);
+}
+
+/// Last recorded `drive_viewer` frame time, in ms. 0.0 if never recorded
+/// (diag off, or no Develop viewer driven yet).
+pub fn viewer_frame_ms() -> f64 {
+    VIEWER_FRAME_US.load(Ordering::Relaxed) as f64 / 1000.0
+}
+
+/// Running max `drive_viewer` frame time (ms) since the last reset.
+pub fn viewer_frame_max_ms() -> f64 {
+    VIEWER_FRAME_MAX_US.load(Ordering::Relaxed) as f64 / 1000.0
+}
+
+/// Reset the running max after it has been read (mirrors `DiagState::tick`'s
+/// own per-second `max_frame_ms` reset), so each ~1/sec snapshot shows the max
+/// over that window rather than the lifetime max.
+pub fn reset_viewer_frame_max() {
+    VIEWER_FRAME_MAX_US.store(0, Ordering::Relaxed);
+}
+
+/// Tiles the sparse producer rendered on the most recent `drive_viewer` call.
+pub fn viewer_tiles_produced() -> u64 {
+    VIEWER_TILES_PRODUCED.load(Ordering::Relaxed)
+}
+
 /// Current ingest phase, for the live `ingest:` line. `Idle` hides the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IngestPhase {
@@ -406,6 +452,13 @@ pub struct Gauges {
     pub export_failed: u64,
     /// Wall time (ms) of the last completed export item.
     pub export_last_ms: u64,
+    /// Task 17 (spec 4.5 §9): most recent Develop `drive_viewer` frame time
+    /// (ms) and the sparse producer's tiles-produced count that frame, plus
+    /// the running max frame time since the last tick. All three read as 0.0/0
+    /// when diag is off or no viewer frame has been driven yet.
+    pub viewer_frame_ms: f64,
+    pub viewer_frame_max_ms: f64,
+    pub viewer_tiles_produced: u64,
 }
 
 /// Everything the log/overlay render, precomputed once per tick.
@@ -489,6 +542,23 @@ pub fn format_export_line(active: u64, done: u64, failed: u64, last_ms: u64) -> 
     format!("\n export  active {active}  done {done} failed {failed}  last {last_ms}ms")
 }
 
+/// Task 17 (spec 4.5 §9): one-line Develop viewer frame-time readout for the
+/// log/overlay. Empty until a viewer frame has actually been driven
+/// (positive `frame_ms`), so it never clutters the Library-only /
+/// no-image-open case. Shows the last frame's time against the 16.6 ms
+/// (60 fps) budget, this tick's max, and the sparse producer's last
+/// tiles-produced count.
+pub fn format_viewer_line(frame_ms: f64, max_ms: f64, tiles_produced: u64) -> String {
+    if frame_ms <= 0.0 {
+        return String::new();
+    }
+    const BUDGET_MS: f64 = 16.6;
+    let over = if frame_ms > BUDGET_MS { " OVER" } else { "" };
+    format!(
+        "\n viewer  frame {frame_ms:.2}ms(max {max_ms:.2}) budget {BUDGET_MS:.1}ms{over}  tiles/f {tiles_produced}"
+    )
+}
+
 /// Render the multi-line ~1/sec log block (also reused, compacted, by the overlay).
 pub fn format_log(s: &Snapshot) -> String {
     let j = &s.jobs;
@@ -500,6 +570,11 @@ pub fn format_log(s: &Snapshot) -> String {
         g.export_done,
         g.export_failed,
         g.export_last_ms,
+    );
+    let viewer_line = format_viewer_line(
+        g.viewer_frame_ms,
+        g.viewer_frame_max_ms,
+        g.viewer_tiles_produced,
     );
     let ingest_line = if g.ingest_phase != IngestPhase::Idle {
         format!(
@@ -520,7 +595,7 @@ pub fn format_log(s: &Snapshot) -> String {
          \x20      pending {tp}  uploading {tu}  handles {th}  missing {tm}  retain req {rc}\n\
          \x20cache tex h/s {thh:.0} m/s {thm:.0} ev/s {the:.0} | pix h/s {pxh:.0} m/s {pxm:.0} ev/s {pxe:.0}\n\
          \x20uploads {up}/{cap} cap  backlog {bk}\n\
-         \x20ingest active {ai}  done {idn}/{itot}{ingest_line}{export_line}",
+         \x20ingest active {ai}  done {idn}/{itot}{ingest_line}{export_line}{viewer_line}",
         dt = s.dt,
         fms = s.frame_ms,
         mx = s.max_frame_ms,
@@ -566,6 +641,7 @@ pub fn format_log(s: &Snapshot) -> String {
         itot = g.ingest_total,
         ingest_line = ingest_line,
         export_line = export_line,
+        viewer_line = viewer_line,
     )
 }
 
@@ -643,6 +719,10 @@ impl DiagState {
                     self.last_tick = Some(now);
                     self.prev_tick = cur;
                     self.max_frame_ms = 0.0;
+                    // Task 17: reset the viewer frame-time max alongside the
+                    // general per-tick max, so each ~1/sec snapshot shows the
+                    // max over that window (not the lifetime max).
+                    reset_viewer_frame_max();
                     self.last_snapshot = Some(snap.clone());
                     Some(snap)
                 }
@@ -671,6 +751,11 @@ pub fn format_overlay(s: &Snapshot) -> String {
         g.export_failed,
         g.export_last_ms,
     );
+    let viewer_line = format_viewer_line(
+        g.viewer_frame_ms,
+        g.viewer_frame_max_ms,
+        g.viewer_tiles_produced,
+    );
     let ingest_line = if g.ingest_phase != IngestPhase::Idle {
         format!(
             "\n ingest  phase {ph} {idn}/{itot}  chan {chan}",
@@ -691,7 +776,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
          thumb pending {tp} uploading {tu} handles {th} missing {tm}\n\
          tex h/s {thh:.0} ev/s {the:.0} | pix h/s {pxh:.0} ev/s {pxe:.0}\n\
          uploads/f {up}/{cap}  backlog {bk}\n\
-         ingest {idn}/{itot} active {ai}{ingest_line}{export_line}",
+         ingest {idn}/{itot} active {ai}{ingest_line}{export_line}{viewer_line}",
         fms = s.frame_ms,
         mx = s.max_frame_ms,
         ev = s.ev_per_frame,
@@ -729,6 +814,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
         ai = g.active_ingests,
         ingest_line = ingest_line,
         export_line = export_line,
+        viewer_line = viewer_line,
     )
 }
 
@@ -1478,6 +1564,9 @@ mod tests {
             export_done: 0,
             export_failed: 0,
             export_last_ms: 0,
+            viewer_frame_ms: 0.0,
+            viewer_frame_max_ms: 0.0,
+            viewer_tiles_produced: 0,
         }
     }
 
@@ -1575,6 +1664,25 @@ mod tests {
         assert!(line.contains("done 3"), "shows completed count");
         assert!(line.contains("failed 1"), "shows failed count");
         assert!(line.contains("last 4200ms"), "shows last item wall time");
+    }
+
+    #[test]
+    fn format_viewer_line_hidden_until_a_frame_is_recorded_then_shows_budget() {
+        // Common case: no Develop viewer frame recorded yet → empty (diag off, or
+        // still in Library) — no clutter.
+        assert_eq!(format_viewer_line(0.0, 0.0, 0), "");
+        // Under budget: no OVER marker.
+        let under = format_viewer_line(10.0, 12.0, 5);
+        assert!(under.contains("frame 10.00ms"), "shows last frame time");
+        assert!(under.contains("max 12.00"), "shows this tick's max");
+        assert!(
+            under.contains("tiles/f 5"),
+            "shows tiles produced this frame"
+        );
+        assert!(!under.contains("OVER"), "under budget is not flagged");
+        // Over the ~16.6ms (60fps) budget: flagged so it's obvious at a glance.
+        let over = format_viewer_line(20.0, 20.0, 32);
+        assert!(over.contains("OVER"), "over-budget frame is flagged");
     }
 
     #[test]

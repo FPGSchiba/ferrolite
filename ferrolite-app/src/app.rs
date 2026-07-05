@@ -50,6 +50,15 @@ impl FerroliteApp {
             // open will borrow from this holder instead of compiling a new pipeline.
             let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
             let pipelines = ferrolite_vt::DisplayPipelines::new(&gpu, rs.target_format);
+            // Build-once guard (CLAUDE.md GPU rule): every render pipeline used by
+            // the viewer is compiled exactly once, here, inside `DisplayPipelines::new`.
+            // No other call site may construct a pipeline — image open/navigation must
+            // only ever borrow from this pre-warmed holder.
+            debug_assert_eq!(
+                pipelines.pipelines_built(),
+                5,
+                "all display pipelines must be built once at pre-warm (build-once, CLAUDE.md GPU rule)"
+            );
             let histogram = ferrolite_vt::HistogramPipeline::new(&gpu);
             rs.renderer
                 .write()
@@ -284,6 +293,15 @@ impl FerroliteApp {
         // loop does not spin.
         v.idle = true;
 
+        // Placeholder (1,1) present-buffer size: `drive_viewer`'s per-frame
+        // resize corrects it to the canvas's physical viewport before paint.
+        let present = ferrolite_vt::PresentBuffers::new(&gpu, (1, 1), rs.target_format);
+        let present_alpha = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-present-alpha"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         rs.renderer
             .write()
             .callback_resources
@@ -293,6 +311,9 @@ impl FerroliteApp {
                 full: None,
                 preview_before: None,
                 image_id,
+                present,
+                present_alpha,
+                blit_bind_front: None,
             });
         self.mark_histogram_dirty();
         true
@@ -877,12 +898,26 @@ impl FerroliteApp {
         {
             let mut renderer = rs.renderer.write();
             if let Some(preview) = preview_vt {
+                let holder_gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+                // Placeholder (1,1) present-buffer size: `drive_viewer`'s per-frame
+                // resize corrects it to the canvas's physical viewport before paint.
+                let present =
+                    ferrolite_vt::PresentBuffers::new(&holder_gpu, (1, 1), rs.target_format);
+                let present_alpha = holder_gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vt-present-alpha"),
+                    size: 32,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
                 renderer.callback_resources.insert(viewer::ViewerGpu {
-                    ctx: ferrolite_gpu::GpuContext::from_render_state(rs),
+                    ctx: holder_gpu,
                     preview,
                     full: Some(full),
                     preview_before: None,
                     image_id,
+                    present,
+                    present_alpha,
+                    blit_bind_front: None,
                 });
                 full_installed = true;
             } else if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -902,7 +937,20 @@ impl FerroliteApp {
                     // `apply_preview_ready` until this color-correct reveal.)
                     v.loaded = true;
                     v.full_ready = true;
-                    v.begin_crossfade();
+                    // Task 15: do NOT start the crossfade here. `full_ready` alone
+                    // does not make `present_source` show anything but `Preview`
+                    // (it also requires `front_valid` — the composed `front` keyed
+                    // to the current `(opstack_version, view)`, gated on the sparse
+                    // pool being fully resident — see `viewer::present::present_source`),
+                    // and the sparse pool is essentially never resident this early (the
+                    // tiles have not been produced yet). A ramp started here would
+                    // complete (150 ms) while fully invisible, so by the time
+                    // `drive_viewer`'s convergence swap fires — often much later —
+                    // the visible crossfade needs a FRESH ramp anyway. That fresh
+                    // ramp is started at the swap in `drive_viewer` (when
+                    // `v.present_key` is set to the freshly-composed state), which is
+                    // the only crossfade trigger that actually drives a visible
+                    // preview→front fade.
                     // The full tier's dimensions (uprighted, half-res demosaic)
                     // are the reveal render's dims too. Fit to them; fall back to
                     // the image's own size if the canvas has not painted yet (the
@@ -1705,9 +1753,26 @@ impl FerroliteApp {
 /// plus a few zoom levels of the quad-binned (half-res) full image.
 const VIEWER_TILE_BUDGET: u32 = 256;
 
-/// Max edited tiles rendered per frame on the render thread (bounds GPU work;
-/// CLAUDE.md GPU rule). Remaining needed tiles are produced on subsequent frames.
-const MAX_PRODUCE_PER_FRAME: usize = 8;
+/// Max edited tiles rendered per frame on the render thread (bounds GPU work
+/// per CLAUDE.md's GPU-frame-budget rule: pipelines run on the render thread
+/// but bounded, never unbounded per-frame work). Remaining needed tiles are
+/// produced on subsequent frames.
+///
+/// Task 15: raised from 8 to 32. Production here only feeds the OFF-SCREEN
+/// sparse pool that `drive_viewer` composes+swaps once converged (see
+/// `compose_sparse_into`) — none of it is presented mid-burst — so a larger
+/// per-frame burst is invisible to the user and just reaches convergence (and
+/// the visible swap) sooner. The value stays a bounded named const rather than
+/// unbounded so a single frame's production cannot blow the frame budget;
+/// the author profiles this bound in the next phase (Task 17) and will tune
+/// it further if 32 proves too expensive on slower GPUs.
+const MAX_PRODUCE_PER_FRAME: usize = 32;
+
+/// Spec 4.5 §4.2: prefetch ring for the sparse producer's needed set — the ring
+/// of tiles around the visible rect (plus the coarse base) produced ahead of a
+/// pan/zoom so the off-screen compose has the neighbours ready and convergence
+/// includes them. A one-tile ring keeps the extra production bounded.
+const PREFETCH_RING: u32 = 1;
 
 /// Max thumbnail texture uploads per frame (bounds per-frame GPU/texture work
 /// during bulk thumbnail delivery; CLAUDE.md responsiveness rule). Overflow is
@@ -1755,29 +1820,113 @@ impl FerroliteApp {
         let mut produce_pending: Option<usize> = None;
         let mut needed_established = false;
         let mut produced_this_frame = 0usize;
-        if let (Some(rs), Some(_v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
+        // Spec 4.5 §4.2: whether the sparse pool is fully resident for the current
+        // transform+version this frame (CPU-rect predicate). Drives the off-screen
+        // compose+swap below and the `present_source` selection for `paint`.
+        let mut converged = false;
+        // Set true on the frame the compose+swap actually ran, so the caller can
+        // (re)start the crossfade ramp exactly once per convergence.
+        let mut swapped_this_frame = false;
+        // Set true when `g.present.resize` actually reallocated (canvas size
+        // changed), meaning `front`/`back` are now blank. `converged` frequently
+        // stays true across a resize (same zoom -> same tiles resident), so the
+        // compose+swap guard below would otherwise never re-fire and the canvas
+        // would show blank/clear-color until the next pan/zoom/edit. Re-armed
+        // below alongside the `!converged` re-arm.
+        let mut present_reallocated = false;
+        if let (Some(rs), Some(v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
+            // The view/viewport for feedback, prefetch, convergence, and the
+            // off-screen compose. One-frame-latent (recorded by the PRIOR frame's
+            // `viewer::paint`), matching `request_view_feedback`'s existing latency.
+            let cur_view = v.view;
+            let cur_viewport = v.viewport;
+            // The `(opstack_version, view)` the compose+swap keys on, captured
+            // (Copy) before the `&mut ViewerGpu` borrow. `front` is composed for
+            // the CURRENT state iff `cur_present_key == Some((cur_version, cur_view))`.
+            let cur_version = v.opstack_version;
+            let cur_present_key = v.present_key;
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                // Resize the off-screen present buffers to the canvas viewport
+                // (converted logical→physical px) every frame; `resize` no-ops
+                // when the size is unchanged. `v.viewport` is one-frame-latent
+                // here (this runs before `viewer::paint` records this frame's
+                // rect below), matching `request_view_feedback`'s existing
+                // one-frame latency.
+                let ppp = ui.ctx().pixels_per_point();
+                let phys = (
+                    (v.viewport.0 * ppp).round().max(1.0) as u32,
+                    (v.viewport.1 * ppp).round().max(1.0) as u32,
+                );
+                present_reallocated = g.present.resize(&g.ctx, phys);
                 if Some(g.image_id) != open_id {
                     // Stale holder from a superseded viewer: stop its tile jobs.
                     if let Some(full) = g.full.as_mut() {
                         full.cancel_sparse();
                     }
-                } else if let Some(full) = g.full.as_mut() {
-                    full.request_view_feedback(&g.ctx);
-                    // Plan 3: when an edit producer is present, render the needed
-                    // tiles on the render thread (bounded). `produce_view` borrows
-                    // the producer (which lives in ViewerState) by &mut per call.
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if let Some(producer) = v.edit_producer.as_mut() {
-                            let needed = full.needed_now();
-                            produced_this_frame =
-                                full.produce_view(&g.ctx, producer, &needed, MAX_PRODUCE_PER_FRAME);
+                } else if g.full.is_some() {
+                    // Scope the `&mut g.full` alias so it is DROPPED before the
+                    // compose+swap below reborrows `g.full` alongside `g.present`
+                    // / `g.ctx` (disjoint-field borrows must not overlap an alias).
+                    {
+                        let full = g.full.as_mut().expect("checked is_some");
+                        full.request_view_feedback(&g.ctx);
+                        // Plan 3: when an edit producer is present, render the needed
+                        // tiles on the render thread (bounded). `produce_view` borrows
+                        // the producer (which lives in ViewerState) by &mut per call.
+                        // Spec 4.5 §4.2: drive production from the PREFETCHED CPU-rect
+                        // set (visible + ring + coarse base) so convergence includes
+                        // the neighbours a pan/zoom will need, and the visible tiles
+                        // converge first.
+                        if let Some(v) = self.state.viewer.as_mut() {
+                            if let Some(producer) = v.edit_producer.as_mut() {
+                                let needed =
+                                    full.needed_prefetched(&cur_view, cur_viewport, PREFETCH_RING);
+                                produced_this_frame = full.produce_view(
+                                    &g.ctx,
+                                    producer,
+                                    &needed,
+                                    MAX_PRODUCE_PER_FRAME,
+                                );
+                            }
                         }
+                        tiles_pending = full.sparse_pending();
+                        produce_pending = full.produce_pending();
+                        needed_established = full.needed_established();
+                        // CPU-rect convergence for the current transform+version.
+                        converged = full.is_converged(&cur_view, cur_viewport);
                     }
-                    tiles_pending = full.sparse_pending();
-                    produce_pending = full.produce_pending();
-                    needed_established = full.needed_established();
+
+                    // Compose+swap when the pool is converged AND `front` is stale
+                    // or missing for the current state — i.e. its key does not match
+                    // `(cur_version, cur_view)`. An edit bumps `opstack_version` and
+                    // a pan/zoom changes `view`, so the key mismatches immediately;
+                    // once composed for this state the key matches and the swap does
+                    // not re-fire (at most ONCE per (version, view)). This is the
+                    // keying that fixes edits/split not showing until a zoom nudge.
+                    // The pool is converged so this is one bounded render pass.
+                    // Disjoint-field borrows: `g.full`, `g.ctx`, and `g.present` are
+                    // three distinct fields borrowed in the same expression.
+                    if converged && cur_present_key != Some((cur_version, cur_view)) {
+                        let mut enc =
+                            g.ctx
+                                .device
+                                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("viewer-present-compose"),
+                                });
+                        if let Some(full) = g.full.as_mut() {
+                            full.compose_sparse_into(
+                                &g.ctx,
+                                &mut enc,
+                                g.present.back_view(),
+                                &cur_view,
+                                cur_viewport,
+                            );
+                        }
+                        g.ctx.queue.submit([enc.finish()]);
+                        g.present.swap();
+                        swapped_this_frame = true;
+                    }
                 }
             }
         }
@@ -1786,6 +1935,18 @@ impl FerroliteApp {
             return;
         };
 
+        // Task 17 (spec 4.5 §9): dev-mode viewer frame-time profiling hook.
+        // Entirely behind `diag::enabled()` — the branch not taken means zero
+        // added cost (no float math, no atomic store) on the hot pan/zoom path
+        // when diagnostics are off, matching every other recorder in `diag.rs`.
+        // Records this frame's `stable_dt` (ms) and the sparse producer's
+        // tiles-produced-this-frame count so the author can measure the
+        // ≤16.6 ms/frame budget on the dev GPU via the existing diag log/overlay
+        // (see `diag::format_viewer_line`); no new UI.
+        if crate::diag::enabled() {
+            crate::diag::record_viewer_frame(dt, produced_this_frame);
+        }
+
         // If the view changed (pan/zoom in `viewer::paint` already cleared `idle`,
         // but a programmatic change might not), `request_view_feedback` above may
         // have submitted new tile loads. Resume the drive loop so they drain + display.
@@ -1793,11 +1954,45 @@ impl FerroliteApp {
             v.idle = false;
         }
 
-        // Advance the crossfade ramp; swap to full once it has completed and the
-        // current view's tiles are all resident.
+        // Spec 4.5 §4.2: key the composed `front` on `(opstack_version, view)`.
+        // A canvas resize reallocates (blanks) the present buffers, so invalidate
+        // the key — `front` no longer holds anything valid until recomposed. On the
+        // frame the compose+swap ran, record the key it was composed at and (re)start
+        // the crossfade ramp so the freshly-composed `front` fades in over the preview.
+        // Recompute the current key here (post-block) since `opstack_version`/`view`
+        // are stable across this function and were captured above as Copy locals.
+        let cur_version = v.opstack_version;
+        let cur_view = v.view;
+        if present_reallocated {
+            v.present_key = None;
+        }
+        if swapped_this_frame {
+            v.present_key = Some((cur_version, cur_view));
+            v.begin_crossfade();
+        }
+
+        // Advance the crossfade ramp. `factor` in [0,1] rides the swap: 0 right
+        // after a swap, 1 once the ramp completes (or immediately once idle+ready).
         let factor = v.tick_crossfade(dt);
         let tiles_settled = matches!(tiles_pending, Some(0));
-        let show_full = v.full_ready && factor >= 1.0 && tiles_settled;
+        // `front` holds a valid composed image for the CURRENT `(version, view)`
+        // iff the recorded key matches. False during edits (version bumped), motion
+        // (view changed each frame), and right after a resize (key set to `None`) —
+        // in all of which `present_source` must fall back to `Preview`.
+        let front_valid = v.present_key == Some((cur_version, cur_view));
+        // The full (sparse) tier is actually on screen once `front` is valid for
+        // the current state, the crossfade has completed, its tiles are all
+        // resident, AND the before/after split is NOT active (the split is a
+        // preview-tier-only compare — never claim the full tier is "shown" while
+        // it renders, which is the split fix). Consulted by `toggle_split_compare`
+        // (via `showing_full`) to decide whether enabling the split dead-ends.
+        let show_full =
+            v.full_ready && front_valid && factor >= 1.0 && tiles_settled && !v.split_compare;
+        // Present-source inputs handed to `viewer::paint` (which also folds in the
+        // per-frame `interacting` and `split_compare` it reads): the sparse tier
+        // exists, `front` is valid for the current `(version, view)`, and the
+        // crossfade factor.
+        let full_ready = v.full_ready;
         // Persist the real, per-frame-current value so `toggle_split_compare`
         // (which runs outside this per-frame borrow, e.g. from a keyboard
         // shortcut or menu click) can consult an accurate "is the full tier
@@ -1840,9 +2035,13 @@ impl FerroliteApp {
         let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
 
         // `paint` applies this frame's pan/zoom and clears `idle` when the view
-        // moved, so read `idle` AFTER it to catch an interaction this frame.
-        let loading_preview = viewer::paint(ui, v, show_full, interactive);
+        // moved, so read `idle` AFTER it to catch an interaction this frame. It
+        // also folds this frame's `interacting` into the present source and returns
+        // the chosen source so the repaint gate can keep the loop alive mid-fade.
+        let (loading_preview, present_source) =
+            viewer::paint(ui, v, full_ready, front_valid, factor, interactive);
         let idle = v.idle;
+        let crossfading_present = matches!(present_source, viewer::PresentSource::Crossfade(_));
 
         // Repaint only while there is pending work:
         //  - preview not yet uploaded, or
@@ -1856,7 +2055,25 @@ impl FerroliteApp {
         // view (feedback is one frame latent + production is bounded per frame),
         // so the sparse tiles stream in on open without a manual pan/zoom.
         let full_warming = show_full && !full_converged;
-        if !idle && (loading_preview || crossfading || tiles_loading || full_warming) {
+        // Spec 4.5 §4.2: while the sparse tier exists but is not yet converged, keep
+        // the loop alive so production advances and the off-screen compose+swap can
+        // fire; and keep it alive while a present-crossfade is mid-ramp so the
+        // freshly-swapped `front` fades in without a manual nudge. Additionally, keep
+        // repainting while `front` is stale for the current state (`!front_valid`) —
+        // e.g. an edit at an already-settled fit view bumped `opstack_version` so the
+        // key mismatches but `converged` may already be true: without this the loop
+        // could idle before the recompose+swap fires and the edit would only appear
+        // after a manual zoom. Once `front_valid` (and not crossfading + converged),
+        // none of these terms hold, so the loop goes idle (no busy-loop).
+        let compose_pending = full_ready && (!converged || !front_valid);
+        if !idle
+            && (loading_preview
+                || crossfading
+                || crossfading_present
+                || tiles_loading
+                || full_warming
+                || compose_pending)
+        {
             ui.ctx().request_repaint();
         }
 
@@ -1883,7 +2100,10 @@ impl FerroliteApp {
                         image_id,
                         view,
                         viewport,
-                        show_full: false,
+                        // The `Before` path always draws the preview-tier
+                        // `preview_before`; the present source is ignored by that
+                        // arm, but pass `Preview` for a well-defined value.
+                        present_source: viewer::PresentSource::Preview,
                         which: viewer::PreviewWhich::Before,
                     },
                 ));
@@ -3512,6 +3732,14 @@ impl eframe::App for FerroliteApp {
                 export_done: crate::diag::export_done(),
                 export_failed: crate::diag::export_failed(),
                 export_last_ms: crate::diag::export_last_ms(),
+                // Task 17 (spec 4.5 §9): last Develop `drive_viewer` frame time
+                // + this tick's max + last tiles-produced count. Recorded by
+                // `drive_viewer` only when diag is enabled; reads as 0.0/0
+                // otherwise (e.g. Library module, or diag off — this whole
+                // block is already gated on `diag_t0.is_some()`).
+                viewer_frame_ms: crate::diag::viewer_frame_ms(),
+                viewer_frame_max_ms: crate::diag::viewer_frame_max_ms(),
+                viewer_tiles_produced: crate::diag::viewer_tiles_produced(),
             };
             let stats = self.state.jobs.stats();
             if let Some(snap) = self.diag.tick(

@@ -20,13 +20,15 @@ use ferrolite_image::{TileCoord, TILE_SIZE};
 
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
-use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest};
-use crate::op::{Aspect, CropRect, Geometry, OpStack};
+use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
+use crate::nodes::{CurveNode, GeometryHeadNode, PointOpNode, TileRequest, VignetteNode};
+use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
-    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, sharpen_halo,
-    sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform,
-    SharpenUniform, WbUniform,
+    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, lens_halo_px,
+    sharpen_halo, sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform,
+    HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
 };
+use ferrolite_lens::{VignetteMap, WarpGrid};
 
 pub struct TileEditPipeline {
     ctx: Arc<GpuContext>,
@@ -34,8 +36,12 @@ pub struct TileEditPipeline {
     output_id: NodeId,
     request: Rc<Cell<TileRequest>>,
     head_id: NodeId,
+    head: Rc<GeometryHeadNode>,
     color_matrix_id: NodeId,
     color_matrix: Rc<Cell<ColorMatrixUniform>>,
+    vignette_id: NodeId,
+    vignette: Rc<Cell<VignetteUniform>>,
+    vignette_node: Rc<VignetteNode>,
     halo: u32,
     // Param cells (set from the stack; Plan 4 mutates via set_stack).
     exposure: Rc<Cell<ExposureUniform>>,
@@ -47,13 +53,25 @@ pub struct TileEditPipeline {
 }
 
 impl TileEditPipeline {
+    /// Construct the per-tile producer, baking the geometry transform and the
+    /// halo (max of the sharpen halo and the lens-warp halo) at construction.
+    ///
+    /// `warp_grid` / `vignette_map` are the app's CURRENT lens bake products (from
+    /// `ferrolite-lens`); pass `None` when no lens is matched or the bake has not
+    /// completed — the head then binds the identity warp / vignette defaults and
+    /// the shader takes the byte-identical no-correction path. When a grid is
+    /// present, the lens halo (over-fetch for the distortion displacement) is
+    /// folded into the haloed tile extent so per-tile borders stay seamless.
     pub fn new(
         ctx: Arc<GpuContext>,
         source: Arc<GpuPyramidSource>,
         stack: OpStack,
         camera_to_working: [[f32; 3]; 3],
+        warp_grid: Option<&WarpGrid>,
+        vignette_map: Option<&VignetteMap>,
     ) -> Self {
-        let halo = sharpen_halo(stack.sharpen());
+        let lc: Option<LensCorrection> = stack.lens_correction();
+        let halo = sharpen_halo(stack.sharpen()).max(lens_halo_px(lc.as_ref(), warp_grid));
         let geometry = stack.geometry().unwrap_or(Geometry {
             crop: CropRect::full(),
             angle_deg: 0.0,
@@ -65,8 +83,13 @@ impl TileEditPipeline {
         }));
 
         let mut graph = Graph::new();
-        let head = GeometryHeadNode::new(ctx.clone(), source, geometry, request.clone());
-        let head_id = graph.add_node(Box::new(head), vec![]);
+        let head = Rc::new(GeometryHeadNode::new(
+            ctx.clone(),
+            source,
+            geometry,
+            request.clone(),
+        ));
+        let head_id = graph.add_node(Box::new(head.clone()), vec![]);
 
         let color_matrix = Rc::new(Cell::new(color_matrix_uniform(camera_to_working)));
         let color_matrix_id = graph.add_node(
@@ -79,6 +102,13 @@ impl TileEditPipeline {
             vec![head_id],
         );
 
+        // Vignetting: scene-linear point op, before exposure (spec §6.2). It is
+        // point-wise, so its position in the per-tile color chain only needs to be
+        // scene-linear. Default `vig_amount = 0` → identity (tile-seam golden safe).
+        let vignette = Rc::new(Cell::new(VignetteUniform::default()));
+        let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone()));
+        let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
+
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
         let exposure_id = graph.add_node(
             Box::new(PointOpNode::new(
@@ -87,7 +117,7 @@ impl TileEditPipeline {
                 "exposure",
                 exposure.clone(),
             )),
-            vec![color_matrix_id],
+            vec![vignette_id],
         );
         let wb = Rc::new(Cell::new(crate::uniforms::wb_uniform(
             stack.white_balance(),
@@ -143,14 +173,38 @@ impl TileEditPipeline {
             vec![hsl_id],
         );
 
+        // Bind the lens bake products (or leave the identity defaults). The head
+        // owns the warp grid + `LensUniform`; the vignette node owns the gain LUT
+        // and reads its lerp amount from the `vignette` cell. `set_warp`/
+        // `set_vignette` rebuild only the cached views (bake-time, not per frame),
+        // and the uniform writes are buffer-only — no pipeline rebuild.
+        if let Some(grid) = warp_grid {
+            head.set_warp(WarpGridTexture::upload(&ctx, grid));
+        }
+        head.set_lens_uniform(crate::uniforms::lens_uniform(
+            lc.as_ref(),
+            warp_grid.is_some(),
+        ));
+        if let Some(map) = vignette_map {
+            vignette_node.set_vignette(VignetteTexture::upload(&ctx, map));
+        }
+        vignette.set(VignetteUniform {
+            vig_amount: crate::uniforms::vignette_amount(lc.as_ref()),
+            ..VignetteUniform::default()
+        });
+
         Self {
             ctx,
             graph,
             output_id: sharpen_id,
             request,
             head_id,
+            head,
             color_matrix_id,
             color_matrix,
+            vignette_id,
+            vignette,
+            vignette_node,
             halo,
             exposure,
             wb,
@@ -169,13 +223,16 @@ impl TileEditPipeline {
     /// tone curve, HSL, sharpen amount) from `stack` and dirty the chain so the
     /// next `produce_tile` re-renders.
     ///
-    /// LIMITATION: the geometry transform (crop/rotate) and the sharpen **halo**
-    /// are fixed at construction (baked into the `GeometryHeadNode` and the haloed
-    /// extent). `set_stack` does NOT update them. If `stack.geometry()` changes or
-    /// `sharpen_halo(stack.sharpen())` differs from the current `halo()`, this
-    /// pipeline must be DISCARDED and rebuilt with `TileEditPipeline::new` — calling
-    /// `set_stack` alone will silently keep the old geometry/halo. (A later plan that
-    /// wires interactive edits is responsible for that rebuild decision.)
+    /// LIMITATION: the geometry transform (crop/rotate), the halo (max of the
+    /// sharpen and lens-warp halos), and the baked lens warp grid are fixed at
+    /// construction (baked into the `GeometryHeadNode` and the haloed extent).
+    /// `set_stack` does NOT update them. If `stack.geometry()` changes, the halo
+    /// changes, or the rebuild-relevant lens key changes (lens id / focal / aperture
+    /// / crop / enabled flags — anything that re-bakes the grid), this pipeline must
+    /// be DISCARDED and rebuilt with `TileEditPipeline::new` — calling `set_stack`
+    /// alone will silently keep the old geometry/halo/grid. `needs_full_rebuild` in
+    /// the app makes that decision. Amount-only lens changes are uniform updates via
+    /// the lens/vignette setters (no rebuild).
     pub fn set_stack(&mut self, stack: OpStack) {
         self.exposure.set(exposure_uniform(stack.exposure()));
         self.wb
@@ -199,6 +256,55 @@ impl TileEditPipeline {
         if u != self.color_matrix.get() {
             self.color_matrix.set(u);
             self.graph.mark_dirty(self.color_matrix_id);
+        }
+    }
+
+    /// Bind a freshly baked lens warp grid to the geometry head (bake-time; no
+    /// pipeline rebuild). Dirties the head so the next `produce_tile` re-samples.
+    pub fn set_warp(&mut self, warp: WarpGridTexture) {
+        self.head.set_warp(warp);
+        self.graph.mark_dirty(self.head_id);
+    }
+
+    /// Set the lens correction amounts + `use_warp` flag on the geometry head
+    /// (buffer write; no rebuild). Dirties the head so the next tile applies it.
+    pub fn set_lens_uniform(&mut self, lens: LensUniform) {
+        self.head.set_lens_uniform(lens);
+        self.graph.mark_dirty(self.head_id);
+    }
+
+    /// Bind a freshly baked vignette gain LUT to the per-tile vignette pass
+    /// (bake-time; rebuilds the cached view, no pipeline rebuild).
+    pub fn set_vignette(&mut self, lut: VignetteTexture) {
+        self.vignette_node.set_vignette(lut);
+        self.graph.mark_dirty(self.vignette_id);
+    }
+
+    /// Set the vignette lerp amount (buffer write; no rebuild). 0 = identity.
+    /// Read-modify-write so an independent `manual` setting is preserved.
+    pub fn set_vig_amount(&mut self, amount: f32) {
+        let u = VignetteUniform {
+            vig_amount: amount,
+            ..self.vignette.get()
+        };
+        if u != self.vignette.get() {
+            self.vignette.set(u);
+            self.graph.mark_dirty(self.vignette_id);
+        }
+    }
+
+    /// Set the parametric manual (lens-free) vignette strength (buffer write; no
+    /// rebuild). 0 = identity; negative darkens corners, positive brightens them.
+    /// Read-modify-write so the independent `vig_amount` (profile) setting is
+    /// preserved.
+    pub fn set_vig_manual(&mut self, manual: f32) {
+        let u = VignetteUniform {
+            manual,
+            ..self.vignette.get()
+        };
+        if u != self.vignette.get() {
+            self.vignette.set(u);
+            self.graph.mark_dirty(self.vignette_id);
         }
     }
 

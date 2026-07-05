@@ -74,6 +74,36 @@ pub struct Sharpen {
     pub radius: u32,
 }
 
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Correction {
+    /// Whether this correction is applied at all.
+    pub enabled: bool,
+    /// Strength multiplier [0..], 1.0 = full DB correction. Applied as a shader lerp.
+    pub amount: f32,
+}
+
+impl Default for Correction {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            amount: 1.0,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct LensCorrection {
+    /// Resolved Lensfun lens key; None = unmatched (identity). Re-resolved on open.
+    pub lens_id: Option<String>,
+    /// Capture context used for the bake (EXIF; user-overridable).
+    pub focal_len: f32,
+    pub aperture: f32,
+    pub crop_factor: f32,
+    pub distortion: Correction,
+    pub tca: Correction,
+    pub vignetting: Correction,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Aspect {
     Original,
@@ -123,6 +153,7 @@ pub enum Op {
     ToneCurve(ToneCurve),
     Hsl(Hsl),
     Sharpen(Sharpen),
+    LensCorrection(LensCorrection),
     Geometry(Geometry),
 }
 
@@ -137,7 +168,8 @@ pub enum OpKind {
     ToneCurve = 3,
     Hsl = 4,
     Sharpen = 5,
-    Geometry = 6,
+    LensCorrection = 6,
+    Geometry = 7,
 }
 
 impl Op {
@@ -149,6 +181,7 @@ impl Op {
             Op::ToneCurve(_) => OpKind::ToneCurve,
             Op::Hsl(_) => OpKind::Hsl,
             Op::Sharpen(_) => OpKind::Sharpen,
+            Op::LensCorrection(_) => OpKind::LensCorrection,
             Op::Geometry(_) => OpKind::Geometry,
         }
     }
@@ -247,6 +280,13 @@ impl OpStack {
     pub fn geometry(&self) -> Option<Geometry> {
         self.ops.iter().find_map(|o| match o {
             Op::Geometry(g) => Some(*g),
+            _ => None,
+        })
+    }
+
+    pub fn lens_correction(&self) -> Option<LensCorrection> {
+        self.ops.iter().find_map(|o| match o {
+            Op::LensCorrection(l) => Some(l.clone()),
             _ => None,
         })
     }
@@ -413,5 +453,42 @@ mod tests {
         };
         let s = serde_json::to_string(&tc).unwrap();
         assert_eq!(serde_json::from_str::<ToneCurve>(&s).unwrap(), tc);
+    }
+
+    #[test]
+    fn lens_correction_sits_before_geometry_in_canonical_order() {
+        let lc = LensCorrection {
+            lens_id: Some("Canon EF 24-70mm f/2.8L II USM".into()),
+            focal_len: 50.0,
+            aperture: 8.0,
+            crop_factor: 1.0,
+            distortion: Correction {
+                enabled: true,
+                amount: 1.0,
+            },
+            tca: Correction::default(),
+            vignetting: Correction::default(),
+        };
+        let s = OpStack::default()
+            .set_op(Op::Geometry(Geometry {
+                crop: CropRect::full(),
+                angle_deg: 0.0,
+                aspect: Aspect::Original,
+            }))
+            .set_op(Op::LensCorrection(lc.clone()));
+        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
+        assert_eq!(kinds, vec![OpKind::LensCorrection, OpKind::Geometry]);
+        assert_eq!(s.lens_correction(), Some(lc));
+    }
+
+    #[test]
+    fn correction_default_is_off_at_full_amount() {
+        assert_eq!(
+            Correction::default(),
+            Correction {
+                enabled: false,
+                amount: 1.0
+            }
+        );
     }
 }

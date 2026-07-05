@@ -133,16 +133,17 @@ fn editing_one_op_reevaluates_minimally() {
         "no node re-ran when nothing changed"
     );
 
-    // Dirtying exposure re-runs it + every downstream op; the source node AND
-    // the upstream camera→working color-matrix node (both ahead of exposure in
-    // the chain) stay cached -> exactly node_count - 2 re-evaluations.
+    // Dirtying exposure re-runs it + every downstream op; the three nodes ahead
+    // of exposure in the chain — source, the camera→working color-matrix, and the
+    // scene-linear vignette pass — stay cached -> exactly node_count - 3
+    // re-evaluations.
     let prev = pipe.eval_count();
     pipe.set_stack(OpStack::default().set_op(Op::Exposure(Exposure { ev: 1.5 })));
     let _ = pipe.evaluate();
     assert_eq!(
         pipe.eval_count(),
-        prev + (pipe.node_count() - 2),
-        "exposure + downstream re-evaluated; source and color-matrix stay cached"
+        prev + (pipe.node_count() - 3),
+        "exposure + downstream re-evaluated; source, color-matrix, and vignette stay cached"
     );
 }
 
@@ -300,7 +301,7 @@ fn sharpen_tiles_match_whole_image_at_seam() {
 
     // Per-tile producer over the GPU-resident source pyramid.
     let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
-    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY);
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
 
     // Produce both tiles, read interiors, and compare the valid region against
     // the whole-image reference — focusing on the seam column.

@@ -443,6 +443,7 @@ impl FerroliteApp {
             &self.state.tx,
             ctx,
             gpu,
+            self.state.lens_db.clone(),
             image_id,
             path,
             kind,
@@ -784,30 +785,55 @@ impl FerroliteApp {
         // buffer is never memcpy'd a second time onto the UI thread.
         let raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
             is_raw.then(|| std::sync::Arc::new(image.clone()));
-        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> =
-            if let Some(src) = raw_preview_source.as_ref() {
-                match self.state.viewer.as_mut() {
-                    Some(v) if v.image_id == image_id => {
-                        v.raw_preview_source = Some(std::sync::Arc::clone(src));
-                        let ctx_arc =
-                            std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                        let mut ep = ferrolite_pipeline::EditPipeline::new(
-                            ctx_arc,
-                            src,
-                            v.op_stack.clone(),
-                            cam,
-                        );
-                        let out = ep.evaluate();
-                        let tex = out.texture.clone();
-                        let dims = (out.width, out.height);
-                        v.preview_edit = Some(ep);
-                        Some((tex, dims))
+        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if let Some(src) =
+            raw_preview_source.as_ref()
+        {
+            match self.state.viewer.as_mut() {
+                Some(v) if v.image_id == image_id => {
+                    v.raw_preview_source = Some(std::sync::Arc::clone(src));
+                    let ctx_arc =
+                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let mut ep = ferrolite_pipeline::EditPipeline::new(
+                        ctx_arc.clone(),
+                        src,
+                        v.op_stack.clone(),
+                        cam,
+                    );
+                    // Bind any lens bake already present (e.g. a re-open that
+                    // baked before this decode landed) so the initial preview
+                    // isn't uncorrected (I1). Usually None at fresh open; the
+                    // `LensBaked` handler pushes the bake once it completes.
+                    if let Some(w) = v.lens_warp.as_ref() {
+                        ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
                     }
-                    _ => None,
+                    ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                        v.op_stack.lens_correction().as_ref(),
+                        v.lens_warp.is_some(),
+                    ));
+                    if let Some(vg) = v.lens_vignette.as_ref() {
+                        ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
+                    }
+                    // Mode-aware vignette (MV2): profile LUT lerp when a bake is
+                    // bound, else the lens-free parametric manual gain — so a
+                    // persisted manual-vignette op (lens_id=None, no bake) still
+                    // applies on open. Both uniforms are pushed as a pair.
+                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                        v.op_stack.lens_correction().as_ref(),
+                        v.lens_vignette.is_some(),
+                    );
+                    ep.set_vig_amount(vig_amount);
+                    ep.set_vig_manual(vig_manual);
+                    let out = ep.evaluate();
+                    let tex = out.texture.clone();
+                    let dims = (out.width, out.height);
+                    v.preview_edit = Some(ep);
+                    Some((tex, dims))
                 }
-            } else {
-                None
-            };
+                _ => None,
+            }
+        } else {
+            None
+        };
 
         let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
             std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
@@ -901,13 +927,27 @@ impl FerroliteApp {
                     // unedited-but-color-managed.
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    // Thread the current lens bake (if any) into the fresh producer
+                    // (U7): `None` until a bake completes, which is byte-identical
+                    // to no lens correction (identity warp/vignette defaults).
+                    // Mode-aware vignette pair (MV2) so a persisted manual-vignette
+                    // op (lens_id=None → no bake) applies on open.
+                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                        v.op_stack.lens_correction().as_ref(),
+                        v.lens_vignette.is_some(),
+                    );
                     let tep = ferrolite_pipeline::TileEditPipeline::new(
                         ctx_arc,
                         pyramid,
                         v.op_stack.clone(),
                         cam,
+                        v.lens_warp.as_ref(),
+                        v.lens_vignette.as_ref(),
                     );
-                    v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                    let mut producer = viewer::EditTileProducer::new(tep);
+                    producer.set_vig_amount(vig_amount);
+                    producer.set_vig_manual(vig_manual);
+                    v.edit_producer = Some(producer);
                     let version = v.opstack_version.max(1);
                     let mut renderer = rs.renderer.write();
                     if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -1046,6 +1086,115 @@ impl FerroliteApp {
         }
     }
 
+    /// An off-thread lens bake (`develop::lens_bake::spawn_lens_bake`) finished
+    /// (Spec 4.4, U7). Stores the fresh warp grid / vignette map / resolved name
+    /// on the viewer, then rebuilds the full-res tile producer so it picks up
+    /// the new grid/LUT (a lens bake ALWAYS changes the baked content — the
+    /// producer must be discarded and rebuilt, the same as a geometry/halo
+    /// change; there is no in-place "new bake, same shapes" case to special-case).
+    ///
+    /// Guarded on `image_id == current`: a bake for an image the user has since
+    /// navigated away from is dropped here even if it slipped past the
+    /// `lens_bake_handle` cancellation checkpoint in the job itself.
+    fn apply_lens_baked(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        result: &crate::develop::lens_bake::LensBakeResult,
+    ) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let cam = self.camera_to_working();
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        if v.image_id != image_id {
+            return; // superseded: navigated away before the bake finished
+        }
+        v.lens_warp = result.warp.clone();
+        v.lens_vignette = result.vignette.clone();
+        v.lens_resolved_name = result.resolved_name.clone();
+        v.lens_bake_handle = None;
+
+        // Rebuild the full-res producer (if the pyramid exists yet) so it binds
+        // the fresh grid/LUT. Mirrors the rebuild branch in `set_preview_and_full`.
+        let shown = if v.before_after {
+            ferrolite_pipeline::OpStack::default()
+        } else {
+            v.op_stack.clone()
+        };
+
+        // Push the fresh bake to the PREVIEW/fit tier too, so toggling or
+        // adjusting a correction updates the fit-zoom image live (I1). The
+        // before-view (identity `shown`) carries no lens op, so bind identity
+        // there. Bake products are cheap GPU uploads here (already baked
+        // off-thread by the job that produced this `result`). Built once and
+        // reused by the full-res producer rebuild below (CLAUDE.md GPU rule).
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let _ = &ctx_arc; // used by the preview and/or full-res branch below
+        if let Some(ep) = v.preview_edit.as_mut() {
+            let lc = shown.lens_correction();
+            if let Some(w) = v.lens_warp.as_ref() {
+                ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
+            }
+            ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                lc.as_ref(),
+                v.lens_warp.is_some(),
+            ));
+            if let Some(vg) = v.lens_vignette.as_ref() {
+                ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
+            }
+            // Mode-aware vignette pair (MV2): a bake just landed, so
+            // `has_vignette_lut` reflects the fresh `v.lens_vignette`.
+            let (vig_amount, vig_manual) =
+                crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
+            ep.set_vig_amount(vig_amount);
+            ep.set_vig_manual(vig_manual);
+            let img = ep.evaluate();
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == image_id {
+                    g.preview
+                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
+                }
+            }
+        }
+        if let Some(pyr) = v.pyramid.clone() {
+            // Mode-aware vignette pair for the rebuilt full-res producer (MV2).
+            let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                shown.lens_correction().as_ref(),
+                v.lens_vignette.is_some(),
+            );
+            let tep = ferrolite_pipeline::TileEditPipeline::new(
+                ctx_arc.clone(),
+                pyr,
+                shown,
+                cam,
+                v.lens_warp.as_ref(),
+                v.lens_vignette.as_ref(),
+            );
+            let mut producer = viewer::EditTileProducer::new(tep);
+            producer.set_vig_amount(vig_amount);
+            producer.set_vig_manual(vig_manual);
+            v.edit_producer = Some(producer);
+            v.opstack_version = v.opstack_version.wrapping_add(1);
+            let version = v.opstack_version;
+            let mut renderer = rs.renderer.write();
+            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                if g.image_id == image_id {
+                    if let Some(full) = g.full.as_mut() {
+                        full.set_producing(true);
+                        full.set_opstack_version(&g.ctx, version);
+                    }
+                }
+            }
+        }
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.idle = false; // wake the drive loop so producer tiles re-render
+        }
+    }
+
     /// Apply `stack` to both render tiers (GPU + memory only; no history/persist).
     /// Preview tier: build the EditPipeline once, reuse via set_stack; evaluate
     /// and swap the displayed single texture. Full-res tier: set_stack (color) or
@@ -1100,16 +1249,42 @@ impl FerroliteApp {
             let (src, matrix) = v.preview_tier_source(cam, pw);
             if let Some(src) = src {
                 let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                v.preview_edit = Some(ferrolite_pipeline::EditPipeline::new(
-                    ctx_arc,
+                let mut ep = ferrolite_pipeline::EditPipeline::new(
+                    ctx_arc.clone(),
                     &src,
                     shown.clone(),
                     matrix,
-                ));
+                );
+                // A rebuilt preview must re-bind the current lens bake so an
+                // already-corrected image keeps its correction at fit zoom (I1).
+                if let Some(w) = v.lens_warp.as_ref() {
+                    ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
+                }
+                if let Some(vg) = v.lens_vignette.as_ref() {
+                    ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
+                }
+                v.preview_edit = Some(ep);
             }
         }
         if let Some(ep) = v.preview_edit.as_mut() {
             ep.set_stack(shown.clone());
+            // Apply the current lens amounts + vig lerp to the preview too, so a
+            // lens Amount-only drag (no bake, no rebuild) updates the fit-zoom
+            // image live — mirroring the full-res producer's amount-only branch
+            // below. `use_warp` follows whether a grid is currently bound.
+            let lc = shown.lens_correction();
+            ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                lc.as_ref(),
+                v.lens_warp.is_some(),
+            ));
+            // Mode-aware vignette pair (MV2): profile lerp when a LUT is bound,
+            // else the lens-free parametric manual gain. This is the site that
+            // makes a manual-vignette Amount drag update the fit-zoom preview
+            // live with NO lens (uniform-only; no bake, no rebuild).
+            let (vig_amount, vig_manual) =
+                crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
+            ep.set_vig_amount(vig_amount);
+            ep.set_vig_manual(vig_manual);
             // Evaluate BEFORE taking the renderer lock; pass the resulting texture
             // (cheap Arc clone) into the write scope. (`ep` borrows `self.state`,
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
@@ -1140,13 +1315,50 @@ impl FerroliteApp {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let tep =
-                        ferrolite_pipeline::TileEditPipeline::new(ctx_arc, pyr, shown.clone(), cam);
-                    v.edit_producer = Some(viewer::EditTileProducer::new(tep));
+                    // Thread the current lens bake (U7); `needs_full_rebuild`
+                    // already fires when the rebuild-relevant lens key changes,
+                    // so the grid/LUT this producer is BUILT with must be the
+                    // one matching `shown`'s lens_id/focal/aperture/crop/enabled
+                    // flags — i.e. the bake already stored on `v` by the
+                    // `LensBaked` handler for this same key.
+                    // Mode-aware vignette pair (MV2) for the fresh producer, so a
+                    // rebuild (e.g. geometry change) with a persisted manual or
+                    // profile vignette keeps applying it — the constructor only
+                    // seeds `vig_amount`, never the parametric `manual`.
+                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                        shown.lens_correction().as_ref(),
+                        v.lens_vignette.is_some(),
+                    );
+                    let tep = ferrolite_pipeline::TileEditPipeline::new(
+                        ctx_arc,
+                        pyr,
+                        shown.clone(),
+                        cam,
+                        v.lens_warp.as_ref(),
+                        v.lens_vignette.as_ref(),
+                    );
+                    let mut producer = viewer::EditTileProducer::new(tep);
+                    producer.set_vig_amount(vig_amount);
+                    producer.set_vig_manual(vig_manual);
+                    v.edit_producer = Some(producer);
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {
-                // Color-only change: update params in place.
+                // Color-only change: update params in place. Also covers a lens
+                // Amount-only change (no rebuild per `needs_full_rebuild`): the
+                // grid/LUT are unchanged, only the uniform lerp amounts move.
                 producer.set_stack(shown.clone());
+                let lc = shown.lens_correction();
+                producer.set_lens_uniform(ferrolite_pipeline::lens_uniform(
+                    lc.as_ref(),
+                    v.lens_warp.is_some(),
+                ));
+                // Mode-aware vignette pair (MV2): a manual Amount drag with no
+                // lens reaches here (uniform-only, no rebuild) and updates the
+                // full-res producer live.
+                let (vig_amount, vig_manual) =
+                    crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
+                producer.set_vig_amount(vig_amount);
+                producer.set_vig_manual(vig_manual);
             }
             let version = v.opstack_version;
             let image_id = v.image_id;
@@ -1174,6 +1386,9 @@ impl FerroliteApp {
         stack: ferrolite_pipeline::OpStack,
         commit: bool,
     ) {
+        // Snapshot the pre-edit stack BEFORE `set_preview_and_full` overwrites
+        // `v.op_stack`, so a lens-key comparison below sees the real old/new.
+        let old_stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
         self.set_preview_and_full(frame, stack.clone());
         if !commit {
             return;
@@ -1189,7 +1404,120 @@ impl FerroliteApp {
         if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
             rec.has_edits = has_edits; // optimistic cache update (filmstrip badge)
         }
+        if kind == ferrolite_pipeline::OpKind::LensCorrection {
+            if let Some(old) = old_stack {
+                self.maybe_spawn_lens_bake(ctx, &old, &stack);
+            }
+        }
         self.persist_ops(ctx, image_id, path, stack);
+    }
+
+    /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the bake-relevant lens
+    /// key (`ops_edit::lens_bake_key`: lens id, distortion/tca/vignetting
+    /// enabled flags, focal/aperture/crop) changed between `old`/`new`. This is
+    /// intentionally a DIFFERENT key from `needs_full_rebuild`'s
+    /// `lens_rebuild_key`, which excludes `vignetting.enabled` (a vignette
+    /// toggle has no halo/geometry impact, so it must not force an immediate
+    /// `TileEditPipeline` rebuild) — but `bake_products` DOES bake the
+    /// vignette LUT whenever `vignetting.enabled`, so the bake trigger must
+    /// still fire on that toggle or the LUT is never produced. This
+    /// deliberately excludes per-correction `amount`s: an Amount-only slider
+    /// drag must NOT re-run the DB lookup + bake (it's a uniform-only update
+    /// applied in `set_preview_and_full`'s non-rebuild branch), only a change
+    /// that would actually produce a different grid/LUT re-bakes.
+    fn maybe_spawn_lens_bake(
+        &mut self,
+        ctx: &egui::Context,
+        old: &ferrolite_pipeline::OpStack,
+        new: &ferrolite_pipeline::OpStack,
+    ) {
+        if crate::develop::ops_edit::lens_bake_key(old)
+            == crate::develop::ops_edit::lens_bake_key(new)
+        {
+            return; // Amount-only (or no) lens change: no bake needed.
+        }
+        let Some(db) = self.state.lens_db.clone() else {
+            return; // DB failed to load at startup: lens correction disabled.
+        };
+        let Some(lc) = new.lens_correction() else {
+            return; // LensCorrection op was removed entirely: nothing to bake.
+        };
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        // Cancel any in-flight bake for the previous key before superseding it.
+        if let Some(h) = v.lens_bake_handle.take() {
+            h.cancel();
+        }
+        let image_id = v.image_id;
+        let handle = crate::develop::lens_bake::spawn_lens_bake(
+            &self.state.jobs,
+            &db,
+            &self.state.tx,
+            ctx,
+            image_id,
+            lc,
+        );
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.lens_bake_handle = Some(handle);
+        }
+    }
+
+    /// Spec 4.4 (U9) Step 1: attempt the cheap in-memory lens auto-match for
+    /// `image_id`'s viewer, once both its EXIF (`meta_loaded`) and its loaded
+    /// op-stack (`ops_loaded`) are known. One-shot per open
+    /// (`lens_auto_match_attempted`) and gated on `lens_match::should_auto_match`
+    /// so an existing `LensCorrection` op (persisted, or added/cleared this
+    /// session) is never second-guessed.
+    ///
+    /// Deliberately does NOT call `ops_edit::set_lens_correction` or spawn a
+    /// bake: it only stores the `LensMatch` candidate on the viewer for the
+    /// panel to read as its seed. No op is created, so `has_edits`/the
+    /// catalog badge/the sidecar are all untouched until the user actually
+    /// toggles a correction — opt-in is preserved.
+    ///
+    /// The DB lookup itself is a bundled-XML string/table search (no I/O, no
+    /// GPU), the same cost class already run inline for the manual picker
+    /// (`find_lenses`) and documented as UI-thread-safe in `lens_bake.rs`'s
+    /// module doc — hence no job is spawned for this step.
+    fn try_auto_match_lens(&mut self, image_id: i64) {
+        let Some(v) = self.state.viewer.as_ref() else {
+            return;
+        };
+        if v.image_id != image_id || v.lens_auto_match_attempted {
+            return;
+        }
+        if !v.meta_loaded || !v.ops_loaded {
+            return; // wait for both prerequisites before attempting/giving up
+        }
+        // Gather everything the match needs as owned values before taking the
+        // exclusive borrow below (mirrors the borrow discipline used elsewhere
+        // in this loop, e.g. `maybe_spawn_lens_bake`).
+        let should_match = crate::develop::lens_match::should_auto_match(&v.op_stack);
+        let query = v
+            .meta
+            .as_ref()
+            .and_then(crate::develop::lens_match::query_from_metadata);
+
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        v.lens_auto_match_attempted = true; // one-shot regardless of outcome below
+        if !should_match {
+            return; // an explicit LensCorrection op already exists: don't guess
+        }
+        let Some(db) = self.state.lens_db.clone() else {
+            return; // DB unavailable: lens correction section is disabled
+        };
+        let Some(query) = query else {
+            return; // decode failed, no EXIF, or no focal length: can't query
+        };
+        let candidate = ferrolite_lens::LensDb::match_lens(db.as_ref(), &query);
+        if let Some(v) = self.state.viewer.as_mut() {
+            if v.image_id == image_id {
+                v.lens_auto_match = candidate;
+            }
+        }
     }
 
     /// Re-apply the currently-resolved display tail to the viewer pipelines.
@@ -1775,6 +2103,7 @@ impl FerroliteApp {
                 &self.state.tx,
                 ctx,
                 std::sync::Arc::clone(&gpu),
+                self.state.lens_db.clone(),
                 id,
                 path,
                 rec.kind,
@@ -1990,6 +2319,7 @@ impl eframe::App for FerroliteApp {
                     continue;
                 }
                 crate::events::AppEvent::OpsLoaded { image_id, stack } => {
+                    let mut rebake: Option<ferrolite_pipeline::LensCorrection> = None;
                     if let Some(v) = self.state.viewer.as_mut() {
                         if v.image_id == *image_id && !v.ops_loaded {
                             v.ops_loaded = true;
@@ -1998,9 +2328,56 @@ impl eframe::App for FerroliteApp {
                                     crate::develop::history::History::new(stack.clone(), 100);
                                 self.set_preview_and_full(frame, stack.clone());
                             }
+                            // Spec 4.4 (U9) Step 2: a persisted correction (any
+                            // toggle enabled, with a resolvable lens key) needs
+                            // its warp/vignette re-baked from scratch — the
+                            // grids themselves are never persisted (spec §7.4).
+                            // Until the bake returns, `LensUniform.use_warp`
+                            // stays 0 (identity), so nothing renders wrong in
+                            // the meantime.
+                            if let Some(lc) = stack.lens_correction() {
+                                if crate::develop::lens_bake::needs_rebake_on_load(&lc) {
+                                    rebake = Some(lc);
+                                }
+                            }
                         }
                     }
+                    if let Some(lc) = rebake {
+                        if let Some(db) = self.state.lens_db.clone() {
+                            let image_id = *image_id;
+                            let handle = crate::develop::lens_bake::spawn_lens_bake(
+                                &self.state.jobs,
+                                &db,
+                                &self.state.tx,
+                                ctx,
+                                image_id,
+                                lc,
+                            );
+                            if let Some(v) = self.state.viewer.as_mut() {
+                                if v.image_id == image_id {
+                                    v.lens_bake_handle = Some(handle);
+                                }
+                            }
+                        }
+                    }
+                    // Spec 4.4 (U9) Step 1: try the cheap in-memory auto-match
+                    // now that the loaded stack is known (it may resolve before
+                    // or after MetaLoaded — both event handlers attempt it, and
+                    // `lens_auto_match_attempted` makes the attempt one-shot).
+                    self.try_auto_match_lens(*image_id);
                     self.state.dirty = true;
+                    continue;
+                }
+                crate::events::AppEvent::MetaLoaded { image_id, meta } => {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == *image_id && !v.meta_loaded {
+                            v.meta_loaded = true;
+                            v.meta = meta.clone();
+                        }
+                    }
+                    self.try_auto_match_lens(*image_id);
+                    self.state.dirty = true;
+                    ctx.request_repaint();
                     continue;
                 }
                 crate::events::AppEvent::IngestDone => {
@@ -2071,6 +2448,12 @@ impl eframe::App for FerroliteApp {
                         }
                         ctx.request_repaint();
                     }
+                    continue;
+                }
+                crate::events::AppEvent::LensBaked { image_id, result } => {
+                    self.apply_lens_baked(frame, *image_id, result);
+                    self.state.dirty = true;
+                    ctx.request_repaint();
                     continue;
                 }
                 _ => {}
@@ -2746,6 +3129,23 @@ impl eframe::App for FerroliteApp {
                     v.path.clone(),
                 );
                 v.ops_read_handle = Some(h);
+            }
+            // Spec 4.4 (U9): read this image's EXIF off-thread once per open so
+            // the lens panel/picker can seed real camera/lens values instead of
+            // placeholders, and so the auto-match (below, once both this AND
+            // OpsLoaded resolve) has something to query. The catalog does not
+            // carry focal_length/aperture/lens at all (see `meta_read`'s doc
+            // comment), so this is a real (lightweight) decode, never inline.
+            if !v.meta_loaded && v.meta_read_handle.is_none() {
+                let h = crate::develop::meta_read::spawn_meta_read(
+                    &self.state.jobs,
+                    &self.state.tx,
+                    ctx,
+                    v.image_id,
+                    v.path.clone(),
+                    v.kind,
+                );
+                v.meta_read_handle = Some(h);
             }
         }
 

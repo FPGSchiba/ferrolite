@@ -138,6 +138,25 @@ pub enum AppEvent {
         name: String,
         generation: u64,
     },
+    /// An off-thread lens-correction bake (`lens_bake::spawn_lens_bake`) finished:
+    /// the warp grid + vignette map for the image's current `LensCorrection`
+    /// (or all-`None` when unmatched). Handled in `app.rs` (needs GPU state to
+    /// upload textures + rebuild the tile producer); guarded there on
+    /// `image_id == current` so a bake superseded by navigation is dropped. The
+    /// `apply` fold ignores it (no counters to update).
+    LensBaked {
+        image_id: i64,
+        result: crate::develop::lens_bake::LensBakeResult,
+    },
+    /// An off-thread EXIF metadata read (`develop::meta_read::spawn_meta_read`)
+    /// finished on Develop open. `meta = None` on a decode error — the panel
+    /// then falls back to its constant defaults. Handled in `app.rs` (drives
+    /// the cheap in-memory auto-match against `state.lens_db`); the `apply`
+    /// fold ignores it (no counters to update).
+    MetaLoaded {
+        image_id: i64,
+        meta: Option<ferrolite_decode::Metadata>,
+    },
 }
 
 impl AppState {
@@ -255,6 +274,12 @@ impl AppState {
             // Handled in `app.rs` (needs GPU state to build/replace the display
             // LUT texture); nothing to fold here.
             AppEvent::DisplayProfileResolved { .. } => None,
+            // Handled in `app.rs` (needs GPU state to upload the warp/vignette
+            // textures and rebuild the tile producer); nothing to fold here.
+            AppEvent::LensBaked { .. } => None,
+            // Handled in `app.rs` (drives the auto-match against `state.lens_db`
+            // and seeds the panel); nothing to fold here.
+            AppEvent::MetaLoaded { .. } => None,
         }
     }
 }

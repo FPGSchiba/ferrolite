@@ -9,12 +9,13 @@ use ferrolite_image::LinearRgbaF32;
 use wgpu::util::DeviceExt;
 
 use crate::image::PipelineImage;
-use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode};
+use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
+use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode, VignetteNode};
 use crate::op::OpStack;
 use crate::uniforms::{
     color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, geometry_uniform,
     hsl_uniform, sharpen_uniform, wb_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform,
-    GeometryUniform, HslUniform, SharpenUniform, WbUniform,
+    GeometryUniform, HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -26,6 +27,9 @@ pub struct EditPipeline {
     output_id: NodeId,
     color_matrix_id: NodeId,
     color_matrix: Rc<Cell<ColorMatrixUniform>>,
+    vignette_id: NodeId,
+    vignette: Rc<Cell<VignetteUniform>>,
+    vignette_node: Rc<VignetteNode>,
     exposure_id: NodeId,
     exposure: Rc<Cell<ExposureUniform>>,
     wb_id: NodeId,
@@ -40,6 +44,7 @@ pub struct EditPipeline {
     sharpen: Rc<Cell<SharpenUniform>>,
     geometry_id: NodeId,
     geometry: Rc<Cell<GeometryUniform>>,
+    geometry_node: Rc<GeometryNode>,
     src_w: u32,
     src_h: u32,
     node_count: usize,
@@ -66,6 +71,12 @@ impl EditPipeline {
         );
         let color_matrix_id = graph.add_node(Box::new(color_matrix_node), vec![source_id]);
 
+        // Vignetting sits scene-linear at the head, before exposure (spec §6.2).
+        // Default `vig_amount = 0` → identity, so an uncorrected image is unchanged.
+        let vignette = Rc::new(Cell::new(VignetteUniform::default()));
+        let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone()));
+        let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
+
         let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
         let exposure_node = PointOpNode::new(
             ctx.clone(),
@@ -73,7 +84,7 @@ impl EditPipeline {
             "exposure",
             exposure.clone(),
         );
-        let exposure_id = graph.add_node(Box::new(exposure_node), vec![color_matrix_id]);
+        let exposure_id = graph.add_node(Box::new(exposure_node), vec![vignette_id]);
 
         let wb = Rc::new(Cell::new(wb_uniform(stack.white_balance())));
         let wb_node = PointOpNode::new(
@@ -123,8 +134,8 @@ impl EditPipeline {
 
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
         let geometry = Rc::new(Cell::new(geo_uniform));
-        let geometry_node = GeometryNode::new(ctx.clone(), geometry.clone());
-        let geometry_id = graph.add_node(Box::new(geometry_node), vec![sharpen_id]);
+        let geometry_node = Rc::new(GeometryNode::new(ctx.clone(), geometry.clone()));
+        let geometry_id = graph.add_node(Box::new(geometry_node.clone()), vec![sharpen_id]);
 
         Self {
             ctx,
@@ -132,6 +143,9 @@ impl EditPipeline {
             output_id: geometry_id,
             color_matrix_id,
             color_matrix,
+            vignette_id,
+            vignette,
+            vignette_node,
             exposure_id,
             exposure,
             wb_id,
@@ -146,10 +160,60 @@ impl EditPipeline {
             sharpen,
             geometry_id,
             geometry,
+            geometry_node,
             src_w,
             src_h,
-            node_count: 9,
+            node_count: 10,
             stack,
+        }
+    }
+
+    /// Bind a freshly baked lens warp grid to the geometry pass (bake-time; no
+    /// pipeline rebuild). Dirties geometry so the next evaluate re-samples.
+    pub fn set_warp(&mut self, warp: WarpGridTexture) {
+        self.geometry_node.set_warp(warp);
+        self.graph.mark_dirty(self.geometry_id);
+    }
+
+    /// Set the lens correction amounts + `use_warp` flag on the geometry pass
+    /// (buffer write; no rebuild). Dirties geometry so the next evaluate applies.
+    pub fn set_lens_uniform(&mut self, lens: LensUniform) {
+        self.geometry_node.set_lens_uniform(lens);
+        self.graph.mark_dirty(self.geometry_id);
+    }
+
+    /// Bind a freshly baked vignette gain LUT (bake-time; rebuilds the cached
+    /// view, no pipeline rebuild). Dirties the vignette pass.
+    pub fn set_vignette(&mut self, lut: VignetteTexture) {
+        self.vignette_node.set_vignette(lut);
+        self.graph.mark_dirty(self.vignette_id);
+    }
+
+    /// Set the vignette lerp amount (buffer write; no rebuild). 0 = identity.
+    /// Read-modify-write so an independent `manual` setting is preserved.
+    pub fn set_vig_amount(&mut self, amount: f32) {
+        let u = VignetteUniform {
+            vig_amount: amount,
+            ..self.vignette.get()
+        };
+        if u != self.vignette.get() {
+            self.vignette.set(u);
+            self.graph.mark_dirty(self.vignette_id);
+        }
+    }
+
+    /// Set the parametric manual (lens-free) vignette strength (buffer write; no
+    /// rebuild). 0 = identity; negative darkens corners, positive brightens them.
+    /// Read-modify-write so the independent `vig_amount` (profile) setting is
+    /// preserved.
+    pub fn set_vig_manual(&mut self, manual: f32) {
+        let u = VignetteUniform {
+            manual,
+            ..self.vignette.get()
+        };
+        if u != self.vignette.get() {
+            self.vignette.set(u);
+            self.graph.mark_dirty(self.vignette_id);
         }
     }
 

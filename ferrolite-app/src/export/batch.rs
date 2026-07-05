@@ -168,6 +168,9 @@ fn run_one(
         stack: &stack,
         camera_to_working,
         working_space,
+        // Batch export renders the identity stack (no per-image edits), so no
+        // lens correction can be present — pass `None`.
+        lens_db: None,
         options,
         dest: &item.dest,
         source_path: &item.path,

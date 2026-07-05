@@ -3,7 +3,10 @@
 //! shader). Display-linear space; the sRGB OETF lives only in the display/blit
 //! shader. No GPU here — fully unit-tested.
 
-use crate::op::{Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, Sharpen, WhiteBalance};
+use crate::op::{
+    Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, LensCorrection, Sharpen, WhiteBalance,
+};
+use ferrolite_lens::{lens_halo, WarpGrid};
 
 /// Mid-grey pivot (display-linear) about which contrast scales. Placeholder
 /// constant; Spec 3 may refine once the working space is fixed.
@@ -351,6 +354,90 @@ pub fn color_matrix_uniform(m: [[f32; 3]; 3]) -> ColorMatrixUniform {
     ColorMatrixUniform { m: pack_mat3(m) }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LensUniform {
+    /// Distortion/TCA/vignette lerp factors (0 when the correction is disabled).
+    pub dist_amount: f32,
+    pub tca_amount: f32,
+    pub vig_amount: f32,
+    /// 1 when a real warp grid is bound; 0 = identity (skip the grid sample).
+    pub use_warp: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct VignetteUniform {
+    /// Lerp factor between identity (gain 1.0) and the LUT gain. 0 = identity.
+    pub vig_amount: f32,
+    /// Parametric manual (lens-free) vignette strength. Composed as
+    /// `1.0 + manual * r * r` (r = normalized center→corner radius), so 0 is
+    /// identity. Negative darkens corners; positive brightens them. Independent
+    /// of `vig_amount` — see `corr(r) * manual(r)` in vignette.wgsl.
+    pub manual: f32,
+    pub pad: [f32; 2],
+}
+
+impl Default for VignetteUniform {
+    /// Identity: `vig_amount = 0`, `manual = 0` → the pass multiplies rgb by 1.0.
+    fn default() -> Self {
+        Self {
+            vig_amount: 0.0,
+            manual: 0.0,
+            pad: [0.0; 2],
+        }
+    }
+}
+
+/// Build the `LensUniform` (per-channel amounts + `use_warp` flag) for the
+/// geometry pass from the op's `LensCorrection` and whether a real warp grid is
+/// bound. A disabled correction contributes amount 0 (identity for that channel
+/// group); `use_warp = 1` only when a grid is present, so with no grid the shader
+/// takes the byte-identical no-correction path regardless of the amounts.
+pub fn lens_uniform(lc: Option<&LensCorrection>, has_grid: bool) -> LensUniform {
+    match lc {
+        Some(l) => LensUniform {
+            dist_amount: if l.distortion.enabled {
+                l.distortion.amount
+            } else {
+                0.0
+            },
+            tca_amount: if l.tca.enabled { l.tca.amount } else { 0.0 },
+            vig_amount: if l.vignetting.enabled {
+                l.vignetting.amount
+            } else {
+                0.0
+            },
+            use_warp: if has_grid { 1 } else { 0 },
+        },
+        None => LensUniform {
+            dist_amount: 0.0,
+            tca_amount: 0.0,
+            vig_amount: 0.0,
+            use_warp: 0,
+        },
+    }
+}
+
+/// The vignette pass lerp amount from the op's `LensCorrection`. Zero (identity)
+/// unless vignetting is enabled. The vignette pass is separate from the geometry
+/// warp, so this drives `VignetteNode`, not the `LensUniform`.
+pub fn vignette_amount(lc: Option<&LensCorrection>) -> f32 {
+    match lc {
+        Some(l) if l.vignetting.enabled => l.vignetting.amount,
+        _ => 0.0,
+    }
+}
+
+/// The geometric halo (px) a tiled lens-corrected pass over-fetches. Zero unless
+/// distortion or TCA is enabled AND a grid is present.
+pub fn lens_halo_px(lc: Option<&LensCorrection>, grid: Option<&WarpGrid>) -> u32 {
+    match (lc, grid) {
+        (Some(l), Some(g)) if l.distortion.enabled || l.tca.enabled => lens_halo(g),
+        _ => 0,
+    }
+}
+
 pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
     let a = op.map(|c| c.amount).unwrap_or(0.0);
     let (gain, pivot) = contrast_gain_pivot(a);
@@ -660,5 +747,49 @@ mod tests {
     fn color_matrix_uniform_wraps_packed_mat() {
         let id = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         assert_eq!(color_matrix_uniform(id).m, pack_mat3(id));
+    }
+
+    #[test]
+    fn lens_uniform_is_16_byte_aligned() {
+        assert_eq!(std::mem::size_of::<LensUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn vignette_uniform_default_is_identity_and_aligned() {
+        assert_eq!(VignetteUniform::default().vig_amount, 0.0);
+        assert_eq!(VignetteUniform::default().manual, 0.0);
+        assert_eq!(std::mem::size_of::<VignetteUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn lens_halo_zero_when_disabled_or_absent() {
+        assert_eq!(lens_halo_px(None, None), 0);
+        let lc = crate::op::LensCorrection {
+            lens_id: Some("x".into()),
+            focal_len: 24.0,
+            aperture: 8.0,
+            crop_factor: 1.0,
+            distortion: crate::op::Correction {
+                enabled: false,
+                amount: 1.0,
+            },
+            tca: crate::op::Correction::default(),
+            vignetting: crate::op::Correction::default(),
+        };
+        // Distortion disabled → no geometric halo even if a grid exists.
+        let g = ferrolite_lens::WarpGrid {
+            n: 2,
+            coords: vec![[0.0; 6]; 4],
+            max_disp: 30.0,
+        };
+        assert_eq!(lens_halo_px(Some(&lc), Some(&g)), 0);
+        let lc_on = crate::op::LensCorrection {
+            distortion: crate::op::Correction {
+                enabled: true,
+                amount: 1.0,
+            },
+            ..lc
+        };
+        assert_eq!(lens_halo_px(Some(&lc_on), Some(&g)), 30);
     }
 }

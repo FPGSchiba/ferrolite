@@ -11,7 +11,10 @@ use ferrolite_color::{working_to_output, WorkingSpace};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::{tile_pixel_origin, TileCoord, TILE_SIZE};
 use ferrolite_jobs::CancelToken;
-use ferrolite_pipeline::{edited_output_dims, GpuPyramidSource, OpStack, TileEditPipeline};
+use ferrolite_lens::LensfunDb;
+use ferrolite_pipeline::{
+    bake_products, edited_output_dims, GpuPyramidSource, OpStack, TileEditPipeline,
+};
 use half::f16;
 
 use crate::convert::{convert_pixel, to_u16, to_u8};
@@ -105,6 +108,7 @@ pub fn render_tiled(
     camera_to_working: [[f32; 3]; 3],
     working_space: WorkingSpace,
     output_space: WorkingSpace,
+    lens_db: Option<&Arc<LensfunDb>>,
     depth: BitDepth,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(u32, u32),
@@ -115,12 +119,35 @@ pub fn render_tiled(
         return Err(ExportError::Render("zero output dimensions".into()));
     }
 
+    // Bake the lens correction (if any) off-thread here — this whole function
+    // runs inside a ferrolite-jobs Background export job (CLAUDE.md §1), never
+    // on the UI thread. `bake_products` yields identity (`None, None`) when
+    // there's no db, no enabled correction, or no matched lens, so an
+    // uncorrected export stays byte-identical to before.
+    let (warp, vignette) = match lens_db {
+        Some(db) => match stack.lens_correction() {
+            Some(lc)
+                if lc.lens_id.is_some()
+                    && (lc.distortion.enabled || lc.tca.enabled || lc.vignetting.enabled) =>
+            {
+                bake_products(db.as_ref(), &lc)
+            }
+            _ => (None, None),
+        },
+        None => (None, None),
+    };
+
     // Build the per-tile edit pipeline ONCE for this export (CLAUDE.md GPU rule).
+    // `TileEditPipeline::new` derives the `LensUniform` + vignette amount from
+    // the stack's `LensCorrection`; passing the baked grid/LUT (or `None`) is all
+    // that's needed. With `None, None` the shader takes the identity path.
     let mut pipeline = TileEditPipeline::new(
         ctx.clone(),
         pyramid.clone(),
         stack.clone(),
         camera_to_working,
+        warp.as_ref(),
+        vignette.as_ref(),
     );
 
     let m = working_to_output(working_space, output_space); // ferrolite_color::Mat3

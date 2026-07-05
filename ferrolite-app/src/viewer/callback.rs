@@ -44,6 +44,18 @@ pub struct ViewerGpu {
     /// Image id whose textures these are — guards against painting a holder that
     /// belongs to a viewer that has since been closed/replaced.
     pub image_id: i64,
+    /// Off-screen "swapchain": the sparse tier is composed into `back` when
+    /// converged, then swapped to `front`; the callback blits `front`.
+    #[allow(dead_code)] // TODO(spec4.5 phase 4): consumed by present blit
+    pub present: ferrolite_vt::PresentBuffers,
+    /// 32-byte `BlitParams { alpha: f32, _pad: vec3<f32> }` uniform for the
+    /// crossfade blit (vec3 forces 16-byte alignment → 32-byte struct).
+    #[allow(dead_code)] // TODO(spec4.5 phase 4): consumed by present blit
+    pub present_alpha: wgpu::Buffer,
+    /// Cached bind group for blitting `present`'s front buffer. Rebuilt when the
+    /// front view changes (resize/swap); `None` until first built.
+    #[allow(dead_code)] // TODO(spec4.5 phase 4): consumed by present blit
+    pub blit_bind_front: Option<wgpu::BindGroup>,
 }
 
 /// Per-frame paint command: small `Copy` data only. The textures are fetched from

@@ -284,6 +284,15 @@ impl FerroliteApp {
         // loop does not spin.
         v.idle = true;
 
+        // Placeholder (1,1) present-buffer size: `drive_viewer`'s per-frame
+        // resize corrects it to the canvas's physical viewport before paint.
+        let present = ferrolite_vt::PresentBuffers::new(&gpu, (1, 1), rs.target_format);
+        let present_alpha = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vt-present-alpha"),
+            size: 32,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         rs.renderer
             .write()
             .callback_resources
@@ -293,6 +302,9 @@ impl FerroliteApp {
                 full: None,
                 preview_before: None,
                 image_id,
+                present,
+                present_alpha,
+                blit_bind_front: None,
             });
         self.mark_histogram_dirty();
         true
@@ -877,12 +889,26 @@ impl FerroliteApp {
         {
             let mut renderer = rs.renderer.write();
             if let Some(preview) = preview_vt {
+                let holder_gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+                // Placeholder (1,1) present-buffer size: `drive_viewer`'s per-frame
+                // resize corrects it to the canvas's physical viewport before paint.
+                let present =
+                    ferrolite_vt::PresentBuffers::new(&holder_gpu, (1, 1), rs.target_format);
+                let present_alpha = holder_gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("vt-present-alpha"),
+                    size: 32,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
                 renderer.callback_resources.insert(viewer::ViewerGpu {
-                    ctx: ferrolite_gpu::GpuContext::from_render_state(rs),
+                    ctx: holder_gpu,
                     preview,
                     full: Some(full),
                     preview_before: None,
                     image_id,
+                    present,
+                    present_alpha,
+                    blit_bind_front: None,
                 });
                 full_installed = true;
             } else if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -1755,9 +1781,21 @@ impl FerroliteApp {
         let mut produce_pending: Option<usize> = None;
         let mut needed_established = false;
         let mut produced_this_frame = 0usize;
-        if let (Some(rs), Some(_v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
+        if let (Some(rs), Some(v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                // Resize the off-screen present buffers to the canvas viewport
+                // (converted logical→physical px) every frame; `resize` no-ops
+                // when the size is unchanged. `v.viewport` is one-frame-latent
+                // here (this runs before `viewer::paint` records this frame's
+                // rect below), matching `request_view_feedback`'s existing
+                // one-frame latency.
+                let ppp = ui.ctx().pixels_per_point();
+                let phys = (
+                    (v.viewport.0 * ppp).round().max(1.0) as u32,
+                    (v.viewport.1 * ppp).round().max(1.0) as u32,
+                );
+                g.present.resize(&g.ctx, phys);
                 if Some(g.image_id) != open_id {
                     // Stale holder from a superseded viewer: stop its tile jobs.
                     if let Some(full) = g.full.as_mut() {

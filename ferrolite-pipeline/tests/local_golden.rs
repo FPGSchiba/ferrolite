@@ -113,6 +113,62 @@ fn empty_mask_layer_applies_globally() {
 }
 
 #[test]
+fn two_layer_masked_adjustment_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    // Layer 1: radial mask, +1 EV exposure. Layer 2: luma-range mask, warm temp.
+    let radial = MaskLayer {
+        name: "spot".into(),
+        visible: true,
+        mask: MaskDefinition {
+            components: vec![(
+                MaskComponent::RadialGradient {
+                    center: MVec2::new(0.35, 0.5),
+                    radius: MVec2::new(0.25, 0.25),
+                    rotation: 0.0,
+                    feather: 0.5,
+                    invert: false,
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        },
+        adjustments: AdjustmentSet {
+            exposure: 1.0,
+            ..Default::default()
+        },
+    };
+    let luma = MaskLayer {
+        name: "brights".into(),
+        visible: true,
+        mask: MaskDefinition {
+            components: vec![(
+                MaskComponent::LumaRange {
+                    lo: 0.4,
+                    hi: 1.0,
+                    softness: 0.1,
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        },
+        adjustments: AdjustmentSet {
+            temp: 0.6,
+            ..Default::default()
+        },
+    };
+    let la = LocalAdjustments {
+        layers: vec![radial, luma],
+    };
+    let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "two_layer_masked.png");
+}
+
+#[test]
 fn local_adjust_edit_only_reevaluates_node_and_downstream() {
     let Some(ctx) = GpuContext::headless() else {
         eprintln!("no GPU adapter; skipping (headless CI)");

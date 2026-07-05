@@ -1348,6 +1348,7 @@ name = "ferrolite-pipeline"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "ferrolite-catalog",
  "ferrolite-color",
  "ferrolite-gpu",
  "ferrolite-image",

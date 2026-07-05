@@ -953,3 +953,88 @@ fn fresh_sparse_is_not_converged_then_converges_after_producing() {
         "after producing every needed tile, the view must be converged"
     );
 }
+
+/// Task 10: `needed_prefetched` delegates to `residency::needed_tiles_prefetched`
+/// — its result must be a superset of the plain visible `needed_tiles` set (at
+/// least as long) and include every tile of the coarsest pyramid level (the
+/// protected base). Empty on a non-sparse VT is covered by construction (sparse
+/// VTs always return the delegated, non-empty set for a non-degenerate view).
+#[test]
+fn needed_prefetched_covers_visible_and_coarse_base() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+
+    let (iw, ih) = (600u32, 500u32);
+    let img = ferrolite_image::LinearRgbaF32::black(iw, ih);
+    let src = PyramidTileSource::new(img);
+    let level_count = src.level_count();
+    let src_arc: Arc<dyn TileSource + Send + Sync> = Arc::new(src);
+    let total: u32 = (0..level_count)
+        .map(|lod| {
+            let (lw, lh) = src_arc.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(1));
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let vt = VirtualTexture::sparse(
+        &ctx,
+        Arc::clone(&src_arc),
+        Arc::clone(&jobs),
+        total,
+        &pipelines,
+    );
+
+    let (w, h) = (128.0f32, 128.0f32);
+    let view = ViewTransform::fit((iw, ih), (w, h));
+
+    let visible = ferrolite_vt::needed_tiles((iw, ih), &view, (w, h), level_count);
+    let prefetched = vt.needed_prefetched(&view, (w, h), 1);
+
+    assert!(
+        prefetched.len() >= visible.len(),
+        "prefetched must be at least as large as the visible needed set"
+    );
+    for t in &visible {
+        assert!(
+            prefetched.contains(t),
+            "prefetched must include every visible tile {t:?}"
+        );
+    }
+
+    // Every tile of the coarsest level (the protected base) must be present.
+    let base_lod = level_count - 1;
+    let (cols, rows) = {
+        let (lw, lh) = src_arc.level_size(base_lod);
+        (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE))
+    };
+    for y in 0..rows {
+        for x in 0..cols {
+            assert!(
+                prefetched.contains(&TileCoord {
+                    lod: base_lod,
+                    x,
+                    y
+                }),
+                "coarse base tile ({x},{y}) must be prefetched"
+            );
+        }
+    }
+}
+
+/// Task 10: `needed_prefetched` is empty on a non-sparse `VirtualTexture` (e.g.
+/// the single-texture rung), never panics.
+#[test]
+fn needed_prefetched_empty_on_non_sparse() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let img = common::split_image();
+    let vt = VirtualTexture::single_texture(&ctx, &img, &pipelines);
+    let view = ViewTransform::fit((img.width, img.height), (64.0, 64.0));
+    assert!(vt.needed_prefetched(&view, (64.0, 64.0), 1).is_empty());
+}

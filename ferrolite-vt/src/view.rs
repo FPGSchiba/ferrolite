@@ -1614,6 +1614,27 @@ impl VirtualTexture {
         s.versions.to_produce(&needed).is_empty()
     }
 
+    /// Rung 4: the prefetched needed set (visible + `ring` + coarse base) for `view`,
+    /// visible-first. Feeds `produce_view` so the swap converges fast and pans/zooms
+    /// have neighbouring + coarse tiles ready. Empty on a non-sparse VT.
+    pub fn needed_prefetched(
+        &self,
+        view: &ViewTransform,
+        viewport: (f32, f32),
+        ring: u32,
+    ) -> Vec<TileCoord> {
+        let Some(s) = self.sparse.as_ref() else {
+            return Vec::new();
+        };
+        crate::residency::needed_tiles_prefetched(
+            s.image_dims,
+            view,
+            viewport,
+            s.layout.level_count(),
+            ring,
+        )
+    }
+
     /// Rung 4: cancel every in-flight tile-load job. Called on navigation so a
     /// superseded image's tile jobs stop competing with the newly-opened one.
     /// Idempotent; a no-op on a non-sparse VT. Mirrors `cancel_streaming`.

@@ -1,7 +1,7 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_mask::{LinearGradientPass, Vec2};
+use ferrolite_mask::{LinearGradientPass, RadialGradientPass, Vec2};
 use std::sync::Arc;
 
 const W: u32 = 64;
@@ -25,4 +25,29 @@ fn linear_gradient_matches_golden() {
         "right edge should clamp to 1"
     );
     common::assert_mask_golden(&values, W, H, "linear_gradient.png");
+}
+
+#[test]
+fn radial_gradient_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    let pass = RadialGradientPass::new(ctx.clone());
+    // Centred ellipse, wider than tall, mild feather.
+    let mask = pass.run(
+        Vec2::new(0.5, 0.5),
+        Vec2::new(0.35, 0.2),
+        0.0,
+        0.3,
+        false,
+        W,
+        H,
+    );
+    let values = common::read_r32f(&ctx, &mask);
+    let center = values[((H / 2) * W + W / 2) as usize];
+    assert!(center > 0.99, "ellipse center should be fully selected");
+    assert!(values[0] < 0.01, "top-left corner should be outside");
+    common::assert_mask_golden(&values, W, H, "radial_gradient.png");
 }

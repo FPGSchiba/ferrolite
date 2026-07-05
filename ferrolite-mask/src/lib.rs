@@ -13,5 +13,7 @@ pub use model::{
     composite_scalar, BrushNode, CompositeMode, MaskComponent, MaskDefinition, MaskProvenance,
     RasterHandle, Stroke,
 };
-pub use shapes::{LinearGradientPass, LinearGradientUniform};
+pub use shapes::{
+    LinearGradientPass, LinearGradientUniform, RadialGradientPass, RadialGradientUniform,
+};
 pub use vec::{Rgb, Vec2};

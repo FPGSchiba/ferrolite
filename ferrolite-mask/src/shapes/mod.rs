@@ -2,5 +2,7 @@
 //! build-once compute pass writing a single-channel `R32Float` `MaskBuffer`.
 
 mod linear;
+mod radial;
 
 pub use linear::{LinearGradientPass, LinearGradientUniform};
+pub use radial::{RadialGradientPass, RadialGradientUniform};

@@ -103,13 +103,18 @@ pub struct ViewerState {
     pub full_ready: bool,
     /// True while the preview→full crossfade ramp is advancing.
     pub crossfading: bool,
-    /// One-shot guard for the off-screen compose+swap (spec 4.5 §4.2): set `true`
-    /// on the frame the sparse pool converges and the composed `back` buffer is
-    /// swapped to `front`, so the compose+swap runs at most ONCE per converged
-    /// state rather than every idle frame. Re-armed to `false` whenever the view
-    /// is no longer converged (a pan/zoom/edit dropped a tile out of residency),
-    /// so the next convergence recomposes the fresh transform+version.
-    pub present_swapped: bool,
+    /// The `(opstack_version, view)` the CURRENT composed `front` buffer was
+    /// composed at (spec 4.5 §4.2), or `None` when `front` is invalid / never
+    /// composed (fresh open, or just reallocated by a canvas resize). Keys the
+    /// off-screen compose+swap: the swap fires when the pool is converged AND
+    /// this key does not match the current `(opstack_version, view)` (front is
+    /// stale or missing), and `paint` presents `Front` only when this key
+    /// matches the current state — otherwise `Preview`. This replaces the old
+    /// transient `present_swapped` bool: an edit bumps `opstack_version` and a
+    /// pan/zoom changes `view`, so the key mismatches immediately (no reliance on
+    /// observing a `!converged` frame), which is why edits and the split now show
+    /// without a zoom nudge.
+    pub present_key: Option<(u64, ferrolite_vt::ViewTransform)>,
     /// Seconds elapsed into the active crossfade.
     pub crossfade_elapsed: f32,
     /// Terminal state: nothing more will load (preview failed AND/OR full failed,
@@ -284,7 +289,7 @@ impl ViewerState {
             full_requested: false,
             full_ready: false,
             crossfading: false,
-            present_swapped: false,
+            present_key: None,
             crossfade_elapsed: 0.0,
             idle: false,
             showing_full: false,
@@ -460,13 +465,13 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 /// texture is loaded) enqueue the egui↔wgpu paint callback.
 ///
 /// Interaction (pan/zoom this frame) is detected HERE, so the present source is
-/// computed here too: `present_source(interacting, full_ready, converged,
-/// present_swapped, crossfade)` selects what the callback shows this frame — the
-/// rung-1 preview (during interaction / before the `front` buffer is composed,
-/// or right after a resize reallocated it — see `present_swapped`), a crossfade
-/// toward the composed `front`, or the converged `front` alone. `full_ready`,
-/// `converged`, `present_swapped`, and `crossfade` are computed by
-/// `drive_viewer` and passed in.
+/// computed here too: `present_source(interacting, split, full_ready,
+/// front_valid, crossfade)` selects what the callback shows this frame — the
+/// rung-1 preview (during interaction, while the before/after split is active,
+/// before the `front` buffer is composed, or when `front` is stale/blank — see
+/// `front_valid`), a crossfade toward the composed `front`, or the converged
+/// `front` alone. `full_ready`, `front_valid`, and `crossfade` are computed by
+/// `drive_viewer` and passed in; `split` is read from `state.split_compare` here.
 ///
 /// Returns `(loading_preview, present_source)`: `loading_preview` is `true` while
 /// the preview is still loading so the caller can `request_repaint` for a prompt
@@ -481,8 +486,7 @@ pub fn paint(
     ui: &mut egui::Ui,
     state: &mut ViewerState,
     full_ready: bool,
-    converged: bool,
-    present_swapped: bool,
+    front_valid: bool,
     crossfade: f32,
     interactive: bool,
 ) -> (bool, PresentSource) {
@@ -549,13 +553,10 @@ pub fn paint(
     }
 
     // Now that this frame's interaction is known, select what the callback shows.
-    let source = present_source(
-        interacting,
-        full_ready,
-        converged,
-        present_swapped,
-        crossfade,
-    );
+    // The before/after SPLIT is a preview-tier-only compare, so fold it in here:
+    // while it is active the composed full `front` must never take over.
+    let split = state.split_compare;
+    let source = present_source(interacting, split, full_ready, front_valid, crossfade);
 
     if state.loaded {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(

@@ -939,16 +939,18 @@ impl FerroliteApp {
                     v.full_ready = true;
                     // Task 15: do NOT start the crossfade here. `full_ready` alone
                     // does not make `present_source` show anything but `Preview`
-                    // (it also requires `converged`, gated on the sparse pool being
-                    // fully resident — see `viewer::present::present_source`), and
-                    // the sparse pool is essentially never resident this early (the
+                    // (it also requires `front_valid` — the composed `front` keyed
+                    // to the current `(opstack_version, view)`, gated on the sparse
+                    // pool being fully resident — see `viewer::present::present_source`),
+                    // and the sparse pool is essentially never resident this early (the
                     // tiles have not been produced yet). A ramp started here would
                     // complete (150 ms) while fully invisible, so by the time
                     // `drive_viewer`'s convergence swap fires — often much later —
                     // the visible crossfade needs a FRESH ramp anyway. That fresh
-                    // ramp is started at the swap in `drive_viewer` (`v.present_swapped`
-                    // transition), which is the only crossfade trigger that actually
-                    // drives a visible preview→front fade.
+                    // ramp is started at the swap in `drive_viewer` (when
+                    // `v.present_key` is set to the freshly-composed state), which is
+                    // the only crossfade trigger that actually drives a visible
+                    // preview→front fade.
                     // The full tier's dimensions (uprighted, half-res demosaic)
                     // are the reveal render's dims too. Fit to them; fall back to
                     // the image's own size if the canvas has not painted yet (the
@@ -1838,8 +1840,11 @@ impl FerroliteApp {
             // `viewer::paint`), matching `request_view_feedback`'s existing latency.
             let cur_view = v.view;
             let cur_viewport = v.viewport;
-            // One-shot compose+swap guard, read before the `&mut ViewerGpu` borrow.
-            let already_swapped = v.present_swapped;
+            // The `(opstack_version, view)` the compose+swap keys on, captured
+            // (Copy) before the `&mut ViewerGpu` borrow. `front` is composed for
+            // the CURRENT state iff `cur_present_key == Some((cur_version, cur_view))`.
+            let cur_version = v.opstack_version;
+            let cur_present_key = v.present_key;
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 // Resize the off-screen present buffers to the canvas viewport
@@ -1892,13 +1897,17 @@ impl FerroliteApp {
                         converged = full.is_converged(&cur_view, cur_viewport);
                     }
 
-                    // On the transition to converged (and only once per converged
-                    // state — `present_swapped` re-armed below), compose the sparse
-                    // tier off-screen into `back`, submit, and swap to `front`. The
-                    // pool is converged so this is one bounded render pass.
+                    // Compose+swap when the pool is converged AND `front` is stale
+                    // or missing for the current state — i.e. its key does not match
+                    // `(cur_version, cur_view)`. An edit bumps `opstack_version` and
+                    // a pan/zoom changes `view`, so the key mismatches immediately;
+                    // once composed for this state the key matches and the swap does
+                    // not re-fire (at most ONCE per (version, view)). This is the
+                    // keying that fixes edits/split not showing until a zoom nudge.
+                    // The pool is converged so this is one bounded render pass.
                     // Disjoint-field borrows: `g.full`, `g.ctx`, and `g.present` are
                     // three distinct fields borrowed in the same expression.
-                    if converged && !already_swapped {
+                    if converged && cur_present_key != Some((cur_version, cur_view)) {
                         let mut enc =
                             g.ctx
                                 .device
@@ -1945,20 +1954,20 @@ impl FerroliteApp {
             v.idle = false;
         }
 
-        // Spec 4.5 §4.2: one-shot compose+swap bookkeeping. Re-arm the guard when
-        // the view is no longer converged (a pan/zoom/edit dropped residency) so
-        // the NEXT convergence recomposes the fresh transform+version; and, on the
-        // frame the compose+swap actually ran, mark it done and (re)start the
-        // crossfade ramp so the freshly-composed `front` fades in over the preview.
-        // Also re-arm on a canvas resize that reallocated the present buffers:
-        // `converged` frequently stays true across a resize, so without this the
-        // compose+swap below would never re-fire and the canvas would blit the
-        // now-blank buffers until the next pan/zoom/edit.
-        if !converged || present_reallocated {
-            v.present_swapped = false;
+        // Spec 4.5 §4.2: key the composed `front` on `(opstack_version, view)`.
+        // A canvas resize reallocates (blanks) the present buffers, so invalidate
+        // the key — `front` no longer holds anything valid until recomposed. On the
+        // frame the compose+swap ran, record the key it was composed at and (re)start
+        // the crossfade ramp so the freshly-composed `front` fades in over the preview.
+        // Recompute the current key here (post-block) since `opstack_version`/`view`
+        // are stable across this function and were captured above as Copy locals.
+        let cur_version = v.opstack_version;
+        let cur_view = v.view;
+        if present_reallocated {
+            v.present_key = None;
         }
         if swapped_this_frame {
-            v.present_swapped = true;
+            v.present_key = Some((cur_version, cur_view));
             v.begin_crossfade();
         }
 
@@ -1966,22 +1975,23 @@ impl FerroliteApp {
         // after a swap, 1 once the ramp completes (or immediately once idle+ready).
         let factor = v.tick_crossfade(dt);
         let tiles_settled = matches!(tiles_pending, Some(0));
-        // Read AFTER the re-arm above (lines computing `present_swapped = false` on
-        // `!converged || present_reallocated`, and `= true` on `swapped_this_frame`),
-        // so this reflects whether `front` actually holds a valid composed image
-        // for the CURRENT converged state THIS frame. Feeding a stale (pre-re-arm)
-        // value to `present_source` would blit the just-blanked `front` for one
-        // frame on a canvas resize (spec 4.5 final review, I1).
-        let present_swapped = v.present_swapped;
-        // The full (sparse) tier is actually on screen once it is composed+swapped
-        // (`present_swapped`), the crossfade has completed, and its tiles are all
-        // resident. Consulted by `toggle_split_compare` (via `showing_full`) to
-        // decide whether enabling the split would dead-end on the full tier.
-        let show_full = v.full_ready && present_swapped && factor >= 1.0 && tiles_settled;
+        // `front` holds a valid composed image for the CURRENT `(version, view)`
+        // iff the recorded key matches. False during edits (version bumped), motion
+        // (view changed each frame), and right after a resize (key set to `None`) —
+        // in all of which `present_source` must fall back to `Preview`.
+        let front_valid = v.present_key == Some((cur_version, cur_view));
+        // The full (sparse) tier is actually on screen once `front` is valid for
+        // the current state, the crossfade has completed, its tiles are all
+        // resident, AND the before/after split is NOT active (the split is a
+        // preview-tier-only compare — never claim the full tier is "shown" while
+        // it renders, which is the split fix). Consulted by `toggle_split_compare`
+        // (via `showing_full`) to decide whether enabling the split dead-ends.
+        let show_full =
+            v.full_ready && front_valid && factor >= 1.0 && tiles_settled && !v.split_compare;
         // Present-source inputs handed to `viewer::paint` (which also folds in the
-        // per-frame `interacting` it detects): the sparse tier exists, the pool is
-        // converged for the current transform+version, `front` is valid
-        // (`present_swapped`), and the crossfade factor.
+        // per-frame `interacting` and `split_compare` it reads): the sparse tier
+        // exists, `front` is valid for the current `(version, view)`, and the
+        // crossfade factor.
         let full_ready = v.full_ready;
         // Persist the real, per-frame-current value so `toggle_split_compare`
         // (which runs outside this per-frame borrow, e.g. from a keyboard
@@ -2028,15 +2038,8 @@ impl FerroliteApp {
         // moved, so read `idle` AFTER it to catch an interaction this frame. It
         // also folds this frame's `interacting` into the present source and returns
         // the chosen source so the repaint gate can keep the loop alive mid-fade.
-        let (loading_preview, present_source) = viewer::paint(
-            ui,
-            v,
-            full_ready,
-            converged,
-            present_swapped,
-            factor,
-            interactive,
-        );
+        let (loading_preview, present_source) =
+            viewer::paint(ui, v, full_ready, front_valid, factor, interactive);
         let idle = v.idle;
         let crossfading_present = matches!(present_source, viewer::PresentSource::Crossfade(_));
 
@@ -2055,8 +2058,14 @@ impl FerroliteApp {
         // Spec 4.5 §4.2: while the sparse tier exists but is not yet converged, keep
         // the loop alive so production advances and the off-screen compose+swap can
         // fire; and keep it alive while a present-crossfade is mid-ramp so the
-        // freshly-swapped `front` fades in without a manual nudge.
-        let compose_pending = full_ready && !converged;
+        // freshly-swapped `front` fades in without a manual nudge. Additionally, keep
+        // repainting while `front` is stale for the current state (`!front_valid`) —
+        // e.g. an edit at an already-settled fit view bumped `opstack_version` so the
+        // key mismatches but `converged` may already be true: without this the loop
+        // could idle before the recompose+swap fires and the edit would only appear
+        // after a manual zoom. Once `front_valid` (and not crossfading + converged),
+        // none of these terms hold, so the loop goes idle (no busy-loop).
+        let compose_pending = full_ready && (!converged || !front_valid);
         if !idle
             && (loading_preview
                 || crossfading

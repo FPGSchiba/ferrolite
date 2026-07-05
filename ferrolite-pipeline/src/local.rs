@@ -23,23 +23,39 @@ pub struct ColorSwatch {
 /// by an older/newer build (missing/extra fields) loads as identity for those.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct AdjustmentSet {
-    #[serde(default)] pub exposure: f32,
-    #[serde(default)] pub contrast: f32,
-    #[serde(default)] pub highlights: f32,
-    #[serde(default)] pub shadows: f32,
-    #[serde(default)] pub whites: f32,
-    #[serde(default)] pub blacks: f32,
-    #[serde(default)] pub temp: f32,
-    #[serde(default)] pub tint: f32,
-    #[serde(default)] pub saturation: f32,
-    #[serde(default)] pub hue: f32,
-    #[serde(default)] pub color: ColorSwatch,
+    #[serde(default)]
+    pub exposure: f32,
+    #[serde(default)]
+    pub contrast: f32,
+    #[serde(default)]
+    pub highlights: f32,
+    #[serde(default)]
+    pub shadows: f32,
+    #[serde(default)]
+    pub whites: f32,
+    #[serde(default)]
+    pub blacks: f32,
+    #[serde(default)]
+    pub temp: f32,
+    #[serde(default)]
+    pub tint: f32,
+    #[serde(default)]
+    pub saturation: f32,
+    #[serde(default)]
+    pub hue: f32,
+    #[serde(default)]
+    pub color: ColorSwatch,
     // Reserved neighborhood locals — no shader in P1 (greyed in Plan 4's UI).
-    #[serde(default)] pub texture: f32,
-    #[serde(default)] pub clarity: f32,
-    #[serde(default)] pub dehaze: f32,
-    #[serde(default)] pub sharpness: f32,
-    #[serde(default)] pub noise: f32,
+    #[serde(default)]
+    pub texture: f32,
+    #[serde(default)]
+    pub clarity: f32,
+    #[serde(default)]
+    pub dehaze: f32,
+    #[serde(default)]
+    pub sharpness: f32,
+    #[serde(default)]
+    pub noise: f32,
 }
 
 /// A single Light control (per-control reset target).
@@ -156,7 +172,11 @@ mod tests {
 
     #[test]
     fn reset_light_zeroes_one_control_only() {
-        let a = AdjustmentSet { exposure: 0.5, contrast: 0.3, ..Default::default() };
+        let a = AdjustmentSet {
+            exposure: 0.5,
+            contrast: 0.3,
+            ..Default::default()
+        };
         let r = a.reset_light(LightControl::Exposure);
         assert_eq!(r.exposure, 0.0, "exposure reset");
         assert_eq!(r.contrast, 0.3, "contrast untouched");
@@ -177,10 +197,7 @@ mod tests {
         };
         assert_eq!(a.reset_color(ColorControl::Temp).temp, 0.0);
         assert_eq!(a.reset_color(ColorControl::Temp).saturation, -0.2);
-        assert_eq!(
-            a.reset_color(ColorControl::Color).color.amount,
-            0.0
-        );
+        assert_eq!(a.reset_color(ColorControl::Color).color.amount, 0.0);
     }
 
     #[test]
@@ -249,9 +266,6 @@ mod tests {
             }],
         };
         let json = serde_json::to_string(&la).unwrap();
-        assert_eq!(
-            serde_json::from_str::<LocalAdjustments>(&json).unwrap(),
-            la
-        );
+        assert_eq!(serde_json::from_str::<LocalAdjustments>(&json).unwrap(), la);
     }
 }

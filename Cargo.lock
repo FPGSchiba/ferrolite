@@ -1352,6 +1352,7 @@ dependencies = [
  "ferrolite-gpu",
  "ferrolite-image",
  "ferrolite-lens",
+ "ferrolite-mask",
  "half",
  "image",
  "pollster 0.4.0",

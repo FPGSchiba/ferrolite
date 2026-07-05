@@ -3,12 +3,14 @@
 //! a game engine as a unit (map §3, D7). Grows module-by-module across P1 Plan 1.
 
 mod buffer;
+mod composite;
 mod model;
 mod pass;
 mod shapes;
 mod vec;
 
 pub use buffer::{MaskBuffer, MASK_FORMAT};
+pub use composite::{CompositeNode, CompositePass};
 pub use model::{
     composite_scalar, BrushNode, CompositeMode, MaskComponent, MaskDefinition, MaskProvenance,
     RasterHandle, Stroke,

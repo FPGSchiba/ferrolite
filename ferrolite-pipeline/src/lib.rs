@@ -5,6 +5,7 @@ mod gpu_pyramid;
 mod image;
 mod lens_bake;
 mod lens_gpu;
+mod local;
 mod nodes;
 mod op;
 mod pipeline;
@@ -16,6 +17,9 @@ pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
 pub use lens_bake::bake_products;
 pub use lens_gpu::{VignetteTexture, WarpGridTexture};
+pub use local::{
+    AdjustmentSet, ColorControl, ColorSwatch, LightControl, LocalAdjustments, MaskLayer,
+};
 pub use nodes::{color_convert, upload_source};
 pub use op::{
     Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,

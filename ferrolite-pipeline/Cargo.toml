@@ -12,6 +12,7 @@ workspace = true
 ferrolite-image = { workspace = true }
 ferrolite-gpu = { workspace = true }
 ferrolite-lens = { workspace = true }
+ferrolite-mask = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 half = { workspace = true }

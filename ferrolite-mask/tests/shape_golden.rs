@@ -1,7 +1,7 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_mask::{LinearGradientPass, RadialGradientPass, Vec2};
+use ferrolite_mask::{LinearGradientPass, LumaRangePass, RadialGradientPass, Vec2};
 use std::sync::Arc;
 
 const W: u32 = 64;
@@ -50,4 +50,27 @@ fn radial_gradient_matches_golden() {
     assert!(center > 0.99, "ellipse center should be fully selected");
     assert!(values[0] < 0.01, "top-left corner should be outside");
     common::assert_mask_golden(&values, W, H, "radial_gradient.png");
+}
+
+#[test]
+fn luma_range_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Vertical luma ramp: dark at top (y=0) to bright at bottom (y=H-1).
+    let input = common::upload_rgba16f(&ctx, W, H, |_x, y| {
+        let l = y as f32 / (H - 1) as f32;
+        [l, l, l, 1.0]
+    });
+    let view = input.create_view(&wgpu::TextureViewDescriptor::default());
+    let pass = LumaRangePass::new(ctx.clone());
+    // Select mid-tones [0.35, 0.65].
+    let mask = pass.run(0.35, 0.65, 0.05, &view, W, H);
+    let values = common::read_r32f(&ctx, &mask);
+    assert!(values[0] < 0.01, "darkest row should be outside the band");
+    let mid = values[((H / 2) * W) as usize];
+    assert!(mid > 0.99, "mid-tone row should be fully selected");
+    common::assert_mask_golden(&values, W, H, "luma_range.png");
 }

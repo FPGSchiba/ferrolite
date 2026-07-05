@@ -34,9 +34,6 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-// Used by `SampledPass`, which is not yet constructed anywhere until the
-// luma-range/color-range shape evaluators land in later tasks.
-#[allow(dead_code)]
 fn loadable_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     // Non-filterable float: sampled via textureLoad (no sampler), matching the
     // vignette-LUT precedent — works for R32Float and Rgba16Float inputs alike.
@@ -165,9 +162,7 @@ impl<U: bytemuck::Pod> GenPass<U> {
 }
 
 /// Sampled shape pass: `input color texture + uniform -> R32Float mask`.
-/// Not yet constructed anywhere — used by luma_range/color_range in later
-/// tasks — so it (and its impl) are allowed to be dead code for now.
-#[allow(dead_code)]
+/// Used by the luma-range shape evaluator (and future color-range).
 pub(crate) struct SampledPass<U: bytemuck::Pod> {
     ctx: Arc<GpuContext>,
     pipeline: wgpu::ComputePipeline,
@@ -176,7 +171,6 @@ pub(crate) struct SampledPass<U: bytemuck::Pod> {
     _marker: std::marker::PhantomData<U>,
 }
 
-#[allow(dead_code)]
 impl<U: bytemuck::Pod> SampledPass<U> {
     pub(crate) fn new(ctx: Arc<GpuContext>, wgsl: &'static str, label: &'static str) -> Self {
         let bgl = ctx

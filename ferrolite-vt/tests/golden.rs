@@ -6,6 +6,7 @@ use ferrolite_gpu::GpuContext;
 use ferrolite_image::{TileCoord, TILE_SIZE};
 use ferrolite_jobs::JobSystem;
 use ferrolite_vt::{PyramidTileSource, TileSource, ViewTransform, VirtualTexture};
+use wgpu::util::DeviceExt;
 
 const TOL: u8 = 4; // absorbs driver float differences
 
@@ -573,6 +574,207 @@ fn sparse_trilinear_blends_adjacent_levels() {
         common::max_abs_diff(&pixels, golden.as_raw()) <= TOL,
         "trilinear-blended render drifted from golden beyond tolerance"
     );
+}
+
+/// Golden proving the off-screen "swapchain" indirection is a no-op when the
+/// sparse pool is converged (Task 8, spec 4.5 §4.2): (A) `draw_sparse` directly
+/// to an offscreen target, vs (B) `compose_sparse_into` a `PresentBuffers.back`,
+/// `swap()`, then blit `front` (alpha 1.0, via the `DisplayVariant::Blit`
+/// pipeline) into a second offscreen target of the same format. If A and B
+/// match within tolerance, presenting through the buffered blit changes nothing
+/// visually versus today's direct draw — it only defers *when* the pixels reach
+/// the screen.
+#[test]
+fn blit_front_matches_direct_sparse_when_converged() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping golden (expected in headless CI)");
+        return;
+    };
+
+    // Small multi-tile gradient so the sparse pool has more than one level/tile
+    // to converge (mirrors the rung-4 / trilinear golden setup above).
+    let (iw, ih) = (600u32, 500u32);
+    let mut px = Vec::new();
+    for y in 0..ih {
+        for x in 0..iw {
+            px.extend_from_slice(&[x as f32 / iw as f32, y as f32 / ih as f32, 0.25, 1.0]);
+        }
+    }
+    let img = ferrolite_image::LinearRgbaF32::new(iw, ih, px).unwrap();
+    let src = PyramidTileSource::new(img);
+    let level_count = src.level_count();
+
+    let target_format = wgpu::TextureFormat::Rgba8Unorm;
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, target_format);
+    let src_arc: Arc<dyn TileSource + Send + Sync> = Arc::new(src);
+
+    // Every tile of every level, so the pool is converged regardless of view.
+    let total: u32 = (0..level_count)
+        .map(|lod| {
+            let (lw, lh) = src_arc.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let all_tiles: Vec<TileCoord> = (0..level_count)
+        .flat_map(|lod| {
+            let (lw, lh) = src_arc.level_size(lod);
+            let (cols, rows) = (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE));
+            (0..rows).flat_map(move |y| (0..cols).map(move |x| TileCoord { lod, x, y }))
+        })
+        .collect();
+
+    let jobs = Arc::new(JobSystem::new(1));
+    let mut vt = VirtualTexture::sparse(
+        &ctx,
+        Arc::clone(&src_arc),
+        Arc::clone(&jobs),
+        total,
+        &pipelines,
+    );
+    let mut producer = SolidProducer;
+    let made = vt.produce_view(&ctx, &mut producer, &all_tiles, all_tiles.len());
+    assert_eq!(made, all_tiles.len(), "every tile of every level produced");
+    for t in &all_tiles {
+        assert!(
+            vt.is_resident(*t),
+            "tile {t:?} should be resident (converged pool)"
+        );
+    }
+
+    let (w, h) = (128u32, 128u32);
+    let view = ViewTransform::fit((iw, ih), (w as f32, h as f32));
+
+    // --- Path A: draw_sparse directly to an offscreen target. ---
+    let target_a = ctx.render_target(w, h, target_format);
+    let view_a = target_a.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut enc_a = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc_a.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-direct-sparse"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view_a,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.02,
+                        g: 0.02,
+                        b: 0.02,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        vt.render_sparse(&ctx, &mut pass, &view, (w as f32, h as f32));
+    }
+    ctx.queue.submit([enc_a.finish()]);
+    let image_a = ctx.read_rgba8(&target_a, w, h);
+
+    // --- Path B: compose_sparse_into PresentBuffers.back, swap, blit front. ---
+    let mut present = ferrolite_vt::PresentBuffers::new(&ctx, (w, h), target_format);
+    let mut enc_b = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    vt.compose_sparse_into(
+        &ctx,
+        &mut enc_b,
+        present.back_view(),
+        &view,
+        (w as f32, h as f32),
+    );
+    ctx.queue.submit([enc_b.finish()]);
+    present.swap();
+
+    // Blit `front` (alpha 1.0) into a second offscreen target via the Blit
+    // pipeline. Clear to opaque first: ALPHA_BLENDING with alpha=1.0 fully
+    // overwrites, but clearing keeps the pass well-defined regardless.
+    let target_b = ctx.render_target(w, h, target_format);
+    let view_b = target_b.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let alpha_buf = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("blit-params"),
+            contents: bytemuck::bytes_of(&BlitParams {
+                alpha: 1.0,
+                _pad0: [0.0; 3],
+                _pad1: [0.0; 4],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+    let blit_bind = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("blit-bind"),
+        layout: pipelines.blit_layout(),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(present.front_view()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(pipelines.sampler()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: alpha_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut enc_blit = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc_blit.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-blit-front"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view_b,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.0,
+                        g: 0.0,
+                        b: 0.0,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_pipeline(pipelines.pipeline(ferrolite_vt::DisplayVariant::Blit));
+        pass.set_bind_group(0, &blit_bind, &[]);
+        pass.draw(0..3, 0..1);
+    }
+    ctx.queue.submit([enc_blit.finish()]);
+    let image_b = ctx.read_rgba8(&target_b, w, h);
+
+    let diff = common::max_abs_diff(&image_a, &image_b);
+    eprintln!("blit_front_matches_direct_sparse max_abs_diff = {diff}");
+    assert!(
+        diff <= TOL,
+        "blit(front) diverged from the direct sparse draw beyond tolerance (diff={diff})"
+    );
+}
+
+/// Uniform matching `present.wgsl`'s `struct BlitParams { alpha: f32, _pad:
+/// vec3<f32> }` layout, used to drive the blit pipeline directly from a golden
+/// test (no app-side wrapper exists yet). WGSL aligns `vec3<f32>` to 16 bytes,
+/// so the struct is 32 bytes total: `alpha` at offset 0 (padded to 16), then
+/// `_pad` at offset 16..28 (padded to 32).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BlitParams {
+    alpha: f32,
+    _pad0: [f32; 3],
+    _pad1: [f32; 4],
 }
 
 /// The working→display matrix uniform is applied before the sRGB OETF. A

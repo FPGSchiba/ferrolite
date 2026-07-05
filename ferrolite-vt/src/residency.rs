@@ -75,7 +75,11 @@ pub fn needed_tiles_prefetched(
         let (cols, rows) = tiles_per_level(image.0, image.1, base_lod);
         for y in 0..rows {
             for x in 0..cols {
-                let t = TileCoord { lod: base_lod, x, y };
+                let t = TileCoord {
+                    lod: base_lod,
+                    x,
+                    y,
+                };
                 if seen.insert(t) {
                     out.push(t);
                 }
@@ -320,14 +324,20 @@ mod tests {
         let image = (2048u32, 2048u32);
         let vp = (256.0f32, 256.0f32);
         let level_count = 4u32;
-        let view = ViewTransform { zoom: 1.0, pan: (0.0, 0.0) };
+        let view = ViewTransform {
+            zoom: 1.0,
+            pan: (0.0, 0.0),
+        };
 
         let base = needed_tiles(image, &view, vp, level_count);
         let pref = needed_tiles_prefetched(image, &view, vp, level_count, 1);
 
         // Superset of the plain needed set.
         for t in &base {
-            assert!(pref.contains(t), "prefetched must include every visible tile {t:?}");
+            assert!(
+                pref.contains(t),
+                "prefetched must include every visible tile {t:?}"
+            );
         }
         // Visible tiles are first (visibility priority).
         assert_eq!(&pref[..base.len()], &base[..]);
@@ -336,7 +346,11 @@ mod tests {
         for y in 0..rows {
             for x in 0..cols {
                 assert!(
-                    pref.contains(&TileCoord { lod: level_count - 1, x, y }),
+                    pref.contains(&TileCoord {
+                        lod: level_count - 1,
+                        x,
+                        y
+                    }),
                     "coarse base tile ({x},{y}) must be prefetched"
                 );
             }

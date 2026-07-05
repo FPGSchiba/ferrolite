@@ -80,11 +80,30 @@ struct TileMeta {
 };
 @group(0) @binding(5) var<uniform> tmeta: TileMeta;
 
-fn pick_lod(img_px: vec2<f32>) -> u32 {
-    let dx = length(dpdx(img_px));
-    let dy = length(dpdy(img_px));
-    let d = max(max(dx, dy), 1.0);
-    return min(u32(max(log2(d), 0.0)), tmeta.level_count - 1u);
+// Resolve a resident tile color at exactly `lvl` (no fallback), returning
+// (rgb, 1.0) if resident or (0,0,0, 0.0) if not. Tiled path (slots buffer).
+fn sample_tiled_at(img_px: vec2<f32>, lvl: u32) -> vec4<f32> {
+    let lod_px = img_px / f32(1u << lvl);
+    let tx = u32(lod_px.x) / 256u;
+    let ty = u32(lod_px.y) / 256u;
+    let cols = tmeta.levels[lvl].x;
+    let offset = tmeta.levels[lvl].y;
+    let slot = slots[offset + ty * cols + tx];
+    if (slot == NOT_RESIDENT) { return vec4(0.0, 0.0, 0.0, 0.0); }
+    let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
+    return vec4(textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb, 1.0);
+}
+
+// Coarse-LOD walk from `lvl` upward until a resident tile is found (tiled path).
+fn resolve_tiled(img_px: vec2<f32>, lvl: u32) -> vec4<f32> {
+    var l = lvl;
+    loop {
+        let c = sample_tiled_at(img_px, l);
+        if (c.a > 0.0) { return c; }
+        if (l + 1u >= tmeta.level_count) { return vec4(0.0, 0.0, 0.0, 0.0); }
+        l = l + 1u;
+    }
+    return vec4(0.0, 0.0, 0.0, 0.0);
 }
 
 @fragment
@@ -95,36 +114,23 @@ fn fs_tiled(in: VsOut) -> @location(0) vec4<f32> {
     if (img_px.x < 0.0 || img_px.x >= xf.image.x || img_px.y < 0.0 || img_px.y >= xf.image.y) {
         return vec4(0.05, 0.05, 0.05, 1.0);
     }
-    let lod = pick_lod(img_px);
-    // Coarse-LOD fallback: start at the picked LOD and walk up to coarser levels
-    // until a resident tile is found. The in-tile UV uses `lvl` (the resolved
-    // level), never the originally picked `lod`.
-    var lvl = lod;
-    var slot = NOT_RESIDENT;
-    var lod_px = vec2<f32>(0.0, 0.0);
-    var tx = 0u;
-    var ty = 0u;
-    loop {
-        lod_px = img_px / f32(1u << lvl);
-        tx = u32(lod_px.x) / 256u;
-        ty = u32(lod_px.y) / 256u;
-        let cols = tmeta.levels[lvl].x;
-        let offset = tmeta.levels[lvl].y;
-        let cand = slots[offset + ty * cols + tx];
-        if (cand != NOT_RESIDENT) {
-            slot = cand;
-            break;
-        }
-        if (lvl + 1u >= tmeta.level_count) {
-            break;
-        }
-        lvl = lvl + 1u;
-    }
-    if (slot == NOT_RESIDENT) {
+    let dx = length(dpdx(img_px));
+    let dy = length(dpdy(img_px));
+    let lf = max(log2(max(max(dx, dy), 1.0)), 0.0);
+    let lo = min(u32(lf), tmeta.level_count - 1u);
+    let hi = min(lo + 1u, tmeta.level_count - 1u);
+    let lo_c = resolve_tiled(img_px, lo);
+    let hi_c = resolve_tiled(img_px, hi);
+    var lin: vec3<f32>;
+    if (lo_c.a > 0.0 && hi_c.a > 0.0) {
+        lin = mix(lo_c.rgb, hi_c.rgb, fract(lf));
+    } else if (lo_c.a > 0.0) {
+        lin = lo_c.rgb;
+    } else if (hi_c.a > 0.0) {
+        lin = hi_c.rgb;
+    } else {
         return vec4(0.05, 0.05, 0.05, 1.0);
     }
-    let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
-    let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
     return vec4(tail(lin), 1.0);
 }
 
@@ -150,6 +156,30 @@ fn page_table_slot(flat: u32) -> u32 {
     return textureLoad(page_table, vec2<i32>(i32(flat), 0), 0).r;
 }
 
+// Resolve a resident tile color at exactly `lvl` (no fallback), returning
+// (rgb, 1.0) if resident or (0,0,0, 0.0) if not. Sparse path (page table).
+fn sample_sparse_at(img_px: vec2<f32>, lvl: u32) -> vec4<f32> {
+    let lod_px = img_px / f32(1u << lvl);
+    let tx = u32(lod_px.x) / 256u;
+    let ty = u32(lod_px.y) / 256u;
+    let slot = page_table_slot(flat_at(lvl, tx, ty));
+    if (slot == NOT_RESIDENT) { return vec4(0.0, 0.0, 0.0, 0.0); }
+    let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
+    return vec4(textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb, 1.0);
+}
+
+// Coarse-LOD walk from `lvl` upward until a resident tile is found (sparse path).
+fn resolve_sparse(img_px: vec2<f32>, lvl: u32) -> vec4<f32> {
+    var l = lvl;
+    loop {
+        let c = sample_sparse_at(img_px, l);
+        if (c.a > 0.0) { return c; }
+        if (l + 1u >= tmeta.level_count) { return vec4(0.0, 0.0, 0.0, 0.0); }
+        l = l + 1u;
+    }
+    return vec4(0.0, 0.0, 0.0, 0.0);
+}
+
 @fragment
 fn fs_sparse(in: VsOut) -> @location(0) vec4<f32> {
     let screen_px = in.screen_uv * xf.viewport;
@@ -158,41 +188,33 @@ fn fs_sparse(in: VsOut) -> @location(0) vec4<f32> {
     if (img_px.x < 0.0 || img_px.x >= xf.image.x || img_px.y < 0.0 || img_px.y >= xf.image.y) {
         return vec4(0.05, 0.05, 0.05, 1.0);
     }
-    let lod = pick_lod(img_px);
+    let dx = length(dpdx(img_px));
+    let dy = length(dpdy(img_px));
+    let lf = max(log2(max(max(dx, dy), 1.0)), 0.0);
+    let lo = min(u32(lf), tmeta.level_count - 1u);
+    let hi = min(lo + 1u, tmeta.level_count - 1u);
 
-    // Mark the desired tile (at the PICKED lod) as needed — GPU-truth feedback of
-    // what the shader wanted, independent of which level the fallback resolves to.
-    let picked_px = img_px / f32(1u << lod);
+    // Mark the desired tile (at the PICKED lod, i.e. `lo`) as needed — GPU-truth
+    // feedback of what the shader wanted, independent of which level(s) the
+    // fallback/blend resolves to. Marked BEFORE resolving so it happens on every
+    // fragment regardless of residency, driving streaming.
+    let picked_px = img_px / f32(1u << lo);
     let picked_tx = u32(picked_px.x) / 256u;
     let picked_ty = u32(picked_px.y) / 256u;
-    let picked_flat = flat_at(lod, picked_tx, picked_ty);
+    let picked_flat = flat_at(lo, picked_tx, picked_ty);
     atomicOr(&feedback[picked_flat], 1u);
 
-    // Coarse-LOD fallback: climb to coarser levels until a resident tile is found,
-    // resolving the slot from the page table. In-tile UV uses the resolved `lvl`.
-    var lvl = lod;
-    var slot = NOT_RESIDENT;
-    var lod_px = vec2<f32>(0.0, 0.0);
-    var tx = 0u;
-    var ty = 0u;
-    loop {
-        lod_px = img_px / f32(1u << lvl);
-        tx = u32(lod_px.x) / 256u;
-        ty = u32(lod_px.y) / 256u;
-        let cand = page_table_slot(flat_at(lvl, tx, ty));
-        if (cand != NOT_RESIDENT) {
-            slot = cand;
-            break;
-        }
-        if (lvl + 1u >= tmeta.level_count) {
-            break;
-        }
-        lvl = lvl + 1u;
-    }
-    if (slot == NOT_RESIDENT) {
+    let lo_c = resolve_sparse(img_px, lo);
+    let hi_c = resolve_sparse(img_px, hi);
+    var lin: vec3<f32>;
+    if (lo_c.a > 0.0 && hi_c.a > 0.0) {
+        lin = mix(lo_c.rgb, hi_c.rgb, fract(lf));
+    } else if (lo_c.a > 0.0) {
+        lin = lo_c.rgb;
+    } else if (hi_c.a > 0.0) {
+        lin = hi_c.rgb;
+    } else {
         return vec4(0.05, 0.05, 0.05, 1.0);
     }
-    let in_tile = (lod_px - vec2(f32(tx * 256u), f32(ty * 256u))) / 256.0;
-    let lin = textureSampleLevel(tiles, img_samp, in_tile, slot, 0.0).rgb;
     return vec4(tail(lin), 1.0);
 }

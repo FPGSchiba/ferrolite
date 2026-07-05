@@ -381,6 +381,200 @@ fn rung4_feedback_makes_center_tile_resident() {
     );
 }
 
+/// A `TileProducer` that writes a solid color keyed on the tile's LOD (not its
+/// x/y), so adjacent LODs are visibly and numerically distinct. Used to force
+/// specific LODs resident directly (bypassing the feedback round-trip, which
+/// only ever marks the picked LOD, never the coarser blend partner) with colors
+/// chosen so the trilinear blend between them is unambiguous in the golden.
+struct LevelTintProducer;
+impl ferrolite_vt::TileProducer for LevelTintProducer {
+    fn produce(
+        &mut self,
+        ctx: &ferrolite_gpu::GpuContext,
+        coord: ferrolite_image::TileCoord,
+    ) -> wgpu::Texture {
+        use wgpu::util::DeviceExt;
+        // lod 2 -> pure red, lod 3 -> pure blue; any other lod (unused here) -> white.
+        let (r, g, b) = match coord.lod {
+            2 => (1.0, 0.0, 0.0),
+            3 => (0.0, 0.0, 1.0),
+            _ => (1.0, 1.0, 1.0),
+        };
+        let n = (TILE_SIZE * TILE_SIZE) as usize;
+        let texel = [
+            half::f16::from_f32(r),
+            half::f16::from_f32(g),
+            half::f16::from_f32(b),
+            half::f16::from_f32(1.0),
+        ];
+        let mut texels = Vec::with_capacity(n * 4);
+        for _ in 0..n {
+            texels.extend_from_slice(&texel);
+        }
+        ctx.device.create_texture_with_data(
+            &ctx.queue,
+            &wgpu::TextureDescriptor {
+                label: Some("level-tint-producer-tile"),
+                size: wgpu::Extent3d {
+                    width: TILE_SIZE,
+                    height: TILE_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&texels),
+        )
+    }
+}
+
+/// Trilinear LOD blend (Task 4): `fs_sparse` samples the picked LOD and the
+/// next-coarser resident LOD and blends by `fract(log2 d)`, instead of hard
+/// LOD selection. Renders at a fractional-LOD zoom (`lf ≈ 2.5`, so `lo=2`,
+/// `hi=3`, blend factor `fract(2.5)=0.5`) with lod 2 forced pure red and lod 3
+/// forced pure blue (via `LevelTintProducer`, bypassing the real pyramid
+/// content so the two source levels are unambiguously distinct) — a correct
+/// 50/50 blend renders magenta (`(0.5, 0, 0.5)`); hard LOD selection (the
+/// pre-Task-4 behavior) would render solid red or solid blue instead. Compares
+/// against a committed reference PNG within the existing tolerance.
+///
+/// Deliberately does NOT call `request_view_feedback` between the producer
+/// pre-fill and the golden render: that reconcile evicts anything not in the
+/// shader's feedback set, and `fs_sparse` only ever marks the *picked* (lo)
+/// LOD — never the coarser blend partner (`hi`) — so reconciling here would
+/// evict `hi` and collapse the test back to a single-level render. The
+/// feedback-mark invariant itself (tiles the shader wants get marked and,
+/// over repeated frames, loaded) is covered by `rung4_feedback_makes_center_tile_resident`.
+#[test]
+fn sparse_trilinear_blends_adjacent_levels() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping golden");
+        return;
+    };
+
+    // 1200x900 -> pyramid levels: 1200x900, 600x450, 300x225, 150x112 (4 levels,
+    // lod 3 is the last since both dims are <=256). lo=2 (300x225, still >256 on
+    // width so 2x1 tiles) and hi=3 (150x112, single tile) are both valid indices
+    // (< level_count), so the blend does not degenerate to a single level. The
+    // base image content is irrelevant here (the producer overrides lod 2/3
+    // tiles with solid tints below); a flat image keeps level dims deterministic.
+    let (iw, ih) = (1200u32, 900u32);
+    let img = ferrolite_image::LinearRgbaF32::black(iw, ih);
+    let src = PyramidTileSource::new(img);
+    assert_eq!(
+        src.level_count(),
+        4,
+        "expected a 4-level pyramid at 1200x900"
+    );
+
+    let (w, h) = (128u32, 128u32);
+    // zoom = 2^-2.5 so that d = 1/zoom = 2^2.5 and lf = log2(d) = 2.5 uniformly
+    // across the frame (the screen->image mapping is affine, no perspective).
+    let view = ViewTransform {
+        zoom: 2f32.powf(-2.5),
+        pan: (0.0, 0.0),
+    };
+
+    let total: u32 = (0..src.level_count())
+        .map(|lod| {
+            let (lw, lh) = src.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(1));
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let src_arc: Arc<dyn TileSource + Send + Sync> = Arc::new(src);
+
+    let mut vt = VirtualTexture::sparse(
+        &ctx,
+        Arc::clone(&src_arc),
+        Arc::clone(&jobs),
+        total,
+        &pipelines,
+    );
+    let mut producer = LevelTintProducer;
+
+    // Force BOTH the lo (lod 2) and hi (lod 3) tiles under the viewport center
+    // resident directly via the producer path — the feedback loop alone only
+    // ever marks the picked (lo) LOD, never the coarser blend partner, so it
+    // cannot converge both levels on its own.
+    let lo_tiles: Vec<TileCoord> = {
+        let (cols, rows) = {
+            let (lw, lh) = src_arc.level_size(2);
+            (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE))
+        };
+        (0..rows)
+            .flat_map(|y| (0..cols).map(move |x| TileCoord { lod: 2, x, y }))
+            .collect()
+    };
+    let hi_tiles: Vec<TileCoord> = {
+        let (cols, rows) = {
+            let (lw, lh) = src_arc.level_size(3);
+            (lw.div_ceil(TILE_SIZE), lh.div_ceil(TILE_SIZE))
+        };
+        (0..rows)
+            .flat_map(|y| (0..cols).map(move |x| TileCoord { lod: 3, x, y }))
+            .collect()
+    };
+    let mut needed = lo_tiles.clone();
+    needed.extend(hi_tiles.clone());
+    let made = vt.produce_view(&ctx, &mut producer, &needed, needed.len());
+    assert_eq!(made, needed.len(), "all lo/hi tiles produced");
+    for t in &needed {
+        assert!(vt.is_resident(*t), "tile {t:?} should be resident");
+    }
+
+    // Render the golden frame the same way `render_sparse_frame` does (marking
+    // feedback as a side effect, which we deliberately do not reconcile — see
+    // the doc comment above), then read back the pixels for comparison.
+    let target = ctx.render_target(w, h, wgpu::TextureFormat::Rgba8Unorm);
+    let tview = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let mut enc = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    {
+        let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("vt-trilinear-golden"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &tview,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        vt.render_sparse(&ctx, &mut pass, &view, (w as f32, h as f32));
+    }
+    ctx.queue.submit([enc.finish()]);
+    let pixels = ctx.read_rgba8(&target, w, h);
+
+    let golden_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/refs/trilinear_sparse.png"
+    );
+    if std::env::var("UPDATE_GOLDEN").is_ok() || !std::path::Path::new(golden_path).exists() {
+        std::fs::create_dir_all(std::path::Path::new(golden_path).parent().unwrap()).unwrap();
+        image::save_buffer(golden_path, &pixels, w, h, image::ColorType::Rgba8).unwrap();
+        eprintln!("wrote golden {golden_path}");
+        return;
+    }
+    let golden = image::open(golden_path).unwrap().to_rgba8();
+    assert_eq!(golden.dimensions(), (w, h));
+    assert!(
+        common::max_abs_diff(&pixels, golden.as_raw()) <= TOL,
+        "trilinear-blended render drifted from golden beyond tolerance"
+    );
+}
+
 /// The working→display matrix uniform is applied before the sRGB OETF. A
 /// channel-swap matrix must visibly change the rendered output, proving the
 /// tail is wired end-to-end (bind group + layout + shader).

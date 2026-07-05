@@ -1602,6 +1602,18 @@ impl VirtualTexture {
             .is_some_and(|s| !s.last_needed.is_empty())
     }
 
+    /// Rung 4: is the visible view fully resident at the current opstack version?
+    /// Uses the immediate CPU `needed_tiles` rect (not the 1-frame-latent feedback),
+    /// so callers can gate the present swap without waiting a frame. `false` if not sparse.
+    pub fn is_converged(&self, view: &ViewTransform, viewport: (f32, f32)) -> bool {
+        let Some(s) = self.sparse.as_ref() else {
+            return false;
+        };
+        let level_count = s.layout.level_count();
+        let needed = crate::residency::needed_tiles(s.image_dims, view, viewport, level_count);
+        s.versions.to_produce(&needed).is_empty()
+    }
+
     /// Rung 4: cancel every in-flight tile-load job. Called on navigation so a
     /// superseded image's tile jobs stop competing with the newly-opened one.
     /// Idempotent; a no-op on a non-sparse VT. Mirrors `cancel_streaming`.

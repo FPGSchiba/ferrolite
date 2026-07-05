@@ -903,3 +903,53 @@ fn lut_path_samples_identity_shaper_lut() {
         }
     }
 }
+
+/// Task 9: `is_converged` is the immediate CPU-rect convergence predicate — it
+/// must report `false` for a freshly-built sparse VT (nothing produced yet) and
+/// `true` once every tile `needed_tiles` reports for the fit view has been
+/// produced via the stub producer. Mirrors the `producer_fills_requested_tiles`
+/// setup above (no photo/pyramid dependency beyond the test-only pyramid source).
+#[test]
+fn fresh_sparse_is_not_converged_then_converges_after_producing() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+
+    let (iw, ih) = (600u32, 500u32);
+    let img = ferrolite_image::LinearRgbaF32::black(iw, ih);
+    let src: Arc<dyn TileSource + Send + Sync> = Arc::new(PyramidTileSource::new(img));
+    let total: u32 = (0..src.level_count())
+        .map(|lod| {
+            let (lw, lh) = src.level_size(lod);
+            lw.div_ceil(TILE_SIZE) * lh.div_ceil(TILE_SIZE)
+        })
+        .sum();
+    let jobs = Arc::new(JobSystem::new(1));
+    let pipelines = ferrolite_vt::DisplayPipelines::new(&ctx, wgpu::TextureFormat::Rgba8Unorm);
+    let mut vt =
+        VirtualTexture::sparse(&ctx, Arc::clone(&src), Arc::clone(&jobs), total, &pipelines);
+    let mut producer = SolidProducer;
+
+    let (w, h) = (128.0f32, 128.0f32);
+    let view = ViewTransform::fit((iw, ih), (w, h));
+
+    // Nothing produced yet: not converged.
+    assert!(
+        !vt.is_converged(&view, (w, h)),
+        "a freshly built sparse VT must not be converged before anything is produced"
+    );
+
+    // Produce every tile the CPU rect estimate says this view needs, using the
+    // same level_count the VT itself was built with (`sparse` caps at MAX_LEVELS,
+    // which a 600x500 pyramid never reaches, so plain `level_count()` matches).
+    let level_count = src.level_count();
+    let needed = ferrolite_vt::needed_tiles((iw, ih), &view, (w, h), level_count);
+    let made = vt.produce_view(&ctx, &mut producer, &needed, needed.len());
+    assert_eq!(made, needed.len(), "every rect-needed tile produced");
+
+    assert!(
+        vt.is_converged(&view, (w, h)),
+        "after producing every needed tile, the view must be converged"
+    );
+}

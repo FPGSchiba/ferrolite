@@ -5,9 +5,12 @@ pub mod callback;
 pub mod edit_producer;
 pub mod load;
 pub mod nav;
+pub mod present;
 
 pub use callback::{PreviewWhich, ViewerCallback, ViewerGpu, ViewerPipelines};
 pub use edit_producer::EditTileProducer;
+#[allow(unused_imports)]
+pub use present::{present_source, PresentSource};
 
 use std::path::PathBuf;
 

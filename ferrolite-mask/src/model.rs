@@ -89,6 +89,48 @@ pub struct MaskDefinition {
     pub invert: bool,
 }
 
+/// Pure CPU reference for the mask compositing semantics (design §4.2). The WGSL
+/// `mask_fold`/`mask_invert` passes mirror these operators exactly; the goldens
+/// are validated against this. `components[i].0` is the i-th evaluated mask value
+/// in `[0,1]`; the first seeds the accumulator, later entries fold by their mode.
+/// Empty → `1.0` (full mask); `invert` applies `1 - m` last (empty+invert → 0.0).
+pub fn composite_scalar(components: &[(f32, CompositeMode)], invert: bool) -> f32 {
+    let mut acc = match components.first() {
+        Some(&(v, _)) => v,
+        None => 1.0,
+    };
+    for &(b, mode) in &components[components.len().min(1)..] {
+        acc = match mode {
+            CompositeMode::Add => acc.max(b),
+            CompositeMode::Subtract => acc * (1.0 - b),
+            CompositeMode::Intersect => acc.min(b),
+        };
+    }
+    if invert {
+        1.0 - acc
+    } else {
+        acc
+    }
+}
+
+impl MaskDefinition {
+    /// Composite pre-evaluated per-component `values` (one per component, same
+    /// order) using each component's stored mode + `self.invert`.
+    pub fn composite_scalar(&self, values: &[f32]) -> f32 {
+        debug_assert_eq!(
+            values.len(),
+            self.components.len(),
+            "one value per component required"
+        );
+        let pairs: Vec<(f32, CompositeMode)> = values
+            .iter()
+            .copied()
+            .zip(self.components.iter().map(|(_, m)| *m))
+            .collect();
+        composite_scalar(&pairs, self.invert)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +183,105 @@ mod tests {
     #[test]
     fn composite_mode_defaults_to_add() {
         assert_eq!(CompositeMode::default(), CompositeMode::Add);
+    }
+
+    const M: f32 = 1e-6;
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-5
+    }
+
+    #[test]
+    fn empty_is_full_and_invert_is_empty() {
+        assert!(approx(composite_scalar(&[], false), 1.0));
+        assert!(approx(composite_scalar(&[], true), 0.0));
+    }
+
+    #[test]
+    fn single_component_seeds_accumulator() {
+        assert!(approx(
+            composite_scalar(&[(0.42, CompositeMode::Add)], false),
+            0.42
+        ));
+        // The seed's own mode is ignored — Subtract as the first entry still seeds.
+        assert!(approx(
+            composite_scalar(&[(0.42, CompositeMode::Subtract)], false),
+            0.42
+        ));
+    }
+
+    #[test]
+    fn add_is_union_max() {
+        let v = composite_scalar(
+            &[(0.3, CompositeMode::Add), (0.7, CompositeMode::Add)],
+            false,
+        );
+        assert!(approx(v, 0.7));
+    }
+
+    #[test]
+    fn subtract_carves_out() {
+        // 0.8 * (1 - 0.5) = 0.4
+        let v = composite_scalar(
+            &[(0.8, CompositeMode::Add), (0.5, CompositeMode::Subtract)],
+            false,
+        );
+        assert!(approx(v, 0.4));
+    }
+
+    #[test]
+    fn intersect_is_min() {
+        let v = composite_scalar(
+            &[(0.6, CompositeMode::Add), (0.25, CompositeMode::Intersect)],
+            false,
+        );
+        assert!(approx(v, 0.25));
+    }
+
+    #[test]
+    fn invert_flips_final_result() {
+        let v = composite_scalar(&[(0.3, CompositeMode::Add)], true);
+        assert!(approx(v, 0.7));
+    }
+
+    #[test]
+    fn fold_is_left_to_right() {
+        // seed 0.9, subtract 0.5 -> 0.45, intersect 0.2 -> 0.2
+        let v = composite_scalar(
+            &[
+                (0.9, CompositeMode::Add),
+                (0.5, CompositeMode::Subtract),
+                (0.2, CompositeMode::Intersect),
+            ],
+            false,
+        );
+        assert!(approx(v, 0.2));
+    }
+
+    #[test]
+    fn definition_helper_zips_values_with_modes() {
+        let def = MaskDefinition {
+            components: vec![
+                (
+                    MaskComponent::LumaRange {
+                        lo: 0.0,
+                        hi: 1.0,
+                        softness: 0.0,
+                    },
+                    CompositeMode::Add,
+                ),
+                (
+                    MaskComponent::LumaRange {
+                        lo: 0.0,
+                        hi: 1.0,
+                        softness: 0.0,
+                    },
+                    CompositeMode::Subtract,
+                ),
+            ],
+            invert: false,
+        };
+        // seed 1.0, subtract 0.25 -> 0.75
+        assert!((def.composite_scalar(&[1.0, 0.25]) - 0.75).abs() < M);
     }
 }

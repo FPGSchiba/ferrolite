@@ -6,6 +6,7 @@ mod model;
 mod vec;
 
 pub use model::{
-    BrushNode, CompositeMode, MaskComponent, MaskDefinition, MaskProvenance, RasterHandle, Stroke,
+    composite_scalar, BrushNode, CompositeMode, MaskComponent, MaskDefinition, MaskProvenance,
+    RasterHandle, Stroke,
 };
 pub use vec::{Rgb, Vec2};

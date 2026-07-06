@@ -2,9 +2,13 @@
 //! read it out of `ViewerState`, mutate a local while rendering, and write it back —
 //! avoiding a multi-field borrow against `&mut AppState`.
 
+// Wired onto ViewerState + rendered in Tasks 9-11; module-level scaffolding allow so
+// the impl methods (used only by tests until then) don't trip dead_code on the bin
+// target under `--all-targets`. Removed at Task 13.
+#![allow(dead_code)]
+
 use crate::develop::tool::{DevelopToolRegistry, TabId, ToolId};
 
-#[allow(dead_code)] // wired onto ViewerState in Task 9; removed at Task 13
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct ToolState {
     pub active: ToolId,

@@ -26,12 +26,14 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
     let Some(mask_idx) = mask.selected else {
         mask.components_modal_open = false; // nothing selected -> close
         mask.editing_component = None;
+        mask.preview_component = None;
         return None;
     };
     let layers = mask_edit::layers(stack);
     let Some(layer) = layers.layers.get(mask_idx) else {
         mask.components_modal_open = false;
         mask.editing_component = None;
+        mask.preview_component = None;
         return None;
     };
     let components = layer.mask.components.clone();
@@ -122,6 +124,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
     if !open {
         mask.components_modal_open = false;
         mask.editing_component = None;
+        mask.preview_component = None;
     }
     out
 }
@@ -356,6 +359,23 @@ fn add_component_ui(
         }
     });
 
+    // Live preview (Task 6): while tuning a Luma/Color add, feed the tentative
+    // component to `mask.preview_component` each frame so the canvas overlay can
+    // composite the prospective full mask (existing components + this one at its
+    // mode). Brush/Linear/Radial are canvas-authored geometry with no scalar
+    // params to preview here, so no preview is set for them.
+    match mask.tool {
+        MaskTool::LumaRange => {
+            mask.preview_component = Some((luma_from_state(mask), mask.next_mode));
+        }
+        MaskTool::ColorRange => {
+            mask.preview_component = Some((color_from_state(mask), mask.next_mode));
+        }
+        MaskTool::Brush | MaskTool::Linear | MaskTool::Radial => {
+            mask.preview_component = None;
+        }
+    }
+
     // Brush params: captured live by the canvas overlay, so no "Add" button
     // here — these sliders just set the radius/hardness/flow/erase used for
     // the NEXT stroke (and shown by the cursor ring while brushing).
@@ -464,6 +484,7 @@ fn add_component_ui(
                 c,
                 mask.next_mode,
             )));
+            mask.preview_component = None;
         }
     }
 
@@ -551,6 +572,7 @@ fn add_component_ui(
             )));
             mask.color_samples.clear();
             mask.picking_color = false;
+            mask.preview_component = None;
         }
     }
 

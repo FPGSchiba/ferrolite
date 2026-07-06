@@ -3,7 +3,7 @@
 //! Mirrors how `hsl_band`/`crop_active` live on `ViewerState` (survives the
 //! panel's per-frame `Option` plumbing).
 
-use ferrolite_mask::{BrushNode, CompositeMode, Rgb};
+use ferrolite_mask::{BrushNode, CompositeMode, MaskComponent, Rgb};
 
 /// The unified Masking tool's active component tool. Linear/Radial are gradient
 /// component types, not separate tools (design §9.1).
@@ -69,6 +69,11 @@ pub struct MaskUiState {
     pub components_modal_open: bool,
     /// Which component index the modal is currently editing (Luma/Color), if any.
     pub editing_component: Option<usize>,
+    /// While the Components window's Add section is tuning a Luma/Color component,
+    /// this holds the tentative (component, mode) so the canvas overlay previews the
+    /// prospective full mask. `None` = no add-preview. Reset on add/close/type change
+    /// (mirrors the `components_modal_open`/`editing_component` reset sites).
+    pub preview_component: Option<(MaskComponent, CompositeMode)>,
 }
 
 impl Default for MaskUiState {
@@ -96,6 +101,7 @@ impl Default for MaskUiState {
             rename_buf: None,
             components_modal_open: false,
             editing_component: None,
+            preview_component: None,
         }
     }
 }

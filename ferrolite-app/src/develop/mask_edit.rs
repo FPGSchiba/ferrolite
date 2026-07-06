@@ -3,7 +3,7 @@
 //! `is_identity()`/`has_edits` stay correct — mirroring `ops_edit`. All edits
 //! carry `OpKind::LocalAdjustments`; the app pushes one history entry per gesture.
 
-use ferrolite_mask::{CompositeMode, MaskComponent};
+use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition};
 use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Op, OpKind, OpStack};
 
 pub fn layers(stack: &OpStack) -> LocalAdjustments {
@@ -99,6 +99,19 @@ pub fn set_component(
 
 pub fn set_adjustments(stack: &OpStack, idx: usize, a: AdjustmentSet) -> OpStack {
     edit_layer(stack, idx, |l| l.adjustments = a)
+}
+
+/// The mask definition AS IT WOULD BE with `tentative` folded in at `mode` after the
+/// existing `base` components — used to preview an in-progress "add component"
+/// (Task 6) without touching the committed `OpStack`.
+pub fn prospective_def(
+    base: &MaskDefinition,
+    tentative: MaskComponent,
+    mode: CompositeMode,
+) -> MaskDefinition {
+    let mut def = base.clone();
+    def.components.push((tentative, mode));
+    def
 }
 
 #[cfg(test)]
@@ -276,6 +289,31 @@ mod tests {
         );
         assert_eq!(remove_component(&s, 0, 9), s, "bad comp idx -> unchanged");
         assert_eq!(remove_component(&s, 9, 0), s, "bad mask idx -> unchanged");
+    }
+
+    #[test]
+    fn prospective_def_appends_tentative() {
+        use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition};
+        let base = MaskDefinition {
+            components: vec![(
+                MaskComponent::LumaRange {
+                    lo: 0.0,
+                    hi: 1.0,
+                    softness: 0.0,
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        };
+        let t = MaskComponent::LumaRange {
+            lo: 0.2,
+            hi: 0.7,
+            softness: 0.1,
+        };
+        let out = prospective_def(&base, t.clone(), CompositeMode::Subtract);
+        assert_eq!(out.components.len(), 2);
+        assert_eq!(out.components[1], (t, CompositeMode::Subtract));
+        assert_eq!(out.components[0], base.components[0], "base preserved");
     }
 
     #[test]

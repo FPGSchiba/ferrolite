@@ -139,6 +139,7 @@ impl FerroliteApp {
                 // it): drop both so the modal never shows/edits stale indices.
                 v.mask.components_modal_open = false;
                 v.mask.editing_component = None;
+                v.mask.preview_component = None;
                 v.mask
                     .clamp_selection(crate::develop::mask_edit::layers(&stack).layers.len());
             }
@@ -1514,10 +1515,27 @@ impl FerroliteApp {
             v.mask.overlay_key = None;
             return;
         };
-        let def = la.layers[sel].mask.clone();
-        // Key: which mask def + preview generation. serde-hash the def (small).
+        let committed_def = &la.layers[sel].mask;
+        // While the Components window's Add section is tuning a Luma/Color
+        // component (Task 6), composite the PROSPECTIVE def (committed + the
+        // tentative component at its mode) instead of the committed one, so the
+        // red overlay live-previews the in-progress add.
+        let def = match v.mask.preview_component.clone() {
+            Some((c, mode)) => mask_edit::prospective_def(committed_def, c, mode),
+            None => committed_def.clone(),
+        };
+        // Key: which mask def + preview generation + any in-progress preview
+        // component. serde-hash the def (small); fold the tentative component in
+        // too so the overlay rebuilds live as the Add sliders move (its params
+        // aren't reflected in `def`/`committed_def` otherwise since it's not
+        // committed to the OpStack yet).
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_string(&def).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(committed_def)
+            .unwrap_or_default()
+            .hash(&mut h);
+        serde_json::to_string(&v.mask.preview_component)
+            .unwrap_or_default()
+            .hash(&mut h);
         v.opstack_version.hash(&mut h); // preview regen bumps this
         let key = h.finish();
         if v.mask.overlay_key == Some(key) && v.mask_overlay_tex.is_some() {
@@ -3605,6 +3623,7 @@ impl eframe::App for FerroliteApp {
                     // stack-invalidating transitions).
                     v.mask.components_modal_open = false;
                     v.mask.editing_component = None;
+                    v.mask.preview_component = None;
                 }
                 v.mask.active = mask_active;
                 v.mask.adjusting = false; // still reset each frame; panel sets it on a drag

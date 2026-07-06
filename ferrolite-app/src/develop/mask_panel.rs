@@ -40,6 +40,7 @@ pub fn show(
             mask.selected = Some(la.layers.len()); // select the new one
             mask.components_modal_open = false;
             mask.editing_component = None;
+            mask.preview_component = None;
             out = Some(commit(mask_edit::create_mask(stack, name)));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -91,6 +92,7 @@ pub fn show(
                     mask.selected = Some(i);
                     mask.components_modal_open = false;
                     mask.editing_component = None;
+                    mask.preview_component = None;
                 }
                 if resp.double_clicked() {
                     mask.rename_buf = Some((i, layer.name.clone()));
@@ -109,6 +111,7 @@ pub fn show(
                         mask.selected = None;
                         mask.components_modal_open = false;
                         mask.editing_component = None;
+                        mask.preview_component = None;
                     }
                 }
             });

@@ -15,8 +15,10 @@ use std::sync::Arc;
 
 const HANDLE_R: f32 = 0.04; // normalized (source-space) hit radius, matches brief tests
 
-/// New brush radius from a scroll delta. `scroll_y > 0` (wheel up) grows the
-/// brush; negative shrinks it. Clamped to `[min, max]` — callers pass the same
+/// New brush radius from a scroll delta, applied MULTIPLICATIVELY so each scroll
+/// tick is a constant percentage change — fine-grained at small radii, coarser at
+/// large radii (smooth size ramp). Clamped to [min, max]. `scroll_y == 0` is a no-op.
+/// `scroll_y > 0` (wheel up) grows the brush; negative shrinks it. Callers pass the same
 /// bounds as the panel's brush-radius slider (`mask_panel::BRUSH_RADIUS_MIN/MAX`)
 /// so the Ctrl+scroll canvas gesture and the slider agree on range. Pure/egui-free
 /// so it's unit-testable without a UI context.
@@ -29,8 +31,9 @@ const HANDLE_R: f32 = 0.04; // normalized (source-space) hit radius, matches bri
 /// allow rather than a false "dead code" failure under `-D warnings`.
 #[allow(dead_code)]
 pub(crate) fn brush_radius_from_scroll(current: f32, scroll_y: f32, min: f32, max: f32) -> f32 {
-    const SENS: f32 = 0.0015; // radius units per scroll unit; tuned in visual test
-    (current + scroll_y * SENS).clamp(min, max)
+    // Per-"tick" growth factor; egui scroll deltas are ~pixels, so scale down.
+    const PER_UNIT: f32 = 0.0012; // ln-space rate; tuned in the visual test
+    (current * (scroll_y * PER_UNIT).exp()).clamp(min, max)
 }
 
 /// Tag bits packed into `MaskGesture::DragHandle.handle` so a single `u32` field
@@ -631,27 +634,46 @@ fn route_color_eyedropper(
 #[cfg(test)]
 mod scroll_tests {
     use super::*;
-
     #[test]
-    fn scroll_up_grows_scroll_down_shrinks_and_clamps() {
-        let (min, max) = (0.005, 0.5);
+    fn scroll_is_multiplicative_and_clamped() {
+        let (min, max) = (0.005f32, 0.5f32);
+        // up grows, down shrinks
         assert!(
-            brush_radius_from_scroll(0.1, 100.0, min, max) > 0.1,
+            brush_radius_from_scroll(0.1, 120.0, min, max) > 0.1,
             "up grows"
         );
         assert!(
-            brush_radius_from_scroll(0.1, -100.0, min, max) < 0.1,
+            brush_radius_from_scroll(0.1, -120.0, min, max) < 0.1,
             "down shrinks"
         );
+        // clamps
         assert_eq!(
             brush_radius_from_scroll(0.49, 100_000.0, min, max),
             max,
-            "clamps hi"
+            "clamp hi"
         );
         assert_eq!(
             brush_radius_from_scroll(0.01, -100_000.0, min, max),
             min,
-            "clamps lo"
+            "clamp lo"
         );
+        // exponential: same scroll delta => larger ABSOLUTE change at a larger radius
+        let small_delta = brush_radius_from_scroll(0.02, 120.0, min, max) - 0.02;
+        let large_delta = brush_radius_from_scroll(0.20, 120.0, min, max) - 0.20;
+        assert!(
+            large_delta > small_delta,
+            "bigger absolute step when larger (exponential feel)"
+        );
+        // and the RATIO is ~constant (multiplicative)
+        let r_small = brush_radius_from_scroll(0.02, 120.0, min, max) / 0.02;
+        let r_large = brush_radius_from_scroll(0.20, 120.0, min, max) / 0.20;
+        assert!(
+            (r_small - r_large).abs() < 1e-3,
+            "constant multiplicative ratio"
+        );
+    }
+    #[test]
+    fn zero_scroll_is_noop() {
+        assert_eq!(brush_radius_from_scroll(0.1, 0.0, 0.005, 0.5), 0.1);
     }
 }

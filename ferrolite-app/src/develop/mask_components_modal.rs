@@ -1,12 +1,21 @@
-//! Modal for managing a selected mask's components: list + delete (any) + edit
-//! (Luma/Color via set_component). Keeps the 296px panel uncluttered (design §9.2).
-//! Editing happens IN the modal (its own sliders), not by routing back to the
-//! panel's Luma/Color sliders — the modal is self-contained.
+//! Non-blocking window for a selected mask's components: list + delete (any) +
+//! edit (Luma/Color via set_component) + add-new (all types). Keeps the 296px
+//! panel uncluttered (design §9.2). Editing happens IN the window (its own
+//! sliders), not by routing back to the panel's Luma/Color sliders — the
+//! window is self-contained. Non-blocking (not suppressed via `modal_active`)
+//! so the canvas stays live behind it for brush drawing, gradient handles, and
+//! color-eyedropper sampling while adding a new component.
+//!
+//! Also owns the component-CREATION add-flow (moved from `mask_panel` — see
+//! Task 5): a type picker, composite-mode selector, and per-type params.
 
 use crate::develop::adjustment_panel::EditOutcome;
+use crate::develop::mask_panel::{BRUSH_RADIUS_MAX, BRUSH_RADIUS_MIN};
+use crate::develop::mask_ui::MaskTool;
 use crate::develop::{mask_edit, mask_ui::MaskUiState};
+use crate::theme;
 use crate::widgets::EguiSlider;
-use ferrolite_mask::MaskComponent;
+use ferrolite_mask::{CompositeMode, MaskComponent};
 use ferrolite_pipeline::{OpKind, OpStack};
 
 /// Render the modal if `mask.components_modal_open`. Returns an edit if one was made.
@@ -96,6 +105,18 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                         mask.editing_component = None;
                     }
                 }
+            }
+
+            // ── Add new component (relocated from `mask_panel::selected_section`,
+            // Task 5) ──
+            ui.separator();
+            ui.label(
+                egui::RichText::new("Add new component")
+                    .size(11.0)
+                    .color(theme::TEXT_DIM),
+            );
+            if let Some(o) = add_component_ui(ui, stack, mask, mask_idx) {
+                out = Some(o);
             }
         });
     if !open {
@@ -280,6 +301,260 @@ fn edit_component_ui(
         _ => {}
     }
     result
+}
+
+/// The "Add new component" section: type picker + composite-mode selector,
+/// then per-type params (relocated verbatim from
+/// `mask_panel::selected_section` — Task 5). `LumaRange`/`ColorRange` commit
+/// an edit directly from here; `Brush`/`Linear`/`Radial` only set `mask.tool`
+/// so the existing canvas affordances (drawn on the image) create them — this
+/// window stays open while the user draws since it's non-blocking.
+fn add_component_ui(
+    ui: &mut egui::Ui,
+    stack: &OpStack,
+    mask: &mut MaskUiState,
+    idx: usize,
+) -> Option<EditOutcome> {
+    let mut out: Option<EditOutcome> = None;
+
+    // ── Component type picker + composite mode ──
+    ui.horizontal(|ui| {
+        for (tool, icon, tip) in [
+            (MaskTool::Brush, crate::icons::BRUSH, "Brush"),
+            (
+                MaskTool::Linear,
+                crate::icons::LINEAR_GRADIENT,
+                "Linear gradient",
+            ),
+            (
+                MaskTool::Radial,
+                crate::icons::RADIAL_GRADIENT,
+                "Radial gradient",
+            ),
+            (MaskTool::LumaRange, crate::icons::LUMA, "Luminance range"),
+            (MaskTool::ColorRange, crate::icons::COLOR, "Color range"),
+        ] {
+            if crate::widgets::tool_button(ui, icon, tip, mask.tool == tool, true, None).clicked() {
+                mask.tool = tool;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Add mode")
+                .size(11.0)
+                .color(theme::TEXT_DIM),
+        );
+        for (m, label) in [
+            (CompositeMode::Add, "Add"),
+            (CompositeMode::Subtract, "Subtract"),
+            (CompositeMode::Intersect, "Intersect"),
+        ] {
+            if ui.selectable_label(mask.next_mode == m, label).clicked() {
+                mask.next_mode = m;
+            }
+        }
+    });
+
+    // Brush params: captured live by the canvas overlay, so no "Add" button
+    // here — these sliders just set the radius/hardness/flow/erase used for
+    // the NEXT stroke (and shown by the cursor ring while brushing).
+    if mask.tool == MaskTool::Brush {
+        ui.add(EguiSlider {
+            label: "Radius",
+            value: &mut mask.brush_radius,
+            min: BRUSH_RADIUS_MIN,
+            max: BRUSH_RADIUS_MAX,
+            default: 0.08,
+            step: 0.005,
+            decimals: 3,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Hardness",
+            value: &mut mask.brush_hardness,
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Flow",
+            value: &mut mask.brush_flow,
+            min: 0.0,
+            max: 1.0,
+            default: 1.0,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.checkbox(&mut mask.brush_erase, "Erase");
+    }
+
+    // Canvas-authored geometry: no Add button, just a hint — selecting the
+    // type above already set `mask.tool`, so the existing canvas affordances
+    // (drag-to-create for Linear/Radial, stroke capture for Brush) create it.
+    if matches!(
+        mask.tool,
+        MaskTool::Brush | MaskTool::Linear | MaskTool::Radial
+    ) {
+        ui.label(
+            egui::RichText::new("Draw on the image to add this component")
+                .size(11.0)
+                .color(theme::TEXT_FAINT),
+        );
+    }
+
+    // Luma-range can be added directly with the current slider values (it
+    // needs no canvas gesture).
+    if mask.tool == MaskTool::LumaRange {
+        ui.add(EguiSlider {
+            label: "Lo",
+            value: &mut mask.range_lo,
+            min: 0.0,
+            max: 1.0,
+            default: 0.3,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Hi",
+            value: &mut mask.range_hi,
+            min: 0.0,
+            max: 1.0,
+            default: 0.7,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Softness",
+            value: &mut mask.range_softness,
+            min: 0.0,
+            max: 0.5,
+            default: 0.1,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        if ui.button("Add Luma range").clicked() {
+            let c = MaskComponent::LumaRange {
+                lo: mask.range_lo,
+                hi: mask.range_hi,
+                softness: mask.range_softness,
+            };
+            out = Some(commit_edit(mask_edit::add_component(
+                stack,
+                idx,
+                c,
+                mask.next_mode,
+            )));
+        }
+    }
+
+    // Color-range: samples are collected by clicking the canvas with the
+    // eyedropper (mask_overlay's `route_color_eyedropper`, UI state only — no
+    // OpStack edit on pick). Show the collected swatches + Tolerance/Softness,
+    // then "Add Color range" commits the component and clears the samples.
+    if mask.tool == MaskTool::ColorRange {
+        if mask.color_samples.is_empty() {
+            ui.label(
+                egui::RichText::new("Click the image to sample colors")
+                    .size(11.0)
+                    .color(theme::TEXT_FAINT),
+            );
+        } else {
+            ui.horizontal(|ui| {
+                for s in &mask.color_samples {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgb(
+                            (s.r.clamp(0.0, 1.0) * 255.0) as u8,
+                            (s.g.clamp(0.0, 1.0) * 255.0) as u8,
+                            (s.b.clamp(0.0, 1.0) * 255.0) as u8,
+                        ),
+                    );
+                }
+                if ui.small_button("Clear").clicked() {
+                    mask.color_samples.clear();
+                }
+            });
+        }
+        let pick_label = if mask.picking_color {
+            format!("{} Picking… (click image)", crate::icons::EYEDROPPER)
+        } else {
+            format!("{} Pick color", crate::icons::EYEDROPPER)
+        };
+        if ui
+            .selectable_label(mask.picking_color, pick_label)
+            .clicked()
+        {
+            mask.picking_color = !mask.picking_color;
+        }
+        ui.add(EguiSlider {
+            label: "Tolerance",
+            value: &mut mask.color_tolerance,
+            min: 0.0,
+            max: 1.0,
+            default: 0.15,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Softness",
+            value: &mut mask.color_softness,
+            min: 0.0,
+            max: 0.5,
+            default: 0.1,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        let can_add = !mask.color_samples.is_empty();
+        if ui
+            .add_enabled(can_add, egui::Button::new("Add Color range"))
+            .clicked()
+        {
+            let c = MaskComponent::ColorRange {
+                samples: mask.color_samples.clone(),
+                tolerance: mask.color_tolerance,
+                softness: mask.color_softness,
+            };
+            out = Some(commit_edit(mask_edit::add_component(
+                stack,
+                idx,
+                c,
+                mask.next_mode,
+            )));
+            mask.color_samples.clear();
+            mask.picking_color = false;
+        }
+    }
+
+    out
 }
 
 /// Wrap a resulting `OpStack` as a committed mask edit (mask edits share

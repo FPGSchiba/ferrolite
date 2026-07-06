@@ -444,20 +444,18 @@ impl FerroliteApp {
     }
 
     /// True while any modal overlay is on screen (Help, Settings, the
-    /// remove-folder confirmation, the mask component-management modal). Used
-    /// to suppress the app's global keyboard shortcuts underneath the modal so
-    /// its own input handling (e.g. Esc) is the only thing that reacts, and so
-    /// shortcuts like Enter/Ctrl+A don't leak through to the grid/viewer while
-    /// a modal is up. Extend this with new modals as they're added.
+    /// remove-folder confirmation). Used to suppress the app's global keyboard
+    /// shortcuts underneath the modal so its own input handling (e.g. Esc) is
+    /// the only thing that reacts, and so shortcuts like Enter/Ctrl+A don't
+    /// leak through to the grid/viewer while a modal is up. Extend this with
+    /// new modals as they're added.
+    ///
+    /// The mask Components window is intentionally NOT included here: unlike
+    /// the modals above, it must stay non-blocking so the canvas keeps
+    /// receiving input behind it (live preview, color-eyedropper sampling,
+    /// brush drawing all route through the canvas while the window is open).
     fn modal_active(&self) -> bool {
-        self.show_help
-            || self.show_settings
-            || self.state.pending_remove.is_some()
-            || self
-                .state
-                .viewer
-                .as_ref()
-                .is_some_and(|v| v.mask.components_modal_open)
+        self.show_help || self.show_settings || self.state.pending_remove.is_some()
     }
 
     /// If the current viewer's edit stack changed this session, spawn a

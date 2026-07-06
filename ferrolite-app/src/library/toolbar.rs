@@ -3,9 +3,8 @@
 //! and `state.include_subfolders` directly; the caller sets `state.dirty` when
 //! the returned `changed` flag is true (so the read pool re-queries off-thread).
 //!
-//! Icon rendering follows the panel.rs "draw shapes, no font glyphs" pattern:
-//! IBM Plex Sans lacks symbol glyphs (★ ⚑ ▾ etc.) so all icons are painted via
-//! `egui::Painter` using the helpers in `library::icons`.
+//! Icons come from the shared icon library (`crate::icons`, backed by egui-phosphor)
+//! via the `library::icons` helpers — see the "UI icons" rule in the root CLAUDE.md.
 
 use crate::library::filter_widgets as fw;
 use crate::library::icons;

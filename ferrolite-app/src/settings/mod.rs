@@ -22,6 +22,7 @@ pub struct Settings {
     pub grid_size: f32,
     pub confirm_remove: bool,
     pub show_histogram: bool,
+    pub show_tool_palette: bool,
     pub restore_session: bool,
     pub last_module: dto::PersistedModule,
     pub last_folder: Option<std::path::PathBuf>,
@@ -38,10 +39,20 @@ impl Default for Settings {
             grid_size: 46.0,
             confirm_remove: true,
             show_histogram: true,
+            show_tool_palette: true,
             restore_session: false,
             last_module: dto::PersistedModule::default(),
             last_folder: None,
             display_profile: dto::PersistedDisplayProfile::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn tool_palette_defaults_on() {
+        assert!(Settings::default().show_tool_palette);
     }
 }

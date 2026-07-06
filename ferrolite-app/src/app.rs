@@ -2902,6 +2902,7 @@ impl eframe::App for FerroliteApp {
                     can_undo,
                     can_redo,
                     self.state.settings.show_histogram,
+                    self.state.settings.show_tool_palette,
                 );
                 if self.module != module_before {
                     self.state.settings.last_module =
@@ -2974,6 +2975,11 @@ impl eframe::App for FerroliteApp {
                     }
                     Some(crate::chrome::MenuAction::ToggleHistogram) => {
                         self.state.settings.show_histogram = !self.state.settings.show_histogram;
+                        self.mark_settings_dirty();
+                    }
+                    Some(crate::chrome::MenuAction::ToggleToolPalette) => {
+                        self.state.settings.show_tool_palette =
+                            !self.state.settings.show_tool_palette;
                         self.mark_settings_dirty();
                     }
                     Some(crate::chrome::MenuAction::OpenHelp) => {

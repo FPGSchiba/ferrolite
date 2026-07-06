@@ -3,8 +3,6 @@
 //! preserved because each keeps its `EguiSlider` (the reset column is baked into the
 //! widget). `base_tabs()` is registered once as the registry's base.
 
-#![allow(dead_code)] // consumed by DevelopToolRegistry::standard() in Task 9; allow removed at Task 13
-
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::tool::{PanelTab, TabId};
 use crate::develop::{

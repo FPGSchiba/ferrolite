@@ -5,8 +5,6 @@
 //! tools. Adding a tool = implement `DevelopTool` + push it in `standard()`; adding a
 //! tab = implement `PanelTab` + include it in `base_tabs()` or a tool's `tabs()`.
 
-#![allow(dead_code)] // wired incrementally across this plan; removed at Task 13
-
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::state::AppState;
 

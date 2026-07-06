@@ -4,6 +4,8 @@
 //! Spec 2 §8). `p`/handles are already inverse-mapped to source coords by the
 //! caller via `display_to_source`.
 
+use ferrolite_mask::{BrushNode, Vec2};
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LinHandle {
     Start,
@@ -13,6 +15,39 @@ pub enum LinHandle {
 
 fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
     ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
+/// Brush dab params captured from the current UI slider values, threaded into
+/// each appended node.
+#[derive(Clone, Copy)]
+pub struct BrushParams {
+    pub radius: f32,
+    pub hardness: f32,
+    pub flow: f32,
+}
+
+/// Minimum spacing between captured dab nodes, as a fraction of the brush radius.
+/// Matches the engine's dab spacing philosophy (`ferrolite_mask::SPACING_FRAC`)
+/// so captured nodes aren't denser than the rasterizer needs.
+const CAPTURE_SPACING_FRAC: f32 = 0.25;
+
+/// Append a dab node at `p` (source coords) iff it is at least
+/// `CAPTURE_SPACING_FRAC · radius` from the last node (or the list is empty).
+/// Returns whether a node was appended.
+pub fn append_brush_node(nodes: &mut Vec<BrushNode>, p: (f32, f32), params: BrushParams) -> bool {
+    let min_d = (CAPTURE_SPACING_FRAC * params.radius).max(1e-4);
+    if let Some(last) = nodes.last() {
+        if dist((last.pos.x, last.pos.y), p) < min_d {
+            return false;
+        }
+    }
+    nodes.push(BrushNode {
+        pos: Vec2::new(p.0, p.1),
+        radius: params.radius,
+        hardness: params.hardness,
+        flow: params.flow,
+    });
+    true
 }
 
 /// Distance from point `p` to segment `a→b`.
@@ -116,6 +151,27 @@ pub fn radial_drag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_brush_node_gates_on_min_distance() {
+        use ferrolite_mask::BrushNode;
+        let mut nodes: Vec<BrushNode> = vec![];
+        let params = BrushParams {
+            radius: 0.05,
+            hardness: 0.5,
+            flow: 1.0,
+        };
+        // First sample always appends.
+        assert!(append_brush_node(&mut nodes, (0.1, 0.1), params));
+        assert_eq!(nodes.len(), 1);
+        // A sample closer than spacing*radius does NOT append.
+        assert!(!append_brush_node(&mut nodes, (0.101, 0.1), params));
+        assert_eq!(nodes.len(), 1);
+        // A sample far enough appends.
+        assert!(append_brush_node(&mut nodes, (0.3, 0.1), params));
+        assert_eq!(nodes.len(), 2);
+        assert!((nodes[1].radius - 0.05).abs() < 1e-6 && (nodes[1].flow - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn linear_hit_test_finds_endpoints() {

@@ -4,11 +4,11 @@
 //! discipline as `crop_overlay`). Visual-tested.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::mask_affordance::{self, LinHandle, RadHandle};
+use crate::develop::mask_affordance::{self, BrushParams, LinHandle, RadHandle};
 use crate::develop::mask_edit;
 use crate::develop::mask_ui::{MaskGesture, MaskTool, MaskUiState};
 use crate::theme;
-use ferrolite_mask::{MaskComponent, Vec2};
+use ferrolite_mask::{MaskComponent, Stroke, Vec2};
 use ferrolite_pipeline::{display_to_source, source_to_display, Geometry, OpKind, OpStack};
 
 const HANDLE_R: f32 = 0.04; // normalized (source-space) hit radius, matches brief tests
@@ -78,6 +78,9 @@ pub fn show(
         return None;
     };
     let tool = mask.tool;
+    if tool == MaskTool::Brush {
+        return route_brush(ui, image_rect, stack, mask, idx, src_dims);
+    }
     if tool != MaskTool::Linear && tool != MaskTool::Radial {
         return None;
     }
@@ -369,4 +372,93 @@ fn to_screen_from_src(
 ) -> egui::Pos2 {
     let disp = source_to_display(geo, src_w, src_h, src);
     to_screen(disp.0, disp.1)
+}
+
+/// Route the Brush tool: draw the cursor ring, capture the in-progress stroke
+/// via pure `mask_affordance::append_brush_node`, and emit a live (commit=false)
+/// preview while dragging or a committed `MaskComponent::Brush` on release. Kept
+/// as its own function so `show` doesn't grow another large inline branch.
+fn route_brush(
+    ui: &mut egui::Ui,
+    image_rect: egui::Rect,
+    stack: &OpStack,
+    mask: &mut MaskUiState,
+    idx: usize,
+    src_dims: (u32, u32),
+) -> Option<EditOutcome> {
+    let geo = stack.geometry();
+    let (src_w, src_h) = src_dims;
+    let params = BrushParams {
+        radius: mask.brush_radius,
+        hardness: mask.brush_hardness,
+        flow: mask.brush_flow,
+    };
+
+    let resp = ui.interact(
+        image_rect,
+        ui.id().with("mask_overlay_affordance"),
+        egui::Sense::click_and_drag(),
+    );
+
+    // Cursor ring at the pointer: outer at the brush radius, a fainter inner
+    // ring scaled by hardness (harder = the falloff starts closer to the edge).
+    if let Some(p) = resp.hover_pos().or_else(|| resp.interact_pointer_pos()) {
+        let screen_r = mask.brush_radius * image_rect.width();
+        ui.painter()
+            .circle_stroke(p, screen_r, egui::Stroke::new(1.5, theme::ACCENT_BRIGHT));
+        ui.painter().circle_stroke(
+            p,
+            screen_r * mask.brush_hardness,
+            egui::Stroke::new(1.0, theme::TEXT_FAINT),
+        );
+    }
+
+    if resp.drag_started() {
+        mask.gesture = Some(MaskGesture::Stroke(vec![], None));
+    }
+
+    let mut outcome: Option<EditOutcome> = None;
+    if resp.dragged() || resp.drag_stopped() {
+        if let (Some(MaskGesture::Stroke(nodes, comp_idx)), Some(p)) =
+            (&mut mask.gesture, resp.interact_pointer_pos())
+        {
+            let norm = (
+                ((p.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0),
+                ((p.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0),
+            );
+            let src = display_to_source(geo, src_w, src_h, norm);
+            mask_affordance::append_brush_node(nodes, src, params);
+
+            let strokes = vec![Stroke {
+                nodes: nodes.clone(),
+                erase: mask.brush_erase,
+            }];
+            let comp = MaskComponent::Brush { strokes };
+            // Two-phase, mirroring the Linear/Radial create-then-replace: the
+            // first node append CREATES the component; every later frame
+            // REPLACES it in place so a growing stroke doesn't append a new
+            // component per dragged frame (the base `stack` passed in each
+            // frame is the previous frame's preview stack, which already
+            // carries the in-progress component).
+            let new_stack = match *comp_idx {
+                Some(ci) => mask_edit::set_component(stack, idx, ci, comp),
+                None => {
+                    let added = mask_edit::add_component(stack, idx, comp, mask.next_mode);
+                    let new_idx = mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
+                    *comp_idx = Some(new_idx);
+                    added
+                }
+            };
+            outcome = Some(EditOutcome {
+                stack: new_stack,
+                kind: OpKind::LocalAdjustments,
+                commit: resp.drag_stopped(),
+            });
+        }
+    }
+    if resp.drag_stopped() {
+        mask.gesture = None;
+    }
+
+    outcome
 }

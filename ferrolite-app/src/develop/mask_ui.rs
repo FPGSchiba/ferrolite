@@ -25,8 +25,14 @@ pub enum MaskTool {
 /// An in-progress canvas gesture (between pointer-down and pointer-up). `None`
 /// between gestures. Filled by the affordance routing in `mask_overlay`.
 pub enum MaskGesture {
-    /// Brush stroke being captured: accumulated dab nodes (normalized source coords).
-    Stroke(Vec<BrushNode>),
+    /// Brush stroke being captured: accumulated dab nodes (normalized source
+    /// coords), plus the index of the in-progress `MaskComponent::Brush` once
+    /// the first node has been appended to the mask's component list (`None`
+    /// until then). Frame 1 APPENDS that component; every later frame REPLACES
+    /// it in place (mirrors the `DragHandle` create-then-replace two-phase
+    /// pattern for Linear/Radial) so a growing stroke doesn't pile up one
+    /// throwaway component per dragged frame.
+    Stroke(Vec<BrushNode>, Option<usize>),
     /// A shape handle being dragged: the component index within the mask + which
     /// handle. The concrete handle payloads are defined by the affordance modules
     /// (linear/radial); this carries the raw drag origin so the affordance can

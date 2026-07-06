@@ -157,6 +157,49 @@ pub(crate) fn selected_section(
         }
     });
 
+    // Brush params: captured live by the canvas overlay (Task 11), so no "Add"
+    // button here — these sliders just set the radius/hardness/flow/erase used
+    // for the NEXT stroke (and shown by the cursor ring while brushing).
+    if mask.tool == MaskTool::Brush {
+        ui.add(EguiSlider {
+            label: "Radius",
+            value: &mut mask.brush_radius,
+            min: 0.005,
+            max: 0.5,
+            default: 0.08,
+            step: 0.005,
+            decimals: 3,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Hardness",
+            value: &mut mask.brush_hardness,
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Flow",
+            value: &mut mask.brush_flow,
+            min: 0.0,
+            max: 1.0,
+            default: 1.0,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.checkbox(&mut mask.brush_erase, "Erase");
+    }
+
     // Luma-range can be added directly from the panel with the current slider
     // values (it needs no canvas gesture). The other tools are captured on the
     // canvas (Tasks 10-12); the tool+mode selection above tells the overlay what

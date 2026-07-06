@@ -4,7 +4,7 @@
 //! Spec 2 §8). `p`/handles are already inverse-mapped to source coords by the
 //! caller via `display_to_source`.
 
-use ferrolite_mask::{BrushNode, Vec2};
+use ferrolite_mask::{BrushNode, Rgb, Vec2};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LinHandle {
@@ -102,6 +102,15 @@ pub fn linear_drag_body(
     d: (f32, f32),
 ) -> ((f32, f32), (f32, f32)) {
     ((start.0 + d.0, start.1 + d.1), (end.0 + d.0, end.1 + d.1))
+}
+
+/// Sample the source image at a normalized source point (nearest pixel). Used by
+/// the color-range eyedropper. Coords are clamped into range.
+pub fn sample_source(img: &ferrolite_image::LinearRgbaF32, src_norm: (f32, f32)) -> Rgb {
+    let x = ((src_norm.0.clamp(0.0, 1.0) * img.width as f32) as u32).min(img.width - 1);
+    let y = ((src_norm.1.clamp(0.0, 1.0) * img.height as f32) as u32).min(img.height - 1);
+    let i = ((y * img.width + x) * 4) as usize;
+    Rgb::new(img.pixels[i], img.pixels[i + 1], img.pixels[i + 2])
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -244,5 +253,22 @@ mod tests {
         assert_eq!(c, (0.5, 0.5));
         assert!((r.0 - 0.4).abs() < 1e-6, "rx = |px - cx| = 0.4");
         assert!((r.1 - 0.2).abs() < 1e-6, "ry unchanged");
+    }
+
+    #[test]
+    fn sample_source_reads_the_nearest_pixel() {
+        use ferrolite_image::LinearRgbaF32;
+        // 2x1: left = red, right = green.
+        let img = LinearRgbaF32::new(2, 1, vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]).unwrap();
+        let left = sample_source(&img, (0.0, 0.5));
+        assert!(
+            (left.r - 1.0).abs() < 1e-6 && left.g < 1e-6,
+            "left pixel is red"
+        );
+        let right = sample_source(&img, (0.99, 0.5));
+        assert!(
+            right.r < 1e-6 && (right.g - 1.0).abs() < 1e-6,
+            "right pixel is green"
+        );
     }
 }

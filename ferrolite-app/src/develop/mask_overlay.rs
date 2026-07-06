@@ -8,8 +8,10 @@ use crate::develop::mask_affordance::{self, BrushParams, LinHandle, RadHandle};
 use crate::develop::mask_edit;
 use crate::develop::mask_ui::{MaskGesture, MaskTool, MaskUiState};
 use crate::theme;
+use ferrolite_image::LinearRgbaF32;
 use ferrolite_mask::{MaskComponent, Stroke, Vec2};
 use ferrolite_pipeline::{display_to_source, source_to_display, Geometry, OpKind, OpStack};
+use std::sync::Arc;
 
 const HANDLE_R: f32 = 0.04; // normalized (source-space) hit radius, matches brief tests
 
@@ -61,6 +63,7 @@ pub fn show(
     mask: &mut MaskUiState,
     overlay_tex: Option<&egui::TextureHandle>,
     src_dims: (u32, u32),
+    preview_source: Option<&Arc<LinearRgbaF32>>,
 ) -> Option<EditOutcome> {
     // Fill: stretch the coverage texture over the image rect with alpha blend.
     if mask.overlay_on {
@@ -80,6 +83,10 @@ pub fn show(
     let tool = mask.tool;
     if tool == MaskTool::Brush {
         return route_brush(ui, image_rect, stack, mask, idx, src_dims);
+    }
+    if tool == MaskTool::ColorRange {
+        route_color_eyedropper(ui, image_rect, mask, src_dims, stack, preview_source);
+        return None;
     }
     if tool != MaskTool::Linear && tool != MaskTool::Radial {
         return None;
@@ -461,4 +468,63 @@ fn route_brush(
     }
 
     outcome
+}
+
+/// Route the Color-range eyedropper: a click on the image inverse-maps to source
+/// coords, samples `preview_source` via the pure `mask_affordance::sample_source`,
+/// and pushes the result into `mask.color_samples` (UI state only — no OpStack
+/// edit; the "Add Color range" button in the panel is what commits the
+/// component). Also draws small swatches for the collected samples so the user
+/// can see what's queued. Kept as its own function so `show` stays a thin
+/// dispatcher (mirrors `route_brush`).
+fn route_color_eyedropper(
+    ui: &mut egui::Ui,
+    image_rect: egui::Rect,
+    mask: &mut MaskUiState,
+    src_dims: (u32, u32),
+    stack: &OpStack,
+    preview_source: Option<&Arc<LinearRgbaF32>>,
+) {
+    let resp = ui.interact(
+        image_rect,
+        ui.id().with("mask_overlay_affordance"),
+        egui::Sense::click(),
+    );
+
+    if resp.clicked() {
+        if let (Some(p), Some(src_img)) = (resp.interact_pointer_pos(), preview_source) {
+            let geo = stack.geometry();
+            let (src_w, src_h) = src_dims;
+            let norm = (
+                ((p.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0),
+                ((p.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0),
+            );
+            let src_norm = display_to_source(geo, src_w, src_h, norm);
+            let rgb = mask_affordance::sample_source(src_img, src_norm);
+            mask.color_samples.push(rgb);
+        }
+    }
+
+    // Small swatches for the collected samples, stacked along the top-left of
+    // the image rect so they don't obscure the pick point.
+    let painter = ui.painter();
+    const SWATCH_R: f32 = 6.0;
+    const SWATCH_SPACING: f32 = 16.0;
+    for (i, s) in mask.color_samples.iter().enumerate() {
+        let center = egui::pos2(
+            image_rect.left() + 12.0 + i as f32 * SWATCH_SPACING,
+            image_rect.top() + 12.0,
+        );
+        let color = egui::Color32::from_rgb(
+            (s.r.clamp(0.0, 1.0) * 255.0) as u8,
+            (s.g.clamp(0.0, 1.0) * 255.0) as u8,
+            (s.b.clamp(0.0, 1.0) * 255.0) as u8,
+        );
+        painter.circle(
+            center,
+            SWATCH_R,
+            color,
+            egui::Stroke::new(1.0, theme::BG_BASE),
+        );
+    }
 }

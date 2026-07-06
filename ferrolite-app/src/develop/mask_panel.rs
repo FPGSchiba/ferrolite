@@ -257,6 +257,81 @@ pub(crate) fn selected_section(
         }
     }
 
+    // Color-range: samples are collected by clicking the canvas with the
+    // eyedropper (mask_overlay's `route_color_eyedropper`, UI state only — no
+    // OpStack edit on pick). Show the collected swatches + Tolerance/Softness,
+    // then "Add Color range" commits the component and clears the samples.
+    if mask.tool == MaskTool::ColorRange {
+        if mask.color_samples.is_empty() {
+            ui.label(
+                egui::RichText::new("Click the image to sample colors")
+                    .size(11.0)
+                    .color(theme::TEXT_FAINT),
+            );
+        } else {
+            ui.horizontal(|ui| {
+                for s in &mask.color_samples {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                    ui.painter().rect_filled(
+                        rect,
+                        2.0,
+                        egui::Color32::from_rgb(
+                            (s.r.clamp(0.0, 1.0) * 255.0) as u8,
+                            (s.g.clamp(0.0, 1.0) * 255.0) as u8,
+                            (s.b.clamp(0.0, 1.0) * 255.0) as u8,
+                        ),
+                    );
+                }
+                if ui.small_button("Clear").clicked() {
+                    mask.color_samples.clear();
+                }
+            });
+        }
+        ui.add(EguiSlider {
+            label: "Tolerance",
+            value: &mut mask.color_tolerance,
+            min: 0.0,
+            max: 1.0,
+            default: 0.15,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Softness",
+            value: &mut mask.color_softness,
+            min: 0.0,
+            max: 0.5,
+            default: 0.1,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        let can_add = !mask.color_samples.is_empty();
+        if ui
+            .add_enabled(can_add, egui::Button::new("Add Color range"))
+            .clicked()
+        {
+            let c = MaskComponent::ColorRange {
+                samples: mask.color_samples.clone(),
+                tolerance: mask.color_tolerance,
+                softness: mask.color_softness,
+            };
+            out = Some(commit(mask_edit::add_component(
+                stack,
+                idx,
+                c,
+                mask.next_mode,
+            )));
+            mask.color_samples.clear();
+        }
+    }
+
     ui.label(
         egui::RichText::new(format!("{} components", layer.mask.components.len()))
             .size(11.0)

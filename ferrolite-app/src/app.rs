@@ -3695,7 +3695,7 @@ impl eframe::App for FerroliteApp {
                             .unwrap_or(false);
                         if mask_active {
                             self.rebuild_mask_overlay_if_needed(ctx);
-                            let (stack, dims, view, viewport, tex) = {
+                            let (stack, dims, view, viewport, tex, preview_source) = {
                                 let v = self.state.viewer.as_ref().unwrap();
                                 (
                                     v.op_stack.clone(),
@@ -3703,6 +3703,7 @@ impl eframe::App for FerroliteApp {
                                     v.view,
                                     v.viewport,
                                     v.mask_overlay_tex.clone(),
+                                    v.preview_source.clone(),
                                 )
                             };
                             let image_rect = crate::viewer::image_screen_rect(
@@ -3719,6 +3720,7 @@ impl eframe::App for FerroliteApp {
                                     &mut v.mask,
                                     tex.as_ref(),
                                     dims,
+                                    preview_source.as_ref(),
                                 )
                             });
                             if let Some(o) = mask_out {

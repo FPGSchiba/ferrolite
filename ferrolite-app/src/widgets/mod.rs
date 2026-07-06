@@ -1,6 +1,9 @@
 pub mod curve;
 pub mod slider;
+pub mod tool_button;
 pub use slider::EguiSlider;
+#[allow(unused_imports)]
+pub(crate) use tool_button::tool_button;
 
 use egui::{vec2, Color32, Stroke};
 

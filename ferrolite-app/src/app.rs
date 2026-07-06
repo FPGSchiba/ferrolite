@@ -3399,6 +3399,44 @@ impl eframe::App for FerroliteApp {
                 {
                     self.toggle_split_compare();
                 }
+
+                // Tool-switch keybinds (A/C/M by default) and mask-overlay toggle.
+                // Mirrors the tool palette's `SelectTool` handler's borrow
+                // discipline: resolve `enabled` via a shared borrow first, then
+                // take `&mut self.state.viewer` to apply it.
+                let km = &self.state.settings.keymap;
+                let tool = if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolAdjust) {
+                    Some(crate::develop::tool::ToolId::Adjust)
+                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolCrop) {
+                    Some(crate::develop::tool::ToolId::Crop)
+                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolMask) {
+                    Some(crate::develop::tool::ToolId::Mask)
+                } else {
+                    None
+                };
+                if let Some(id) = tool {
+                    let enabled = self
+                        .tool_registry
+                        .get(id)
+                        .map(|t| {
+                            t.enabled(&crate::develop::tool::DevelopCtx { state: &self.state })
+                        })
+                        .unwrap_or(false);
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.tool_state.select_tool(id, enabled, &self.tool_registry);
+                    }
+                }
+
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::ToggleMaskOverlay)
+                {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.mask.overlay_on = !v.mask.overlay_on;
+                    }
+                }
             }
         }
 

@@ -40,6 +40,10 @@ const GROUPS: &[(&str, &[Action])] = &[
             Action::HoldBeforePeek,
             Action::ToggleSplitCompare,
             Action::AddToQueue,
+            Action::SwitchToolAdjust,
+            Action::SwitchToolCrop,
+            Action::SwitchToolMask,
+            Action::ToggleMaskOverlay,
         ],
     ),
     ("Editing", &[Action::Undo, Action::Redo]),
@@ -161,6 +165,20 @@ fn draw_shortcuts(ui: &mut egui::Ui, keymap: &Keymap) {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
                             egui::RichText::new(keymap.chord(*action).label())
+                                .monospace()
+                                .color(theme::TEXT_PRIMARY),
+                        );
+                    });
+                    ui.end_row();
+                }
+                // Not a rebindable `Action` (it's a scroll gesture, not a
+                // chord), so it's a manually-drawn row rather than part of
+                // `GROUPS`. Documents the Mask ▸ Brush size gesture.
+                if *group_name == "Develop" {
+                    ui.label("Brush size (Mask ▸ Brush)");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new("Ctrl + scroll")
                                 .monospace()
                                 .color(theme::TEXT_PRIMARY),
                         );

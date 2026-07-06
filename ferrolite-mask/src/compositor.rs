@@ -14,6 +14,7 @@ use crate::model::{CompositeMode, MaskComponent, MaskDefinition};
 use crate::shapes::{ColorRangePass, LinearGradientPass, LumaRangePass, RadialGradientPass};
 use crate::stroke::{stroke_dabs, SPACING_FRAC};
 use crate::vec::{Rgb, Vec2};
+use crate::RasterStore;
 use crate::{BrushRasterizer, CompositePass};
 
 pub struct MaskCompositor {
@@ -64,7 +65,14 @@ impl MaskCompositor {
         buf
     }
 
-    fn eval(&self, comp: &MaskComponent, input: &wgpu::TextureView, w: u32, h: u32) -> MaskBuffer {
+    fn eval(
+        &self,
+        comp: &MaskComponent,
+        input: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+        rasters: &RasterStore,
+    ) -> MaskBuffer {
         match comp {
             MaskComponent::LinearGradient { start, end } => {
                 self.linear
@@ -104,8 +112,14 @@ impl MaskCompositor {
                 }
                 acc
             }
-            // Inert in P1 (no producer) — contributes nothing. Plan 5 wires it.
-            MaskComponent::Imported { .. } => MaskBuffer::alloc_zeroed(&self.ctx, w, h),
+            // The AI/imported seam. Resolve the handle from the runtime RasterStore;
+            // a resolved raster of matching dims folds like any other component. With
+            // no producer (P1) the store is empty → inert (zeroed). A dim-mismatch is
+            // also treated as absent (A2 supplies rasters at the compositing resolution).
+            MaskComponent::Imported { handle, .. } => match rasters.get(*handle) {
+                Some(buf) if (buf.width, buf.height) == (w, h) => buf.clone(),
+                _ => MaskBuffer::alloc_zeroed(&self.ctx, w, h),
+            },
         }
     }
 
@@ -117,6 +131,7 @@ impl MaskCompositor {
         input: &wgpu::TextureView,
         w: u32,
         h: u32,
+        rasters: &RasterStore,
     ) -> MaskBuffer {
         if def.components.is_empty() {
             return if def.invert {
@@ -128,7 +143,7 @@ impl MaskCompositor {
         let inputs: Vec<(MaskBuffer, CompositeMode)> = def
             .components
             .iter()
-            .map(|(c, m)| (self.eval(c, input, w, h), *m))
+            .map(|(c, m)| (self.eval(c, input, w, h, rasters), *m))
             .collect();
         self.composite.composite(&inputs, def.invert)
     }
@@ -193,7 +208,45 @@ pub fn read_mask_r32f(ctx: &GpuContext, buf: &MaskBuffer) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CompositeMode, MaskComponent};
+    use crate::model::{CompositeMode, MaskComponent, RasterHandle};
+    use crate::RasterStore;
+
+    fn constant_buffer(ctx: &Arc<GpuContext>, w: u32, h: u32, value: f32) -> MaskBuffer {
+        let buf = MaskBuffer::alloc(ctx, w, h);
+        let data = vec![value; (buf.width * buf.height) as usize];
+        ctx.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &buf.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(buf.width * 4),
+                rows_per_image: Some(buf.height),
+            },
+            wgpu::Extent3d {
+                width: buf.width,
+                height: buf.height,
+                depth_or_array_layers: 1,
+            },
+        );
+        buf
+    }
+
+    fn imported(handle: u64) -> MaskComponent {
+        use crate::model::{MaskProvenance, RasterHandle};
+        MaskComponent::Imported {
+            handle: RasterHandle(handle),
+            provenance: MaskProvenance {
+                model_id: "sam2.1".into(),
+                model_version: "1".into(),
+                prompt: "click:0.5,0.5".into(),
+            },
+        }
+    }
 
     #[test]
     fn empty_definition_is_ones_or_zero_by_invert() {
@@ -216,6 +269,7 @@ mod tests {
             &iv,
             4,
             4,
+            &RasterStore::default(),
         );
         assert!(
             read_mask_r32f(&ctx, &full)
@@ -231,6 +285,7 @@ mod tests {
             &iv,
             4,
             4,
+            &RasterStore::default(),
         );
         assert!(
             read_mask_r32f(&ctx, &none).iter().all(|&v| v.abs() < 1e-4),
@@ -239,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_component_contributes_zero() {
+    fn imported_composites_like_any_other_component() {
         let Some(ctx) = GpuContext::headless() else {
             eprintln!("no GPU adapter; skipping (headless CI)");
             return;
@@ -250,25 +305,122 @@ mod tests {
         let iv = input
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        use crate::model::{MaskProvenance, RasterHandle};
-        let def = MaskDefinition {
-            components: vec![(
-                MaskComponent::Imported {
-                    handle: RasterHandle(1),
-                    provenance: MaskProvenance {
-                        model_id: "x".into(),
-                        model_version: "1".into(),
-                        prompt: "p".into(),
-                    },
-                },
-                CompositeMode::Add,
-            )],
-            invert: false,
+
+        // A store holding a constant-0.6 raster for handle 7 (stands in for an AI mask).
+        let store =
+            RasterStore::default().with_raster(RasterHandle(7), constant_buffer(&ctx, 4, 4, 0.6));
+
+        // 1) Single Imported → the raster values themselves.
+        let single = comp.composite(
+            &MaskDefinition {
+                components: vec![(imported(7), CompositeMode::Add)],
+                invert: false,
+            },
+            &iv,
+            4,
+            4,
+            &store,
+        );
+        assert!(
+            read_mask_r32f(&ctx, &single)
+                .iter()
+                .all(|&v| (v - 0.6).abs() < 1e-4),
+            "single imported == raster"
+        );
+
+        // 2) Imported inverted → 1 - 0.6 = 0.4 (composites like any other, invert applies).
+        let inv = comp.composite(
+            &MaskDefinition {
+                components: vec![(imported(7), CompositeMode::Add)],
+                invert: true,
+            },
+            &iv,
+            4,
+            4,
+            &store,
+        );
+        assert!(
+            read_mask_r32f(&ctx, &inv)
+                .iter()
+                .all(|&v| (v - 0.4).abs() < 1e-4),
+            "inverted imported == 0.4"
+        );
+
+        // 3) Full luma seed (lo=0,hi=1 → 1.0) SUBTRACT imported → 1*(1-0.6) = 0.4 ("refine for free").
+        let seed = MaskComponent::LumaRange {
+            lo: 0.0,
+            hi: 1.0,
+            softness: 0.0,
         };
-        let out = comp.composite(&def, &iv, 4, 4);
+        let sub = comp.composite(
+            &MaskDefinition {
+                components: vec![
+                    (seed.clone(), CompositeMode::Add),
+                    (imported(7), CompositeMode::Subtract),
+                ],
+                invert: false,
+            },
+            &iv,
+            4,
+            4,
+            &store,
+        );
+        assert!(
+            read_mask_r32f(&ctx, &sub)
+                .iter()
+                .all(|&v| (v - 0.4).abs() < 1e-4),
+            "brush/range SUBTRACT imported folds like any component"
+        );
+
+        // 4) Imported INTERSECT a 0.3 constant raster (handle 9) → min(0.6, 0.3) = 0.3.
+        let store2 = store.with_raster(RasterHandle(9), constant_buffer(&ctx, 4, 4, 0.3));
+        let isect = comp.composite(
+            &MaskDefinition {
+                components: vec![
+                    (imported(7), CompositeMode::Add),
+                    (imported(9), CompositeMode::Intersect),
+                ],
+                invert: false,
+            },
+            &iv,
+            4,
+            4,
+            &store2,
+        );
+        assert!(
+            read_mask_r32f(&ctx, &isect)
+                .iter()
+                .all(|&v| (v - 0.3).abs() < 1e-4),
+            "imported INTERSECT imported == min"
+        );
+    }
+
+    #[test]
+    fn imported_with_no_producer_is_inert() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let comp = MaskCompositor::new(ctx.clone());
+        let input = MaskBuffer::alloc_zeroed(&ctx, 4, 4);
+        let iv = input
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        // Empty store (the P1 default: no producer) → Imported contributes zero.
+        let out = comp.composite(
+            &MaskDefinition {
+                components: vec![(imported(7), CompositeMode::Add)],
+                invert: false,
+            },
+            &iv,
+            4,
+            4,
+            &RasterStore::default(),
+        );
         assert!(
             read_mask_r32f(&ctx, &out).iter().all(|&v| v.abs() < 1e-4),
-            "imported inert => zero"
+            "no producer => imported inert"
         );
     }
 }

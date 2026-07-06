@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_mask::{read_mask_r32f, MaskCompositor, MaskDefinition};
+use ferrolite_mask::{read_mask_r32f, MaskCompositor, MaskDefinition, RasterStore};
 
 use crate::image::PipelineImage;
 
@@ -38,7 +38,9 @@ impl MaskOverlayCompositor {
         let iv = input
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let buf = self.compositor.composite(def, &iv, w, h);
+        let buf = self
+            .compositor
+            .composite(def, &iv, w, h, &RasterStore::default());
         (w, h, read_mask_r32f(ctx, &buf))
     }
 }

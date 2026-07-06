@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
-use ferrolite_mask::{MaskBuffer, MaskCompositor};
+use ferrolite_mask::{MaskBuffer, MaskCompositor, RasterStore};
 use wgpu::util::DeviceExt;
 
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
@@ -293,9 +293,14 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
             }
         };
         if rebuild {
+            // P1 has no mask producer, so imported components resolve to nothing here.
+            // A2 threads a populated RasterStore (rebuilt from provenance prompts) in.
             let masks: Vec<MaskBuffer> = layers
                 .visible_layers()
-                .map(|l| self.compositor.composite(&l.mask, &input_view, mw, mh))
+                .map(|l| {
+                    self.compositor
+                        .composite(&l.mask, &input_view, mw, mh, &RasterStore::default())
+                })
                 .collect();
             *self.cache.borrow_mut() = Some(CachedMasks {
                 layers: layers.clone(),

@@ -41,9 +41,16 @@ green, then the author's hands-on visual test (CLAUDE.md).
 **In:**
 - **Icon library (permanent fix):** add the **`egui-phosphor`** crate (MIT; Phosphor icons MIT); install
   its font once in `theme::install_fonts`; add a thin `ferrolite-app` `icons` module of **semantic
-  aliases** over the crate's constants; render icons in the crate's font family everywhere (starting
-  with `widgets::tool_button` + the mask sub-tool strip + palette undo/redo). Replace all broken emoji
-  glyphs. Add a **CLAUDE.md rule** codifying the icon convention.
+  aliases** over the crate's constants; render icons in the crate's font family. Add a **CLAUDE.md rule**
+  codifying the icon convention.
+- **App-wide icon audit + migration (MUST — a guarantee, not a nice-to-have):** every icon in the app is
+  sourced from the `icons` library so nothing can silently render as tofu again. This covers the broken
+  Develop tool/sub-tool/undo-redo/eyedropper/edit/delete icons AND every other icon/glyph in the app:
+  the hand-drawn vector icons in `library/icons.rs` (rating stars, flags, chevrons) and the per-control
+  reset glyph `draw_reset_arrow`, plus any raw emoji/symbol characters found anywhere else. The plan
+  begins with an audit that enumerates every icon/glyph/hand-drawn-icon call site; all are migrated. The
+  only permitted exception is a genuinely bespoke shape with no adequate Phosphor equivalent, which must
+  be explicitly named and justified in the plan (default = migrate).
 - **Keybinds:** new Develop-gated `Action`s — tool switch (Adjust/Crop/Mask), brush-radius decrease/
   increase (key-repeat), toggle-mask-overlay — with default chords, conflict resolution, the Settings
   rebind UI, the in-app help cheat sheet, and automatic persistence.
@@ -59,10 +66,8 @@ green, then the author's hands-on visual test (CLAUDE.md).
 - **Brush-mask performance** (the lag) → a separate brainstorm → spec (diagnostics first, then fix).
 - No new adjustment ops, mask component types, or pipeline/OpStack/persistence changes.
 - No re-theming beyond the icon-font addition and the small controls this adds.
-- Not migrating every existing glyph in the app to the icon library in this pass — only the Develop
-  tool-registry icons that are broken + any new icons this spec adds (rating/flag icons in
-  `library/icons.rs` already work via vector drawing and are left as-is; they MAY move to the library
-  later, out of scope here).
+- (Icon migration is comprehensive and in-scope — see the In list. The only carve-out is a bespoke shape
+  with no Phosphor equivalent, which the plan must name + justify; everything else migrates.)
 
 ---
 
@@ -72,8 +77,12 @@ green, then the author's hands-on visual test (CLAUDE.md).
 ferrolite-app
   Cargo.toml            + egui-phosphor (version matching egui 0.29)                    [NEW dep]
   src/theme.rs          install_fonts(): egui_phosphor::add_to_fonts(&mut fonts, ...)   [MODIFY]
-  src/icons.rs          semantic aliases over egui_phosphor::regular::* (CROP, MASK,…)  [NEW]
+  src/icons.rs          semantic aliases over egui_phosphor::regular::* (CROP, MASK, STAR,
+                        FLAG, CARET_DOWN, RESET, …)                                     [NEW]
   src/widgets/tool_button.rs   render icon in the phosphor font family                  [MODIFY]
+  src/widgets/mod.rs    draw_reset_arrow -> render icons::RESET in the reset column     [MODIFY]
+  src/library/icons.rs  stars/flags/chevrons -> icons::* (bespoke drawers removed)      [MODIFY]
+  (+ audit: any other raw emoji/symbol glyph call site app-wide -> icons::*)            [MODIFY]
   src/develop/
     tools/{adjust,crop,mask,heal}.rs   icon() -> icons::* constant                      [MODIFY]
     tool_palette.rs     undo/redo icons -> icons::UNDO / icons::REDO                     [MODIFY]
@@ -160,14 +169,36 @@ nearest Phosphor glyph.)
 - Update all icon call sites: `tools/{adjust,crop,mask,heal}.rs::icon()`, the `mask_panel.rs` sub-tool
   strip array, and `tool_palette.rs` undo/redo, to the `icons::*` constants.
 
-### 4.5 CLAUDE.md rule (new, added by this work)
-> **UI icons (load-bearing).** All Develop/UI icons come from the `icons` module
+### 4.5 App-wide audit + migration (MUST)
+The library is the single source for **all** icons — a guarantee that nothing renders as tofu. The plan
+starts with an **audit task** that enumerates every icon/glyph call site in `ferrolite-app`:
+- Raw emoji/symbol characters passed to `painter.text`, `ui.label`, `RichText`, `Button`, `selectable_label`,
+  combo/menu text, etc. (grep for non-ASCII glyph literals + the known offenders `⌗ ◯ 🎚 🩹 🖌 ▤ ◎ ◐ 🎨 ↶ ↷`).
+- The hand-drawn vector icons in `library/icons.rs` (rating **stars**, **flags**, **chevrons**) →
+  Phosphor `STAR`/`STAR_FILL`, `FLAG`/`FLAG_FILL` (+ a reject variant), `CARET_DOWN`/`CARET_UP`, etc.,
+  rendered in the icon font. Preserve current sizing/placement/fill-state semantics (e.g. filled vs
+  outline star for rating level); verify visual parity in the author's test.
+- The per-control reset glyph `widgets::draw_reset_arrow` → the library's reset icon
+  (`icons::RESET`, e.g. Phosphor `ARROW_COUNTER_CLOCKWISE`), rendered in the `EguiSlider` reset column
+  and any other reset affordance. **Load-bearing:** the per-control reset affordance + its placement
+  (CLAUDE.md) are unchanged — only the drawn glyph is swapped for the library icon; verify the reset
+  column still looks/behaves right at the author's test.
+
+Every enumerated site is migrated. If the audit finds a shape with no adequate Phosphor equivalent, the
+plan names it and either picks the closest Phosphor glyph or justifies keeping a bespoke vector draw —
+the default is to migrate. Once migrated, `library/icons.rs`'s bespoke drawers and `draw_reset_arrow` are
+removed (or reduced to a thin wrapper over the library) so there is exactly one icon system.
+
+### 4.6 CLAUDE.md rule (new, added by this work)
+> **UI icons (load-bearing).** EVERY icon in the app comes from the `icons` module
 > (`ferrolite-app/src/icons.rs`), which aliases the bundled icon font (`egui-phosphor`, installed in
-> `theme::install_fonts`). Render them in the icon font family (via `tool_button` or `FontId` with that
-> family). NEVER put raw emoji/symbol characters in IBM Plex text — Plex and egui's bundled emoji subset
-> don't cover them and they render as tofu. Add a new icon by adding a semantic alias in `icons.rs`
-> (sourced from the crate's catalog). Pre-existing vector icons (`library/icons.rs`,
-> `draw_reset_arrow`) remain valid for bespoke shapes.
+> `theme::install_fonts`), rendered in the icon font family (via `tool_button` or a `FontId` with that
+> family). This includes rating/flag/chevron icons and the per-control **reset** glyph. NEVER put raw
+> emoji/symbol characters in IBM Plex text, and do NOT hand-draw new icons with `Painter` shapes — Plex
+> + egui's bundled emoji subset don't cover symbols (tofu), and ad-hoc vector icons fragment the system.
+> Add a new icon by adding a semantic alias in `icons.rs` sourced from the Phosphor catalog. (The
+> per-control reset affordance + its placement remain load-bearing; only its glyph comes from the
+> library.)
 
 ---
 
@@ -337,9 +368,14 @@ cause, fix, verify the loupe + sampling work.
 ## 11. Decomposition into implementation plans
 
 Likely a **single plan** on `feat/develop-tool-registry`, in dependency order:
-1. **Icon library:** add `egui-phosphor` (pin egui-0.29-compatible version), install in `theme`, create
-   `icons.rs` aliases, switch `tool_button` to the icon font, replace all tool/sub-tool/undo-redo icon
-   literals, add the CLAUDE.md rule. Verify icons render (build + visual).
+1. **Icon library + full audit/migration:** add `egui-phosphor` (pin egui-0.29-compatible version),
+   install in `theme`, create `icons.rs` aliases, switch `tool_button` to the icon font, add the
+   CLAUDE.md rule. **Audit** every icon/glyph/hand-drawn-icon call site in `ferrolite-app` and migrate
+   ALL of them: the broken Develop tool/sub-tool/undo-redo icons, `library/icons.rs` (stars/flags/
+   chevrons), the `draw_reset_arrow` reset glyph (→ `icons::RESET`, preserving the reset column's
+   placement/behavior), and any other raw emoji/symbol usage. Remove the superseded bespoke drawers.
+   Verify all icons render + reset-column parity (build + visual). This step may split (crate+install,
+   then the migration sweep, then the reset-glyph swap) if large — the writing-plans step decides.
 2. **Keybinds:** new `Action`s + `ALL` + `label()` + defaults (+ conflict resolution), Develop-gated
    dispatch (tool switch / overlay toggle / brush-radius held), rebind `GROUPS` + help table.
 3. **Mask overlay toggle:** UI toggle in the mask panel wired to `overlay_on` (keybind from step 2).
@@ -359,6 +395,7 @@ swaps; the writing-plans step decides final task granularity.
 | Question | Decision | Rationale |
 |---|---|---|
 | Icon approach | **Bundle an icon-font crate (`egui-phosphor`) + a thin `icons` alias module + a CLAUDE.md rule** | A reusable icon *library* is a permanent fix — future UI sources any glyph from the catalog or adds a one-line alias; no per-icon vector drawing, no silent font-glyph breakage. User chose a "material-icons-crate-like" library; Phosphor is the reliable egui-0.29 choice (MIT). |
+| Icon migration scope | **ALL app icons migrate to the library (MUST), via an audit** — including `library/icons.rs` stars/flags/chevrons and the `draw_reset_arrow` reset glyph; bespoke vector drawers removed | User: "the library is a MUST not a MAY — so we guarantee the icons render." One icon system, single source, nothing can silently break; the working vector icons consolidate onto it too (reset affordance stays load-bearing, only its glyph comes from the library). |
 | Icon crate | **`egui-phosphor` (Regular)** | De-facto egui icon crate, tracks egui releases, MIT, covers every needed glyph. Material (`egui_material_icons`) offered but Phosphor is the safer version-compat bet. |
 | Keybind defaults | **Mnemonic: A/C/M tools, `[`/`]` brush radius, `O` overlay (conflict-checked)**, all rebindable | Matches Photoshop/Lightroom muscle memory (`[`/`]` universal); mnemonic tool letters; rebindable so defaults aren't binding. |
 | Brush-radius repeat | **`held()` key with per-frame delta, clamped** | egui `key_down` gives smooth repeat; reuses the `HoldBeforePeek` held-key pattern. |

@@ -9,7 +9,6 @@ pub struct ToolState {
     pub active: ToolId,
     pub active_tab: TabId,
     pub base_tab: TabId,
-    pub palette_visible: bool,
 }
 
 impl Default for ToolState {
@@ -18,7 +17,6 @@ impl Default for ToolState {
             active: ToolId::Adjust,
             active_tab: TabId("light"),
             base_tab: TabId("light"),
-            palette_visible: true,
         }
     }
 }
@@ -146,7 +144,6 @@ mod tests {
         let s = ToolState::default();
         assert_eq!(s.active, ToolId::Adjust);
         assert_eq!(s.active_tab, TabId("light"));
-        assert!(s.palette_visible);
     }
 
     #[test]
@@ -201,7 +198,6 @@ mod tests {
             active: ToolId::Adjust,
             active_tab: TabId("gone"),
             base_tab: TabId("gone"),
-            palette_visible: true,
         };
         s.ensure_valid_tab(&reg);
         assert_eq!(

@@ -110,15 +110,25 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
             }
 
             // ── Add new component (relocated from `mask_panel::selected_section`,
-            // Task 5) ──
-            ui.separator();
-            ui.label(
-                egui::RichText::new("Add new component")
-                    .size(11.0)
-                    .color(theme::TEXT_DIM),
-            );
-            if let Some(o) = add_component_ui(ui, stack, mask, mask_idx) {
-                out = Some(o);
+            // Task 5) ── Suppressed while editing an existing component: the
+            // add section binds the same `mask.range_*`/`mask.color_*` slider
+            // fields as the edit-in-place UI above and writes
+            // `mask.preview_component` every frame for Luma/Color, so running
+            // it during an edit would overlay a phantom duplicate of the
+            // component being edited on top of the true edit result.
+            if mask.editing_component.is_none() {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("Add new component")
+                        .size(11.0)
+                        .color(theme::TEXT_DIM),
+                );
+                if let Some(o) = add_component_ui(ui, stack, mask, mask_idx) {
+                    out = Some(o);
+                }
+            } else {
+                // While editing an existing component, no add-preview.
+                mask.preview_component = None;
             }
         });
     if !open {

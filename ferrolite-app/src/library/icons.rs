@@ -1,51 +1,42 @@
-//! Painter-based icon helpers for the Library UI.
+//! Icon-font-based icon helpers for the Library UI.
 //!
-//! All drawing uses `egui::Painter`/`egui::Shape` directly — no font glyphs —
-//! so they render correctly with IBM Plex Sans (which lacks symbol glyphs such
-//! as ★, ⚑, ▾).  Every function is pure geometry: no state, no allocation
-//! beyond the shape list appended to the painter.
+//! Ratings/flags/carets render glyphs from the bundled Phosphor icon font (see
+//! `crate::icons`) via `Painter::text`, rather than hand-built `egui::Shape`
+//! polygons — this is the single icon system for the app (root `CLAUDE.md`).
+//! Helpers that draw non-Phosphor glyphs (cross/check/export tray/queued
+//! badge/split-compare) are unaffected and remain pure geometry.
 
-use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2};
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-/// Build the 10 vertices of a regular 5-pointed star centred at `center`.
-/// `r_outer` is the circumradius; `r_inner` ≈ r_outer * 0.382 gives sharp tips.
-fn star_points(center: Pos2, r_outer: f32, r_inner: f32) -> Vec<Pos2> {
-    // Vertex 0 points straight up (−π/2).
-    let mut pts = Vec::with_capacity(10);
-    for i in 0..10 {
-        let angle = std::f32::consts::FRAC_PI_2 + (i as f32) * std::f32::consts::PI / 5.0;
-        let r = if i % 2 == 0 { r_outer } else { r_inner };
-        // subtract because egui y increases downward
-        pts.push(center + Vec2::new(r * angle.cos(), -r * angle.sin()));
-    }
-    pts
-}
+use crate::icons;
+use egui::{Color32, Painter, Pos2, Rect, Stroke, Vec2};
 
 // ── public API ───────────────────────────────────────────────────────────────
 
-/// Draw a 5-pointed star centred at `center` with circumradius `r`.
+/// Draw a star glyph centred at `center` sized so its visual extent matches
+/// the former circumradius-`r` polygon.
 ///
-/// `filled = true`  → filled polygon (solid star).
-/// `filled = false` → stroked outline only.
+/// `filled = true`  → `icons::STAR_FILL` (solid star).
+/// `filled = false` → `icons::STAR` (outline star).
 pub fn star(painter: &Painter, center: Pos2, r: f32, filled: bool, color: Color32) {
-    let r_inner = r * 0.382;
-    let points = star_points(center, r, r_inner);
+    // The old vector star's circumradius `r` corresponds to a glyph font size
+    // of about `r * 2.2` (matches the reset-arrow glyph's scale factor for the
+    // same "geometric radius -> font size" conversion).
+    let size = r * 2.2;
     if filled {
-        painter.add(Shape::Path(egui::epaint::PathShape {
-            points,
-            closed: true,
-            fill: color,
-            stroke: egui::epaint::PathStroke::NONE,
-        }));
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            icons::STAR_FILL,
+            icons::font_fill(size),
+            color,
+        );
     } else {
-        painter.add(Shape::Path(egui::epaint::PathShape {
-            points,
-            closed: true,
-            fill: Color32::TRANSPARENT,
-            stroke: egui::epaint::PathStroke::new(1.0, color),
-        }));
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            icons::STAR,
+            icons::font(size),
+            color,
+        );
     }
 }
 
@@ -96,11 +87,30 @@ pub fn advance_width(r: f32, gap: f32, n: u8) -> f32 {
     (n as f32) * 2.0 * r + ((n as f32) - 1.0) * gap
 }
 
-/// Draw a small pennant flag whose pole bottom sits near `base`.
+/// Draw a flag glyph anchored so its footprint matches the former hand-drawn
+/// pennant's bounding box (pole bottom at `base`, extending up/right by `h`).
 ///
-/// `h` is the total height of the icon (pole + pennant).
-/// `filled = true` fills the pennant head; `false` draws an outline only.
-pub fn flag(painter: &Painter, base: Pos2, h: f32, filled: bool, color: Color32, bg: bool) {
+/// `filled = true` → `icons::FLAG_FILL` (solid pick flag) unless `reject`, in
+/// which case reject always renders `icons::FLAG_REJECT` (a prohibit glyph
+/// has no separate filled variant in Phosphor, so `filled` only toggles
+/// weight for the pick glyph). `filled = false` → `icons::FLAG` outline.
+///
+/// `reject = true` selects the reject glyph (`icons::FLAG_REJECT`) instead of
+/// the pick flag glyph — this parameter was added during the icon-font
+/// migration since the old geometry drew the same pennant shape for both
+/// pick/reject and relied purely on `color` to distinguish them.
+pub fn flag(
+    painter: &Painter,
+    base: Pos2,
+    h: f32,
+    filled: bool,
+    color: Color32,
+    bg: bool,
+    reject: bool,
+) {
+    // Old geometry's bounding box was roughly h tall x (h*0.55) wide, so the
+    // glyph anchor sits at the vertical/horizontal center of that box.
+    let center = Pos2::new(base.x + h * 0.275, base.y - h * 0.5);
     if bg {
         let pad = 2.5;
         let bg_rect = Rect::from_min_max(
@@ -109,54 +119,56 @@ pub fn flag(painter: &Painter, base: Pos2, h: f32, filled: bool, color: Color32,
         );
         painter.rect_filled(bg_rect, 3.0, Color32::from_black_alpha(120));
     }
-    let pole_x = base.x;
-    // Pole: vertical line from base upward.
-    let pole_top = Pos2::new(pole_x, base.y - h);
-    painter.line_segment([base, pole_top], Stroke::new(1.2, color));
-
-    // Pennant: a triangle to the right of the top half of the pole.
-    let pennant_h = h * 0.55;
-    let pennant_w = h * 0.55;
-    let p0 = Pos2::new(pole_x, base.y - h);
-    let p1 = Pos2::new(pole_x + pennant_w, base.y - h + pennant_h * 0.5);
-    let p2 = Pos2::new(pole_x, base.y - h + pennant_h);
-    if filled {
-        painter.add(Shape::convex_polygon(vec![p0, p1, p2], color, Stroke::NONE));
+    let size = h * 2.2;
+    if reject {
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            icons::FLAG_REJECT,
+            icons::font(size),
+            color,
+        );
+    } else if filled {
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            icons::FLAG_FILL,
+            icons::font_fill(size),
+            color,
+        );
     } else {
-        painter.add(Shape::Path(egui::epaint::PathShape {
-            points: vec![p0, p1, p2],
-            closed: true,
-            fill: Color32::TRANSPARENT,
-            stroke: egui::epaint::PathStroke::new(1.0, color),
-        }));
+        painter.text(
+            center,
+            egui::Align2::CENTER_CENTER,
+            icons::FLAG,
+            icons::font(size),
+            color,
+        );
     }
 }
 
-/// Draw a small triangle caret centred at `center`.
+/// Draw a caret glyph centred at `center`.
 ///
-/// `down = true`  → triangle points downward (▾).
-/// `down = false` → triangle points upward  (▲).
-/// `half_w` is half the base width of the triangle.
+/// `down = true`  → `icons::CARET_DOWN` (▾).
+/// `down = false` → `icons::CARET_UP` (▲).
+/// `half_w` is half the base width the old triangle used; the glyph is sized
+/// to match that visual footprint.
 pub fn caret(painter: &Painter, center: Pos2, half_w: f32, color: Color32, down: bool) {
-    let half_h = half_w * 0.65;
-    let (tip, left, right) = if down {
-        (
-            Pos2::new(center.x, center.y + half_h),
-            Pos2::new(center.x - half_w, center.y - half_h),
-            Pos2::new(center.x + half_w, center.y - half_h),
-        )
+    // Old triangle's base width was `half_w * 2`; apply the same
+    // "geometric size -> font size" factor used by star/flag/reset.
+    let size = (half_w * 2.0) * 2.2;
+    let glyph = if down {
+        icons::CARET_DOWN
     } else {
-        (
-            Pos2::new(center.x, center.y - half_h),
-            Pos2::new(center.x - half_w, center.y + half_h),
-            Pos2::new(center.x + half_w, center.y + half_h),
-        )
+        icons::CARET_UP
     };
-    painter.add(Shape::convex_polygon(
-        vec![tip, left, right],
+    painter.text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        glyph,
+        icons::font(size),
         color,
-        Stroke::NONE,
-    ));
+    );
 }
 
 /// Draw a small "✕" (remove/close) icon as two crossing diagonal strokes
@@ -311,26 +323,5 @@ mod tests {
         let expected = 5.0 * 12.0 + 4.0 * gap; // 68.0
         let w = advance_width(r, gap, 5);
         assert!((w - expected).abs() < 1e-4, "expected {expected}, got {w}");
-    }
-
-    #[test]
-    fn star_points_has_ten_vertices() {
-        let pts = star_points(Pos2::new(0.0, 0.0), 6.0, 2.3);
-        assert_eq!(pts.len(), 10);
-    }
-
-    #[test]
-    fn star_points_outer_radius_approx() {
-        let r = 6.0_f32;
-        let center = Pos2::new(0.0, 0.0);
-        let pts = star_points(center, r, r * 0.382);
-        // Even-indexed points should be at distance r from center.
-        for i in (0..10).step_by(2) {
-            let d = (pts[i] - center).length();
-            assert!(
-                (d - r).abs() < 1e-3,
-                "outer vertex {i}: dist={d}, expected {r}"
-            );
-        }
     }
 }

@@ -60,6 +60,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
                 active,
                 color,
                 false,
+                f == Flag::Reject,
             );
             let hover = format!(
                 "{} ({})",

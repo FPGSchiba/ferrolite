@@ -130,6 +130,7 @@ pub fn flag_filters(ui: &mut egui::Ui, flags: &mut Vec<Flag>) -> bool {
             active,
             color,
             false,
+            f == Flag::Reject,
         );
         if resp.clicked() {
             if let Some(p) = flags.iter().position(|x| *x == f) {

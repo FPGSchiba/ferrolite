@@ -29,21 +29,13 @@ pub const REDO: &str = p::ARROW_CLOCKWISE;
 pub const DELETE: &str = p::TRASH;
 #[allow(dead_code)] // rename/edit affordance icon — future task
 pub const EDIT: &str = p::PENCIL_SIMPLE;
-#[allow(dead_code)] // per-control reset arrow icon — future task
 pub const RESET: &str = p::ARROW_COUNTER_CLOCKWISE;
-#[allow(dead_code)] // rating stars (library grid/filmstrip) — future task
 pub const STAR: &str = p::STAR; // outline (regular) — render with font()
-#[allow(dead_code)] // rating stars (library grid/filmstrip) — future task
 pub const STAR_FILL: &str = pf::STAR; // filled (fill variant) — render with font_fill()
-#[allow(dead_code)] // pick flag (library grid/filmstrip) — future task
 pub const FLAG: &str = p::FLAG; // pick flag outline — font()
-#[allow(dead_code)] // pick flag (library grid/filmstrip) — future task
 pub const FLAG_FILL: &str = pf::FLAG; // pick flag filled — font_fill()
-#[allow(dead_code)] // reject flag (library grid/filmstrip) — future task
 pub const FLAG_REJECT: &str = p::PROHIBIT; // reject — font()
-#[allow(dead_code)] // combo/dropdown affordance icon — future task
 pub const CARET_DOWN: &str = p::CARET_DOWN;
-#[allow(dead_code)] // combo/dropdown affordance icon — future task
 pub const CARET_UP: &str = p::CARET_UP;
 #[allow(dead_code)] // histogram/overlay visibility toggle icon — future task
 pub const OVERLAY_ON: &str = p::EYE;
@@ -59,7 +51,6 @@ pub fn font(size: f32) -> egui::FontId {
 
 /// The filled icon font (rating stars / pick flag), registered under the
 /// `"phosphor-fill"` named family in `theme::install_fonts`.
-#[allow(dead_code)] // paired with STAR_FILL/FLAG_FILL — future task
 pub fn font_fill(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name("phosphor-fill".into()))
 }

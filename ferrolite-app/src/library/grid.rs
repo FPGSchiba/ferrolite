@@ -327,7 +327,7 @@ fn paint_cell(
         );
     }
 
-    // #8 — Flag icon (top-left): drawn shapes instead of glyphs.
+    // #8 — Flag icon (top-left): icon-font glyph, not a hand-drawn shape.
     match rec.flag {
         Flag::Pick => {
             icons::flag(
@@ -337,6 +337,7 @@ fn paint_cell(
                 true,
                 theme::SEMANTIC_GREEN,
                 true,
+                false,
             );
         }
         Flag::Reject => {
@@ -346,6 +347,7 @@ fn paint_cell(
                 10.0,
                 true,
                 theme::SEMANTIC_RED,
+                true,
                 true,
             );
         }

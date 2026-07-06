@@ -4,3 +4,4 @@
 #![allow(dead_code)] // consumed by standard() in Task 9; allow removed at Task 13
 
 pub mod crop;
+pub mod mask;

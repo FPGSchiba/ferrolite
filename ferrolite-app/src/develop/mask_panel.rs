@@ -128,14 +128,14 @@ pub(crate) fn selected_section(
 
     // ── Component tool picker + composite mode ──
     ui.horizontal(|ui| {
-        for (tool, label) in [
-            (MaskTool::Brush, "Brush"),
-            (MaskTool::Linear, "Linear"),
-            (MaskTool::Radial, "Radial"),
-            (MaskTool::LumaRange, "Luma"),
-            (MaskTool::ColorRange, "Color"),
+        for (tool, icon, tip) in [
+            (MaskTool::Brush, "🖌", "Brush"),
+            (MaskTool::Linear, "▤", "Linear gradient"),
+            (MaskTool::Radial, "◎", "Radial gradient"),
+            (MaskTool::LumaRange, "◐", "Luminance range"),
+            (MaskTool::ColorRange, "🎨", "Color range"),
         ] {
-            if ui.selectable_label(mask.tool == tool, label).clicked() {
+            if crate::widgets::tool_button(ui, icon, tip, mask.tool == tool, true, None).clicked() {
                 mask.tool = tool;
             }
         }

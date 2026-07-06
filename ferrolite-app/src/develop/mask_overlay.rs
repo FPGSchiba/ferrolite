@@ -15,6 +15,24 @@ use std::sync::Arc;
 
 const HANDLE_R: f32 = 0.04; // normalized (source-space) hit radius, matches brief tests
 
+/// New brush radius from a scroll delta. `scroll_y > 0` (wheel up) grows the
+/// brush; negative shrinks it. Clamped to `[min, max]` — callers pass the same
+/// bounds as the panel's brush-radius slider (`mask_panel::BRUSH_RADIUS_MIN/MAX`)
+/// so the Ctrl+scroll canvas gesture and the slider agree on range. Pure/egui-free
+/// so it's unit-testable without a UI context.
+///
+/// Only called from `app.rs`'s Ctrl+scroll dispatch, which — like the rest of
+/// the `app`/`chrome`/`canvas` module tree — is compiled into the `ferrolite-app`
+/// *binary* target only, not the library target (`lib.rs` intentionally omits
+/// `app`; see its module comment). The `--lib` build/test therefore has no
+/// caller for this function even though the real app does; hence the explicit
+/// allow rather than a false "dead code" failure under `-D warnings`.
+#[allow(dead_code)]
+pub(crate) fn brush_radius_from_scroll(current: f32, scroll_y: f32, min: f32, max: f32) -> f32 {
+    const SENS: f32 = 0.0015; // radius units per scroll unit; tuned in visual test
+    (current + scroll_y * SENS).clamp(min, max)
+}
+
 /// Tag bits packed into `MaskGesture::DragHandle.handle` so a single `u32` field
 /// can carry either a `LinHandle` or a `RadHandle`. Decoding uses `mask.tool` to
 /// know which enum applies (a mask's active gesture is always for its current
@@ -594,6 +612,34 @@ fn route_color_eyedropper(
             SWATCH_R,
             color,
             egui::Stroke::new(1.0, theme::BG_BASE),
+        );
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn scroll_up_grows_scroll_down_shrinks_and_clamps() {
+        let (min, max) = (0.005, 0.5);
+        assert!(
+            brush_radius_from_scroll(0.1, 100.0, min, max) > 0.1,
+            "up grows"
+        );
+        assert!(
+            brush_radius_from_scroll(0.1, -100.0, min, max) < 0.1,
+            "down shrinks"
+        );
+        assert_eq!(
+            brush_radius_from_scroll(0.49, 100_000.0, min, max),
+            max,
+            "clamps hi"
+        );
+        assert_eq!(
+            brush_radius_from_scroll(0.01, -100_000.0, min, max),
+            min,
+            "clamps lo"
         );
     }
 }

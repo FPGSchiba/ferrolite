@@ -12,6 +12,12 @@ use crate::widgets::slider::EguiSlider;
 use ferrolite_mask::{CompositeMode, MaskComponent};
 use ferrolite_pipeline::{OpKind, OpStack};
 
+/// Brush-radius slider bounds (fraction of the image's smaller edge). Shared
+/// with the canvas Ctrl+scroll brush-size gesture (`mask_overlay::route_brush`)
+/// so both entry points clamp to the exact same range.
+pub const BRUSH_RADIUS_MIN: f32 = 0.005;
+pub const BRUSH_RADIUS_MAX: f32 = 0.5;
+
 pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Option<EditOutcome> {
     let la = mask_edit::layers(stack);
     mask.clamp_selection(la.layers.len());
@@ -174,8 +180,8 @@ pub(crate) fn selected_section(
         ui.add(EguiSlider {
             label: "Radius",
             value: &mut mask.brush_radius,
-            min: 0.005,
-            max: 0.5,
+            min: BRUSH_RADIUS_MIN,
+            max: BRUSH_RADIUS_MAX,
             default: 0.08,
             step: 0.005,
             decimals: 3,

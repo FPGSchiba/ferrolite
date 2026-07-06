@@ -3717,6 +3717,57 @@ impl eframe::App for FerroliteApp {
                             }
                             self.crop_active_prev = crop_active;
                         }
+                        // Ctrl+scroll brush-size gesture (Mask tool active, a mask
+                        // selected, Brush sub-tool — the same three conditions
+                        // `mask_overlay::show` requires before it dispatches to
+                        // `route_brush`, so the gesture only fires when the brush
+                        // cursor/affordance is actually shown — pointer over the
+                        // image): must run BEFORE `drive_viewer`,
+                        // because `drive_viewer` → `viewer::paint` reads the same
+                        // `i.raw_scroll_delta.y` this frame to drive canvas zoom
+                        // (viewer/mod.rs `paint`). Handling the brush gesture first
+                        // and zeroing `raw_scroll_delta` here (via `ctx.input_mut`)
+                        // consumes the scroll so the zoom handler sees none left —
+                        // the only place both concerns are close enough to serialize
+                        // without restructuring `viewer::paint`'s own scroll read.
+                        if let Some(v) = self.state.viewer.as_ref() {
+                            if v.mask.active
+                                && v.mask.selected.is_some()
+                                && v.mask.tool == crate::develop::mask_ui::MaskTool::Brush
+                            {
+                                let dims = v.image_dims.unwrap_or((1, 1));
+                                let image_rect = crate::viewer::image_screen_rect(
+                                    ui.min_rect(),
+                                    dims,
+                                    v.view,
+                                    v.viewport,
+                                );
+                                let ctrl_scroll_over_image = ctx.input(|i| {
+                                    let ctrl = i.modifiers.command || i.modifiers.ctrl;
+                                    let scroll_y = i.raw_scroll_delta.y;
+                                    let over_image = i
+                                        .pointer
+                                        .hover_pos()
+                                        .is_some_and(|p| image_rect.contains(p));
+                                    (ctrl && scroll_y.abs() > f32::EPSILON && over_image)
+                                        .then_some(scroll_y)
+                                });
+                                if let Some(scroll_y) = ctrl_scroll_over_image {
+                                    if let Some(v) = self.state.viewer.as_mut() {
+                                        v.mask.brush_radius =
+                                            crate::develop::mask_overlay::brush_radius_from_scroll(
+                                                v.mask.brush_radius,
+                                                scroll_y,
+                                                crate::develop::mask_panel::BRUSH_RADIUS_MIN,
+                                                crate::develop::mask_panel::BRUSH_RADIUS_MAX,
+                                            );
+                                    }
+                                    // Consume: zero the scroll so `drive_viewer`'s zoom
+                                    // handler (reading the same field) does not also fire.
+                                    ctx.input_mut(|i| i.raw_scroll_delta = egui::Vec2::ZERO);
+                                }
+                            }
+                        }
                         self.drive_viewer(ui, frame);
                         if self.state.settings.show_histogram {
                             self.draw_histogram_overlay(ui);

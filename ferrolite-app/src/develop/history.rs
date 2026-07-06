@@ -185,6 +185,32 @@ mod tests {
     }
 
     #[test]
+    fn create_then_adjust_are_two_undo_steps() {
+        use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Op};
+        let with = |vis_adj: f32| {
+            let d = LocalAdjustments {
+                layers: vec![MaskLayer {
+                    name: "m".into(),
+                    visible: true,
+                    mask: Default::default(),
+                    adjustments: AdjustmentSet {
+                        exposure: vis_adj,
+                        ..Default::default()
+                    },
+                }],
+            };
+            OpStack::default().set_op(Op::LocalAdjustments(d))
+        };
+        let mut h = History::new(OpStack::default(), 50);
+        h.push(OpKind::LocalAdjustments, with(0.0));
+        h.break_coalesce(); // create
+        h.push(OpKind::LocalAdjustments, with(0.5));
+        h.break_coalesce(); // adjust
+        assert_eq!(h.undo(), Some(with(0.0)), "undo the adjustment");
+        assert_eq!(h.undo(), Some(OpStack::default()), "undo the create");
+    }
+
+    #[test]
     fn no_coalesce_after_undo() {
         let ev = |v: f32| OpStack::default().set_op(Op::Exposure(Exposure { ev: v }));
         let mut h = History::new(OpStack::default(), 50);

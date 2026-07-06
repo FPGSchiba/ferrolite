@@ -2,11 +2,6 @@
 //! helpers (unit-tested); egui rendering lives in `mask_panel`/`mask_overlay`.
 //! Mirrors how `hsl_band`/`crop_active` live on `ViewerState` (survives the
 //! panel's per-frame `Option` plumbing).
-//!
-//! NOTE: this scaffolding is consumed by the mask panel/overlay/affordance tasks
-//! later in Plan 4; the module-level allow is REMOVED at the Plan-4 gate (Task 13)
-//! — its removal proves nothing here was left unconsumed.
-#![allow(dead_code)]
 
 use ferrolite_mask::{BrushNode, CompositeMode, Rgb};
 

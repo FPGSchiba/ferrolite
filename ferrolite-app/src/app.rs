@@ -124,6 +124,13 @@ impl FerroliteApp {
             self.set_preview_and_full(frame, stack.clone());
             if let Some(v) = self.state.viewer.as_mut() {
                 v.edits_dirty = true;
+                // A stale in-progress gesture or cached overlay must not carry over
+                // onto the newly-restored stack: drop any in-flight brush/handle
+                // gesture and force the overlay to rebuild against the new stack.
+                v.mask.gesture = None;
+                v.mask.overlay_key = None;
+                v.mask
+                    .clamp_selection(crate::develop::mask_edit::layers(&stack).layers.len());
             }
             // Persist the resulting stack (undo/redo changes the on-disk state).
             // Gather viewer scalars into locals before the iter_mut borrow.

@@ -14,6 +14,7 @@ pub mod lens_bake;
 pub mod lens_caps_ui;
 pub mod lens_match;
 pub mod lens_picker;
+pub mod mask_edit;
 pub mod mask_ui;
 pub mod meta_read;
 pub mod ops_edit;

@@ -38,6 +38,11 @@ pub struct FerroliteApp {
     /// (pipelines pre-warmed), after kicking off the initial display-profile
     /// detect. Ensures the startup detect fires exactly once.
     did_display_detect: bool,
+    /// The Develop tool/tab registry (design §4): base adjustment tabs + the
+    /// ordered canvas tools shown in the palette. Built once here; read in
+    /// Tasks 10-11 to render the palette/tab bar/canvas overlay.
+    #[allow(dead_code)] // read starting Task 10; allow removed at Task 13
+    tool_registry: crate::develop::tool::DevelopToolRegistry,
 }
 
 impl FerroliteApp {
@@ -86,6 +91,7 @@ impl FerroliteApp {
             show_help: false,
             show_settings: false,
             did_display_detect: false,
+            tool_registry: crate::develop::tool::DevelopToolRegistry::standard(),
         }
     }
 

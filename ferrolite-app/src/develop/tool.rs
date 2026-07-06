@@ -81,6 +81,24 @@ impl DevelopToolRegistry {
     }
 }
 
+impl DevelopToolRegistry {
+    /// The shipped tool set: Adjust (default), Crop, Mask, Heal (disabled).
+    pub fn standard() -> Self {
+        use crate::develop::tools::{
+            adjust::AdjustTool, crop::CropTool, heal::HealTool, mask::MaskTool,
+        };
+        Self::new(
+            crate::develop::base_tabs::base_tabs(),
+            vec![
+                Box::new(AdjustTool),
+                Box::new(CropTool),
+                Box::new(MaskTool),
+                Box::new(HealTool),
+            ],
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +175,23 @@ mod tests {
         assert!(
             reg.get(ToolId::Mask).is_none(),
             "mask not in this dummy registry"
+        );
+    }
+
+    #[test]
+    fn standard_registry_has_the_shipped_tools_in_order() {
+        let reg = DevelopToolRegistry::standard();
+        let ids: Vec<ToolId> = reg.tools().iter().map(|t| t.id()).collect();
+        assert_eq!(
+            ids,
+            vec![ToolId::Adjust, ToolId::Crop, ToolId::Mask, ToolId::Heal]
+        );
+        assert_eq!(reg.base_tabs().len(), 5, "Light/Color/Curve/Detail/Optics");
+        // Heal is the only always-disabled tool; assert via its (empty) tabs rather
+        // than `enabled()` to avoid constructing a full `AppState` here.
+        assert!(
+            reg.get(ToolId::Heal).unwrap().tabs().is_empty(),
+            "Heal has no tabs"
         );
     }
 }

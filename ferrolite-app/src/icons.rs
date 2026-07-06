@@ -22,7 +22,6 @@ pub const COLOR: &str = p::PALETTE;
 // dead_code doesn't fire there) — each is reserved for a later, not-yet-landed UI
 // task. Scoped `#[allow(dead_code)]` per item (not a blanket module allow) so new
 // aliases stay covered by the lint by default; remove the annotation once wired up.
-#[allow(dead_code)] // color-range/eyedropper canvas affordance icon — future task
 pub const EYEDROPPER: &str = p::EYEDROPPER;
 pub const UNDO: &str = p::ARROW_COUNTER_CLOCKWISE;
 pub const REDO: &str = p::ARROW_CLOCKWISE;

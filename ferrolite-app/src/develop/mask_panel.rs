@@ -111,6 +111,25 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
         );
     }
 
+    // The color eyedropper stages samples in `mask.color_samples` independent of
+    // any selected mask (mask_overlay's routing lets it sample regardless of
+    // selection so arming it never dead-ends silently). But "Add Color range"
+    // lives in `selected_section` below, which only renders with a selection —
+    // so if samples were collected while a mask was selected and the user then
+    // deselects it (switches rows, or the mask is deleted), the button
+    // disappears with them still queued. Surface that here so it's never a
+    // silent dead end.
+    if !mask.color_samples.is_empty() && mask.selected.is_none() {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} color sample(s) queued — select or create a mask to add them",
+                mask.color_samples.len()
+            ))
+            .size(11.0)
+            .color(theme::TEXT_FAINT),
+        );
+    }
+
     ui.add_space(6.0);
     // Selected-mask section (component tools + Light+Color) — Task 8.
     if let Some(idx) = mask.selected {
@@ -317,9 +336,9 @@ pub(crate) fn selected_section(
             });
         }
         let pick_label = if mask.picking_color {
-            "Picking… (click image)"
+            format!("{} Picking… (click image)", crate::icons::EYEDROPPER)
         } else {
-            "Pick color"
+            format!("{} Pick color", crate::icons::EYEDROPPER)
         };
         if ui
             .selectable_label(mask.picking_color, pick_label)

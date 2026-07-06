@@ -99,6 +99,18 @@ pub fn show(
         }
     }
 
+    // Color eyedropper is armed-mode and stages samples in `mask.color_samples`
+    // (UI state only — not tied to a selected mask until "Add Color range" is
+    // clicked in the panel), so route it whenever the Mask tool is active,
+    // BEFORE the selection gate below that brush/linear/radial need. Without
+    // this, arming "Pick color" with no mask selected made the eyedropper's
+    // `ui.interact`, cursor, loupe, and sampling a silent no-op — the click
+    // fell through to `drive_viewer`'s canvas interact instead.
+    if mask.active && mask.tool == MaskTool::ColorRange && mask.picking_color {
+        route_color_eyedropper(ui, image_rect, mask, src_dims, stack, preview_source);
+        return None;
+    }
+
     let (Some(idx), true) = (mask.selected, mask.active) else {
         return None;
     };

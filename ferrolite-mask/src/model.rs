@@ -37,7 +37,7 @@ pub struct Stroke {
 }
 
 /// Opaque handle to an externally-produced raster mask (the AI seam). Inert in P1.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub struct RasterHandle(pub u64);
 
 /// Engine-opaque descriptor for an imported (AI) mask. The engine stores but

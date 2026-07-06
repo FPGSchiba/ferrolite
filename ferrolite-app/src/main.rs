@@ -7,6 +7,9 @@ mod events;
 mod export;
 mod export_module;
 mod help;
+// Consumed starting in Tasks 2-3 (tool/sub-tool icon rendering); allow removed once wired up.
+#[allow(dead_code)]
+mod icons;
 mod ingest;
 mod library;
 mod metadata;

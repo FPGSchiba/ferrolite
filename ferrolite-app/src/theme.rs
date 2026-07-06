@@ -53,6 +53,18 @@ fn install_fonts(ctx: &Context) {
         .entry(FontFamily::Monospace)
         .or_default()
         .insert(0, "plex-mono".into());
+    egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    // Filled glyphs (rating stars / pick flag) under a dedicated named family, since
+    // add_to_fonts registers a single variant under the "phosphor" key.
+    fonts.font_data.insert(
+        "phosphor-fill".into(),
+        egui_phosphor::Variant::Fill.font_data(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Name("phosphor-fill".into()))
+        .or_default()
+        .push("phosphor-fill".into());
     ctx.set_fonts(fonts);
 }
 

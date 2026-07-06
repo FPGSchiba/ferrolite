@@ -64,3 +64,16 @@ without touching its neighbors and without hunting for the original value.
 Reuse the shared reset affordance (`ferrolite-app/src/widgets` `draw_reset_arrow`
 + the `EguiSlider` reset column) so it stays visually consistent. A new editable
 control is not complete until it has a per-control reset.
+
+## UI icons (load-bearing)
+
+EVERY icon in the app comes from the `icons` module (`ferrolite-app/src/icons.rs`), which
+aliases the bundled icon font (`egui-phosphor`, installed once in `theme::install_fonts`)
+and is rendered in the icon font family (via `widgets::tool_button` or a `FontId` from
+`icons::font`). This includes tool/sub-tool icons, undo/redo, the rating **stars**,
+**flags**, **chevrons**, and the per-control **reset** glyph. NEVER put raw emoji/symbol
+characters in IBM Plex text and do NOT hand-draw new icons with `Painter` shapes — Plex +
+egui's bundled emoji subset don't cover symbols (they render as tofu), and ad-hoc vector
+icons fragment the system. Add a new icon by adding a semantic alias in `icons.rs` sourced
+from the Phosphor catalog. The per-control reset affordance and its placement remain
+load-bearing (see "Per-component reset"); only its glyph comes from the library.

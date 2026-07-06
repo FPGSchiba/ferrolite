@@ -6,6 +6,7 @@ pub mod develop;
 pub mod diag;
 pub mod events;
 pub mod export;
+pub mod icons;
 pub mod ingest;
 pub mod library;
 pub mod metadata;

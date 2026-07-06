@@ -3547,9 +3547,10 @@ impl eframe::App for FerroliteApp {
 
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
             if let Some(v) = self.state.viewer.as_mut() {
-                v.crop_active = false; // re-armed by the open Geometry section
-                v.mask.active = false; // re-armed by the open Masks section
-                v.mask.adjusting = false; // re-set by the panel on a drag frame (panel runs before the canvas overlay below, so no lag)
+                let active = v.tool_state.active;
+                v.crop_active = active == crate::develop::tool::ToolId::Crop;
+                v.mask.active = active == crate::develop::tool::ToolId::Mask;
+                v.mask.adjusting = false; // still reset each frame; panel sets it on a drag
             }
             let mut outcome = None;
             let working_space = self.state.working_space;
@@ -3566,9 +3567,10 @@ impl eframe::App for FerroliteApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            outcome = Some(crate::develop::adjustment_panel::show(
+                            outcome = Some(crate::develop::tool_panel::show(
                                 ui,
                                 &mut self.state,
+                                &self.tool_registry,
                                 working_space,
                             ));
                         });
@@ -3734,80 +3736,34 @@ impl eframe::App for FerroliteApp {
                                 None => {}
                             }
                         }
-                        // Crop overlay: shown while the Geometry section is open.
-                        // Gather all viewer data into locals BEFORE calling apply_edit
-                        // (which needs &mut self) — mirrors the panel-outcome pattern.
-                        if self
-                            .state
-                            .viewer
-                            .as_ref()
-                            .map(|v| v.crop_active)
-                            .unwrap_or(false)
-                        {
-                            let (stack, dims, view, viewport) = {
-                                let v = self.state.viewer.as_ref().unwrap();
-                                (
-                                    v.op_stack.clone(),
-                                    v.image_dims.unwrap_or((1, 1)),
-                                    v.view,
-                                    v.viewport,
-                                )
-                            };
-                            let image_rect = crate::viewer::image_screen_rect(
-                                ui.min_rect(),
-                                dims,
-                                view,
-                                viewport,
-                            );
-                            if let Some(o) =
-                                crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)
-                            {
-                                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
-                            }
-                        }
-                        // Mask overlay: shown while the Masks section is open. Rebuild
-                        // the coverage texture only when the selected mask / preview
-                        // generation changed (bounded + on-change, CLAUDE.md §1), then
-                        // paint the fill. Gather locals BEFORE calling apply_edit, same
-                        // borrow discipline as the crop overlay above.
-                        let mask_active = self
-                            .state
-                            .viewer
-                            .as_ref()
-                            .map(|v| v.mask.active)
-                            .unwrap_or(false);
-                        if mask_active {
+                        // Active-tool canvas overlay (crop handles, mask coverage tint,
+                        // etc.) — a single dispatch to the active tool's `canvas()`
+                        // replaces the old per-section crop_overlay/mask_overlay calls.
+                        // Keep the mask overlay's bounded rebuild glue (needs ctx +
+                        // &mut self) here, before dispatch, so `mask_overlay_tex` is
+                        // current when `MaskTool::canvas` reads it.
+                        let active_tool = self.state.viewer.as_ref().map(|v| v.tool_state.active);
+                        if active_tool == Some(crate::develop::tool::ToolId::Mask) {
                             self.rebuild_mask_overlay_if_needed(ctx);
-                            let (stack, dims, view, viewport, tex, preview_source) = {
-                                let v = self.state.viewer.as_ref().unwrap();
-                                (
-                                    v.op_stack.clone(),
-                                    v.image_dims.unwrap_or((1, 1)),
-                                    v.view,
-                                    v.viewport,
-                                    v.mask_overlay_tex.clone(),
-                                    v.preview_source.clone(),
-                                )
-                            };
-                            let image_rect = crate::viewer::image_screen_rect(
-                                ui.min_rect(),
-                                dims,
-                                view,
-                                viewport,
-                            );
-                            let mask_out = self.state.viewer.as_mut().and_then(|v| {
-                                crate::develop::mask_overlay::show(
-                                    ui,
-                                    image_rect,
-                                    &stack,
-                                    &mut v.mask,
-                                    tex.as_ref(),
+                        }
+                        if let Some(id) = active_tool {
+                            if let Some((dims, view, viewport)) = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .map(|v| (v.image_dims.unwrap_or((1, 1)), v.view, v.viewport))
+                            {
+                                let image_rect = crate::viewer::image_screen_rect(
+                                    ui.min_rect(),
                                     dims,
-                                    preview_source.as_ref(),
-                                )
-                            });
-                            if let Some(o) = mask_out {
-                                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                                    view,
+                                    viewport,
+                                );
+                                if let Some(tool) = self.tool_registry.get(id) {
+                                    if let Some(o) = tool.canvas(ui, image_rect, &mut self.state) {
+                                        self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                                    }
+                                }
                             }
                         }
                         // Loupe context-menu widget covers the whole canvas; while

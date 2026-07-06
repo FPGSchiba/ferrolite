@@ -29,6 +29,7 @@ pub mod split;
 pub mod thumb_regen;
 pub mod tool;
 pub mod tool_palette;
+pub mod tool_panel;
 pub mod tool_state;
 pub mod tools;
 pub mod vignette_mode;

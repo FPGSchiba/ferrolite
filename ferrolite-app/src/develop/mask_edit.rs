@@ -69,6 +69,26 @@ pub fn add_component(stack: &OpStack, idx: usize, c: MaskComponent, m: Composite
     edit_layer(stack, idx, |l| l.mask.components.push((c, m)))
 }
 
+/// Replace the component at `comp_idx` within the mask layer at `mask_idx`,
+/// keeping its composite mode. Out-of-range `mask_idx` or `comp_idx` → unchanged
+/// stack (mirrors `edit_layer`'s out-of-range behavior).
+pub fn set_component(
+    stack: &OpStack,
+    mask_idx: usize,
+    comp_idx: usize,
+    c: MaskComponent,
+) -> OpStack {
+    let mut la = layers(stack);
+    let Some(layer) = la.layers.get_mut(mask_idx) else {
+        return stack.clone();
+    };
+    let Some(entry) = layer.mask.components.get_mut(comp_idx) else {
+        return stack.clone();
+    };
+    entry.0 = c;
+    write(stack, la)
+}
+
 pub fn set_adjustments(stack: &OpStack, idx: usize, a: AdjustmentSet) -> OpStack {
     edit_layer(stack, idx, |l| l.adjustments = a)
 }
@@ -130,6 +150,52 @@ mod tests {
         let comps = &layers(&s).layers[0].mask.components;
         assert_eq!(comps.len(), 1);
         assert_eq!(comps[0].1, CompositeMode::Subtract);
+    }
+
+    #[test]
+    fn set_component_replaces_params_in_place() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::LinearGradient {
+                start: Vec2::new(0.0, 0.0),
+                end: Vec2::new(0.0, 1.0),
+            },
+            CompositeMode::Subtract,
+        );
+        let s = set_component(
+            &s,
+            0,
+            0,
+            MaskComponent::LinearGradient {
+                start: Vec2::new(0.2, 0.3),
+                end: Vec2::new(0.8, 0.9),
+            },
+        );
+        let comps = &layers(&s).layers[0].mask.components;
+        assert_eq!(comps.len(), 1, "replaces in place, does not append");
+        assert_eq!(comps[0].1, CompositeMode::Subtract, "mode is preserved");
+        match comps[0].0 {
+            MaskComponent::LinearGradient { start, end } => {
+                assert_eq!(start, Vec2::new(0.2, 0.3));
+                assert_eq!(end, Vec2::new(0.8, 0.9));
+            }
+            _ => panic!("expected LinearGradient"),
+        }
+    }
+
+    #[test]
+    fn set_component_out_of_range_is_a_noop() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(&s, 0, brush(), CompositeMode::Add);
+        let same = set_component(&s, 0, 9, brush()); // comp_idx 9 doesn't exist
+        assert_eq!(same, s, "out-of-range comp_idx returns the stack unchanged");
+        let same2 = set_component(&s, 9, 0, brush()); // mask_idx 9 doesn't exist
+        assert_eq!(
+            same2, s,
+            "out-of-range mask_idx returns the stack unchanged"
+        );
     }
 
     #[test]

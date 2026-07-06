@@ -3718,6 +3718,7 @@ impl eframe::App for FerroliteApp {
                                     &stack,
                                     &mut v.mask,
                                     tex.as_ref(),
+                                    dims,
                                 )
                             });
                             if let Some(o) = mask_out {

@@ -1,0 +1,192 @@
+//! Pure hit-test / handle-drag / stroke-capture / eyedropper math for the mask
+//! tools, in normalized SOURCE coordinates ([0,1]²). No egui, no GPU — the
+//! canvas overlay only routes pointer events into these (crop-overlay discipline,
+//! Spec 2 §8). `p`/handles are already inverse-mapped to source coords by the
+//! caller via `display_to_source`.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LinHandle {
+    Start,
+    End,
+    Body,
+}
+
+fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
+}
+
+/// Distance from point `p` to segment `a→b`.
+fn point_seg_dist(a: (f32, f32), b: (f32, f32), p: (f32, f32)) -> f32 {
+    let (abx, aby) = (b.0 - a.0, b.1 - a.1);
+    let len2 = abx * abx + aby * aby;
+    if len2 < 1e-12 {
+        return dist(a, p);
+    }
+    let t = (((p.0 - a.0) * abx + (p.1 - a.1) * aby) / len2).clamp(0.0, 1.0);
+    dist((a.0 + t * abx, a.1 + t * aby), p)
+}
+
+/// Which linear-gradient handle (if any) is within `r` of `p`. Endpoints win over
+/// the body; the body matches anywhere within `r` of the axis segment.
+pub fn linear_hit_test(
+    start: (f32, f32),
+    end: (f32, f32),
+    p: (f32, f32),
+    r: f32,
+) -> Option<LinHandle> {
+    if dist(start, p) <= r {
+        return Some(LinHandle::Start);
+    }
+    if dist(end, p) <= r {
+        return Some(LinHandle::End);
+    }
+    if point_seg_dist(start, end, p) <= r {
+        return Some(LinHandle::Body);
+    }
+    None
+}
+
+/// Move the targeted endpoint to `p` (Start/End). Body is handled by `linear_drag_body`.
+pub fn linear_drag(
+    start: (f32, f32),
+    end: (f32, f32),
+    h: LinHandle,
+    p: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    match h {
+        LinHandle::Start => (p, end),
+        LinHandle::End => (start, p),
+        LinHandle::Body => (start, end),
+    }
+}
+
+/// Translate the whole axis by a source-space delta.
+pub fn linear_drag_body(
+    start: (f32, f32),
+    end: (f32, f32),
+    d: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    ((start.0 + d.0, start.1 + d.1), (end.0 + d.0, end.1 + d.1))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RadHandle {
+    Center,
+    RadiusX,
+    RadiusY,
+}
+
+/// Which radial handle is within `r` of `p`. Rotation is ignored for hit-testing
+/// the axis endpoints in P1 (axis-aligned handles; rotation via a later handle).
+pub fn radial_hit_test(
+    center: (f32, f32),
+    radius: (f32, f32),
+    _rot: f32,
+    p: (f32, f32),
+    r: f32,
+) -> Option<RadHandle> {
+    if dist(center, p) <= r {
+        return Some(RadHandle::Center);
+    }
+    if dist((center.0 + radius.0, center.1), p) <= r {
+        return Some(RadHandle::RadiusX);
+    }
+    if dist((center.0, center.1 + radius.1), p) <= r {
+        return Some(RadHandle::RadiusY);
+    }
+    None
+}
+
+/// Apply a radial drag: Center moves the center; RadiusX/Y set the extent to
+/// `|p − center|` on that axis (clamped ≥ a tiny epsilon so the ellipse stays valid).
+pub fn radial_drag(
+    center: (f32, f32),
+    radius: (f32, f32),
+    _rot: f32,
+    h: RadHandle,
+    p: (f32, f32),
+) -> ((f32, f32), (f32, f32)) {
+    match h {
+        RadHandle::Center => (p, radius),
+        RadHandle::RadiusX => (center, ((p.0 - center.0).abs().max(1e-3), radius.1)),
+        RadHandle::RadiusY => (center, (radius.0, (p.1 - center.1).abs().max(1e-3))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_hit_test_finds_endpoints() {
+        let (s, e) = ((0.2f32, 0.5f32), (0.8f32, 0.5f32));
+        assert_eq!(
+            linear_hit_test(s, e, (0.2, 0.5), 0.04),
+            Some(LinHandle::Start)
+        );
+        assert_eq!(
+            linear_hit_test(s, e, (0.8, 0.5), 0.04),
+            Some(LinHandle::End)
+        );
+        // Near the line but between endpoints => Body (move whole).
+        assert_eq!(
+            linear_hit_test(s, e, (0.5, 0.5), 0.04),
+            Some(LinHandle::Body)
+        );
+        // Far away => None.
+        assert_eq!(linear_hit_test(s, e, (0.5, 0.9), 0.04), None);
+    }
+
+    #[test]
+    fn linear_drag_moves_the_targeted_handle() {
+        let (s, e) = ((0.2f32, 0.5f32), (0.8f32, 0.5f32));
+        let (ns, ne) = linear_drag(s, e, LinHandle::End, (0.9, 0.6));
+        assert_eq!(ns, s, "start unchanged");
+        assert!((ne.0 - 0.9).abs() < 1e-6 && (ne.1 - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn linear_drag_body_translates_both() {
+        let (s, e) = ((0.2f32, 0.5f32), (0.8f32, 0.5f32));
+        // Body drag carries a delta (dx,dy); model as pointer delta from grab.
+        let (ns, ne) = linear_drag_body(s, e, (0.1, -0.05));
+        assert!((ns.0 - 0.3).abs() < 1e-6 && (ne.0 - 0.9).abs() < 1e-6);
+        assert!((ns.1 - 0.45).abs() < 1e-6 && (ne.1 - 0.45).abs() < 1e-6);
+    }
+
+    #[test]
+    fn radial_hit_test_center_and_axes() {
+        let c = (0.5f32, 0.5f32);
+        let rad = (0.3f32, 0.2f32);
+        assert_eq!(
+            radial_hit_test(c, rad, 0.0, (0.5, 0.5), 0.04),
+            Some(RadHandle::Center)
+        );
+        // +x axis edge at center + (rx, 0) = (0.8, 0.5).
+        assert_eq!(
+            radial_hit_test(c, rad, 0.0, (0.8, 0.5), 0.04),
+            Some(RadHandle::RadiusX)
+        );
+        // +y axis edge at (0.5, 0.7).
+        assert_eq!(
+            radial_hit_test(c, rad, 0.0, (0.5, 0.7), 0.04),
+            Some(RadHandle::RadiusY)
+        );
+        assert_eq!(radial_hit_test(c, rad, 0.0, (0.1, 0.1), 0.04), None);
+    }
+
+    #[test]
+    fn radial_drag_center_moves_center_only() {
+        let (c, r) = radial_drag((0.5, 0.5), (0.3, 0.2), 0.0, RadHandle::Center, (0.4, 0.45));
+        assert!((c.0 - 0.4).abs() < 1e-6 && (c.1 - 0.45).abs() < 1e-6);
+        assert_eq!(r, (0.3, 0.2), "radius unchanged when moving center");
+    }
+
+    #[test]
+    fn radial_drag_radius_x_sets_x_extent() {
+        let (c, r) = radial_drag((0.5, 0.5), (0.3, 0.2), 0.0, RadHandle::RadiusX, (0.9, 0.5));
+        assert_eq!(c, (0.5, 0.5));
+        assert!((r.0 - 0.4).abs() < 1e-6, "rx = |px - cx| = 0.4");
+        assert!((r.1 - 0.2).abs() < 1e-6, "ry unchanged");
+    }
+}

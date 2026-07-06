@@ -36,7 +36,7 @@ pub(crate) fn tool_button(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         icon,
-        egui::FontId::proportional(15.0),
+        crate::icons::font(15.0),
         fg,
     );
     if enabled {

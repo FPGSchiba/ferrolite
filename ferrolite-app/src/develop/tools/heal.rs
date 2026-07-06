@@ -9,7 +9,7 @@ impl DevelopTool for HealTool {
         ToolId::Heal
     }
     fn icon(&self) -> &'static str {
-        "🩹"
+        crate::icons::HEAL
     }
     fn label(&self) -> &'static str {
         "Heal (P5)"

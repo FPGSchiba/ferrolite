@@ -58,12 +58,14 @@ pub fn show(
                             }
                         }
                         ui.separator();
-                        if tool_button(ui, "\u{21b6}", "Undo", false, can_undo, None).clicked()
+                        if tool_button(ui, crate::icons::UNDO, "Undo", false, can_undo, None)
+                            .clicked()
                             && can_undo
                         {
                             action = Some(PaletteAction::Undo);
                         }
-                        if tool_button(ui, "\u{21b7}", "Redo", false, can_redo, None).clicked()
+                        if tool_button(ui, crate::icons::REDO, "Redo", false, can_redo, None)
+                            .clicked()
                             && can_redo
                         {
                             action = Some(PaletteAction::Redo);

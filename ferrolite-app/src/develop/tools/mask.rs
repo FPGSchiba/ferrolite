@@ -18,7 +18,7 @@ impl DevelopTool for MaskTool {
         ToolId::Mask
     }
     fn icon(&self) -> &'static str {
-        "◯"
+        crate::icons::MASK
     }
     fn label(&self) -> &'static str {
         "Mask"

@@ -53,11 +53,21 @@ pub(crate) fn chrome(
                     ui.label(egui::RichText::new(name).color(theme::TEXT_DIM).size(11.0));
                 }
                 if let Some(label) = status.chip_label() {
-                    let chip = ui.label(
-                        egui::RichText::new(label)
-                            .color(theme::SEMANTIC_RED)
-                            .size(11.0),
-                    );
+                    let chip = ui
+                        .horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            ui.label(
+                                egui::RichText::new(crate::icons::WARNING)
+                                    .font(crate::icons::font(11.0))
+                                    .color(theme::SEMANTIC_RED),
+                            );
+                            ui.label(
+                                egui::RichText::new(label)
+                                    .color(theme::SEMANTIC_RED)
+                                    .size(11.0),
+                            );
+                        })
+                        .response;
                     if let Some(tip) = status.tooltip() {
                         chip.on_hover_text(tip);
                     }

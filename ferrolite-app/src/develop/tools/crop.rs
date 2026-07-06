@@ -16,7 +16,7 @@ impl DevelopTool for CropTool {
         ToolId::Crop
     }
     fn icon(&self) -> &'static str {
-        "⌗"
+        crate::icons::CROP
     }
     fn label(&self) -> &'static str {
         "Crop"

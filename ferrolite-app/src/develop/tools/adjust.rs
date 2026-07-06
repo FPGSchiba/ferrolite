@@ -11,7 +11,7 @@ impl DevelopTool for AdjustTool {
         ToolId::Adjust
     }
     fn icon(&self) -> &'static str {
-        "🎚"
+        crate::icons::ADJUST
     }
     fn label(&self) -> &'static str {
         "Adjust"

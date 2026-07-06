@@ -70,7 +70,9 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .small_button("\u{1f5d1}")
+                    .add(egui::Button::new(
+                        egui::RichText::new(crate::icons::DELETE).font(crate::icons::font(12.0)),
+                    ))
                     .on_hover_text("Delete mask")
                     .clicked()
                 {
@@ -129,11 +131,19 @@ pub(crate) fn selected_section(
     // ── Component tool picker + composite mode ──
     ui.horizontal(|ui| {
         for (tool, icon, tip) in [
-            (MaskTool::Brush, "🖌", "Brush"),
-            (MaskTool::Linear, "▤", "Linear gradient"),
-            (MaskTool::Radial, "◎", "Radial gradient"),
-            (MaskTool::LumaRange, "◐", "Luminance range"),
-            (MaskTool::ColorRange, "🎨", "Color range"),
+            (MaskTool::Brush, crate::icons::BRUSH, "Brush"),
+            (
+                MaskTool::Linear,
+                crate::icons::LINEAR_GRADIENT,
+                "Linear gradient",
+            ),
+            (
+                MaskTool::Radial,
+                crate::icons::RADIAL_GRADIENT,
+                "Radial gradient",
+            ),
+            (MaskTool::LumaRange, crate::icons::LUMA, "Luminance range"),
+            (MaskTool::ColorRange, crate::icons::COLOR, "Color range"),
         ] {
             if crate::widgets::tool_button(ui, icon, tip, mask.tool == tool, true, None).clicked() {
                 mask.tool = tool;

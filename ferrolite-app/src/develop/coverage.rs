@@ -25,7 +25,7 @@ impl CoverageStatus {
     /// Short warning-chip label, or `None` when no chip should be shown.
     pub fn chip_label(self) -> Option<&'static str> {
         match self {
-            CoverageStatus::Fallback => Some("\u{26a0} approximate color"),
+            CoverageStatus::Fallback => Some("approximate color"),
             _ => None,
         }
     }

@@ -29,11 +29,23 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
         commit: true,
     };
 
-    if ui.button("Create New Mask").clicked() {
-        let name = format!("Mask {}", la.layers.len() + 1);
-        mask.selected = Some(la.layers.len()); // select the new one
-        out = Some(commit(mask_edit::create_mask(stack, name)));
-    }
+    ui.horizontal(|ui| {
+        if ui.button("Create New Mask").clicked() {
+            let name = format!("Mask {}", la.layers.len() + 1);
+            mask.selected = Some(la.layers.len()); // select the new one
+            out = Some(commit(mask_edit::create_mask(stack, name)));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (icon, tip) = if mask.overlay_on {
+                (crate::icons::OVERLAY_ON, "Hide mask overlay")
+            } else {
+                (crate::icons::OVERLAY_OFF, "Show mask overlay")
+            };
+            if crate::widgets::tool_button(ui, icon, tip, mask.overlay_on, true, None).clicked() {
+                mask.overlay_on = !mask.overlay_on;
+            }
+        });
+    });
 
     ui.add_space(4.0);
 

@@ -37,9 +37,7 @@ pub const FLAG_FILL: &str = pf::FLAG; // pick flag filled — font_fill()
 pub const FLAG_REJECT: &str = p::PROHIBIT; // reject — font()
 pub const CARET_DOWN: &str = p::CARET_DOWN;
 pub const CARET_UP: &str = p::CARET_UP;
-#[allow(dead_code)] // histogram/overlay visibility toggle icon — future task
 pub const OVERLAY_ON: &str = p::EYE;
-#[allow(dead_code)] // histogram/overlay visibility toggle icon — future task
 pub const OVERLAY_OFF: &str = p::EYE_SLASH;
 pub const WARNING: &str = p::WARNING;
 

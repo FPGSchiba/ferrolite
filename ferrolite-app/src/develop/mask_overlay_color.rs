@@ -1,5 +1,9 @@
 //! Pure conversion of a mask coverage buffer to a red RGBA overlay image. Alpha
 //! = coverage · strength; RGB is the overlay color (default red). No egui/GPU.
+//!
+//! NOTE: consumed by the canvas overlay task later in Plan 4; the module-level
+//! allow is REMOVED at the Plan-4 gate (Task 13).
+#![allow(dead_code)]
 
 /// Bounded overlay resolution (longest edge) — keeps the GPU composite + readback
 /// small enough to rebuild every frame during a stroke (CLAUDE.md §1).

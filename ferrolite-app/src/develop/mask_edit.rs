@@ -2,6 +2,10 @@
 //! `LocalAdjustments` with zero layers REMOVES the op (reset) so
 //! `is_identity()`/`has_edits` stay correct — mirroring `ops_edit`. All edits
 //! carry `OpKind::LocalAdjustments`; the app pushes one history entry per gesture.
+//!
+//! NOTE: consumed by the mask panel tasks later in Plan 4; the module-level allow
+//! is REMOVED at the Plan-4 gate (Task 13).
+#![allow(dead_code)]
 
 use ferrolite_mask::{CompositeMode, MaskComponent};
 use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Op, OpKind, OpStack};

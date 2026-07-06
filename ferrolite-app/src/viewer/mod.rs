@@ -197,6 +197,9 @@ pub struct ViewerState {
     /// Index of the currently-selected HSL band in the HSL panel (0–7).
     pub hsl_band: usize,
     /// Masking-tool UI state (design §9). Per-image, like `hsl_band`/`crop_active`.
+    // Read by the mask panel/overlay wired later in Plan 4 (Task 7+); allow
+    // removed at the Plan-4 gate (Task 13).
+    #[allow(dead_code)]
     pub mask: crate::develop::mask_ui::MaskUiState,
     /// `true` once the `OpsLoaded` event for this image has been received (the
     /// op-stack read job finished and the stack has been applied).

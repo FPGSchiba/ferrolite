@@ -84,3 +84,11 @@ Any control bound to a keybind MUST display that key in its hover tooltip, sourc
 the live keymap (`Keymap::hint(action)`), so rebinding updates the shown key. Format the
 label as `"<Label> (<Key>)"` (e.g. "Crop (C)", "Undo (Ctrl+Z)"). Non-rebindable input
 gestures are documented in Help/Settings instead (see "Keybind discoverability").
+
+## Keybind discoverability (load-bearing)
+
+Every keybind or input gesture MUST be represented so the user can discover it: a
+rebindable `Action` appears in BOTH the Settings keyboard tab (add it to a `GROUPS`
+entry — enforced by `every_action_is_in_a_settings_group`) AND the Help panel's shortcut
+list. A non-rebindable input gesture (e.g. Ctrl+scroll = brush size) appears at least in
+the Help panel and is noted in the Settings keyboard tab's gestures line.

@@ -15,7 +15,7 @@ mod serialize;
 mod tile_edit;
 mod uniforms;
 
-pub use coord::display_to_source;
+pub use coord::{display_to_source, source_to_display};
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
 pub use lens_bake::bake_products;

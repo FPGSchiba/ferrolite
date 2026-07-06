@@ -29,6 +29,30 @@ pub fn display_to_source(
     (sx / u.src_dims[0], sy / u.src_dims[1])
 }
 
+/// Inverse of `display_to_source`: map a normalized SOURCE point to normalized
+/// OUTPUT/crop space, for placing mask handles on the displayed (cropped/rotated)
+/// image. `src_px = m·out_px + off` ⇒ `out_px = m⁻¹·(src_px − off)`; then normalize
+/// by the output dims. Identity geometry → the identity map.
+pub fn source_to_display(
+    geo: Option<Geometry>,
+    src_w: u32,
+    src_h: u32,
+    src_norm: (f32, f32),
+) -> (f32, f32) {
+    let (u, out_w, out_h) = geometry_uniform(geo, src_w, src_h);
+    let sx = src_norm.0 * u.src_dims[0];
+    let sy = src_norm.1 * u.src_dims[1];
+    // Invert the row-major 2×2 m = [a b; c d].
+    let (a, b, c, d) = (u.m[0], u.m[1], u.m[2], u.m[3]);
+    let det = a * d - b * c;
+    let inv_det = if det.abs() < 1e-12 { 0.0 } else { 1.0 / det };
+    let dx = sx - u.off[0];
+    let dy = sy - u.off[1];
+    let ox = (d * dx - b * dy) * inv_det;
+    let oy = (-c * dx + a * dy) * inv_det;
+    (ox / out_w as f32, oy / out_h as f32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +109,49 @@ mod tests {
         approx(
             display_to_source(Some(geo), 100, 100, (0.5, 0.5)),
             (0.5, 0.5),
+        );
+    }
+
+    #[test]
+    fn source_to_display_is_identity_for_identity_geometry() {
+        let p = source_to_display(None, 100, 80, (0.25, 0.75));
+        assert!((p.0 - 0.25).abs() < 1e-4 && (p.1 - 0.75).abs() < 1e-4);
+    }
+
+    #[test]
+    fn source_to_display_round_trips_display_to_source_under_crop() {
+        let geo = Geometry {
+            crop: CropRect {
+                x: 0.25,
+                y: 0.25,
+                w: 0.5,
+                h: 0.5,
+            },
+            angle_deg: 0.0,
+            aspect: Aspect::Free,
+        };
+        for &(ox, oy) in &[(0.0f32, 0.0f32), (1.0, 1.0), (0.3, 0.6)] {
+            let src = display_to_source(Some(geo), 100, 100, (ox, oy));
+            let back = source_to_display(Some(geo), 100, 100, src);
+            assert!(
+                (back.0 - ox).abs() < 1e-3 && (back.1 - oy).abs() < 1e-3,
+                "round-trip {ox},{oy} -> {back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_to_display_round_trips_under_rotation() {
+        let geo = Geometry {
+            crop: CropRect::full(),
+            angle_deg: 30.0,
+            aspect: Aspect::Original,
+        };
+        let src = display_to_source(Some(geo), 120, 90, (0.4, 0.55));
+        let back = source_to_display(Some(geo), 120, 90, src);
+        assert!(
+            (back.0 - 0.4).abs() < 2e-3 && (back.1 - 0.55).abs() < 2e-3,
+            "rot round-trip -> {back:?}"
         );
     }
 }

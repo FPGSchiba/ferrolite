@@ -5,7 +5,6 @@ use crate::theme;
 
 /// A compact icon button. `active` → accent fill; `!enabled` → faint + a hover reason;
 /// otherwise idle with a hover highlight. Returns the click `Response`.
-#[allow(dead_code)]
 pub(crate) fn tool_button(
     ui: &mut egui::Ui,
     icon: &str,

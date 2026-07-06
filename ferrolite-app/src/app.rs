@@ -41,7 +41,6 @@ pub struct FerroliteApp {
     /// The Develop tool/tab registry (design §4): base adjustment tabs + the
     /// ordered canvas tools shown in the palette. Built once here; read in
     /// Tasks 10-11 to render the palette/tab bar/canvas overlay.
-    #[allow(dead_code)] // read starting Task 10; allow removed at Task 13
     tool_registry: crate::develop::tool::DevelopToolRegistry,
 }
 
@@ -3681,6 +3680,59 @@ impl eframe::App for FerroliteApp {
                         self.drive_viewer(ui, frame);
                         if self.state.settings.show_histogram {
                             self.draw_histogram_overlay(ui);
+                        }
+                        if self.state.settings.show_tool_palette && self.state.viewer.is_some() {
+                            let ts = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .map(|v| v.tool_state)
+                                .unwrap_or_default();
+                            let can_undo = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .is_some_and(|v| v.history.can_undo());
+                            let can_redo = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .is_some_and(|v| v.history.can_redo());
+                            let ctx_ro = crate::develop::tool::DevelopCtx { state: &self.state };
+                            let action = crate::develop::tool_palette::show(
+                                ui,
+                                &self.tool_registry,
+                                ts,
+                                &ctx_ro,
+                                can_undo,
+                                can_redo,
+                            );
+                            match action {
+                                Some(crate::develop::tool_palette::PaletteAction::SelectTool(
+                                    id,
+                                )) => {
+                                    let enabled = self
+                                        .tool_registry
+                                        .get(id)
+                                        .map(|t| {
+                                            let c = crate::develop::tool::DevelopCtx {
+                                                state: &self.state,
+                                            };
+                                            t.enabled(&c)
+                                        })
+                                        .unwrap_or(false);
+                                    if let Some(v) = self.state.viewer.as_mut() {
+                                        v.tool_state.select_tool(id, enabled, &self.tool_registry);
+                                    }
+                                }
+                                Some(crate::develop::tool_palette::PaletteAction::Undo) => {
+                                    self.apply_undo_redo(ctx, frame, true)
+                                }
+                                Some(crate::develop::tool_palette::PaletteAction::Redo) => {
+                                    self.apply_undo_redo(ctx, frame, false)
+                                }
+                                None => {}
+                            }
                         }
                         // Crop overlay: shown while the Geometry section is open.
                         // Gather all viewer data into locals BEFORE calling apply_edit

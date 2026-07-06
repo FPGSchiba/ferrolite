@@ -26,7 +26,6 @@ pub const EYEDROPPER: &str = p::EYEDROPPER;
 pub const UNDO: &str = p::ARROW_COUNTER_CLOCKWISE;
 pub const REDO: &str = p::ARROW_CLOCKWISE;
 pub const DELETE: &str = p::TRASH;
-#[allow(dead_code)] // rename/edit affordance icon — future task
 pub const EDIT: &str = p::PENCIL_SIMPLE;
 pub const RESET: &str = p::ARROW_COUNTER_CLOCKWISE;
 pub const STAR: &str = p::STAR; // outline (regular) — render with font()

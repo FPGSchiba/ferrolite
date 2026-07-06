@@ -134,6 +134,11 @@ impl FerroliteApp {
                 // gesture and force the overlay to rebuild against the new stack.
                 v.mask.gesture = None;
                 v.mask.overlay_key = None;
+                // A restored stack may have removed/reordered components out from
+                // under an open components modal (or the component being edited in
+                // it): drop both so the modal never shows/edits stale indices.
+                v.mask.components_modal_open = false;
+                v.mask.editing_component = None;
                 v.mask
                     .clamp_selection(crate::develop::mask_edit::layers(&stack).layers.len());
             }
@@ -439,13 +444,20 @@ impl FerroliteApp {
     }
 
     /// True while any modal overlay is on screen (Help, Settings, the
-    /// remove-folder confirmation). Used to suppress the app's global
-    /// keyboard shortcuts underneath the modal so its own input handling
-    /// (e.g. Esc) is the only thing that reacts, and so shortcuts like
-    /// Enter/Ctrl+A don't leak through to the grid/viewer while a modal is
-    /// up. Extend this with new modals as they're added.
+    /// remove-folder confirmation, the mask component-management modal). Used
+    /// to suppress the app's global keyboard shortcuts underneath the modal so
+    /// its own input handling (e.g. Esc) is the only thing that reacts, and so
+    /// shortcuts like Enter/Ctrl+A don't leak through to the grid/viewer while
+    /// a modal is up. Extend this with new modals as they're added.
     fn modal_active(&self) -> bool {
-        self.show_help || self.show_settings || self.state.pending_remove.is_some()
+        self.show_help
+            || self.show_settings
+            || self.state.pending_remove.is_some()
+            || self
+                .state
+                .viewer
+                .as_ref()
+                .is_some_and(|v| v.mask.components_modal_open)
     }
 
     /// If the current viewer's edit stack changed this session, spawn a
@@ -3587,7 +3599,16 @@ impl eframe::App for FerroliteApp {
             if let Some(v) = self.state.viewer.as_mut() {
                 let active = v.tool_state.active;
                 v.crop_active = active == crate::develop::tool::ToolId::Crop;
-                v.mask.active = active == crate::develop::tool::ToolId::Mask;
+                let mask_active = active == crate::develop::tool::ToolId::Mask;
+                if v.mask.active && !mask_active {
+                    // Mask tool deselected: close the components modal along with
+                    // any in-progress edit so it doesn't linger over a different
+                    // tool's panel (mirrors the gesture/overlay_key resets on
+                    // stack-invalidating transitions).
+                    v.mask.components_modal_open = false;
+                    v.mask.editing_component = None;
+                }
+                v.mask.active = mask_active;
                 v.mask.adjusting = false; // still reset each frame; panel sets it on a drag
             }
             let mut outcome = None;
@@ -3949,6 +3970,25 @@ impl eframe::App for FerroliteApp {
                 self.redetect_display_profile(ctx, frame);
             }
             self.show_settings = open;
+        }
+
+        // Mask component-management modal (list + delete + Luma/Color edit).
+        // `egui::Window` renders directly on `ctx`, so this can run outside the
+        // SidePanel/CentralPanel closures like the other modals above. Mirrors
+        // the mask-panel borrow pattern: pre-extract the (cheap, Arc-backed)
+        // `OpStack` clone first, releasing the shared borrow, before taking
+        // `&mut v.mask` for the call.
+        {
+            let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
+            let modal_out = match (stack, self.state.viewer.as_mut()) {
+                (Some(stack), Some(v)) => {
+                    crate::develop::mask_components_modal::show(ctx, &stack, &mut v.mask)
+                }
+                _ => None,
+            };
+            if let Some(o) = modal_out {
+                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+            }
         }
 
         // Single-file export dialog (spec §8.3). Non-modal (see

@@ -67,7 +67,6 @@ pub fn add_component(stack: &OpStack, idx: usize, c: MaskComponent, m: Composite
 
 /// Remove one component (by index) from a mask's definition. No-op if `mask_idx` or
 /// `comp_idx` is out of range. The layer itself stays (even if it becomes empty).
-#[allow(dead_code)]
 pub fn remove_component(stack: &OpStack, mask_idx: usize, comp_idx: usize) -> OpStack {
     let la = layers(stack);
     if mask_idx >= la.layers.len() || comp_idx >= la.layers[mask_idx].mask.components.len() {

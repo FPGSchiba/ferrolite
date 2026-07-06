@@ -65,6 +65,10 @@ pub struct MaskUiState {
     pub gesture: Option<MaskGesture>,
     pub overlay_key: Option<u64>,
     pub rename_buf: Option<(usize, String)>,
+    /// The component-management modal is open for the selected mask.
+    pub components_modal_open: bool,
+    /// Which component index the modal is currently editing (Luma/Color), if any.
+    pub editing_component: Option<usize>,
 }
 
 impl Default for MaskUiState {
@@ -90,6 +94,8 @@ impl Default for MaskUiState {
             gesture: None,
             overlay_key: None,
             rename_buf: None,
+            components_modal_open: false,
+            editing_component: None,
         }
     }
 }

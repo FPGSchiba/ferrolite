@@ -33,6 +33,8 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
         if ui.button("Create New Mask").clicked() {
             let name = format!("Mask {}", la.layers.len() + 1);
             mask.selected = Some(la.layers.len()); // select the new one
+            mask.components_modal_open = false;
+            mask.editing_component = None;
             out = Some(commit(mask_edit::create_mask(stack, name)));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -81,6 +83,8 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
                 let resp = ui.selectable_label(selected, &layer.name);
                 if resp.clicked() {
                     mask.selected = Some(i);
+                    mask.components_modal_open = false;
+                    mask.editing_component = None;
                 }
                 if resp.double_clicked() {
                     mask.rename_buf = Some((i, layer.name.clone()));
@@ -97,6 +101,8 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
                     out = Some(commit(mask_edit::delete_mask(stack, i)));
                     if mask.selected == Some(i) {
                         mask.selected = None;
+                        mask.components_modal_open = false;
+                        mask.editing_component = None;
                     }
                 }
             });
@@ -391,11 +397,25 @@ pub(crate) fn selected_section(
         }
     }
 
-    ui.label(
-        egui::RichText::new(format!("{} components", layer.mask.components.len()))
-            .size(11.0)
-            .color(theme::TEXT_FAINT),
-    );
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("{} components", layer.mask.components.len()))
+                .size(11.0)
+                .color(theme::TEXT_FAINT),
+        );
+        if crate::widgets::tool_button(
+            ui,
+            crate::icons::EDIT,
+            "Manage components",
+            false,
+            true,
+            None,
+        )
+        .clicked()
+        {
+            mask.components_modal_open = true;
+        }
+    });
 
     ui.separator();
 

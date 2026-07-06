@@ -65,6 +65,19 @@ pub fn add_component(stack: &OpStack, idx: usize, c: MaskComponent, m: Composite
     edit_layer(stack, idx, |l| l.mask.components.push((c, m)))
 }
 
+/// Remove one component (by index) from a mask's definition. No-op if `mask_idx` or
+/// `comp_idx` is out of range. The layer itself stays (even if it becomes empty).
+#[allow(dead_code)]
+pub fn remove_component(stack: &OpStack, mask_idx: usize, comp_idx: usize) -> OpStack {
+    let la = layers(stack);
+    if mask_idx >= la.layers.len() || comp_idx >= la.layers[mask_idx].mask.components.len() {
+        return stack.clone();
+    }
+    edit_layer(stack, mask_idx, |layer| {
+        layer.mask.components.remove(comp_idx);
+    })
+}
+
 /// Replace the component at `comp_idx` within the mask layer at `mask_idx`,
 /// keeping its composite mode. Out-of-range `mask_idx` or `comp_idx` → unchanged
 /// stack (mirrors `edit_layer`'s out-of-range behavior).
@@ -229,5 +242,58 @@ mod tests {
             1
         );
         let _ = OpKind::LocalAdjustments; // kind used by the app when pushing history
+    }
+
+    #[test]
+    fn remove_component_removes_the_indexed_component() {
+        let luma = |lo| MaskComponent::LumaRange {
+            lo,
+            hi: 1.0,
+            softness: 0.1,
+        };
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(&s, 0, luma(0.1), CompositeMode::Add);
+        let s = add_component(&s, 0, luma(0.2), CompositeMode::Add);
+        let s = add_component(&s, 0, luma(0.3), CompositeMode::Add);
+        let out = remove_component(&s, 0, 1); // remove the middle one
+        let comps = &layers(&out).layers[0].mask.components;
+        assert_eq!(comps.len(), 2);
+        assert_eq!(comps[0].0, luma(0.1));
+        assert_eq!(comps[1].0, luma(0.3), "index 2 shifted down to 1");
+    }
+
+    #[test]
+    fn remove_component_out_of_range_is_noop() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::LumaRange {
+                lo: 0.1,
+                hi: 1.0,
+                softness: 0.1,
+            },
+            CompositeMode::Add,
+        );
+        assert_eq!(remove_component(&s, 0, 9), s, "bad comp idx -> unchanged");
+        assert_eq!(remove_component(&s, 9, 0), s, "bad mask idx -> unchanged");
+    }
+
+    #[test]
+    fn remove_last_component_keeps_the_layer() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::LumaRange {
+                lo: 0.1,
+                hi: 1.0,
+                softness: 0.1,
+            },
+            CompositeMode::Add,
+        );
+        let out = remove_component(&s, 0, 0);
+        assert_eq!(layers(&out).layers.len(), 1, "layer stays");
+        assert!(layers(&out).layers[0].mask.components.is_empty());
     }
 }

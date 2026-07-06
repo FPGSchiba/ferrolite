@@ -118,6 +118,11 @@ pub enum RadHandle {
     Center,
     RadiusX,
     RadiusY,
+    /// Create-only: grows both radii together from the drag origin (center),
+    /// so drag-to-create yields an ellipse fit to the drag instead of a thin
+    /// horizontal line. Never returned by `radial_hit_test` — only used by the
+    /// overlay's drag-to-create gesture.
+    Both,
 }
 
 /// Which radial handle is within `r` of `p`. Rotation is ignored for hit-testing
@@ -154,6 +159,13 @@ pub fn radial_drag(
         RadHandle::Center => (p, radius),
         RadHandle::RadiusX => (center, ((p.0 - center.0).abs().max(1e-3), radius.1)),
         RadHandle::RadiusY => (center, (radius.0, (p.1 - center.1).abs().max(1e-3))),
+        RadHandle::Both => (
+            center,
+            (
+                (p.0 - center.0).abs().max(1e-3),
+                (p.1 - center.1).abs().max(1e-3),
+            ),
+        ),
     }
 }
 
@@ -253,6 +265,17 @@ mod tests {
         assert_eq!(c, (0.5, 0.5));
         assert!((r.0 - 0.4).abs() < 1e-6, "rx = |px - cx| = 0.4");
         assert!((r.1 - 0.2).abs() < 1e-6, "ry unchanged");
+    }
+
+    #[test]
+    fn radial_drag_both_sets_both_extents() {
+        // Drag-to-create: both radii should grow to |pointer - center| per axis,
+        // center unchanged. Guards against the "horizontal line" bug where only
+        // radius.x grew during create.
+        let (c, r) = radial_drag((0.5, 0.5), (1e-3, 1e-3), 0.0, RadHandle::Both, (0.8, 0.7));
+        assert_eq!(c, (0.5, 0.5), "center unchanged");
+        assert!((r.0 - 0.3).abs() < 1e-6, "rx = |0.8 - 0.5| = 0.3");
+        assert!((r.1 - 0.2).abs() < 1e-6, "ry = |0.7 - 0.5| = 0.2");
     }
 
     #[test]

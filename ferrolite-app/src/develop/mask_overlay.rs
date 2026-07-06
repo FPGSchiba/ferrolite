@@ -41,6 +41,7 @@ fn rad_handle_to_u32(h: RadHandle) -> u32 {
         RadHandle::Center => 0,
         RadHandle::RadiusX => 1,
         RadHandle::RadiusY => 2,
+        RadHandle::Both => 3,
     }
 }
 
@@ -48,6 +49,7 @@ fn u32_to_rad_handle(v: u32) -> RadHandle {
     match v {
         0 => RadHandle::Center,
         1 => RadHandle::RadiusX,
+        3 => RadHandle::Both,
         _ => RadHandle::RadiusY,
     }
 }
@@ -66,7 +68,9 @@ pub fn show(
     preview_source: Option<&Arc<LinearRgbaF32>>,
 ) -> Option<EditOutcome> {
     // Fill: stretch the coverage texture over the image rect with alpha blend.
-    if mask.overlay_on {
+    // Suppressed while `adjusting` (a Light+Color slider of this mask is being
+    // dragged) so the user sees the actual effect instead of the red tint.
+    if mask.overlay_on && !mask.adjusting {
         if let Some(tex) = overlay_tex {
             ui.painter().image(
                 tex.id(),
@@ -179,7 +183,7 @@ pub fn show(
                     } else {
                         mask.gesture = Some(MaskGesture::DragHandle {
                             component: usize::MAX,
-                            handle: rad_handle_to_u32(RadHandle::RadiusX),
+                            handle: rad_handle_to_u32(RadHandle::Both),
                             origin_src: src,
                         });
                     }
@@ -235,7 +239,7 @@ pub fn show(
                             mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
                         mask.gesture = Some(MaskGesture::DragHandle {
                             component: new_idx,
-                            handle: rad_handle_to_u32(RadHandle::RadiusX),
+                            handle: rad_handle_to_u32(RadHandle::Both),
                             origin_src,
                         });
                         Some(added)

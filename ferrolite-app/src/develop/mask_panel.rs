@@ -344,6 +344,7 @@ pub(crate) fn selected_section(
     let mut a = layer.adjustments;
     let mut changed = false;
     let mut commit_now = false;
+    let mut adjusting = false;
     let slider = |ui: &mut egui::Ui,
                   label: &str,
                   v: &mut f32,
@@ -351,7 +352,8 @@ pub(crate) fn selected_section(
                   max: f32,
                   bip: bool,
                   changed: &mut bool,
-                  commit_now: &mut bool| {
+                  commit_now: &mut bool,
+                  adjusting: &mut bool| {
         let r = ui.add(EguiSlider {
             label,
             value: v,
@@ -364,6 +366,9 @@ pub(crate) fn selected_section(
             bipolar: bip,
             signed: bip,
         });
+        if r.dragged() {
+            *adjusting = true;
+        }
         if r.changed() {
             *changed = true;
             if r.drag_stopped() || !r.dragged() {
@@ -386,6 +391,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -396,6 +402,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -406,6 +413,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -416,6 +424,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -426,6 +435,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -436,6 +446,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
 
     ui.label(
@@ -452,6 +463,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -462,6 +474,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -472,6 +485,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     slider(
         ui,
@@ -482,6 +496,7 @@ pub(crate) fn selected_section(
         true,
         &mut changed,
         &mut commit_now,
+        &mut adjusting,
     );
     // "Color" swatch amount (RGB picked via the swatch below).
     let mut amt = a.color.amount;
@@ -497,6 +512,9 @@ pub(crate) fn selected_section(
         bipolar: false,
         signed: false,
     });
+    if r.dragged() {
+        adjusting = true;
+    }
     if r.changed() {
         a.color.amount = amt;
         changed = true;
@@ -512,6 +530,7 @@ pub(crate) fn selected_section(
         changed = true;
         commit_now = true;
     }
+    mask.adjusting = adjusting;
 
     // ── Reserved neighborhood controls: greyed, hover reason (design §9.2) ──
     ui.add_space(4.0);

@@ -45,6 +45,10 @@ pub struct MaskUiState {
     pub tool: MaskTool,
     pub next_mode: CompositeMode,
     pub overlay_on: bool,
+    /// Transient — set true by the panel while a Light+Color slider of the
+    /// selected mask is being dragged; the canvas overlay hides its red fill
+    /// while true so the user sees the actual effect. Reset each frame.
+    pub adjusting: bool,
     pub brush_radius: f32,
     pub brush_hardness: f32,
     pub brush_flow: f32,
@@ -68,6 +72,7 @@ impl Default for MaskUiState {
             tool: MaskTool::default(),
             next_mode: CompositeMode::Add,
             overlay_on: true,
+            adjusting: false,
             brush_radius: 0.08, // fraction of the image's smaller edge
             brush_hardness: 0.5,
             brush_flow: 1.0,
@@ -109,6 +114,7 @@ mod tests {
         assert_eq!(s.tool, MaskTool::Brush);
         assert_eq!(s.next_mode, ferrolite_mask::CompositeMode::Add);
         assert!(s.overlay_on);
+        assert!(!s.adjusting);
         assert!(s.gesture.is_none());
         // sane brush defaults in [0,1]-ish ranges
         assert!(s.brush_radius > 0.0 && s.brush_hardness >= 0.0 && s.brush_flow > 0.0);

@@ -1529,6 +1529,17 @@ impl FerroliteApp {
         else {
             return;
         };
+        // PERF (non-blocking, follow-up): during a brush stroke this rebuild runs
+        // every dragged frame (the mask def hash changes each dab), so the bounded
+        // 512² mask composite + `read_mask_r32f` GPU readback below executes on
+        // every such frame. A per-frame GPU readback can stall the pipeline
+        // (map+wait for the readback buffer), which is the likely source of the
+        // slight brush lag the author noticed — acceptable for now, but a
+        // follow-up could throttle the overlay rebuild while a stroke is active
+        // (e.g. only rebuild on `drag_stopped()`, or at a capped rate), or replace
+        // this readback-based overlay entirely with a GPU-side display-pipeline
+        // overlay pass (the option deferred at plan time, avoiding the
+        // GPU→CPU→GPU round trip altogether).
         let (w, h2, cov) = oc.coverage(&gpu_ctx, &def, input);
         let rgba = overlay_rgba(&cov, 0.5); // 50% red tint
         let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h2 as usize], &rgba);
@@ -3527,6 +3538,7 @@ impl eframe::App for FerroliteApp {
             if let Some(v) = self.state.viewer.as_mut() {
                 v.crop_active = false; // re-armed by the open Geometry section
                 v.mask.active = false; // re-armed by the open Masks section
+                v.mask.adjusting = false; // re-set by the panel on a drag frame (panel runs before the canvas overlay below, so no lag)
             }
             let mut outcome = None;
             let working_space = self.state.working_space;

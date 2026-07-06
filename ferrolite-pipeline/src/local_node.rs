@@ -8,10 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
-use ferrolite_mask::{
-    stroke_dabs, BrushRasterizer, ColorRangePass, CompositeMode, CompositePass, LinearGradientPass,
-    LumaRangePass, MaskBuffer, MaskComponent, MaskDefinition, RadialGradientPass, Rgb, Vec2,
-};
+use ferrolite_mask::{MaskBuffer, MaskCompositor};
 use wgpu::util::DeviceExt;
 
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
@@ -27,13 +24,8 @@ struct CachedMasks {
 pub(crate) struct LocalAdjustmentsNode {
     ctx: Arc<GpuContext>,
     layers: Rc<RefCell<LocalAdjustments>>,
-    // build-once passes
-    linear: LinearGradientPass,
-    radial: RadialGradientPass,
-    luma: LumaRangePass,
-    color: ColorRangePass,
-    brush: BrushRasterizer,
-    composite: CompositePass,
+    // build-once mask compositing (shared source of truth w/ the UI overlay)
+    compositor: MaskCompositor,
     // apply pass
     apply_bgl: wgpu::BindGroupLayout,
     apply_pipeline: wgpu::ComputePipeline,
@@ -132,12 +124,7 @@ impl LocalAdjustmentsNode {
                 cache: None,
             });
         Self {
-            linear: LinearGradientPass::new(ctx.clone()),
-            radial: RadialGradientPass::new(ctx.clone()),
-            luma: LumaRangePass::new(ctx.clone()),
-            color: ColorRangePass::new(ctx.clone()),
-            brush: BrushRasterizer::new(ctx.clone()),
-            composite: CompositePass::new(ctx.clone()),
+            compositor: MaskCompositor::new(ctx.clone()),
             apply_bgl,
             apply_pipeline,
             apply_out: RefCell::new(None),
@@ -164,104 +151,6 @@ impl LocalAdjustmentsNode {
     /// Invalidate the cached composited masks (call when `layers` change).
     pub(crate) fn invalidate(&self) {
         self.cache.borrow_mut().take();
-    }
-
-    fn ones_mask(&self, w: u32, h: u32) -> MaskBuffer {
-        let buf = MaskBuffer::alloc(&self.ctx, w, h);
-        let ones = vec![1.0f32; (buf.width * buf.height) as usize];
-        self.ctx.queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &buf.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(&ones),
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(buf.width * 4),
-                rows_per_image: Some(buf.height),
-            },
-            wgpu::Extent3d {
-                width: buf.width,
-                height: buf.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        buf
-    }
-
-    fn eval_component(
-        &self,
-        comp: &MaskComponent,
-        color_view: &wgpu::TextureView,
-        w: u32,
-        h: u32,
-    ) -> MaskBuffer {
-        match comp {
-            MaskComponent::LinearGradient { start, end } => {
-                self.linear
-                    .run(Vec2::new(start.x, start.y), Vec2::new(end.x, end.y), w, h)
-            }
-            MaskComponent::RadialGradient {
-                center,
-                radius,
-                rotation,
-                feather,
-                invert,
-            } => self.radial.run(
-                Vec2::new(center.x, center.y),
-                Vec2::new(radius.x, radius.y),
-                *rotation,
-                *feather,
-                *invert,
-                w,
-                h,
-            ),
-            MaskComponent::LumaRange { lo, hi, softness } => {
-                self.luma.run(*lo, *hi, *softness, color_view, w, h)
-            }
-            MaskComponent::ColorRange {
-                samples,
-                tolerance,
-                softness,
-            } => {
-                let s: Vec<Rgb> = samples.iter().map(|c| Rgb::new(c.r, c.g, c.b)).collect();
-                self.color.run(&s, *tolerance, *softness, color_view, w, h)
-            }
-            MaskComponent::Brush { strokes } => {
-                let mut acc = MaskBuffer::alloc_zeroed(&self.ctx, w, h);
-                for st in strokes {
-                    let dabs = stroke_dabs(st, ferrolite_mask::SPACING_FRAC);
-                    acc = self.brush.stamp_onto(&acc, &dabs, st.erase, (0, 0), (w, h));
-                }
-                acc
-            }
-            // Inert in P1 (no producer) — contributes nothing. Plan 5 wires it.
-            MaskComponent::Imported { .. } => MaskBuffer::alloc_zeroed(&self.ctx, w, h),
-        }
-    }
-
-    fn composite_mask(
-        &self,
-        def: &MaskDefinition,
-        color_view: &wgpu::TextureView,
-        w: u32,
-        h: u32,
-    ) -> MaskBuffer {
-        if def.components.is_empty() {
-            return if def.invert {
-                MaskBuffer::alloc_zeroed(&self.ctx, w, h)
-            } else {
-                self.ones_mask(w, h)
-            };
-        }
-        let inputs: Vec<(MaskBuffer, CompositeMode)> = def
-            .components
-            .iter()
-            .map(|(c, m)| (self.eval_component(c, color_view, w, h), *m))
-            .collect();
-        self.composite.composite(&inputs, def.invert)
     }
 
     fn alloc_out(&self, w: u32, h: u32, label: &str) -> PipelineImage {
@@ -406,7 +295,7 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
         if rebuild {
             let masks: Vec<MaskBuffer> = layers
                 .visible_layers()
-                .map(|l| self.composite_mask(&l.mask, &input_view, mw, mh))
+                .map(|l| self.compositor.composite(&l.mask, &input_view, mw, mh))
                 .collect();
             *self.cache.borrow_mut() = Some(CachedMasks {
                 layers: layers.clone(),

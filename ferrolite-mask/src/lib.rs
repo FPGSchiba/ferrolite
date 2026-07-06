@@ -5,6 +5,7 @@
 mod brush;
 mod buffer;
 mod composite;
+mod compositor;
 mod model;
 mod pass;
 mod shapes;
@@ -14,6 +15,7 @@ mod vec;
 pub use brush::BrushRasterizer;
 pub use buffer::{MaskBuffer, MASK_FORMAT};
 pub use composite::{CompositeNode, CompositePass};
+pub use compositor::{read_mask_r32f, MaskCompositor};
 pub use model::{
     composite_scalar, BrushNode, CompositeMode, MaskComponent, MaskDefinition, MaskProvenance,
     RasterHandle, Stroke,

@@ -8,6 +8,7 @@ mod composite;
 mod compositor;
 mod model;
 mod pass;
+mod raster_store;
 mod shapes;
 mod stroke;
 mod vec;
@@ -20,6 +21,7 @@ pub use model::{
     composite_scalar, BrushNode, CompositeMode, MaskComponent, MaskDefinition, MaskProvenance,
     RasterHandle, Stroke,
 };
+pub use raster_store::RasterStore;
 pub use shapes::{
     ColorRangePass, ColorRangeUniform, LinearGradientPass, LinearGradientUniform, LumaRangePass,
     LumaRangeUniform, RadialGradientPass, RadialGradientUniform, MAX_COLOR_SAMPLES,

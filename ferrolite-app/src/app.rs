@@ -3876,14 +3876,17 @@ impl eframe::App for FerroliteApp {
                                 }
                             }
                         }
-                        // Loupe context-menu widget covers the whole canvas; while
-                        // cropping it must NOT be registered, or it competes with the
-                        // crop overlay for input. Gate it on `!crop_active`.
+                        // Loupe context-menu widget covers the whole canvas; while any
+                        // canvas tool (Crop/Mask/Heal) is active it must NOT be
+                        // registered, or it competes with that tool's own interact for
+                        // input (e.g. it stole clicks from the mask color-eyedropper).
+                        // Only register it in the Adjust tool, where no canvas tool
+                        // owns the pointer.
                         let ctx_menu_id = self
                             .state
                             .viewer
                             .as_ref()
-                            .filter(|v| !v.crop_active)
+                            .filter(|v| v.tool_state.active == crate::develop::tool::ToolId::Adjust)
                             .map(|v| v.image_id);
                         if let Some(image_id) = ctx_menu_id {
                             let rect = ui.min_rect();

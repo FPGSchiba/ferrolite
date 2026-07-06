@@ -288,6 +288,17 @@ pub(crate) fn selected_section(
                 }
             });
         }
+        let pick_label = if mask.picking_color {
+            "Picking… (click image)"
+        } else {
+            "Pick color"
+        };
+        if ui
+            .selectable_label(mask.picking_color, pick_label)
+            .clicked()
+        {
+            mask.picking_color = !mask.picking_color;
+        }
         ui.add(EguiSlider {
             label: "Tolerance",
             value: &mut mask.color_tolerance,
@@ -329,6 +340,7 @@ pub(crate) fn selected_section(
                 mask.next_mode,
             )));
             mask.color_samples.clear();
+            mask.picking_color = false;
         }
     }
 

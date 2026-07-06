@@ -489,11 +489,16 @@ fn route_color_eyedropper(
     stack: &OpStack,
     preview_source: Option<&Arc<LinearRgbaF32>>,
 ) {
+    if !mask.picking_color {
+        return; // sampling (and the loupe) only while the "Pick color" toggle is armed
+    }
+
     let resp = ui.interact(
         image_rect,
         ui.id().with("mask_overlay_affordance"),
         egui::Sense::click(),
     );
+    let hover = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
 
     if resp.clicked() {
         if let (Some(p), Some(src_img)) = (resp.interact_pointer_pos(), preview_source) {
@@ -507,6 +512,66 @@ fn route_color_eyedropper(
             let rgb = mask_affordance::sample_source(src_img, src_norm);
             mask.color_samples.push(rgb);
         }
+    }
+
+    // Picker cursor + zoom loupe while armed: a small grid of source pixels
+    // around the pointer, magnified, with a crosshair on the exact sampled
+    // pixel (bounded egui vector drawing — mirrors the brush cursor ring in
+    // `route_brush`; no texture/sub-Ui allocation, no per-frame heavy work).
+    if let (Some(p), Some(src_img)) = (hover, preview_source) {
+        let painter = ui.painter();
+        const LOUPE_R: f32 = 44.0;
+        const ZOOM: f32 = 8.0; // source px per loupe px
+        let center = p - egui::vec2(0.0, LOUPE_R + 16.0); // float above the pointer
+        let geo = stack.geometry();
+        let (src_w, src_h) = src_dims;
+        let span = (LOUPE_R / ZOOM) as i32; // half-width in source px
+        for dy in -span..=span {
+            for dx in -span..=span {
+                let n = (
+                    ((p.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0)
+                        + dx as f32 / src_w as f32,
+                    ((p.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0)
+                        + dy as f32 / src_h as f32,
+                );
+                let sn = display_to_source(
+                    geo,
+                    src_w,
+                    src_h,
+                    (n.0.clamp(0.0, 1.0), n.1.clamp(0.0, 1.0)),
+                );
+                let rgb = mask_affordance::sample_source(src_img, sn);
+                let cell = egui::Rect::from_center_size(
+                    center + egui::vec2(dx as f32 * ZOOM, dy as f32 * ZOOM),
+                    egui::vec2(ZOOM, ZOOM),
+                );
+                painter.rect_filled(
+                    cell,
+                    0.0,
+                    egui::Color32::from_rgb(
+                        (rgb.r.clamp(0.0, 1.0) * 255.0) as u8,
+                        (rgb.g.clamp(0.0, 1.0) * 255.0) as u8,
+                        (rgb.b.clamp(0.0, 1.0) * 255.0) as u8,
+                    ),
+                );
+            }
+        }
+        painter.circle_stroke(
+            center,
+            LOUPE_R,
+            egui::Stroke::new(1.5, theme::ACCENT_BRIGHT),
+        );
+        // Crosshair on the exact sampled (center) pixel.
+        painter.line_segment(
+            [center - egui::vec2(6.0, 0.0), center + egui::vec2(6.0, 0.0)],
+            egui::Stroke::new(1.0, theme::BG_BASE),
+        );
+        painter.line_segment(
+            [center - egui::vec2(0.0, 6.0), center + egui::vec2(0.0, 6.0)],
+            egui::Stroke::new(1.0, theme::BG_BASE),
+        );
+        // Picker dot at the pointer itself.
+        painter.circle_stroke(p, 3.0, egui::Stroke::new(1.5, theme::ACCENT_BRIGHT));
     }
 
     // Small swatches for the collected samples, stacked along the top-left of

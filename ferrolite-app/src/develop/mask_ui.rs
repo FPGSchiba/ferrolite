@@ -59,6 +59,9 @@ pub struct MaskUiState {
     pub color_tolerance: f32,
     pub color_softness: f32,
     pub color_samples: Vec<Rgb>,
+    /// Armed color-pick mode (the Color sub-tool's "Pick color" toggle). While true,
+    /// the canvas shows a picker cursor + zoom loupe and a click samples a pixel.
+    pub picking_color: bool,
     pub gesture: Option<MaskGesture>,
     pub overlay_key: Option<u64>,
     pub rename_buf: Option<(usize, String)>,
@@ -83,6 +86,7 @@ impl Default for MaskUiState {
             color_tolerance: 0.15,
             color_softness: 0.1,
             color_samples: Vec::new(),
+            picking_color: false,
             gesture: None,
             overlay_key: None,
             rename_buf: None,

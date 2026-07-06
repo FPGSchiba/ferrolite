@@ -1226,6 +1226,7 @@ dependencies = [
  "ferrolite-image",
  "ferrolite-jobs",
  "ferrolite-lens",
+ "ferrolite-mask",
  "ferrolite-pipeline",
  "ferrolite-previews",
  "ferrolite-vt",

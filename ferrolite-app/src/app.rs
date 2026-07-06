@@ -3425,6 +3425,7 @@ impl eframe::App for FerroliteApp {
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
             if let Some(v) = self.state.viewer.as_mut() {
                 v.crop_active = false; // re-armed by the open Geometry section
+                v.mask.active = false; // re-armed by the open Masks section
             }
             let mut outcome = None;
             let working_space = self.state.working_space;

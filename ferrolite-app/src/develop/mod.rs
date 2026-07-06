@@ -16,6 +16,7 @@ pub mod lens_match;
 pub mod lens_picker;
 pub mod mask_edit;
 pub mod mask_overlay_color;
+pub mod mask_panel;
 pub mod mask_ui;
 pub mod meta_read;
 pub mod ops_edit;

@@ -196,6 +196,8 @@ pub struct ViewerState {
     pub crop_active: bool,
     /// Index of the currently-selected HSL band in the HSL panel (0–7).
     pub hsl_band: usize,
+    /// Masking-tool UI state (design §9). Per-image, like `hsl_band`/`crop_active`.
+    pub mask: crate::develop::mask_ui::MaskUiState,
     /// `true` once the `OpsLoaded` event for this image has been received (the
     /// op-stack read job finished and the stack has been applied).
     pub ops_loaded: bool,
@@ -312,6 +314,7 @@ impl ViewerState {
             split_pos: 0.5,
             crop_active: false,
             hsl_band: 0,
+            mask: crate::develop::mask_ui::MaskUiState::default(),
             ops_loaded: false,
             ops_read_handle: None,
             histogram: HistogramState::new(),

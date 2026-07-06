@@ -29,6 +29,7 @@ ferrolite-export = { workspace = true }
 ferrolite-gpu = { workspace = true }
 ferrolite-image = { workspace = true }
 ferrolite-lens = { workspace = true }
+ferrolite-mask = { workspace = true }
 ferrolite-pipeline = { path = "../ferrolite-pipeline" }
 ferrolite-previews = { workspace = true }
 ferrolite-vt = { workspace = true }

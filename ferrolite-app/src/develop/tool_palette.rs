@@ -4,12 +4,25 @@
 
 use crate::develop::tool::{DevelopCtx, DevelopToolRegistry, ToolId};
 use crate::develop::tool_state::ToolState;
+use crate::settings::keymap::Action;
 use crate::widgets::tool_button;
 
 pub enum PaletteAction {
     SelectTool(ToolId),
     Undo,
     Redo,
+}
+
+/// The keybind `Action` bound to a palette tool, if it has one (Heal has none —
+/// it's disabled/P5). Used to append a live keybind hint to each tool's tooltip
+/// (CLAUDE.md "UI keybind tooltips" rule).
+fn tool_action(id: ToolId) -> Option<Action> {
+    match id {
+        ToolId::Adjust => Some(Action::SwitchToolAdjust),
+        ToolId::Crop => Some(Action::SwitchToolCrop),
+        ToolId::Mask => Some(Action::SwitchToolMask),
+        ToolId::Heal => None,
+    }
 }
 
 /// Render the floating tool palette anchored to the top-left of the Develop canvas
@@ -29,6 +42,7 @@ pub fn show(
     let canvas_rect = ui.min_rect();
     let pos = egui::pos2(canvas_rect.left() + MARGIN, canvas_rect.top() + MARGIN);
     let mut action = None;
+    let km = &ctx.state.settings.keymap;
 
     egui::Area::new(egui::Id::new("develop_tool_palette"))
         .order(egui::Order::Foreground)
@@ -43,10 +57,14 @@ pub fn show(
                         for tool in reg.tools() {
                             let enabled = tool.enabled(ctx);
                             let reason = (!enabled).then_some("Coming in P5");
+                            let tooltip = match tool_action(tool.id()) {
+                                Some(a) => format!("{} ({})", tool.label(), km.hint(a)),
+                                None => tool.label().to_string(),
+                            };
                             if tool_button(
                                 ui,
                                 tool.icon(),
-                                tool.label(),
+                                &tooltip,
                                 ts.active == tool.id(),
                                 enabled,
                                 reason,
@@ -58,13 +76,15 @@ pub fn show(
                             }
                         }
                         ui.separator();
-                        if tool_button(ui, crate::icons::UNDO, "Undo", false, can_undo, None)
+                        let undo_tip = format!("Undo ({})", km.hint(Action::Undo));
+                        if tool_button(ui, crate::icons::UNDO, &undo_tip, false, can_undo, None)
                             .clicked()
                             && can_undo
                         {
                             action = Some(PaletteAction::Undo);
                         }
-                        if tool_button(ui, crate::icons::REDO, "Redo", false, can_redo, None)
+                        let redo_tip = format!("Redo ({})", km.hint(Action::Redo));
+                        if tool_button(ui, crate::icons::REDO, &redo_tip, false, can_redo, None)
                             .clicked()
                             && can_redo
                         {

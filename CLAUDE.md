@@ -77,3 +77,10 @@ egui's bundled emoji subset don't cover symbols (they render as tofu), and ad-ho
 icons fragment the system. Add a new icon by adding a semantic alias in `icons.rs` sourced
 from the Phosphor catalog. The per-control reset affordance and its placement remain
 load-bearing (see "Per-component reset"); only its glyph comes from the library.
+
+## UI keybind tooltips (load-bearing)
+
+Any control bound to a keybind MUST display that key in its hover tooltip, sourced from
+the live keymap (`Keymap::hint(action)`), so rebinding updates the shown key. Format the
+label as `"<Label> (<Key>)"` (e.g. "Crop (C)", "Undo (Ctrl+Z)"). Non-rebindable input
+gestures are documented in Help/Settings instead (see "Keybind discoverability").

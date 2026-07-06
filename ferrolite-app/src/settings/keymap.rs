@@ -569,6 +569,14 @@ impl Keymap {
         *self.map.get(&a).unwrap_or(&plain(Key::F1))
     }
 
+    /// The bound chord for `action` as a short display string (e.g. "Ctrl+Z",
+    /// "C"). Delegates to `Chord::label()` (same modifier order: Ctrl, Shift,
+    /// Alt, then the key) so a rebind updates the shown key everywhere a
+    /// tooltip calls this (CLAUDE.md "UI keybind tooltips" rule).
+    pub fn hint(&self, action: Action) -> String {
+        self.chord(action).label()
+    }
+
     pub fn set(&mut self, a: Action, c: Chord) {
         self.map.insert(a, c);
     }
@@ -814,6 +822,15 @@ mod tests {
             Key::O,
             "ToggleMaskOverlay must not default to O (FlagReject's key)"
         );
+    }
+
+    #[test]
+    fn hint_formats_chords() {
+        let km = Keymap::defaults();
+        assert_eq!(km.hint(Action::SwitchToolCrop), "C");
+        assert_eq!(km.hint(Action::Undo), "Ctrl+Z");
+        assert_eq!(km.hint(Action::Redo), "Ctrl+Shift+Z");
+        assert_eq!(km.hint(Action::ToggleMaskOverlay), "T");
     }
 
     #[test]

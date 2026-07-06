@@ -73,7 +73,8 @@ impl PanelTab for MaskTab {
         // Mirrors the current call (adjustment_panel.rs:244-252): pull the
         // OpStack out, then take &mut v.mask.
         let stack = state.viewer.as_ref()?.op_stack.clone();
+        let keymap = state.settings.keymap.clone();
         let v = state.viewer.as_mut()?;
-        crate::develop::mask_panel::show(ui, &stack, &mut v.mask)
+        crate::develop::mask_panel::show(ui, &stack, &mut v.mask, &keymap)
     }
 }

@@ -7,6 +7,7 @@
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::mask_edit;
 use crate::develop::mask_ui::{MaskTool, MaskUiState};
+use crate::settings::keymap::{Action, Keymap};
 use crate::theme;
 use crate::widgets::slider::EguiSlider;
 use ferrolite_mask::{CompositeMode, MaskComponent};
@@ -18,7 +19,12 @@ use ferrolite_pipeline::{OpKind, OpStack};
 pub const BRUSH_RADIUS_MIN: f32 = 0.005;
 pub const BRUSH_RADIUS_MAX: f32 = 0.5;
 
-pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Option<EditOutcome> {
+pub fn show(
+    ui: &mut egui::Ui,
+    stack: &OpStack,
+    mask: &mut MaskUiState,
+    keymap: &Keymap,
+) -> Option<EditOutcome> {
     let la = mask_edit::layers(stack);
     mask.clamp_selection(la.layers.len());
     let mut out: Option<EditOutcome> = None;
@@ -43,7 +49,8 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
             } else {
                 (crate::icons::OVERLAY_OFF, "Show mask overlay")
             };
-            if crate::widgets::tool_button(ui, icon, tip, mask.overlay_on, true, None).clicked() {
+            let tip = format!("{} ({})", tip, keymap.hint(Action::ToggleMaskOverlay));
+            if crate::widgets::tool_button(ui, icon, &tip, mask.overlay_on, true, None).clicked() {
                 mask.overlay_on = !mask.overlay_on;
             }
         });

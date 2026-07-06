@@ -52,25 +52,33 @@
 **Interfaces:**
 - Produces: `ferrolite_app::icons` with `pub const <NAME>: &str` aliases + a way to get the icon `FontId` (e.g. `pub fn font(size: f32) -> egui::FontId`). Consumed by Tasks 2, 3, 6, 10.
 
-- [ ] **Step 1: Add the dependency (correct version for egui 0.29)**
+- [ ] **Step 1: Dependency (ALREADY ADDED + PRIMED by the controller)**
 
-Determine the `egui-phosphor` release whose `egui` dependency is `0.29` (check the crate's metadata/changelog; egui-phosphor tags releases per egui version). Add to `ferrolite-app/Cargo.toml` `[dependencies]` (mirror the existing dependency style, near `egui`):
+The controller already added the dependency (authorized fetch done; `egui-phosphor v0.7.3` resolves against egui 0.29 and builds offline). `ferrolite-app/Cargo.toml` already contains, near `egui`:
 
 ```toml
-egui-phosphor = "<version matching egui 0.29>"
+egui-phosphor = { version = "0.7", features = ["fill"] }
 ```
 
-Run `cargo build -p ferrolite-app`. **If the crates.io fetch fails with a TLS/schannel revocation error**, STOP and report **BLOCKED** (the controller will re-run the fetch with the author-authorized `CARGO_HTTP_CHECK_REVOKE=false`, then you continue offline). If the chosen version's `egui` req is not `0.29`, pick the correct one. If NO published version targets egui 0.29, report BLOCKED with findings (fallback: vendor the crate's `Regular` `.ttf` into `assets/fonts/` + register directly — controller decides).
+(Default feature `regular` + explicit `fill` → both weights compiled: outline icons AND filled rating stars.) Just confirm `cargo build -p ferrolite-app --offline` succeeds (it does); do NOT change the version or re-fetch. You will commit `Cargo.toml` + `Cargo.lock` with this task.
 
 - [ ] **Step 2: Install the font in `theme::install_fonts`**
 
-In `ferrolite-app/src/theme.rs` `install_fonts` (currently inserts Plex Sans/Mono then `ctx.set_fonts(fonts)` at ~theme.rs:36-57), add the Phosphor font BEFORE `ctx.set_fonts(fonts)`:
+In `ferrolite-app/src/theme.rs` `install_fonts` (currently inserts Plex Sans/Mono then `ctx.set_fonts(fonts)` at ~theme.rs:36-57), add the Phosphor fonts BEFORE `ctx.set_fonts(fonts)`. **Verified API for 0.7.3:** `add_to_fonts(fonts, Variant::Regular)` inserts one font under the key `"phosphor"` and puts it at index 1 of the `Proportional` family fallback chain (so Regular icon PUA codepoints resolve via `FontFamily::Proportional`). It registers only ONE variant, so for the filled rating glyphs we register the **Fill** variant manually under its own named family (`Variant::font_data()` is `pub`):
 
 ```rust
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+    // Filled glyphs (rating stars / pick flag) under a dedicated named family, since
+    // add_to_fonts registers a single variant under the "phosphor" key.
+    fonts
+        .font_data
+        .insert("phosphor-fill".into(), egui_phosphor::Variant::Fill.font_data());
+    fonts
+        .families
+        .entry(egui::FontFamily::Name("phosphor-fill".into()))
+        .or_default()
+        .push("phosphor-fill".into());
 ```
-
-(Verify the exact API against the pinned version — `add_to_fonts(&mut FontDefinitions, Variant)` is the standard signature; the crate adds its font to the family fallback chain so its PUA codepoints resolve in `Proportional`. If the version exposes a named family instead, note it and expose that family from `icons::font`.)
 
 - [ ] **Step 3: Write the failing test for `icons`**
 
@@ -84,6 +92,8 @@ Create `ferrolite-app/src/icons.rs`:
 //! icon = add one alias here, sourced from the Phosphor catalog
 //! (`egui_phosphor::regular::*`).
 
+// All names below are VERIFIED to exist in egui-phosphor 0.7.3 `regular`/`fill`.
+use egui_phosphor::fill as pf;
 use egui_phosphor::regular as p;
 
 pub const ADJUST: &str = p::SLIDERS_HORIZONTAL;
@@ -91,7 +101,7 @@ pub const CROP: &str = p::CROP;
 pub const MASK: &str = p::CIRCLE_HALF_TILT;
 pub const HEAL: &str = p::BANDAIDS;
 pub const BRUSH: &str = p::PAINT_BRUSH;
-pub const LINEAR_GRADIENT: &str = p::ROWS;
+pub const LINEAR_GRADIENT: &str = p::GRADIENT;
 pub const RADIAL_GRADIENT: &str = p::CIRCLE;
 pub const LUMA: &str = p::CIRCLE_HALF;
 pub const COLOR: &str = p::PALETTE;
@@ -101,20 +111,26 @@ pub const REDO: &str = p::ARROW_CLOCKWISE;
 pub const DELETE: &str = p::TRASH;
 pub const EDIT: &str = p::PENCIL_SIMPLE;
 pub const RESET: &str = p::ARROW_COUNTER_CLOCKWISE;
-pub const STAR: &str = p::STAR;
-pub const STAR_FILL: &str = p::STAR_FILL;
-pub const FLAG: &str = p::FLAG;
-pub const FLAG_REJECT: &str = p::FLAG_BANNER_FOLD; // or PROHIBIT / X — pick the closest reject glyph
+pub const STAR: &str = p::STAR; // outline (regular) — render with font()
+pub const STAR_FILL: &str = pf::STAR; // filled (fill variant) — render with font_fill()
+pub const FLAG: &str = p::FLAG; // pick flag outline — font()
+pub const FLAG_FILL: &str = pf::FLAG; // pick flag filled — font_fill()
+pub const FLAG_REJECT: &str = p::PROHIBIT; // reject — font()
 pub const CARET_DOWN: &str = p::CARET_DOWN;
 pub const CARET_UP: &str = p::CARET_UP;
 pub const OVERLAY_ON: &str = p::EYE;
 pub const OVERLAY_OFF: &str = p::EYE_SLASH;
 
-/// The icon font. If `add_to_fonts` registered Phosphor into the Proportional fallback
-/// chain, `FontFamily::Proportional` resolves the PUA codepoints and this is fine; if the
-/// crate exposes a named family, return that instead.
+/// The regular icon font. `add_to_fonts(Regular)` put Phosphor Regular into the
+/// `Proportional` family's fallback chain, so its PUA codepoints resolve here.
 pub fn font(size: f32) -> egui::FontId {
     egui::FontId::proportional(size)
+}
+
+/// The filled icon font (rating stars / pick flag), registered under the
+/// `"phosphor-fill"` named family in `theme::install_fonts`.
+pub fn font_fill(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name("phosphor-fill".into()))
 }
 
 #[cfg(test)]
@@ -128,7 +144,8 @@ mod tests {
             ("RADIAL_GRADIENT", RADIAL_GRADIENT), ("LUMA", LUMA), ("COLOR", COLOR),
             ("EYEDROPPER", EYEDROPPER), ("UNDO", UNDO), ("REDO", REDO),
             ("DELETE", DELETE), ("EDIT", EDIT), ("RESET", RESET), ("STAR", STAR),
-            ("STAR_FILL", STAR_FILL), ("FLAG", FLAG), ("FLAG_REJECT", FLAG_REJECT),
+            ("STAR_FILL", STAR_FILL), ("FLAG", FLAG), ("FLAG_FILL", FLAG_FILL),
+            ("FLAG_REJECT", FLAG_REJECT),
             ("CARET_DOWN", CARET_DOWN), ("CARET_UP", CARET_UP),
             ("OVERLAY_ON", OVERLAY_ON), ("OVERLAY_OFF", OVERLAY_OFF),
         ] {
@@ -230,9 +247,9 @@ git commit -m "feat(develop): render tool/sub-tool/undo-redo icons from the icon
 - [ ] **Step 1: Migrate the rating/flag/chevron drawers**
 
 `library/icons.rs` currently hand-draws `star()` (and flag/chevron helpers) as `Painter` shapes. Convert each to render the corresponding library glyph in the icon font, preserving the existing call signature (so callers don't change) and the current sizing/placement/color/fill-state:
-- `star(painter, center/rect, size, color, filled)` → `painter.text(center, egui::Align2::CENTER_CENTER, if filled { icons::STAR_FILL } else { icons::STAR }, icons::font(size), color)` (match the existing size/anchor the vector version used so ratings line up in the grid).
-- flag pick/reject → `icons::FLAG` / `icons::FLAG_REJECT` similarly (preserve the filled/colored states the current code uses).
-- chevron/caret → `icons::CARET_DOWN` / `CARET_UP`.
+- `star(painter, center/rect, size, color, filled)` → `painter.text(center, egui::Align2::CENTER_CENTER, glyph, fontid, color)` where a **filled** star uses `icons::STAR_FILL` with `icons::font_fill(size)` and an **outline** star uses `icons::STAR` with `icons::font(size)` (the fill glyph lives in the `"phosphor-fill"` family, the outline in the Proportional chain). Match the existing size/anchor the vector version used so ratings line up in the grid.
+- flag pick → `icons::FLAG` (`font`) or `icons::FLAG_FILL` (`font_fill`) for the active/filled state; reject → `icons::FLAG_REJECT` (`font`). Preserve the current colored/filled states.
+- chevron/caret → `icons::CARET_DOWN` / `CARET_UP` (`font`).
 
 Keep each helper's public signature identical; only the body changes from shape-drawing to `painter.text`. If a helper's signature can't express the glyph cleanly (e.g. it took no color), adjust minimally and update its callers, noting it.
 

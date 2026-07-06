@@ -2,6 +2,7 @@
 //! op-stack edit helpers + undo/redo history, and off-thread frl:ops persistence.
 
 pub mod adjustment_panel;
+pub mod base_tabs;
 pub mod coverage;
 pub mod crop_math;
 pub mod crop_overlay;

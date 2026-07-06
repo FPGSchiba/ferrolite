@@ -93,8 +93,15 @@ fn provenance_prompt_is_stored_verbatim() {
 
 /// Contract 2: the serialized `Imported` component carries the PROMPT (provenance),
 /// not a raster. Only `handle` (a u64 id) + `provenance` are present — no pixel data.
+///
+/// This is proven structurally (exact key-set of the `Imported` payload and its
+/// `provenance` object), not via negative substring checks — a substring check like
+/// `!json.contains("texture")` would false-negative the instant a future, unrelated
+/// field happened to contain that substring. An exact key-set assertion cannot.
 #[test]
 fn serialized_imported_carries_prompt_not_raster() {
+    use std::collections::BTreeSet;
+
     let def = MaskDefinition {
         components: vec![(
             MaskComponent::Imported {
@@ -110,13 +117,36 @@ fn serialized_imported_carries_prompt_not_raster() {
         invert: false,
     };
     let json = serde_json::to_string(&def).unwrap();
-    assert!(
-        json.contains("\"prompt\":\"click:0.5,0.5\""),
-        "prompt persists"
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+    // MaskDefinition = {"components":[[<component>,<mode>]],"invert":..}
+    // MaskComponent is externally tagged, so the component object is {"Imported": {..}}.
+    let imported = value["components"][0][0]["Imported"]
+        .as_object()
+        .expect("components[0][0].Imported is an object");
+
+    let imported_keys: BTreeSet<&str> = imported.keys().map(String::as_str).collect();
+    let expected_imported_keys: BTreeSet<&str> = ["handle", "provenance"].into_iter().collect();
+    assert_eq!(
+        imported_keys, expected_imported_keys,
+        "Imported payload must contain exactly `handle` + `provenance` — no raster/pixel field"
     );
-    assert!(json.contains("\"handle\":7"), "handle is a plain id");
-    // No raster/pixel payload exists in the model to serialize.
-    assert!(!json.contains("raster"), "no raster field");
-    assert!(!json.contains("pixels"), "no pixel data");
-    assert!(!json.contains("texture"), "no texture data");
+
+    let provenance = imported["provenance"]
+        .as_object()
+        .expect("Imported.provenance is an object");
+    let provenance_keys: BTreeSet<&str> = provenance.keys().map(String::as_str).collect();
+    let expected_provenance_keys: BTreeSet<&str> = ["model_id", "model_version", "prompt"]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        provenance_keys, expected_provenance_keys,
+        "provenance must contain exactly model_id + model_version + prompt — no extra data"
+    );
+
+    assert_eq!(
+        provenance["prompt"], "click:0.5,0.5",
+        "prompt value persists verbatim"
+    );
+    assert_eq!(imported["handle"], 7, "handle survives as a plain id");
 }

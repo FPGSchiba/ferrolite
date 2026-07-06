@@ -86,10 +86,12 @@ ferrolite-app
   src/develop/
     tools/{adjust,crop,mask,heal}.rs   icon() -> icons::* constant                      [MODIFY]
     tool_palette.rs     undo/redo icons -> icons::UNDO / icons::REDO                     [MODIFY]
-    mask_panel.rs        sub-tool strip icons -> icons::*; overlay toggle; per-component
-                         list (delete/edit); "Pick color" edit-mode wiring              [MODIFY]
-    mask_overlay.rs      color-eyedropper routing fix (relax selection gate)            [MODIFY]
-    mask_ui.rs           + editing_component: Option<usize>                             [MODIFY]
+    mask_panel.rs        sub-tool strip icons -> icons::*; overlay toggle;
+                         "Manage components" button opening the modal                  [MODIFY]
+    mask_components_modal.rs  the component-management modal (list + delete + edit)     [NEW]
+    mask_overlay.rs      color-eyedropper routing fix (relax selection gate);
+                         Ctrl+scroll brush-radius gesture (gated + consumes scroll)     [MODIFY]
+    mask_ui.rs           + components_modal_open: bool, editing_component: Option<usize> [MODIFY]
     mask_edit.rs         + remove_component(stack, mask_idx, comp_idx)                  [MODIFY]
   src/settings/keymap.rs        + Action variants + ALL + label() + defaults()          [MODIFY]
   src/settings/ui/keyboard.rs   + new actions in the Develop GROUPS entry               [MODIFY]
@@ -209,33 +211,43 @@ Extend the existing keymap (`settings/keymap.rs`): the pattern is add an `Action
 `held()` check in `app.rs`; the Settings rebind UI auto-lists actions from a `GROUPS` table; persistence
 is automatic (`Keymap` is `#[serde(default)]` in `Settings`).
 
-### 5.1 New actions + default chords
+### 5.1 New keymap actions + default chords
 | Action | Default | Trigger | Effect |
 |---|---|---|---|
 | `SwitchToolAdjust` | `A` | `pressed` | select `ToolId::Adjust` |
 | `SwitchToolCrop` | `C` | `pressed` | select `ToolId::Crop` |
 | `SwitchToolMask` | `M` | `pressed` | select `ToolId::Mask` |
-| `BrushRadiusDecrease` | `[` (`OpenBracket`) | `held` | brush radius −= rate·dt, clamped |
-| `BrushRadiusIncrease` | `]` (`CloseBracket`) | `held` | brush radius += rate·dt, clamped |
 | `ToggleMaskOverlay` | `O` | `pressed` | flip `mask.overlay_on` |
 
 - **Conflict handling:** `O` is `FlagReject`'s default. The plan runs `Keymap::conflict()` for each new
   default; if a default collides with an action reachable in the same (Develop) context, pick a free key
   (documented in the plan). All are rebindable, so a collision is not fatal — but defaults must not
   shadow an existing Develop action.
-- **Module gating:** all six are handled only inside the existing `self.module == Module::Develop &&
+- **Module gating:** all four are handled only inside the existing `self.module == Module::Develop &&
   self.state.viewer.is_some()` block in `app.rs` (mirroring NextImage/PrevImage), so they never fire in
-  Library/Export. Brush-radius keys additionally only act when the Mask tool + Brush sub-tool are the
-  active context (else no-op) — the plan decides the exact guard; at minimum they mutate
-  `v.mask.brush_radius` clamped to the panel slider's range.
+  Library/Export.
 - **Tool switch** reuses the palette's exact enable-check + `ToolState::select_tool(id, enabled, reg)`.
-- **Held-key repeat** uses `Keymap::held()` (egui `key_down`) with a per-frame delta, the pattern
-  `HoldBeforePeek` already establishes for held keys.
 
-### 5.2 UI surfaces
-- Add the new actions to the `"Develop"` entry of `settings/ui/keyboard.rs`'s `GROUPS` (auto-appears in
-  the rebind grid with a reset arrow).
-- Add them to `help.rs`'s cheat-sheet table for discoverability.
+### 5.2 Brush radius = Ctrl + Mouse Scroll (canvas gesture, NOT a keymap chord)
+Brush radius is adjusted by **Ctrl + mouse scroll** over the canvas — a pointer gesture, not a key
+combination, so it does not go through the `Chord` keymap (which is key+modifier only) and is not a
+rebindable `Action`. Handling:
+- Read the scroll delta + modifier from egui input (`ctx.input(|i| (i.modifiers.command_or_ctrl, i.raw_scroll_delta.y / i.smooth_scroll_delta.y))` — the plan picks the field that matches the existing canvas-zoom code).
+- **Gated context:** only when the **Mask tool is active AND the Brush sub-tool is selected** and the
+  pointer is over the image; scroll `up` → larger, `down` → smaller; apply a sensitivity factor;
+  **clamp** to the same range as the panel's brush-radius slider. Mutates `v.mask.brush_radius`.
+- **Conflict with canvas zoom:** Ctrl+scroll (and/or plain scroll) may already drive canvas zoom
+  (`drive_viewer`). When the brush gesture is active (Mask+Brush + Ctrl held over the image), the brush
+  handler **consumes** the scroll so zoom does not also fire; otherwise scroll/zoom behaves exactly as
+  today. The plan confirms the exact zoom-input path and consumes appropriately (no double-handling).
+- Rebinding the modifier/gesture is out of scope (the keymap models key chords, not scroll gestures); a
+  future setting could add it.
+
+### 5.3 UI surfaces
+- Add the new keymap actions to the `"Develop"` entry of `settings/ui/keyboard.rs`'s `GROUPS`
+  (auto-appears in the rebind grid with a reset arrow).
+- Add them to `help.rs`'s cheat-sheet table for discoverability, plus a line documenting the
+  **Ctrl+scroll = brush size** gesture (even though it isn't a rebindable action).
 
 ---
 
@@ -299,24 +311,44 @@ shape. Unit-tested (removes the right index; out-of-range → unchanged clone; r
 leaves the mask layer present with an empty component list).
 
 ### 8.2 UI state
-Add `MaskUiState.editing_component: Option<usize>` (default `None`) — which component index the
-Luma/Color sliders are currently editing (vs. adding a new one). Reset on mask switch/undo/redo (mirror
-the existing transient-state resets).
+Add to `MaskUiState`:
+- `components_modal_open: bool` (default `false`) — whether the component-management modal is open.
+- `editing_component: Option<usize>` (default `None`) — which component index the modal is currently
+  editing (vs. no component selected for edit).
+Both reset on mask switch / undo / redo / mask-tool deselect (mirror the existing transient-state
+resets), so the modal never references a stale mask/component.
 
-### 8.3 Panel UI (`mask_panel::selected_section`)
-- Render a **per-component list**: loop `layer.mask.components.iter().enumerate()`, each row showing a
-  short type label (Brush / Linear / Radial / Luma / Color / Imported) + its `CompositeMode`, a
-  **delete** button (`icons::DELETE`) for any component (→ `remove_component`, `commit`), and — for
-  **Luma/Color** — an **edit** button (`icons::EDIT`) that sets `editing_component = Some(i)` and loads
-  the component's params back into `mask.range_lo/hi/softness` (Luma) or `mask.color_samples/tolerance/
-  softness` (Color).
-- When `editing_component == Some(i)`, the Luma/Color param block's action button reads **"Update"** and
-  calls `mask_edit::set_component(stack, idx, i, new_component)` instead of `add_component`; committing
-  clears `editing_component`. When `None`, it stays **"Add Luma range"/"Add Color range"** →
-  `add_component` (today's behavior).
-- Deleting the component currently being edited clears `editing_component`.
-- Brush/gradient components remain edited on the canvas (handles/strokes); they appear in the list with
-  a delete button but no panel edit button (their edit is spatial).
+### 8.3 A dedicated modal (NOT inline in the panel)
+The panel is already dense (296px), so component management lives in its **own modal**, not the
+selected-mask section:
+- **Panel trigger:** in `mask_panel::selected_section`, the "N components" count becomes (or is joined
+  by) a **"Manage components"** button (with `icons::EDIT`/a list icon) that sets
+  `mask.components_modal_open = true`. That is the panel's only addition — no inline list.
+- **The modal** (`mask_components_modal.rs`, an `egui::Window`/modal following the app's existing
+  modal pattern — e.g. `show_settings`/`show_help`: `Order::Foreground`, closable, and integrated with
+  `modal_active()` so canvas/keybind input is suppressed while open):
+  - Header: the selected mask's name.
+  - **Component list:** loop `layer.mask.components.iter().enumerate()`; each row = a short type label
+    (Brush / Linear / Radial / Luma / Color / Imported) + its `CompositeMode` + a **delete** button
+    (`icons::DELETE`) that calls `mask_edit::remove_component(stack, idx, i)` (→ `commit`), and — for
+    **Luma/Color** — an **edit** button (`icons::EDIT`) that sets `editing_component = Some(i)`.
+  - **Inline param editor (self-contained in the modal):** when `editing_component == Some(i)` and that
+    component is Luma/Color, show its parameter sliders (Luma: lo/hi/softness; Color: tolerance/softness
+    + its sample swatches) initialised from the component's current values, plus an **"Update"** button
+    that calls `mask_edit::set_component(stack, idx, i, new_component)` and clears `editing_component`,
+    and a **"Cancel"** that clears it without writing. Reuse the same `EguiSlider`s (per-control reset
+    preserved).
+  - Brush/gradient/Imported components appear in the list with a **delete** button but **no edit**
+    button (their editing is spatial/canvas-based, or N/A for Imported).
+  - Deleting the component currently being edited clears `editing_component`. Closing the modal clears
+    `editing_component` (and `components_modal_open`).
+- **Return path:** the modal is rendered from the same place the mask tool/panel is driven and returns
+  its `Option<EditOutcome>` (delete/update) into the existing `apply_edit` path — the exact wiring
+  (where the modal is shown + how its outcome reaches `apply_edit`) is a plan detail, mirroring how
+  the panel's outcome flows today.
+- The **add-new-component** flow (tool picker + "Add Luma/Color range" + their sliders) **stays in the
+  panel** as today — the modal is for managing/editing/removing existing components, keeping creation
+  and management cleanly separated.
 
 ---
 
@@ -330,10 +362,14 @@ the existing transient-state resets).
 - **Eyedropper with no source** → armed cursor shows; no loupe/sample if `preview_source` is `None`;
   never panics.
 - **remove_component / set_component out of range** → no-op clone (bounds-checked), never panics.
-- **editing_component stale** (component removed or mask switched) → cleared; the action button reverts
-  to "Add"; never edits a wrong/absent index.
+- **editing_component / components_modal_open stale** (component removed, mask switched, mask tool
+  deselected, or undo/redo) → both cleared; the modal closes / stops editing a wrong index; never edits
+  or renders a stale mask/component.
+- **Ctrl+scroll brush gesture** → only fires in the Mask+Brush context over the image; clamps
+  `brush_radius` to the slider range (no runaway); consumes the scroll so canvas zoom doesn't double-fire;
+  outside that context, scroll/zoom is unchanged.
 - **Keybind conflicts** → resolved at default-assignment time via `Keymap::conflict()`; user rebinds
-  freely; brush-radius held keys clamp to the slider range (no runaway values).
+  freely.
 - **Nothing slow on the UI thread (CLAUDE.md §1):** all of this is plain egui + one pure helper; no new
   per-frame heavy work. (Brush-mask perf is the separate follow-up.)
 
@@ -376,13 +412,16 @@ Likely a **single plan** on `feat/develop-tool-registry`, in dependency order:
    placement/behavior), and any other raw emoji/symbol usage. Remove the superseded bespoke drawers.
    Verify all icons render + reset-column parity (build + visual). This step may split (crate+install,
    then the migration sweep, then the reset-glyph swap) if large — the writing-plans step decides.
-2. **Keybinds:** new `Action`s + `ALL` + `label()` + defaults (+ conflict resolution), Develop-gated
-   dispatch (tool switch / overlay toggle / brush-radius held), rebind `GROUPS` + help table.
+2. **Keybinds + brush gesture:** new keymap `Action`s (tool switch A/C/M + overlay toggle O) + `ALL` +
+   `label()` + defaults (+ conflict resolution), Develop-gated dispatch, rebind `GROUPS` + help table;
+   AND the **Ctrl+scroll brush-radius** canvas gesture (gated to Mask+Brush, clamped, consumes scroll).
 3. **Mask overlay toggle:** UI toggle in the mask panel wired to `overlay_on` (keybind from step 2).
 4. **Color-picker fix:** systematic-debugging → relax the eyedropper's selection gate + ensure source;
    verify loupe + sampling.
-5. **Component edit/remove:** `remove_component` (pure + tests) + `editing_component` state + the
-   per-component list UI (delete/edit; Add↔Update).
+5. **Component edit/remove (modal):** `remove_component` (pure + tests) + `components_modal_open` /
+   `editing_component` state + the `mask_components_modal.rs` modal (list + delete + Luma/Color inline
+   edit via `set_component`); panel gets a "Manage components" button; wire the modal's outcome into
+   `apply_edit`.
 6. Gate green + author visual test.
 
 If the icon step's font-family/rendering details prove fiddly, it may split from the icon call-site
@@ -398,9 +437,10 @@ swaps; the writing-plans step decides final task granularity.
 | Icon migration scope | **ALL app icons migrate to the library (MUST), via an audit** — including `library/icons.rs` stars/flags/chevrons and the `draw_reset_arrow` reset glyph; bespoke vector drawers removed | User: "the library is a MUST not a MAY — so we guarantee the icons render." One icon system, single source, nothing can silently break; the working vector icons consolidate onto it too (reset affordance stays load-bearing, only its glyph comes from the library). |
 | Icon crate | **`egui-phosphor` (Regular)** | De-facto egui icon crate, tracks egui releases, MIT, covers every needed glyph. Material (`egui_material_icons`) offered but Phosphor is the safer version-compat bet. |
 | Keybind defaults | **Mnemonic: A/C/M tools, `[`/`]` brush radius, `O` overlay (conflict-checked)**, all rebindable | Matches Photoshop/Lightroom muscle memory (`[`/`]` universal); mnemonic tool letters; rebindable so defaults aren't binding. |
-| Brush-radius repeat | **`held()` key with per-frame delta, clamped** | egui `key_down` gives smooth repeat; reuses the `HoldBeforePeek` held-key pattern. |
+| Brush-radius input | **Ctrl + mouse scroll over the canvas (gated to Mask+Brush, clamped, consumes the scroll so zoom doesn't also fire)** — NOT a keymap chord | User preference; scroll-to-resize is a natural brush gesture; the `Chord` keymap is key-based so this lives as a canvas gesture, not a rebindable action. |
+| Component edit/remove UI | **A dedicated modal (`mask_components_modal.rs`), not inline in the panel**; panel gets a "Manage components" button; add-new stays in the panel | User: the 296px panel would be overloaded by an inline list; a modal keeps creation (panel) and management/edit/remove (modal) cleanly separated. |
 | Overlay toggle | **Persistent `overlay_on` toggle (UI + keybind) AND keep the drag-time auto-hide** | User wants to see the real effect at rest (persistent off) without losing the existing drag-reveal. |
 | Color picker | **Fix by relaxing the selection gate so the armed eyedropper runs without a selected mask (samples stage in `MaskUiState`); confirm via systematic-debugging** | Samples aren't tied to a mask until "Add Color range"; the gate is the likely no-op cause. |
-| Component edit/remove | **Pure `remove_component` + `editing_component` state + per-component list (delete any; edit Luma/Color via `set_component`)** | `set_component` already exists; only remove + UI are missing; brush/gradient stay canvas-edited. |
+| Component edit/remove mechanism | **Pure `remove_component` + `editing_component` state; delete any component; edit Luma/Color via the existing `set_component`** | `set_component` already exists; only `remove_component` + UI are missing; brush/gradient stay canvas-edited. (UI = the modal above.) |
 | Brush performance | **Deferred to a separate brainstorm → spec** | User asked for it as a follow-up after these fixes; it needs its own diagnostics-first design. |
 | Branch | **Continue on `feat/develop-tool-registry`** | These are visual-test-feedback fixes for that unmerged refactor; CLAUDE.md says address issues before finishing the branch. |

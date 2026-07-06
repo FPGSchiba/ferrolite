@@ -6,8 +6,10 @@
 
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::mask_edit;
-use crate::develop::mask_ui::MaskUiState;
+use crate::develop::mask_ui::{MaskTool, MaskUiState};
 use crate::theme;
+use crate::widgets::slider::EguiSlider;
+use ferrolite_mask::{CompositeMode, MaskComponent};
 use ferrolite_pipeline::{OpKind, OpStack};
 
 pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Option<EditOutcome> {
@@ -102,12 +104,330 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
     out
 }
 
-/// Placeholder until Task 8 fills it in. Returns None so the list works standalone.
+/// The selected mask's component tools + Light/Color adjustments (design §9.2).
+/// Non-canvas components (Luma-range, using the current slider values) can be
+/// added directly from the panel; Brush/Linear/Radial/Color-range are captured
+/// on the canvas (Tasks 10-12) — this picker only selects the tool + composite
+/// mode so the canvas overlay knows what to create.
 pub(crate) fn selected_section(
-    _ui: &mut egui::Ui,
-    _stack: &OpStack,
-    _mask: &mut MaskUiState,
-    _idx: usize,
+    ui: &mut egui::Ui,
+    stack: &OpStack,
+    mask: &mut MaskUiState,
+    idx: usize,
 ) -> Option<EditOutcome> {
-    None
+    let la = mask_edit::layers(stack);
+    let layer = &la.layers[idx];
+    let mut out: Option<EditOutcome> = None;
+    let commit = |s: OpStack| EditOutcome {
+        stack: s,
+        kind: OpKind::LocalAdjustments,
+        commit: true,
+    };
+
+    ui.separator();
+
+    // ── Component tool picker + composite mode ──
+    ui.horizontal(|ui| {
+        for (tool, label) in [
+            (MaskTool::Brush, "Brush"),
+            (MaskTool::Linear, "Linear"),
+            (MaskTool::Radial, "Radial"),
+            (MaskTool::LumaRange, "Luma"),
+            (MaskTool::ColorRange, "Color"),
+        ] {
+            if ui.selectable_label(mask.tool == tool, label).clicked() {
+                mask.tool = tool;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("Add mode")
+                .size(11.0)
+                .color(theme::TEXT_DIM),
+        );
+        for (m, label) in [
+            (CompositeMode::Add, "Add"),
+            (CompositeMode::Subtract, "Subtract"),
+            (CompositeMode::Intersect, "Intersect"),
+        ] {
+            if ui.selectable_label(mask.next_mode == m, label).clicked() {
+                mask.next_mode = m;
+            }
+        }
+    });
+
+    // Luma-range can be added directly from the panel with the current slider
+    // values (it needs no canvas gesture). The other tools are captured on the
+    // canvas (Tasks 10-12); the tool+mode selection above tells the overlay what
+    // to create. Show the range params + an "Add component" button when Luma is
+    // the active tool.
+    if mask.tool == MaskTool::LumaRange {
+        ui.add(EguiSlider {
+            label: "Lo",
+            value: &mut mask.range_lo,
+            min: 0.0,
+            max: 1.0,
+            default: 0.3,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Hi",
+            value: &mut mask.range_hi,
+            min: 0.0,
+            max: 1.0,
+            default: 0.7,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        ui.add(EguiSlider {
+            label: "Softness",
+            value: &mut mask.range_softness,
+            min: 0.0,
+            max: 0.5,
+            default: 0.1,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: false,
+            signed: false,
+        });
+        if ui.button("Add Luma range").clicked() {
+            let c = MaskComponent::LumaRange {
+                lo: mask.range_lo,
+                hi: mask.range_hi,
+                softness: mask.range_softness,
+            };
+            out = Some(commit(mask_edit::add_component(
+                stack,
+                idx,
+                c,
+                mask.next_mode,
+            )));
+        }
+    }
+
+    ui.label(
+        egui::RichText::new(format!("{} components", layer.mask.components.len()))
+            .size(11.0)
+            .color(theme::TEXT_FAINT),
+    );
+
+    ui.separator();
+
+    // ── Light + Color adjustments (each slider carries its own reset column) ──
+    let mut a = layer.adjustments;
+    let mut changed = false;
+    let mut commit_now = false;
+    let slider = |ui: &mut egui::Ui,
+                  label: &str,
+                  v: &mut f32,
+                  min: f32,
+                  max: f32,
+                  bip: bool,
+                  changed: &mut bool,
+                  commit_now: &mut bool| {
+        let r = ui.add(EguiSlider {
+            label,
+            value: v,
+            min,
+            max,
+            default: 0.0,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: bip,
+            signed: bip,
+        });
+        if r.changed() {
+            *changed = true;
+            if r.drag_stopped() || !r.dragged() {
+                *commit_now = true;
+            }
+        }
+    };
+
+    ui.label(
+        egui::RichText::new("Light")
+            .size(11.0)
+            .color(theme::TEXT_DIM),
+    );
+    slider(
+        ui,
+        "Exposure",
+        &mut a.exposure,
+        -5.0,
+        5.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Contrast",
+        &mut a.contrast,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Highlights",
+        &mut a.highlights,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Shadows",
+        &mut a.shadows,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Whites",
+        &mut a.whites,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Blacks",
+        &mut a.blacks,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+
+    ui.label(
+        egui::RichText::new("Color")
+            .size(11.0)
+            .color(theme::TEXT_DIM),
+    );
+    slider(
+        ui,
+        "Temp",
+        &mut a.temp,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Tint",
+        &mut a.tint,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Saturation",
+        &mut a.saturation,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    slider(
+        ui,
+        "Hue",
+        &mut a.hue,
+        -1.0,
+        1.0,
+        true,
+        &mut changed,
+        &mut commit_now,
+    );
+    // "Color" swatch amount (RGB picked via the swatch below).
+    let mut amt = a.color.amount;
+    let r = ui.add(EguiSlider {
+        label: "Color",
+        value: &mut amt,
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        signed: false,
+    });
+    if r.changed() {
+        a.color.amount = amt;
+        changed = true;
+        if r.drag_stopped() || !r.dragged() {
+            commit_now = true;
+        }
+    }
+    let mut rgb = [a.color.r, a.color.g, a.color.b];
+    if ui.color_edit_button_rgb(&mut rgb).changed() {
+        a.color.r = rgb[0];
+        a.color.g = rgb[1];
+        a.color.b = rgb[2];
+        changed = true;
+        commit_now = true;
+    }
+
+    // ── Reserved neighborhood controls: greyed, hover reason (design §9.2) ──
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new("Effects")
+            .size(11.0)
+            .color(theme::TEXT_DIM),
+    );
+    for name in ["Texture", "Clarity", "Dehaze", "Sharpness", "Noise"] {
+        let mut dummy = 0.0f32;
+        ui.add_enabled_ui(false, |ui| {
+            ui.add(EguiSlider {
+                label: name,
+                value: &mut dummy,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+            });
+        })
+        .response
+        .on_hover_text("Coming in a later phase (needs neighborhood processing)");
+    }
+
+    if changed {
+        out = Some(EditOutcome {
+            stack: mask_edit::set_adjustments(stack, idx, a),
+            kind: OpKind::LocalAdjustments,
+            commit: commit_now,
+        });
+    }
+    out
 }

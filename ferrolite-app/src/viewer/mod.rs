@@ -196,6 +196,19 @@ pub struct ViewerState {
     pub crop_active: bool,
     /// Index of the currently-selected HSL band in the HSL panel (0–7).
     pub hsl_band: usize,
+    /// Masking-tool UI state (design §9). Per-image, like `hsl_band`/`crop_active`.
+    pub mask: crate::develop::mask_ui::MaskUiState,
+    /// Overlay compositor for the canvas mask fill (Task 9), built once lazily on
+    /// first overlay use and reused thereafter (CLAUDE.md §2: build GPU pipelines
+    /// once, never per frame).
+    pub mask_overlay: Option<ferrolite_pipeline::MaskOverlayCompositor>,
+    /// Bounded (≤ `OVERLAY_MAX_EDGE`), GPU-uploaded downscale of `preview_source`
+    /// used as the compositor's input for range shapes. Cached; rebuilt only when
+    /// `preview_source` changes (cleared alongside it).
+    pub mask_overlay_input: Option<ferrolite_pipeline::PipelineImage>,
+    /// The egui texture for the current overlay fill; rebuilt only when
+    /// `mask.overlay_key` changes (selected mask definition + `opstack_version`).
+    pub mask_overlay_tex: Option<egui::TextureHandle>,
     /// `true` once the `OpsLoaded` event for this image has been received (the
     /// op-stack read job finished and the stack has been applied).
     pub ops_loaded: bool,
@@ -312,6 +325,10 @@ impl ViewerState {
             split_pos: 0.5,
             crop_active: false,
             hsl_band: 0,
+            mask: crate::develop::mask_ui::MaskUiState::default(),
+            mask_overlay: None,
+            mask_overlay_input: None,
+            mask_overlay_tex: None,
             ops_loaded: false,
             ops_read_handle: None,
             histogram: HistogramState::new(),

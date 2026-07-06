@@ -1,10 +1,14 @@
 //! ferrolite-pipeline — the photo edit DAG. An ordered `OpStack` document model
 //! and a retained GPU pipeline built on `ferrolite-gpu`'s generic executor; WGSL
 //! compute passes implement the edits. Photo tier (GPL-OK).
+mod coord;
 mod gpu_pyramid;
 mod image;
 mod lens_bake;
 mod lens_gpu;
+mod local;
+mod local_node;
+mod mask_overlay;
 mod nodes;
 mod op;
 mod pipeline;
@@ -12,10 +16,15 @@ mod serialize;
 mod tile_edit;
 mod uniforms;
 
+pub use coord::{display_to_source, source_to_display};
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
 pub use lens_bake::bake_products;
 pub use lens_gpu::{VignetteTexture, WarpGridTexture};
+pub use local::{
+    AdjustmentSet, ColorControl, ColorSwatch, LightControl, LocalAdjustments, MaskLayer,
+};
+pub use mask_overlay::MaskOverlayCompositor;
 pub use nodes::{color_convert, upload_source};
 pub use op::{
     Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,
@@ -30,15 +39,16 @@ pub use tile_edit::TileEditPipeline;
 // Exception: `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
 pub use uniforms::{
     curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform, sharpen_halo, vignette_amount,
-    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, SharpenUniform,
-    VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
+    SharpenUniform, VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Nine passes: the seven original
-/// color/tone/geometry passes plus the two lens passes (geometry now carries the
-/// warp; `vignette` is the new radial-gain pass).
+/// alongside the display-pipeline pre-warm. Ten passes: the seven original
+/// color/tone/geometry passes, the two lens passes (geometry now carries the
+/// warp; `vignette` is the radial-gain pass), plus `local-adjust` (the masked
+/// Light+Color point op).
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
@@ -50,6 +60,7 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         ("sharpen", include_str!("shaders/sharpen.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
+        ("local-adjust", include_str!("shaders/local_adjust.wgsl")),
     ] {
         let _ = ctx.shader_module(label, src);
     }

@@ -43,4 +43,31 @@ impl MaskBuffer {
             height: height.max(1),
         }
     }
+
+    /// Allocate an `R32Float` mask texture initialised to `0.0` everywhere.
+    pub fn alloc_zeroed(ctx: &GpuContext, width: u32, height: u32) -> Self {
+        let buf = Self::alloc(ctx, width, height);
+        let (w, h) = (buf.width, buf.height);
+        let zeros = vec![0.0f32; (w * h) as usize];
+        ctx.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &buf.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&zeros),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        buf
+    }
 }

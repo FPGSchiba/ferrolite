@@ -1226,6 +1226,7 @@ dependencies = [
  "ferrolite-image",
  "ferrolite-jobs",
  "ferrolite-lens",
+ "ferrolite-mask",
  "ferrolite-pipeline",
  "ferrolite-previews",
  "ferrolite-vt",
@@ -1335,6 +1336,7 @@ version = "0.0.1"
 dependencies = [
  "bytemuck",
  "ferrolite-gpu",
+ "ferrolite-image",
  "half",
  "image",
  "serde",
@@ -1347,10 +1349,12 @@ name = "ferrolite-pipeline"
 version = "0.0.1"
 dependencies = [
  "bytemuck",
+ "ferrolite-catalog",
  "ferrolite-color",
  "ferrolite-gpu",
  "ferrolite-image",
  "ferrolite-lens",
+ "ferrolite-mask",
  "half",
  "image",
  "pollster 0.4.0",

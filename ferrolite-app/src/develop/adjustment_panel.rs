@@ -239,6 +239,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, working_space: WorkingSpace
         }
     });
 
+    // ── Masks ── (design §9): unified Masking tool. Open => mask overlay + tool
+    // affordances on the canvas (mirrors the Geometry section's crop_active).
+    egui::CollapsingHeader::new("Masks").show(ui, |ui| {
+        if let Some(v) = state.viewer.as_mut() {
+            v.mask.active = true;
+            let stack = v.op_stack.clone();
+            if let Some(o) = crate::develop::mask_panel::show(ui, &stack, &mut v.mask) {
+                out = Some(o);
+            }
+        }
+    });
+
     // ── Detail ──
     egui::CollapsingHeader::new("Detail").show(ui, |ui| {
         let sh = stack.sharpen();

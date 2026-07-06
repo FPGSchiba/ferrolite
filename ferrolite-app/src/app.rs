@@ -124,6 +124,13 @@ impl FerroliteApp {
             self.set_preview_and_full(frame, stack.clone());
             if let Some(v) = self.state.viewer.as_mut() {
                 v.edits_dirty = true;
+                // A stale in-progress gesture or cached overlay must not carry over
+                // onto the newly-restored stack: drop any in-flight brush/handle
+                // gesture and force the overlay to rebuild against the new stack.
+                v.mask.gesture = None;
+                v.mask.overlay_key = None;
+                v.mask
+                    .clamp_selection(crate::develop::mask_edit::layers(&stack).layers.len());
             }
             // Persist the resulting stack (undo/redo changes the on-disk state).
             // Gather viewer scalars into locals before the iter_mut borrow.
@@ -216,6 +223,10 @@ impl FerroliteApp {
         // happy path.
         let is_raw = v.kind == ferrolite_image::FileKind::Raw;
         v.preview_source = Some(std::sync::Arc::new(linear.clone()));
+        // Invalidate the mask-overlay's bounded input + texture cache: they were
+        // derived from the previous preview source and no longer apply.
+        v.mask_overlay_input = None;
+        v.mask_overlay_tex = None;
 
         // RAW: do NOT reveal the embedded JPEG. Keep the spinner up until the
         // color-managed raw render is built at full-decode (`apply_full_decoded`),
@@ -1098,6 +1109,10 @@ impl FerroliteApp {
             Some(v) if v.image_id == image_id => {
                 // Reuse the sRGB reveal path, which reads `preview_source`.
                 v.preview_source = Some(std::sync::Arc::new(linear.clone()));
+                // Invalidate the mask-overlay's bounded input + texture cache: they
+                // were derived from the previous preview source and no longer apply.
+                v.mask_overlay_input = None;
+                v.mask_overlay_tex = None;
             }
             _ => return, // stale: viewer closed or a different image is open
         }
@@ -1446,6 +1461,11 @@ impl FerroliteApp {
         };
         v.edits_dirty = true;
         v.history.push(kind, stack.clone());
+        // Mask edits all share OpKind::LocalAdjustments; seal so each committed
+        // gesture (stroke, slider drag, discrete action) is its own undo step.
+        if kind == ferrolite_pipeline::OpKind::LocalAdjustments {
+            v.history.break_coalesce();
+        }
         let image_id = v.image_id;
         let path = v.path.clone();
         let has_edits = !stack.is_identity();
@@ -1458,6 +1478,74 @@ impl FerroliteApp {
             }
         }
         self.persist_ops(ctx, image_id, path, stack);
+    }
+
+    /// Rebuild the mask-overlay egui texture iff the selected mask definition or
+    /// the preview generation changed. Bounded (≤ OVERLAY_MAX_EDGE composite +
+    /// readback) + only-on-change, so it is safe on the UI thread even mid-stroke
+    /// (CLAUDE.md §1). The `MaskOverlayCompositor` is built once and cached on
+    /// `ViewerState`, never rebuilt per frame (CLAUDE.md §2).
+    fn rebuild_mask_overlay_if_needed(&mut self, ctx: &egui::Context) {
+        use crate::develop::mask_edit;
+        use crate::develop::mask_overlay_color::{overlay_rgba, OVERLAY_MAX_EDGE};
+        use std::hash::{Hash, Hasher};
+
+        let Some(v) = self.state.viewer.as_mut() else {
+            return;
+        };
+        let la = mask_edit::layers(&v.op_stack);
+        let Some(sel) = v.mask.selected.filter(|&i| i < la.layers.len()) else {
+            v.mask_overlay_tex = None;
+            v.mask.overlay_key = None;
+            return;
+        };
+        let def = la.layers[sel].mask.clone();
+        // Key: which mask def + preview generation. serde-hash the def (small).
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(&def).unwrap_or_default().hash(&mut h);
+        v.opstack_version.hash(&mut h); // preview regen bumps this
+        let key = h.finish();
+        if v.mask.overlay_key == Some(key) && v.mask_overlay_tex.is_some() {
+            return;
+        }
+
+        // Ensure the compositor + bounded input exist.
+        let Some(pipe) = v.preview_edit.as_ref() else {
+            return;
+        };
+        let gpu_ctx = pipe.gpu_context();
+        if v.mask_overlay.is_none() {
+            v.mask_overlay = Some(ferrolite_pipeline::MaskOverlayCompositor::new(
+                gpu_ctx.clone(),
+            ));
+        }
+        if v.mask_overlay_input.is_none() {
+            if let Some(src) = v.preview_source.as_ref() {
+                let small = downscale_linear(src, OVERLAY_MAX_EDGE);
+                v.mask_overlay_input = Some(ferrolite_pipeline::upload_source(&gpu_ctx, &small));
+            }
+        }
+        let (Some(oc), Some(input)) = (v.mask_overlay.as_ref(), v.mask_overlay_input.as_ref())
+        else {
+            return;
+        };
+        // PERF (non-blocking, follow-up): during a brush stroke this rebuild runs
+        // every dragged frame (the mask def hash changes each dab), so the bounded
+        // 512² mask composite + `read_mask_r32f` GPU readback below executes on
+        // every such frame. A per-frame GPU readback can stall the pipeline
+        // (map+wait for the readback buffer), which is the likely source of the
+        // slight brush lag the author noticed — acceptable for now, but a
+        // follow-up could throttle the overlay rebuild while a stroke is active
+        // (e.g. only rebuild on `drag_stopped()`, or at a capped rate), or replace
+        // this readback-based overlay entirely with a GPU-side display-pipeline
+        // overlay pass (the option deferred at plan time, avoiding the
+        // GPU→CPU→GPU round trip altogether).
+        let (w, h2, cov) = oc.coverage(&gpu_ctx, &def, input);
+        let rgba = overlay_rgba(&cov, 0.5); // 50% red tint
+        let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h2 as usize], &rgba);
+        v.mask_overlay_tex =
+            Some(ctx.load_texture("mask-overlay", img, egui::TextureOptions::LINEAR));
+        v.mask.overlay_key = Some(key);
     }
 
     /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the bake-relevant lens
@@ -2376,6 +2464,35 @@ fn window_resize(ctx: &egui::Context) {
             ctx.send_viewport_cmd(ViewportCommand::BeginResize(dir));
         }
     }
+}
+
+/// Nearest-neighbor CPU downscale of a LinearRgbaF32 to ≤ max_edge longest side.
+/// Used to bound the mask-overlay compositor's input (CLAUDE.md §1) so the
+/// GPU composite + CPU readback stay cheap enough to rebuild on every mask/edit
+/// change, even mid-stroke.
+fn downscale_linear(
+    src: &ferrolite_image::LinearRgbaF32,
+    max_edge: u32,
+) -> ferrolite_image::LinearRgbaF32 {
+    let (sw, sh) = (src.width, src.height);
+    let scale = (max_edge as f32 / sw.max(sh) as f32).min(1.0);
+    let (dw, dh) = (
+        ((sw as f32 * scale) as u32).max(1),
+        ((sh as f32 * scale) as u32).max(1),
+    );
+    if (dw, dh) == (sw, sh) {
+        return src.clone();
+    }
+    let mut px = Vec::with_capacity((dw * dh * 4) as usize);
+    for y in 0..dh {
+        let sy = (y as f32 / dh as f32 * sh as f32) as u32;
+        for x in 0..dw {
+            let sx = (x as f32 / dw as f32 * sw as f32) as u32;
+            let i = ((sy * sw + sx) * 4) as usize;
+            px.extend_from_slice(&src.pixels[i..i + 4]);
+        }
+    }
+    ferrolite_image::LinearRgbaF32::new(dw, dh, px).expect("downscale length")
 }
 
 impl eframe::App for FerroliteApp {
@@ -3420,6 +3537,8 @@ impl eframe::App for FerroliteApp {
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
             if let Some(v) = self.state.viewer.as_mut() {
                 v.crop_active = false; // re-armed by the open Geometry section
+                v.mask.active = false; // re-armed by the open Masks section
+                v.mask.adjusting = false; // re-set by the panel on a drag frame (panel runs before the canvas overlay below, so no lag)
             }
             let mut outcome = None;
             let working_space = self.state.working_space;
@@ -3579,6 +3698,51 @@ impl eframe::App for FerroliteApp {
                             if let Some(o) =
                                 crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)
                             {
+                                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                            }
+                        }
+                        // Mask overlay: shown while the Masks section is open. Rebuild
+                        // the coverage texture only when the selected mask / preview
+                        // generation changed (bounded + on-change, CLAUDE.md §1), then
+                        // paint the fill. Gather locals BEFORE calling apply_edit, same
+                        // borrow discipline as the crop overlay above.
+                        let mask_active = self
+                            .state
+                            .viewer
+                            .as_ref()
+                            .map(|v| v.mask.active)
+                            .unwrap_or(false);
+                        if mask_active {
+                            self.rebuild_mask_overlay_if_needed(ctx);
+                            let (stack, dims, view, viewport, tex, preview_source) = {
+                                let v = self.state.viewer.as_ref().unwrap();
+                                (
+                                    v.op_stack.clone(),
+                                    v.image_dims.unwrap_or((1, 1)),
+                                    v.view,
+                                    v.viewport,
+                                    v.mask_overlay_tex.clone(),
+                                    v.preview_source.clone(),
+                                )
+                            };
+                            let image_rect = crate::viewer::image_screen_rect(
+                                ui.min_rect(),
+                                dims,
+                                view,
+                                viewport,
+                            );
+                            let mask_out = self.state.viewer.as_mut().and_then(|v| {
+                                crate::develop::mask_overlay::show(
+                                    ui,
+                                    image_rect,
+                                    &stack,
+                                    &mut v.mask,
+                                    tex.as_ref(),
+                                    dims,
+                                    preview_source.as_ref(),
+                                )
+                            });
+                            if let Some(o) = mask_out {
                                 self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
                             }
                         }

@@ -74,6 +74,14 @@ impl History {
         self.last_kind = None;
         Some(self.entries[self.cursor].clone())
     }
+
+    /// Force the NEXT `push` to start a fresh step instead of coalescing into the
+    /// current tip. Called after a committed mask gesture (all mask edits share
+    /// `OpKind::LocalAdjustments`, so kind-based coalescing would otherwise merge
+    /// separate gestures — a stroke and a later slider edit — into one undo step).
+    pub fn break_coalesce(&mut self) {
+        self.last_kind = None;
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +151,63 @@ mod tests {
             steps, 1,
             "cap=2: exactly one undo step survives after eviction"
         );
+    }
+
+    #[test]
+    fn break_coalesce_separates_same_kind_gestures() {
+        use ferrolite_pipeline::{LocalAdjustments, Op};
+        let la = |n: usize| {
+            let mut d = LocalAdjustments::default();
+            for i in 0..n {
+                d.layers.push(ferrolite_pipeline::MaskLayer {
+                    name: format!("m{i}"),
+                    visible: true,
+                    mask: Default::default(),
+                    adjustments: Default::default(),
+                });
+            }
+            OpStack::default().set_op(Op::LocalAdjustments(d))
+        };
+        let mut h = History::new(OpStack::default(), 50);
+        // Gesture 1: one mask (a "stroke" commit).
+        h.push(OpKind::LocalAdjustments, la(1));
+        h.break_coalesce();
+        // Gesture 2: two masks (a distinct "slider" commit) — must NOT coalesce into gesture 1.
+        h.push(OpKind::LocalAdjustments, la(2));
+        // Two distinct undo steps back to identity.
+        assert_eq!(h.undo(), Some(la(1)), "undo returns to after gesture 1");
+        assert_eq!(
+            h.undo(),
+            Some(OpStack::default()),
+            "undo returns to identity"
+        );
+        assert!(!h.can_undo());
+    }
+
+    #[test]
+    fn create_then_adjust_are_two_undo_steps() {
+        use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Op};
+        let with = |vis_adj: f32| {
+            let d = LocalAdjustments {
+                layers: vec![MaskLayer {
+                    name: "m".into(),
+                    visible: true,
+                    mask: Default::default(),
+                    adjustments: AdjustmentSet {
+                        exposure: vis_adj,
+                        ..Default::default()
+                    },
+                }],
+            };
+            OpStack::default().set_op(Op::LocalAdjustments(d))
+        };
+        let mut h = History::new(OpStack::default(), 50);
+        h.push(OpKind::LocalAdjustments, with(0.0));
+        h.break_coalesce(); // create
+        h.push(OpKind::LocalAdjustments, with(0.5));
+        h.break_coalesce(); // adjust
+        assert_eq!(h.undo(), Some(with(0.0)), "undo the adjustment");
+        assert_eq!(h.undo(), Some(OpStack::default()), "undo the create");
     }
 
     #[test]

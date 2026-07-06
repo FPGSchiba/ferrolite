@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::local::LocalAdjustments;
+
 /// Current on-stack schema version. Bumped if `Op`'s shape changes incompatibly.
 pub const STACK_VERSION: u32 = 1;
 
@@ -152,6 +154,7 @@ pub enum Op {
     Contrast(Contrast),
     ToneCurve(ToneCurve),
     Hsl(Hsl),
+    LocalAdjustments(LocalAdjustments),
     Sharpen(Sharpen),
     LensCorrection(LensCorrection),
     Geometry(Geometry),
@@ -167,9 +170,10 @@ pub enum OpKind {
     Contrast = 2,
     ToneCurve = 3,
     Hsl = 4,
-    Sharpen = 5,
-    LensCorrection = 6,
-    Geometry = 7,
+    LocalAdjustments = 5,
+    Sharpen = 6,
+    LensCorrection = 7,
+    Geometry = 8,
 }
 
 impl Op {
@@ -180,6 +184,7 @@ impl Op {
             Op::Contrast(_) => OpKind::Contrast,
             Op::ToneCurve(_) => OpKind::ToneCurve,
             Op::Hsl(_) => OpKind::Hsl,
+            Op::LocalAdjustments(_) => OpKind::LocalAdjustments,
             Op::Sharpen(_) => OpKind::Sharpen,
             Op::LensCorrection(_) => OpKind::LensCorrection,
             Op::Geometry(_) => OpKind::Geometry,
@@ -266,6 +271,13 @@ impl OpStack {
     pub fn hsl(&self) -> Option<Hsl> {
         self.ops.iter().find_map(|o| match o {
             Op::Hsl(h) => Some(*h),
+            _ => None,
+        })
+    }
+
+    pub fn local_adjustments(&self) -> Option<LocalAdjustments> {
+        self.ops.iter().find_map(|o| match o {
+            Op::LocalAdjustments(l) => Some(l.clone()),
             _ => None,
         })
     }
@@ -489,6 +501,68 @@ mod tests {
                 enabled: false,
                 amount: 1.0
             }
+        );
+    }
+
+    #[test]
+    fn local_adjustments_sorts_between_hsl_and_sharpen() {
+        use crate::local::{AdjustmentSet, LocalAdjustments, MaskLayer};
+        use ferrolite_mask::MaskDefinition;
+        let la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: AdjustmentSet {
+                    exposure: 0.5,
+                    ..Default::default()
+                },
+            }],
+        };
+        let s = OpStack::default()
+            .set_op(Op::Sharpen(Sharpen {
+                amount: 0.3,
+                radius: 1,
+            }))
+            .set_op(Op::LocalAdjustments(la.clone()))
+            .set_op(Op::Hsl(Hsl {
+                bands: [HslBand {
+                    hue: 0.0,
+                    sat: 0.0,
+                    lum: 0.0,
+                }; 8],
+            }));
+        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
+        assert_eq!(
+            kinds,
+            vec![OpKind::Hsl, OpKind::LocalAdjustments, OpKind::Sharpen]
+        );
+        assert_eq!(s.local_adjustments(), Some(la));
+    }
+
+    #[test]
+    fn opkind_discriminants_place_local_adjustments_after_hsl() {
+        assert_eq!(OpKind::Hsl as u8, 4);
+        assert_eq!(OpKind::LocalAdjustments as u8, 5);
+        assert_eq!(OpKind::Sharpen as u8, 6);
+        assert_eq!(OpKind::LensCorrection as u8, 7);
+        assert_eq!(OpKind::Geometry as u8, 8);
+    }
+
+    #[test]
+    fn opkind_renumber_does_not_change_serde_output() {
+        // OpKind is a sort key, never serialized; Op serializes by variant name.
+        // This exact JSON must be stable across the renumber.
+        let s = OpStack::default()
+            .set_op(Op::Exposure(Exposure { ev: 0.5 }))
+            .set_op(Op::Sharpen(Sharpen {
+                amount: 0.6,
+                radius: 3,
+            }));
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            json,
+            r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}},{"Sharpen":{"amount":0.6,"radius":3}}]}"#
         );
     }
 }

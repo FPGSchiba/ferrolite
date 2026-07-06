@@ -1446,6 +1446,11 @@ impl FerroliteApp {
         };
         v.edits_dirty = true;
         v.history.push(kind, stack.clone());
+        // Mask edits all share OpKind::LocalAdjustments; seal so each committed
+        // gesture (stroke, slider drag, discrete action) is its own undo step.
+        if kind == ferrolite_pipeline::OpKind::LocalAdjustments {
+            v.history.break_coalesce();
+        }
         let image_id = v.image_id;
         let path = v.path.clone();
         let has_edits = !stack.is_identity();

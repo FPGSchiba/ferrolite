@@ -304,6 +304,11 @@ impl EditPipeline {
         self.graph.eval_count()
     }
 
+    /// The shared GPU context (for building overlay compositors, etc.).
+    pub fn gpu_context(&self) -> Arc<GpuContext> {
+        self.ctx.clone()
+    }
+
     /// Total nodes in the graph (source + one per op). Used by invalidation tests.
     pub fn node_count(&self) -> usize {
         self.node_count

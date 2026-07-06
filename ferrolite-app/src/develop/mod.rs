@@ -26,4 +26,5 @@ pub mod ops_persist;
 pub mod preview_cache;
 pub mod split;
 pub mod thumb_regen;
+pub mod tool;
 pub mod vignette_mode;

@@ -24,18 +24,6 @@ struct CachedMasks {
     masks: Vec<MaskBuffer>, // one per visible layer, in visible order
 }
 
-/// TEMP brush-perf probe gate (`FERROLITE_BRUSH_PROFILE`). Resolved once.
-fn local_brush_profile() -> bool {
-    use std::sync::OnceLock;
-    static B: OnceLock<bool> = OnceLock::new();
-    *B.get_or_init(|| {
-        std::env::var("FERROLITE_BRUSH_PROFILE")
-            .ok()
-            .map(|v| !matches!(v.trim(), "" | "0" | "off" | "false"))
-            .unwrap_or(false)
-    })
-}
-
 pub(crate) struct LocalAdjustmentsNode {
     ctx: Arc<GpuContext>,
     layers: Rc<RefCell<LocalAdjustments>>,
@@ -321,44 +309,7 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
                 None => true,
             }
         };
-        // TEMP brush-perf probe (round 3b): does an adjustment-slider drag force a
-        // full mask re-composite? Kept in sync with the `rebuild` condition above,
-        // which is now keyed on mask definitions only.
-        if local_brush_profile() {
-            let comps: usize = layers
-                .visible_layers()
-                .map(|l| l.mask.components.len())
-                .sum();
-            let t = std::time::Instant::now();
-            if rebuild {
-                self.rebuilds.set(self.rebuilds.get() + 1);
-                let masks: Vec<MaskBuffer> = layers
-                    .visible_layers()
-                    .map(|l| {
-                        self.compositor.composite(
-                            &l.mask,
-                            &input_view,
-                            mw,
-                            mh,
-                            &RasterStore::default(),
-                        )
-                    })
-                    .collect();
-                eprintln!(
-                    "[brush-perf] local_node rebuild=true components={comps} composite={:.2}ms",
-                    t.elapsed().as_secs_f64() * 1e3
-                );
-                *self.cache.borrow_mut() = Some(CachedMasks {
-                    mask_defs: cur_defs,
-                    full_dims: (mw, mh),
-                    masks,
-                });
-            } else {
-                eprintln!(
-                    "[brush-perf] local_node rebuild=false components={comps} (mask cache hit)"
-                );
-            }
-        } else if rebuild {
+        if rebuild {
             // P1 has no mask producer, so imported components resolve to nothing here.
             // A2 threads a populated RasterStore (rebuilt from provenance prompts) in.
             self.rebuilds.set(self.rebuilds.get() + 1);

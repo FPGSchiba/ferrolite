@@ -6,11 +6,16 @@ use rawler::rawimage::{RawImageData, RawPhotometricInterpretation};
 use rawler::rawsource::RawSource;
 use std::path::Path;
 
-/// A fully decoded RAW: integer CFA/sensor samples plus geometry and colour
-/// calibration metadata. Consumed by the demosaic/display pipeline.
+/// A fully decoded RAW cropped to the camera's recommended image rectangle
+/// (`crop_area`, else `active_area`, else the full sensor): integer CFA/sensor
+/// samples plus geometry and colour calibration metadata. `width`/`height` are
+/// the CROPPED dimensions; `cfa_pattern` and `black_levels` are phase-aligned to
+/// the crop origin. Consumed by the demosaic/display pipeline.
 #[derive(Debug, Clone)]
 pub struct RawDecoded {
+    /// Cropped width (see struct docs) — NOT the full sensor width.
     pub width: u32,
+    /// Cropped height (see struct docs) — NOT the full sensor height.
     pub height: u32,
     /// Components per pixel (1 for Bayer CFA, 3/4 for some formats).
     pub cpp: usize,
@@ -35,6 +40,11 @@ pub struct RawDecoded {
     pub orientation: Orientation,
 }
 
+/// Decode a RAW file, cropping the sensor buffer to the camera's recommended
+/// image rectangle (`img.crop_area`, else `img.active_area`, else no crop) so
+/// the masked/optically-black sensor border is excluded. The returned
+/// `width`/`height` are the CROPPED dimensions, and `cfa_pattern`/`black_levels`
+/// are phase-shifted to the crop origin (a no-op at an even/even origin).
 pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
     let src = RawSource::new(path).map_err(rawler_err)?;
     let decoder = rawler::get_decoder(&src).map_err(rawler_err)?;
@@ -52,15 +62,47 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
         .map(Orientation::from_exif)
         .unwrap_or(Orientation::Normal);
 
+    // Crop to the camera's recommended image rectangle so the sensor's masked /
+    // optically-black border is excluded (otherwise the tiled renderer edge-
+    // replicates it into a stretched seam). Prefer `crop_area` (the intended
+    // final image, matching the embedded preview); fall back to `active_area`
+    // (optically-black-excluded); else no crop. `Rect { p: Point{x,y}, d: Dim2{w,h} }`
+    // is in sensor-buffer pixel coords (pre-orientation).
+    let full_w = img.width;
+    let full_h = img.height;
+    let crop = img
+        .crop_area
+        .or(img.active_area)
+        .filter(|r| r.p.x + r.d.w <= full_w && r.p.y + r.d.h <= full_h)
+        .filter(|r| !(r.p.x == 0 && r.p.y == 0 && r.d.w == full_w && r.d.h == full_h));
+
     // RawImageData is Integer(Vec<u16>) for almost all formats; a few DNGs are
     // Float — quantize to u16 for this plan's display-only consumer.
-    let pixels = match img.data {
+    let full_pixels = match img.data {
         RawImageData::Integer(v) => v,
         // NaN/Inf saturate to 0 / 65535 via Rust's defined float-to-int cast; acceptable for this display-only consumer.
         RawImageData::Float(v) => v
             .iter()
             .map(|f| f.round().clamp(0.0, 65535.0) as u16)
             .collect(),
+    };
+    let (pixels, width, height, crop_origin) = match crop {
+        Some(r) => (
+            crop_sensor_buffer(
+                &full_pixels,
+                full_w,
+                full_h,
+                img.cpp,
+                r.p.x,
+                r.p.y,
+                r.d.w,
+                r.d.h,
+            ),
+            r.d.w,
+            r.d.h,
+            (r.p.x, r.p.y),
+        ),
+        None => (full_pixels, full_w, full_h, (0, 0)),
     };
 
     // --- CFA pattern ---
@@ -72,11 +114,18 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
         RawPhotometricInterpretation::Cfa(cfg) => cfg.cfa.clone(),
         _ => img.camera.cfa.clone(),
     };
+    // Cropping can move the top-left into a different Bayer phase; shift the
+    // pattern to the crop origin so it describes the cropped buffer's (0,0).
+    let cfa = cfa.shift(crop_origin.0, crop_origin.1);
     let cfa_pattern = cfa_to_pattern(&cfa);
 
     // --- Black levels ---
     // BlackLevel::as_bayer_array() -> [f32; 4]  (rawler 0.7.2, rawimage.rs:120)
-    let black_levels = img.blacklevel.as_bayer_array();
+    let black_levels = permute_black_levels_by_origin(
+        img.blacklevel.as_bayer_array(),
+        crop_origin.0,
+        crop_origin.1,
+    );
 
     // --- White level ---
     // WhiteLevel(Vec<u32>)  (rawler 0.7.2, rawimage.rs:27)
@@ -99,9 +148,9 @@ pub fn decode_full(path: &Path) -> Result<RawDecoded, DecodeError> {
     ];
 
     Ok(RawDecoded {
-        width: u32::try_from(img.width)
+        width: u32::try_from(width)
             .map_err(|_| DecodeError::Rawler("RAW width exceeds u32".into()))?,
-        height: u32::try_from(img.height)
+        height: u32::try_from(height)
             .map_err(|_| DecodeError::Rawler("RAW height exceeds u32".into()))?,
         cpp: img.cpp,
         pixels,
@@ -155,11 +204,7 @@ fn cfa_to_pattern(cfa: &rawler::CFA) -> [u8; 4] {
 /// Copy the `cw`×`ch` sub-rectangle whose top-left is sensor pixel `(cx, cy)`
 /// out of a row-major `full_w`×`full_h` buffer with `cpp` components per pixel.
 /// The caller guarantees `cx + cw <= full_w` and `cy + ch <= full_h`.
-// TODO(decode-active-area-crop Task 2): drop these two `allow`s once `decode_full`
-// calls this helper — `dead_code` disappears because it becomes reachable outside
-// tests, and the 8-argument shape mirrors rawler's `Rect{p:{x,y}, d:{w,h}}` plus
-// source-buffer geometry, which is the plan's fixed public interface for Task 2.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn crop_sensor_buffer(
     pixels: &[u16],
     full_w: usize,
@@ -192,9 +237,6 @@ fn crop_sensor_buffer(
 /// matches the CFA phase after cropping at sensor origin `(cx, cy)`. Cropped
 /// position `(r, c)` reads sensor position `((cy + r) % 2, (cx + c) % 2)`.
 /// Identity when `cx` and `cy` are both even.
-// TODO(decode-active-area-crop Task 2): drop this `allow` once `decode_full` calls
-// this helper, making it reachable outside tests.
-#[allow(dead_code)]
 fn permute_black_levels_by_origin(bl: [f32; 4], cx: usize, cy: usize) -> [f32; 4] {
     let mut out = [0.0f32; 4];
     for r in 0..2 {
@@ -311,5 +353,34 @@ mod tests {
             cheap, full,
             "dummy-decode color profile must equal the full-decode color profile"
         );
+    }
+
+    /// The active-area crop must shrink the decoded frame to the camera's
+    /// recommended rectangle (removing the masked/optically-black border that
+    /// otherwise seams at the right/bottom edge in the tiled renderer). For the
+    /// bundled RW2 (`crop_area` origin (8,6), even/even) the crop preserves the
+    /// Bayer phase, so `cfa_pattern` and `black_levels` are unchanged.
+    #[test]
+    fn decode_full_crops_to_active_area() {
+        let fixture = Path::new("../fixtures/raw/sample.rw2");
+        if !fixture.exists() {
+            eprintln!("no RAW fixture; skipping active-area crop assertion");
+            return;
+        }
+        let d = decode_full(fixture).expect("decode");
+        // Cropped dims (NOT the full 4060x2250 sensor).
+        assert_eq!(
+            (d.width, d.height),
+            (3968, 2232),
+            "decoded to crop_area dims"
+        );
+        // Pixel buffer length matches cropped dims * cpp.
+        assert_eq!(
+            d.pixels.len(),
+            (d.width as usize) * (d.height as usize) * d.cpp
+        );
+        // Even/even origin -> phase preserved; every black level finite.
+        assert!(d.black_levels.iter().all(|b| b.is_finite()));
+        assert!(d.white_level > 0.0);
     }
 }

@@ -489,7 +489,7 @@ fn route_brush(
 
     let mut outcome: Option<EditOutcome> = None;
     if resp.dragged() || resp.drag_stopped() {
-        if let (Some(MaskGesture::Stroke(nodes, comp_idx)), Some(p)) =
+        if let (Some(MaskGesture::Stroke(nodes, target)), Some(p)) =
             (&mut mask.gesture, resp.interact_pointer_pos())
         {
             let norm = (
@@ -498,26 +498,33 @@ fn route_brush(
             );
             let src = display_to_source(geo, src_w, src_h, norm);
             mask_affordance::append_brush_node(nodes, src, params);
-
-            let strokes = vec![Stroke {
+            let stroke = Stroke {
                 nodes: nodes.clone(),
                 erase: mask.brush_erase,
-            }];
-            let comp = MaskComponent::Brush { strokes };
-            // Two-phase, mirroring the Linear/Radial create-then-replace: the
-            // first node append CREATES the component; every later frame
-            // REPLACES it in place so a growing stroke doesn't append a new
-            // component per dragged frame (the base `stack` passed in each
-            // frame is the previous frame's preview stack, which already
-            // carries the in-progress component).
-            let new_stack = match *comp_idx {
-                Some(ci) => mask_edit::set_component(stack, idx, ci, comp),
-                None => {
-                    let added = mask_edit::add_component(stack, idx, comp, mask.next_mode);
-                    let new_idx = mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
-                    *comp_idx = Some(new_idx);
-                    added
-                }
+            };
+            // Merge into the mask's active (last) Brush component: locate/create it
+            // on the first frame (recording base_stroke_count), then replace the
+            // live stroke in place each later frame. Strokes accumulate into ONE
+            // component instead of one-per-stroke, so component count stays bounded.
+            let new_stack = match *target {
+                Some((ci, base)) => mask_edit::set_brush_with_base(stack, idx, ci, base, stroke),
+                None => match mask_edit::last_brush_index(stack, idx) {
+                    Some(ci) => {
+                        let base = mask_edit::brush_stroke_count(stack, idx, ci);
+                        *target = Some((ci, base));
+                        mask_edit::set_brush_with_base(stack, idx, ci, base, stroke)
+                    }
+                    None => {
+                        let comp = MaskComponent::Brush {
+                            strokes: vec![stroke],
+                        };
+                        let added = mask_edit::add_component(stack, idx, comp, mask.next_mode);
+                        let new_idx =
+                            mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
+                        *target = Some((new_idx, 0));
+                        added
+                    }
+                },
             };
             outcome = Some(EditOutcome {
                 stack: new_stack,

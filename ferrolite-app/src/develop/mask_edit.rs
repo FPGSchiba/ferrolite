@@ -2,11 +2,6 @@
 //! `LocalAdjustments` with zero layers REMOVES the op (reset) so
 //! `is_identity()`/`has_edits` stay correct — mirroring `ops_edit`. All edits
 //! carry `OpKind::LocalAdjustments`; the app pushes one history entry per gesture.
-//!
-//! NOTE: the brush-merge helpers (`last_brush_index`, `brush_stroke_count`,
-//! `set_brush_with_base`, `new_brush_layer`) are consumed by the brush routing task
-//! that lands next; the module-level allow is REMOVED once that routing lands.
-#![allow(dead_code)]
 
 use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Stroke};
 use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Op, OpKind, OpStack};
@@ -174,6 +169,9 @@ pub fn set_brush_with_base(
 
 /// Append a fresh empty `Brush` component (Add mode) — "New Brush Layer": the next
 /// strokes accumulate here, and it is independently deletable in the Components list.
+// NOTE: not yet called from the routing layer — Task 5 wires this into the "New
+// Brush Layer" UI affordance, at which point this allow is removed.
+#[allow(dead_code)]
 pub fn new_brush_layer(stack: &OpStack, mask_idx: usize) -> OpStack {
     add_component(
         stack,

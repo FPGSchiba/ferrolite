@@ -11,6 +11,7 @@ mod pass;
 mod raster_store;
 mod shapes;
 mod stroke;
+mod tile_transform;
 mod vec;
 
 pub use brush::BrushRasterizer;
@@ -30,4 +31,5 @@ pub use stroke::{
     composite_dabs, dab_alpha, halo_px, max_dab_radius, stroke_dabs, Dab, StrokeCursor,
     SPACING_FRAC,
 };
+pub use tile_transform::TileTransform;
 pub use vec::{Rgb, Vec2};

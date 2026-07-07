@@ -38,13 +38,22 @@ fn add_composite_matches_golden() {
         eprintln!("no GPU adapter; skipping (headless CI)");
         return;
     };
-    let a = lin.run(Vec2::new(0.1, 0.5), Vec2::new(0.5, 0.5), W, H);
+    let a = lin.run(
+        Vec2::new(0.1, 0.5),
+        Vec2::new(0.5, 0.5),
+        [1.0, 1.0],
+        [0.0, 0.0],
+        W,
+        H,
+    );
     let b = rad.run(
         Vec2::new(0.7, 0.5),
         Vec2::new(0.2, 0.3),
         0.0,
         0.2,
         false,
+        [1.0, 1.0],
+        [0.0, 0.0],
         W,
         H,
     );
@@ -59,13 +68,22 @@ fn subtract_composite_matches_golden() {
         eprintln!("no GPU adapter; skipping (headless CI)");
         return;
     };
-    let a = lin.run(Vec2::new(0.1, 0.5), Vec2::new(0.9, 0.5), W, H);
+    let a = lin.run(
+        Vec2::new(0.1, 0.5),
+        Vec2::new(0.9, 0.5),
+        [1.0, 1.0],
+        [0.0, 0.0],
+        W,
+        H,
+    );
     let b = rad.run(
         Vec2::new(0.5, 0.5),
         Vec2::new(0.25, 0.35),
         0.0,
         0.2,
         false,
+        [1.0, 1.0],
+        [0.0, 0.0],
         W,
         H,
     );
@@ -83,13 +101,22 @@ fn intersect_composite_matches_golden() {
         eprintln!("no GPU adapter; skipping (headless CI)");
         return;
     };
-    let a = lin.run(Vec2::new(0.1, 0.5), Vec2::new(0.9, 0.5), W, H);
+    let a = lin.run(
+        Vec2::new(0.1, 0.5),
+        Vec2::new(0.9, 0.5),
+        [1.0, 1.0],
+        [0.0, 0.0],
+        W,
+        H,
+    );
     let b = rad.run(
         Vec2::new(0.5, 0.5),
         Vec2::new(0.4, 0.4),
         0.0,
         0.2,
         false,
+        [1.0, 1.0],
+        [0.0, 0.0],
         W,
         H,
     );
@@ -107,7 +134,14 @@ fn invert_composite_matches_golden() {
         eprintln!("no GPU adapter; skipping (headless CI)");
         return;
     };
-    let a = lin.run(Vec2::new(0.1, 0.5), Vec2::new(0.9, 0.5), W, H);
+    let a = lin.run(
+        Vec2::new(0.1, 0.5),
+        Vec2::new(0.9, 0.5),
+        [1.0, 1.0],
+        [0.0, 0.0],
+        W,
+        H,
+    );
     let out = comp.composite(&[(a, CompositeMode::Add)], true);
     let values = common::read_r32f(&ctx, &out);
     common::assert_mask_golden(&values, W, H, "composite_invert.png");
@@ -173,13 +207,22 @@ fn composite_node_runs_in_generic_graph() {
         eprintln!("no GPU adapter; skipping (headless CI)");
         return;
     };
-    let a = lin.run(Vec2::new(0.1, 0.5), Vec2::new(0.9, 0.5), W, H);
+    let a = lin.run(
+        Vec2::new(0.1, 0.5),
+        Vec2::new(0.9, 0.5),
+        [1.0, 1.0],
+        [0.0, 0.0],
+        W,
+        H,
+    );
     let b = rad.run(
         Vec2::new(0.5, 0.5),
         Vec2::new(0.3, 0.3),
         0.0,
         0.2,
         false,
+        [1.0, 1.0],
+        [0.0, 0.0],
         W,
         H,
     );

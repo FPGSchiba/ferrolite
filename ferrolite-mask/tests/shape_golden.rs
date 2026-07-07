@@ -16,7 +16,14 @@ fn linear_gradient_matches_golden() {
     let ctx = Arc::new(ctx);
     let pass = LinearGradientPass::new(ctx.clone());
     // Horizontal ramp across the middle third of the image.
-    let mask = pass.run(Vec2::new(0.2, 0.5), Vec2::new(0.8, 0.5), W, H);
+    let mask = pass.run(
+        Vec2::new(0.2, 0.5),
+        Vec2::new(0.8, 0.5),
+        [1.0, 1.0],
+        [0.0, 0.0],
+        W,
+        H,
+    );
     let values = common::read_r32f(&ctx, &mask);
     // Sanity: left edge clamps to 0, right edge clamps to 1.
     assert!(values[0] < 0.01, "left edge should clamp to 0");
@@ -42,6 +49,8 @@ fn radial_gradient_matches_golden() {
         0.0,
         0.3,
         false,
+        [1.0, 1.0],
+        [0.0, 0.0],
         W,
         H,
     );

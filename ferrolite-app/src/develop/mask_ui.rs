@@ -51,25 +51,6 @@ pub fn tool_for_component(c: &MaskComponent) -> Option<MaskTool> {
     }
 }
 
-/// Which component the canvas affordance for `tool` should act on: the
-/// `editing` component if it exists and matches `tool`, otherwise the first
-/// component matching `tool` (the create-a-fresh-one fallback). `None` if no
-/// component matches.
-pub fn edit_target_index(
-    components: &[(MaskComponent, CompositeMode)],
-    tool: MaskTool,
-    editing: Option<usize>,
-) -> Option<usize> {
-    if let Some(i) = editing {
-        if components.get(i).and_then(|(c, _)| tool_for_component(c)) == Some(tool) {
-            return Some(i);
-        }
-    }
-    components
-        .iter()
-        .position(|(c, _)| tool_for_component(c) == Some(tool))
-}
-
 pub struct MaskUiState {
     pub active: bool,
     pub selected: Option<usize>,
@@ -197,7 +178,7 @@ mod tests {
         assert_eq!(s2.selected, Some(0), "in-range selection preserved");
     }
 
-    use ferrolite_mask::{CompositeMode, MaskComponent, Vec2};
+    use ferrolite_mask::{MaskComponent, Vec2};
 
     fn linear() -> MaskComponent {
         MaskComponent::LinearGradient {
@@ -216,9 +197,6 @@ mod tests {
     }
     fn brush() -> MaskComponent {
         MaskComponent::Brush { strokes: vec![] }
-    }
-    fn add(c: MaskComponent) -> (MaskComponent, CompositeMode) {
-        (c, CompositeMode::Add)
     }
 
     #[test]
@@ -251,34 +229,6 @@ mod tests {
                     prompt: "".into()
                 },
             }),
-            None
-        );
-    }
-
-    #[test]
-    fn edit_target_prefers_editing_when_type_matches_else_first() {
-        // components: [linear#0, radial#1, linear#2]
-        let comps = vec![add(linear()), add(radial()), add(linear())];
-        // editing #2 (a linear) + Linear tool -> target #2 (not the first linear #0)
-        assert_eq!(
-            edit_target_index(&comps, MaskTool::Linear, Some(2)),
-            Some(2)
-        );
-        // editing #1 (a radial) but Linear tool -> type mismatch -> first linear (#0)
-        assert_eq!(
-            edit_target_index(&comps, MaskTool::Linear, Some(1)),
-            Some(0)
-        );
-        // no editing -> first matching
-        assert_eq!(edit_target_index(&comps, MaskTool::Radial, None), Some(1));
-        // editing out of range -> first matching
-        assert_eq!(
-            edit_target_index(&comps, MaskTool::Linear, Some(99)),
-            Some(0)
-        );
-        // no matching component -> None
-        assert_eq!(
-            edit_target_index(&[add(brush())], MaskTool::Linear, None),
             None
         );
     }

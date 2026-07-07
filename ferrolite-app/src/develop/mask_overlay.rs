@@ -173,32 +173,36 @@ pub fn show(
     let src_to_screen =
         |p: (f32, f32)| -> egui::Pos2 { to_screen_from_src(geo, src_w, src_h, p, &to_screen) };
 
-    // Find the component the canvas affordance should target: the component
-    // being edited (if it matches `tool`), else the first matching component
-    // (the create-a-fresh-one fallback) — see `mask_ui::edit_target_index`.
+    // Find the component the canvas affordance should target: ONLY the
+    // component currently being edited (`mask.editing_component`), and only if
+    // it matches this tool's component type. Explicit-edit model — canvas
+    // handles must never fall back to "the first matching component", or they'd
+    // draw (and stay draggable) merely because the tool is active and a
+    // gradient happens to exist, even after the user clicked "Done" editing.
     let la = mask_edit::layers(stack);
     let comps = la
         .layers
         .get(idx)
         .map(|l| l.mask.components.as_slice())
         .unwrap_or(&[]);
-    let existing = crate::develop::mask_ui::edit_target_index(comps, tool, mask.editing_component)
+    let existing = mask
+        .editing_component
         .filter(|_| tool == MaskTool::Linear)
-        .and_then(|i| match &comps[i].0 {
-            MaskComponent::LinearGradient { start, end } => {
+        .and_then(|i| match comps.get(i).map(|(c, _)| c) {
+            Some(MaskComponent::LinearGradient { start, end }) => {
                 Some((i, (start.x, start.y), (end.x, end.y)))
             }
             _ => None,
         });
-    let existing_radial =
-        crate::develop::mask_ui::edit_target_index(comps, tool, mask.editing_component)
-            .filter(|_| tool == MaskTool::Radial)
-            .and_then(|i| match &comps[i].0 {
-                MaskComponent::RadialGradient { center, radius, .. } => {
-                    Some((i, (center.x, center.y), (radius.x, radius.y)))
-                }
-                _ => None,
-            });
+    let existing_radial = mask
+        .editing_component
+        .filter(|_| tool == MaskTool::Radial)
+        .and_then(|i| match comps.get(i).map(|(c, _)| c) {
+            Some(MaskComponent::RadialGradient { center, radius, .. }) => {
+                Some((i, (center.x, center.y), (radius.x, radius.y)))
+            }
+            _ => None,
+        });
 
     let resp = ui.interact(
         image_rect,
@@ -253,6 +257,12 @@ pub fn show(
     }
 
     let mut outcome: Option<EditOutcome> = None;
+    // Set (outside the `&mask.gesture` borrow below) when the drag-CREATE path
+    // adds a brand-new gradient component, so it immediately becomes the edit
+    // target — its handles must appear right away without a separate "Edit"
+    // click (the `existing`/`existing_radial` finders above only match
+    // `mask.editing_component`).
+    let mut new_created: Option<usize> = None;
     if resp.dragged() || resp.drag_stopped() {
         if let (
             Some(MaskGesture::DragHandle {
@@ -283,6 +293,7 @@ pub fn show(
                             handle: lin_handle_to_u32(LinHandle::End),
                             origin_src,
                         });
+                        new_created = Some(new_idx);
                         Some(added)
                     }
                     MaskTool::Radial => {
@@ -301,6 +312,7 @@ pub fn show(
                             handle: rad_handle_to_u32(RadHandle::Both),
                             origin_src,
                         });
+                        new_created = Some(new_idx);
                         Some(added)
                     }
                     _ => None,
@@ -347,15 +359,19 @@ pub fn show(
                         }
                         let h = u32_to_rad_handle(handle);
                         let (nc, nr) = mask_affordance::radial_drag(center, radius, 0.0, h, src);
-                        let feather = la.layers[idx]
-                            .mask
-                            .components
-                            .get(comp_idx)
-                            .and_then(|(c, _)| match c {
-                                MaskComponent::RadialGradient { feather, .. } => Some(*feather),
+                        let existing_comp = la.layers[idx].mask.components.get(comp_idx).and_then(
+                            |(c, _)| match c {
+                                MaskComponent::RadialGradient {
+                                    feather,
+                                    rotation,
+                                    invert,
+                                    ..
+                                } => Some((*feather, *rotation, *invert)),
                                 _ => None,
-                            })
-                            .unwrap_or(0.3);
+                            },
+                        );
+                        let (feather, rotation, invert) =
+                            existing_comp.unwrap_or((0.3, 0.0, false));
                         Some(mask_edit::set_component(
                             stack,
                             idx,
@@ -363,9 +379,9 @@ pub fn show(
                             MaskComponent::RadialGradient {
                                 center: Vec2::new(nc.0, nc.1),
                                 radius: Vec2::new(nr.0, nr.1),
-                                rotation: 0.0,
+                                rotation,
                                 feather,
-                                invert: false,
+                                invert,
                             },
                         ))
                     }),
@@ -380,6 +396,9 @@ pub fn show(
                 });
             }
         }
+    }
+    if let Some(new_idx) = new_created {
+        mask.editing_component = Some(new_idx);
     }
     if resp.drag_stopped() {
         mask.gesture = None;
@@ -425,6 +444,20 @@ pub fn show(
                     theme::ACCENT_BRIGHT,
                     egui::Stroke::new(1.0, theme::BG_BASE),
                 );
+                // Resize handles at the RadiusX/RadiusY axis endpoints — without
+                // these there was nothing to grab even though `radial_hit_test`
+                // already hit-tests exactly these two points.
+                for p in [
+                    src_to_screen((center.0 + radius.0, center.1)),
+                    src_to_screen((center.0, center.1 + radius.1)),
+                ] {
+                    painter.circle(
+                        p,
+                        4.0,
+                        theme::ACCENT_BRIGHT,
+                        egui::Stroke::new(1.0, theme::BG_BASE),
+                    );
+                }
             }
         }
         _ => {}

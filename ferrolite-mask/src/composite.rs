@@ -128,15 +128,22 @@ impl CompositePass {
         }
     }
 
-    fn fold_into(&self, acc: &MaskBuffer, b: &MaskBuffer, mode: CompositeMode) -> MaskBuffer {
+    /// Record (but do not submit) one fold step: `out = fold(acc, b, mode)`.
+    /// `acc`, `b`, and `out` must never alias the same texture (ping-pong
+    /// scratch buffers guarantee this) — `acc`/`b` are read-only inputs here,
+    /// including cached component coverage buffers, which this must never
+    /// mutate.
+    fn record_fold(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        acc: &wgpu::Texture,
+        b: &wgpu::Texture,
+        out: &MaskBuffer,
+        mode: CompositeMode,
+    ) {
         use wgpu::util::DeviceExt;
-        let out = MaskBuffer::alloc(&self.ctx, acc.width, acc.height);
-        let acc_view = acc
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let b_view = b
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let acc_view = acc.create_view(&wgpu::TextureViewDescriptor::default());
+        let b_view = b.create_view(&wgpu::TextureViewDescriptor::default());
         let out_view = out
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -183,15 +190,13 @@ impl CompositePass {
                     },
                 ],
             });
-        self.dispatch(&self.fold_pipeline, &bind, out.width, out.height);
-        out
+        Self::record_pass(enc, &self.fold_pipeline, &bind, out.width, out.height);
     }
 
-    fn invert(&self, src: &MaskBuffer) -> MaskBuffer {
-        let out = MaskBuffer::alloc(&self.ctx, src.width, src.height);
-        let src_view = src
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+    /// Record (but do not submit) an invert step: `out = 1 - src`. `src` and
+    /// `out` must never alias the same texture.
+    fn record_invert(&self, enc: &mut wgpu::CommandEncoder, src: &wgpu::Texture, out: &MaskBuffer) {
+        let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
         let out_view = out
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -212,40 +217,88 @@ impl CompositePass {
                     },
                 ],
             });
-        self.dispatch(&self.invert_pipeline, &bind, out.width, out.height);
-        out
+        Self::record_pass(enc, &self.invert_pipeline, &bind, out.width, out.height);
     }
 
-    fn dispatch(&self, pipeline: &wgpu::ComputePipeline, bind: &wgpu::BindGroup, w: u32, h: u32) {
-        let mut enc = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("mask-composite-pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
-        }
-        self.ctx.queue.submit([enc.finish()]);
+    /// Record a single compute pass (bind pipeline + bind group, dispatch)
+    /// into `enc`. Does not submit — wgpu inserts automatic memory barriers
+    /// between separate compute passes within one encoder, so each ping-pong
+    /// step correctly observes the previous step's writes.
+    fn record_pass(
+        enc: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        bind: &wgpu::BindGroup,
+        w: u32,
+        h: u32,
+    ) {
+        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("mask-composite-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
     }
 
     /// Fold `inputs` left-to-right (first seeds the accumulator), then invert if
     /// requested. Panics if `inputs` is empty (the zero-component case is a
     /// caller concern — see `composite_scalar`). All inputs must share dims.
+    ///
+    /// Batches the whole fold chain (+ optional invert) into ONE command
+    /// encoder and ONE `queue.submit`, ping-ponging between two scratch
+    /// buffers. The input buffers (including `inputs[0]`, the seed, which may
+    /// be a cached component coverage buffer) are only ever read — every
+    /// write targets one of the two freshly allocated scratch buffers.
     pub fn composite(&self, inputs: &[(MaskBuffer, CompositeMode)], invert: bool) -> MaskBuffer {
         assert!(!inputs.is_empty(), "composite requires >= 1 input buffer");
-        let mut acc = inputs[0].0.clone();
+        let (w, h) = (inputs[0].0.width, inputs[0].0.height);
+
+        // Single input, no invert: nothing to compute — hand back the seed.
+        if inputs.len() == 1 && !invert {
+            return inputs[0].0.clone();
+        }
+
+        // Two scratch buffers; ping-pong so read-tex != write-tex each step (and
+        // the cached input buffers are never written). Only 2 allocs regardless
+        // of N.
+        let scratch = [
+            MaskBuffer::alloc(&self.ctx, w, h),
+            MaskBuffer::alloc(&self.ctx, w, h),
+        ];
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mask-composite"),
+            });
+
+        // Fold: step k reads the previous accumulator, writes the other scratch.
+        // acc for step 1 is the seed (inputs[0]); afterwards it alternates
+        // scratch.
+        let mut acc_tex = &inputs[0].0.texture;
+        let mut cur = 0usize;
         for (buf, mode) in &inputs[1..] {
-            acc = self.fold_into(&acc, buf, *mode);
+            self.record_fold(&mut enc, acc_tex, &buf.texture, &scratch[cur], *mode);
+            acc_tex = &scratch[cur].texture;
+            cur ^= 1;
         }
+        // `cur` now points at the free scratch; the last write went to
+        // scratch[cur ^ 1].
+        let mut result_idx = cur ^ 1;
+
         if invert {
-            acc = self.invert(&acc);
+            // Read the last accumulator, write the free scratch.
+            let src_tex = if inputs.len() == 1 {
+                &inputs[0].0.texture
+            } else {
+                &scratch[result_idx].texture
+            };
+            self.record_invert(&mut enc, src_tex, &scratch[cur]);
+            result_idx = cur;
         }
-        acc
+
+        self.ctx.queue.submit([enc.finish()]);
+        scratch[result_idx].clone()
     }
 }
 
@@ -269,5 +322,73 @@ impl Node<MaskBuffer> for CompositeNode {
             })
             .collect();
         self.pass.composite(&pairs, self.invert)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrolite_gpu::GpuContext;
+
+    fn const_buf(ctx: &Arc<GpuContext>, w: u32, h: u32, v: f32) -> MaskBuffer {
+        let buf = MaskBuffer::alloc(ctx, w, h);
+        let data = vec![v; (w * h) as usize];
+        ctx.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &buf.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        buf
+    }
+
+    #[test]
+    fn batched_composite_matches_scalar_reference_three_inputs() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let pass = CompositePass::new(ctx.clone());
+        // 2x2 constant buffers: 0.8 (seed, Add), 0.5 (Subtract), 0.3 (Intersect)
+        let a = const_buf(&ctx, 2, 2, 0.8);
+        let b = const_buf(&ctx, 2, 2, 0.5);
+        let c = const_buf(&ctx, 2, 2, 0.3);
+        let out = pass.composite(
+            &[
+                (a, crate::model::CompositeMode::Add),
+                (b, crate::model::CompositeMode::Subtract),
+                (c, crate::model::CompositeMode::Intersect),
+            ],
+            false,
+        );
+        // scalar reference: intersect(subtract(0.8, 0.5), 0.3)
+        let want = crate::model::composite_scalar(
+            &[
+                (0.8, crate::model::CompositeMode::Add),
+                (0.5, crate::model::CompositeMode::Subtract),
+                (0.3, crate::model::CompositeMode::Intersect),
+            ],
+            false,
+        );
+        let got = crate::compositor::read_mask_r32f(&ctx, &out);
+        assert!(
+            got.iter().all(|&v| (v - want).abs() < 1e-4),
+            "got {:?} want {want}",
+            &got[..1]
+        );
     }
 }

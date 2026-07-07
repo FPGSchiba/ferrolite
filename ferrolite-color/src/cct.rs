@@ -55,7 +55,9 @@ pub fn wb_temp_to_cct(temp_norm: f32) -> f32 {
     const D65_CCT: f32 = 6504.0;
     const TEMP_MIRED_SPAN: f32 = 200.0; // mired per unit of normalized temp
     let baseline_mired = 1.0e6 / D65_CCT;
-    // mired ∈ [40, 600] ⇒ CCT ∈ [1667, 25000] (Kim-locus valid range).
+    // mired ∈ [40, 599] ⇒ CCT ∈ [~1669, 25000], inside the Kim-locus valid
+    // range. Upper bound is 599 (not 600) because 1e6/600 ≈ 1666.67 falls just
+    // below the 1667 K floor `cct_to_xy` accepts.
     let mired = (baseline_mired + temp_norm * TEMP_MIRED_SPAN).clamp(40.0, 599.0);
     1.0e6 / mired
 }

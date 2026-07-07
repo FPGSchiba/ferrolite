@@ -297,7 +297,8 @@ pub fn spawn_prefetch(
                 let Ok(raw) = ferrolite_decode::decode_full(&path) else {
                     return;
                 };
-                // Demosaic + upright, exactly as `viewer/load.rs::spawn_full` does.
+                // Demosaic (QuadBin — this is the tier-1 reveal/prefetch cache only;
+                // the on-screen full tier uses GPU RCD via `spawn_full`) + upright.
                 let image = ferrolite_decode::apply_orientation_linear(
                     QuadBin.to_linear_rgba_f32(&raw),
                     raw.orientation,

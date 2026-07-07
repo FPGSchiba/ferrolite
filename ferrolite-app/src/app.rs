@@ -990,8 +990,9 @@ impl FerroliteApp {
                     // `v.present_key` is set to the freshly-composed state), which is
                     // the only crossfade trigger that actually drives a visible
                     // preview→front fade.
-                    // The full tier's dimensions (uprighted, half-res demosaic)
-                    // are the reveal render's dims too. Fit to them; fall back to
+                    // The full tier's dimensions (uprighted; full-res GPU RCD for
+                    // RGGB, else QuadBin half-res) are the reveal render's dims too.
+                    // Fit to them; fall back to
                     // the image's own size if the canvas has not painted yet (the
                     // user has not interacted at open time).
                     let full_dims = (image.width, image.height);

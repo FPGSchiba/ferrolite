@@ -38,6 +38,7 @@ pub fn show(
         if ui.button("Create New Mask").clicked() {
             let name = format!("Mask {}", la.layers.len() + 1);
             mask.selected = Some(la.layers.len()); // select the new one
+            mask.overlay_on = true;
             mask.components_modal_open = false;
             mask.editing_component = None;
             mask.preview_component = None;

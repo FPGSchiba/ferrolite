@@ -188,7 +188,7 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     ui.add_space(6.0);
     ui.label(
         egui::RichText::new(
-            "Gestures: Ctrl + scroll over the image resizes the brush (Mask \u{25b8} Brush).",
+            "Gestures: Ctrl + scroll over the image resizes the brush (Mask > Brush).",
         )
         .size(11.0)
         .color(crate::theme::TEXT_DIM),

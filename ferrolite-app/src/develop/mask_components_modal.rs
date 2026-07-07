@@ -276,7 +276,24 @@ fn edit_component_ui(
                             ),
                         );
                     }
+                    if ui.small_button("Clear").clicked() {
+                        mask.color_samples.clear();
+                    }
                 });
+            }
+            let pick_label = if mask.picking_color {
+                format!("{} Picking… (click image)", crate::icons::EYEDROPPER)
+            } else {
+                format!("{} Pick color", crate::icons::EYEDROPPER)
+            };
+            if ui
+                .selectable_label(mask.picking_color, pick_label)
+                .clicked()
+            {
+                mask.picking_color = !mask.picking_color;
+                if mask.picking_color {
+                    mask.tool = MaskTool::ColorRange; // so mask_overlay::show routes the eyedropper
+                }
             }
             ui.add(EguiSlider {
                 label: "Tolerance",
@@ -305,9 +322,11 @@ fn edit_component_ui(
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
                     result = Some(color_from_state(mask));
+                    mask.picking_color = false;
                 }
                 if ui.button("Cancel").clicked() {
                     mask.editing_component = None;
+                    mask.picking_color = false;
                 }
             });
         }

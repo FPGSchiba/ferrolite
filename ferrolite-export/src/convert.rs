@@ -7,10 +7,13 @@ use ferrolite_color::{mul_vec3, output_oetf, Mat3, WorkingSpace};
 /// Apply the working→output 3×3, clamp to `[0,1]`, then the output OETF.
 pub(crate) fn convert_pixel(rgb_lin: [f32; 3], m: &Mat3, out: WorkingSpace) -> [f32; 3] {
     let lin = mul_vec3(m, &rgb_lin);
+    // Unclamped working values must never encode a NaN pixel (§6): map NaN to a
+    // defined 0.0 before the OETF. ±Inf is left to `output_oetf`'s clamp (→ 1/0).
+    let nz = |v: f32| if v.is_nan() { 0.0 } else { v };
     [
-        output_oetf(out, lin[0]),
-        output_oetf(out, lin[1]),
-        output_oetf(out, lin[2]),
+        output_oetf(out, nz(lin[0])),
+        output_oetf(out, nz(lin[1])),
+        output_oetf(out, nz(lin[2])),
     ]
 }
 
@@ -54,5 +57,42 @@ mod tests {
         assert_eq!(to_u8([0.0, 1.0, 0.5]), [0, 255, 128]);
         assert_eq!(to_u8([-1.0, 2.0, 0.5]), [0, 255, 128]);
         assert_eq!(to_u16([0.0, 1.0, 0.5]), [0, 65535, 32768]);
+    }
+
+    #[test]
+    fn sanitizes_non_finite_channels() {
+        let m = identity();
+        // Isolate each non-finite input: the identity dot product would otherwise
+        // cross-contaminate via 0*Inf = NaN, so drive one channel at a time (the
+        // identity diagonal passes it through; the others become NaN → masked to 0).
+        // NaN -> 0 (nz guard); +Inf -> white and -Inf -> black (output_oetf clamp).
+        let nan_ch = convert_pixel([f32::NAN, 0.0, 0.0], &m, WorkingSpace::Srgb);
+        assert!(
+            nan_ch.iter().all(|v| v.is_finite()),
+            "NaN must sanitize, got {nan_ch:?}"
+        );
+        assert_eq!(to_u8(nan_ch)[0], 0, "NaN channel -> 0");
+
+        let pos_inf = convert_pixel([0.0, f32::INFINITY, 0.0], &m, WorkingSpace::Srgb);
+        assert!(
+            pos_inf.iter().all(|v| v.is_finite()),
+            "output must be finite, got {pos_inf:?}"
+        );
+        assert_eq!(
+            to_u8(pos_inf)[1],
+            255,
+            "+Inf channel clamps to white via output_oetf"
+        );
+
+        let neg_inf = convert_pixel([0.0, 0.0, f32::NEG_INFINITY], &m, WorkingSpace::Srgb);
+        assert!(
+            neg_inf.iter().all(|v| v.is_finite()),
+            "output must be finite, got {neg_inf:?}"
+        );
+        assert_eq!(
+            to_u8(neg_inf)[2],
+            0,
+            "-Inf channel clamps to black via output_oetf"
+        );
     }
 }

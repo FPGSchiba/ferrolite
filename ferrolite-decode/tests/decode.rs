@@ -1,14 +1,24 @@
 use ferrolite_image::FileKind;
 use std::path::{Path, PathBuf};
 
-/// First file in the shared fixture directory (extension-agnostic).
+/// First RAW file in the shared fixture directory. Sidecars and exported
+/// images (`.xmp`, `.jpg`, `.png`, …) that may land in the dir during manual
+/// testing are skipped so a stray file cannot hijack the fixture selection.
 fn fixture() -> PathBuf {
+    const NON_RAW: &[&str] = &["xmp", "jpg", "jpeg", "png", "tif", "tiff", "webp", "avif"];
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fixtures/raw");
     std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.is_file())
+        .find(|p| {
+            p.is_file()
+                && !p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| NON_RAW.contains(&e.to_ascii_lowercase().as_str()))
+                    .unwrap_or(false)
+        })
         .expect("a RAW fixture in fixtures/raw")
 }
 

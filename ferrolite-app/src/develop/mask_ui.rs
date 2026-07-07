@@ -55,8 +55,6 @@ pub fn tool_for_component(c: &MaskComponent) -> Option<MaskTool> {
 /// `editing` component if it exists and matches `tool`, otherwise the first
 /// component matching `tool` (the create-a-fresh-one fallback). `None` if no
 /// component matches.
-// Wired into the canvas edit-target routing in a follow-up task.
-#[allow(dead_code)]
 pub fn edit_target_index(
     components: &[(MaskComponent, CompositeMode)],
     tool: MaskTool,

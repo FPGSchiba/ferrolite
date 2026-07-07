@@ -173,32 +173,32 @@ pub fn show(
     let src_to_screen =
         |p: (f32, f32)| -> egui::Pos2 { to_screen_from_src(geo, src_w, src_h, p, &to_screen) };
 
-    // Find the first component matching the active tool in the selected mask.
+    // Find the component the canvas affordance should target: the component
+    // being edited (if it matches `tool`), else the first matching component
+    // (the create-a-fresh-one fallback) — see `mask_ui::edit_target_index`.
     let la = mask_edit::layers(stack);
-    let existing = la.layers.get(idx).and_then(|l| {
-        l.mask
-            .components
-            .iter()
-            .enumerate()
-            .find_map(|(i, (c, _))| match (tool, c) {
-                (MaskTool::Linear, MaskComponent::LinearGradient { start, end }) => {
-                    Some((i, (start.x, start.y), (end.x, end.y)))
-                }
-                _ => None,
-            })
-    });
-    let existing_radial = la.layers.get(idx).and_then(|l| {
-        l.mask
-            .components
-            .iter()
-            .enumerate()
-            .find_map(|(i, (c, _))| match (tool, c) {
-                (MaskTool::Radial, MaskComponent::RadialGradient { center, radius, .. }) => {
+    let comps = la
+        .layers
+        .get(idx)
+        .map(|l| l.mask.components.as_slice())
+        .unwrap_or(&[]);
+    let existing = crate::develop::mask_ui::edit_target_index(comps, tool, mask.editing_component)
+        .filter(|_| tool == MaskTool::Linear)
+        .and_then(|i| match &comps[i].0 {
+            MaskComponent::LinearGradient { start, end } => {
+                Some((i, (start.x, start.y), (end.x, end.y)))
+            }
+            _ => None,
+        });
+    let existing_radial =
+        crate::develop::mask_ui::edit_target_index(comps, tool, mask.editing_component)
+            .filter(|_| tool == MaskTool::Radial)
+            .and_then(|i| match &comps[i].0 {
+                MaskComponent::RadialGradient { center, radius, .. } => {
                     Some((i, (center.x, center.y), (radius.x, radius.y)))
                 }
                 _ => None,
-            })
-    });
+            });
 
     let resp = ui.interact(
         image_rect,
@@ -489,6 +489,9 @@ fn route_brush(
 
     let mut outcome: Option<EditOutcome> = None;
     if resp.dragged() || resp.drag_stopped() {
+        // Read before the `&mut mask.gesture` borrow below so the edited-component
+        // lookup doesn't conflict with it.
+        let editing = mask.editing_component;
         if let (Some(MaskGesture::Stroke(nodes, target)), Some(p)) =
             (&mut mask.gesture, resp.interact_pointer_pos())
         {
@@ -508,23 +511,36 @@ fn route_brush(
             // component instead of one-per-stroke, so component count stays bounded.
             let new_stack = match *target {
                 Some((ci, base)) => mask_edit::set_brush_with_base(stack, idx, ci, base, stroke),
-                None => match mask_edit::last_brush_index(stack, idx) {
-                    Some(ci) => {
-                        let base = mask_edit::brush_stroke_count(stack, idx, ci);
-                        *target = Some((ci, base));
-                        mask_edit::set_brush_with_base(stack, idx, ci, base, stroke)
+                None => {
+                    // Prefer the component being edited (resume-paint), else the
+                    // mask's last brush component, else create a new one.
+                    let edited_brush = editing.filter(|&i| {
+                        matches!(
+                            mask_edit::layers(stack)
+                                .layers
+                                .get(idx)
+                                .and_then(|l| l.mask.components.get(i)),
+                            Some((MaskComponent::Brush { .. }, _))
+                        )
+                    });
+                    match edited_brush.or_else(|| mask_edit::last_brush_index(stack, idx)) {
+                        Some(ci) => {
+                            let base = mask_edit::brush_stroke_count(stack, idx, ci);
+                            *target = Some((ci, base));
+                            mask_edit::set_brush_with_base(stack, idx, ci, base, stroke)
+                        }
+                        None => {
+                            let comp = MaskComponent::Brush {
+                                strokes: vec![stroke],
+                            };
+                            let added = mask_edit::add_component(stack, idx, comp, mask.next_mode);
+                            let new_idx =
+                                mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
+                            *target = Some((new_idx, 0));
+                            added
+                        }
                     }
-                    None => {
-                        let comp = MaskComponent::Brush {
-                            strokes: vec![stroke],
-                        };
-                        let added = mask_edit::add_component(stack, idx, comp, mask.next_mode);
-                        let new_idx =
-                            mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
-                        *target = Some((new_idx, 0));
-                        added
-                    }
-                },
+                }
             };
             outcome = Some(EditOutcome {
                 stack: new_stack,

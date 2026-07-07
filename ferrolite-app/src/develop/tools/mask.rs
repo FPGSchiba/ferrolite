@@ -38,12 +38,13 @@ impl DevelopTool for MaskTool {
         // Wrap mask_overlay::show verbatim (mirrors app.rs:3724-3745): pre-extract
         // the shared bits out of the viewer first (all cheap Arc/handle clones),
         // releasing the borrow, then take &mut v.mask for the call.
-        let (stack, dims, tex, preview_source) = {
+        let (stack, dims, tex, highlight_tex, preview_source) = {
             let v = state.viewer.as_ref()?;
             (
                 v.op_stack.clone(),
                 v.image_dims.unwrap_or((1, 1)),
                 state.mask_overlay_native,
+                state.mask_overlay_highlight_native,
                 v.preview_source.clone(),
             )
         };
@@ -54,6 +55,7 @@ impl DevelopTool for MaskTool {
             &stack,
             &mut v.mask,
             tex,
+            highlight_tex,
             dims,
             preview_source.as_ref(),
         )

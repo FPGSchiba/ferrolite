@@ -115,6 +115,14 @@ pub struct AppState {
     /// Keeps the current overlay `OverlayTexture` alive while egui's bind group
     /// references it. Replaced on each overlay rebuild.
     pub mask_overlay_gpu: Option<ferrolite_pipeline::OverlayTexture>,
+    /// App-global egui native texture id for the white hover-highlight overlay
+    /// (a single component's coverage, tinted white). Registered once, updated
+    /// in place — mirrors `mask_overlay_native`. Stale (not drawn) whenever no
+    /// component is hovered (`MaskUiState::highlight_component == None`).
+    pub mask_overlay_highlight_native: Option<egui::TextureId>,
+    /// Keeps the current highlight `OverlayTexture` alive while egui's bind
+    /// group references it. Replaced on each highlight rebuild.
+    pub mask_overlay_highlight_gpu: Option<ferrolite_pipeline::OverlayTexture>,
 
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
@@ -270,6 +278,8 @@ impl AppState {
             pending_remove: None,
             mask_overlay_native: None,
             mask_overlay_gpu: None,
+            mask_overlay_highlight_native: None,
+            mask_overlay_highlight_gpu: None,
             viewer: None,
             export_dialog: None,
             export_activity: None,
@@ -835,6 +845,8 @@ impl AppState {
             pending_remove: None,
             mask_overlay_native: None,
             mask_overlay_gpu: None,
+            mask_overlay_highlight_native: None,
+            mask_overlay_highlight_gpu: None,
             viewer: None,
             export_dialog: None,
             export_activity: None,

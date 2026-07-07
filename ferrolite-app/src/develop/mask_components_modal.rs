@@ -32,6 +32,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
         mask.components_modal_open = false; // nothing selected -> close
         mask.editing_component = None;
         mask.preview_component = None;
+        mask.highlight_component = None;
         return None;
     };
     let layers = mask_edit::layers(stack);
@@ -39,6 +40,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
         mask.components_modal_open = false;
         mask.editing_component = None;
         mask.preview_component = None;
+        mask.highlight_component = None;
         return None;
     };
     let components = layer.mask.components.clone();
@@ -62,18 +64,21 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
             // Scrollable, height-capped list so a large mask (100+ components)
             // never grows the window past the screen and hides the editor /
             // add-new section below.
+            let mut hovered: Option<usize> = None;
             egui::ScrollArea::vertical()
                 .max_height(COMPONENTS_LIST_MAX_HEIGHT)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (i, (comp, mode)) in components.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(format!(
+                        let row = ui.horizontal(|ui| {
+                            let hovered_now = mask.highlight_component == Some(i);
+                            let label = egui::RichText::new(format!(
                                 "{}. {}  [{:?}]",
                                 i + 1,
                                 component_label(comp),
                                 mode
                             ));
+                            ui.label(if hovered_now { label.strong() } else { label });
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -112,8 +117,12 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                                 },
                             );
                         });
+                        if row.response.hovered() {
+                            hovered = Some(i);
+                        }
                     }
                 });
+            mask.highlight_component = hovered;
             // Inline editor for the component being edited (Luma/Color only).
             if let Some(i) = mask.editing_component {
                 if let Some((comp, _mode)) = components.get(i) {
@@ -153,6 +162,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
         mask.components_modal_open = false;
         mask.editing_component = None;
         mask.preview_component = None;
+        mask.highlight_component = None;
     }
     out
 }

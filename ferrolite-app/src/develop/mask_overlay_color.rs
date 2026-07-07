@@ -9,3 +9,9 @@ pub const OVERLAY_MAX_EDGE: u32 = 512;
 
 /// Red-overlay tint strength (alpha multiplier). Matches the former 50% tint.
 pub const OVERLAY_STRENGTH: f32 = 0.5;
+
+/// White hover-highlight tint strength (alpha multiplier) for a single
+/// component's coverage, drawn over the red overlay (`MaskOverlayCompositor::
+/// highlight_texture`). Stronger than `OVERLAY_STRENGTH` so the highlighted
+/// component stays legible against the red fill.
+pub const HIGHLIGHT_STRENGTH: f32 = 0.7;

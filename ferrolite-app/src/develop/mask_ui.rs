@@ -74,6 +74,11 @@ pub struct MaskUiState {
     /// prospective full mask. `None` = no add-preview. Reset on add/close/type change
     /// (mirrors the `components_modal_open`/`editing_component` reset sites).
     pub preview_component: Option<(MaskComponent, CompositeMode)>,
+    /// Component index currently hovered in the Components modal's row list, if
+    /// any. Drives both the bolded row label (modal) and a white highlight of
+    /// that component's coverage drawn over the canvas (`mask_overlay`). `None`
+    /// when the pointer isn't over any row / the modal is closed.
+    pub highlight_component: Option<usize>,
 }
 
 impl Default for MaskUiState {
@@ -102,6 +107,7 @@ impl Default for MaskUiState {
             components_modal_open: false,
             editing_component: None,
             preview_component: None,
+            highlight_component: None,
         }
     }
 }

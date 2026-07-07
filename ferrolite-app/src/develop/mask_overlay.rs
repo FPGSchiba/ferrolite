@@ -78,14 +78,27 @@ fn u32_to_rad_handle(v: u32) -> RadHandle {
 /// Paint the coverage fill (if a texture is ready + overlay is on) and route tool
 /// affordances. `overlay_tex` is the app-global native texture id for the
 /// GPU-tinted overlay (None until first built / when no mask is selected).
+/// `highlight_tex` is the app-global native texture id for the white
+/// hover-highlight overlay (a single component's coverage, from the Components
+/// modal's row hover) — drawn over the red fill whenever
+/// `mask.highlight_component.is_some()`, INDEPENDENT of `mask.overlay_on`/
+/// `adjusting`, so hovering answers "which one" even with the red overlay off.
 /// `src_dims` is the source image's (w, h), needed for the display↔source
 /// coordinate mapping.
+// `highlight_tex` (hover-highlight, Task 4) pushed this past clippy's default
+// 7-arg threshold; all 8 are distinct per-frame overlay inputs with no natural
+// grouping (mirrors the existing `overlay_tex` — one more of the same shape,
+// not scope creep), so a wider params struct wasn't worth the churn for the
+// single caller (`develop/tools/mask.rs`, which already spreads them from a
+// tuple).
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     image_rect: egui::Rect,
     stack: &OpStack,
     mask: &mut MaskUiState,
     overlay_tex: Option<egui::TextureId>,
+    highlight_tex: Option<egui::TextureId>,
     src_dims: (u32, u32),
     preview_source: Option<&Arc<LinearRgbaF32>>,
 ) -> Option<EditOutcome> {
@@ -94,6 +107,18 @@ pub fn show(
     // dragged) so the user sees the actual effect instead of the red tint.
     if mask.overlay_on && !mask.adjusting {
         if let Some(tex_id) = overlay_tex {
+            ui.painter().image(
+                tex_id,
+                image_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+    }
+    // Highlight: draws whenever a component is hovered in the Components modal
+    // AND a highlight texture exists — regardless of the red overlay toggle.
+    if mask.highlight_component.is_some() {
+        if let Some(tex_id) = highlight_tex {
             ui.painter().image(
                 tex_id,
                 image_rect,

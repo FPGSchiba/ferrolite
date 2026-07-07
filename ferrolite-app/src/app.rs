@@ -1556,6 +1556,10 @@ impl FerroliteApp {
         serde_json::to_string(&v.mask.preview_component)
             .unwrap_or_default()
             .hash(&mut h);
+        // Fold the hovered component into the key so the highlight texture
+        // rebuilds (via `MaskOverlayCompositor::highlight_texture`) whenever the
+        // Components modal's hover changes, even though the def itself didn't.
+        v.mask.highlight_component.hash(&mut h);
         let key = h.finish();
         // Dedup: `overlay_key` is the per-viewer correctness signal (it resets to
         // None on image switch / stack change, so a fresh viewer always rebuilds
@@ -1589,11 +1593,16 @@ impl FerroliteApp {
                 v.mask_overlay_input = Some(ferrolite_pipeline::upload_source(&gpu_ctx, &small));
             }
         }
-        let overlay = {
-            let (Some(oc), Some(input)) = (v.mask_overlay.as_ref(), v.mask_overlay_input.as_ref())
+        let (overlay, highlight) = {
+            let highlight_component = v.mask.highlight_component;
+            let (Some(oc), Some(input)) = (v.mask_overlay.as_mut(), v.mask_overlay_input.as_ref())
             else {
                 return;
             };
+            // Stable id for the overlay's input texture: changes whenever the
+            // (possibly re-uploaded) `mask_overlay_input` texture changes, so the
+            // compositor's incremental cache invalidates range shapes correctly.
+            let input_id = std::sync::Arc::as_ptr(&input.texture) as u64;
             // TEMP brush-perf probe (round 2): time the overlay composite+tint
             // (which re-evaluates ALL components each call — the suspected
             // O(components) cost on the UI thread) and report component/node
@@ -1607,6 +1616,7 @@ impl FerroliteApp {
             let overlay = oc.overlay_texture(
                 &def,
                 input,
+                input_id,
                 crate::develop::mask_overlay_color::OVERLAY_STRENGTH,
             );
             if let Some(t) = t {
@@ -1626,10 +1636,18 @@ impl FerroliteApp {
                     t.elapsed().as_secs_f64() * 1e3
                 ));
             }
+            // Highlight build MUST come after `overlay_texture` above: it reads
+            // the per-component cache that call just populated for the CURRENT
+            // def. `highlight_texture` is bounds-safe (returns `None` if the
+            // hovered index isn't in the cache), so a stale/out-of-range index
+            // just means no highlight this frame rather than a panic.
+            let highlight = highlight_component.and_then(|idx| {
+                oc.highlight_texture(idx, crate::develop::mask_overlay_color::HIGHLIGHT_STRENGTH)
+            });
             v.mask.overlay_key = Some(key);
-            overlay
+            (overlay, highlight)
         };
-        // `v` borrow ends here; the renderer + app-global texture id are disjoint.
+        // `v` borrow ends here; the renderer + app-global texture ids are disjoint.
         let view = overlay.srgb_view();
         {
             let mut renderer = rs.renderer.write();
@@ -1649,8 +1667,35 @@ impl FerroliteApp {
                     self.state.mask_overlay_native = Some(id);
                 }
             }
+            if let Some(highlight) = &highlight {
+                let hview = highlight.srgb_view();
+                match self.state.mask_overlay_highlight_native {
+                    Some(id) => renderer.update_egui_texture_from_wgpu_texture(
+                        &gpu_ctx.device,
+                        &hview,
+                        wgpu::FilterMode::Linear,
+                        id,
+                    ),
+                    None => {
+                        let id = renderer.register_native_texture(
+                            &gpu_ctx.device,
+                            &hview,
+                            wgpu::FilterMode::Linear,
+                        );
+                        self.state.mask_overlay_highlight_native = Some(id);
+                    }
+                }
+            }
         }
         self.state.mask_overlay_gpu = Some(overlay);
+        // Only replace the cached highlight `OverlayTexture` when a fresh one was
+        // built this frame; when `highlight_component` is `None` the stale GPU
+        // texture is simply left un-drawn (draw-time gates on
+        // `highlight_component.is_some()`), so there's no dangling-view risk from
+        // dropping it here while the registered native id still references it.
+        if let Some(highlight) = highlight {
+            self.state.mask_overlay_highlight_gpu = Some(highlight);
+        }
     }
 
     /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the bake-relevant lens

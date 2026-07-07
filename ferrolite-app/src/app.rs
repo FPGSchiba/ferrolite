@@ -1367,7 +1367,22 @@ impl FerroliteApp {
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
             // keep the evaluate out of the lock scope to stay close to the
             // apply_full_decoded discipline.)
+            // TEMP brush-perf probe (round 2): time the preview edit-pipeline
+            // evaluate (LocalAdjustmentsNode re-composites the selected mask's
+            // ALL components each frame) only while a brush stroke is live.
+            let profile = crate::diag::brush_profile_enabled()
+                && matches!(
+                    v.mask.gesture,
+                    Some(crate::develop::mask_ui::MaskGesture::Stroke(..))
+                );
+            let t_eval = profile.then(std::time::Instant::now);
             let img = ep.evaluate();
+            if let Some(t) = t_eval {
+                crate::diag::write_log(&format!(
+                    "[brush-perf] preview ep.evaluate()={:.2}ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                ));
+            }
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == v.image_id {
@@ -1579,11 +1594,38 @@ impl FerroliteApp {
             else {
                 return;
             };
+            // TEMP brush-perf probe (round 2): time the overlay composite+tint
+            // (which re-evaluates ALL components each call — the suspected
+            // O(components) cost on the UI thread) and report component/node
+            // counts, only while a brush stroke is live.
+            let profile = crate::diag::brush_profile_enabled()
+                && matches!(
+                    v.mask.gesture,
+                    Some(crate::develop::mask_ui::MaskGesture::Stroke(..))
+                );
+            let t = profile.then(std::time::Instant::now);
             let overlay = oc.overlay_texture(
                 &def,
                 input,
                 crate::develop::mask_overlay_color::OVERLAY_STRENGTH,
             );
+            if let Some(t) = t {
+                let comps = def.components.len();
+                let nodes: usize = def
+                    .components
+                    .iter()
+                    .map(|(c, _)| match c {
+                        ferrolite_mask::MaskComponent::Brush { strokes } => {
+                            strokes.iter().map(|s| s.nodes.len()).sum()
+                        }
+                        _ => 0,
+                    })
+                    .sum();
+                crate::diag::write_log(&format!(
+                    "[brush-perf] overlay_texture(components={comps} brush_nodes={nodes})={:.2}ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                ));
+            }
             v.mask.overlay_key = Some(key);
             overlay
         };

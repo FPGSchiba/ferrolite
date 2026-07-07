@@ -167,10 +167,14 @@ pub fn set_brush_with_base(
     )
 }
 
-/// Append a fresh empty `Brush` component (Add mode) — "New Brush Layer": the next
-/// strokes accumulate here, and it is independently deletable in the Components list.
+/// Append a fresh empty `Brush` component — "New Brush Layer": the next strokes
+/// accumulate here, and it is independently deletable in the Components list.
 /// Wired into the "New Brush Layer" button (`mask_panel.rs`) and its rebindable
 /// keybind (`Action::NewBrushLayer`, dispatched in `app.rs`).
+///
+/// Mode is deliberately `Add` (mode-neutral): an explicit new layer starts as a
+/// plain additive brush regardless of the Components-modal `next_mode` picker
+/// (which governs the *paint* path's first-create + non-brush component adds).
 pub fn new_brush_layer(stack: &OpStack, mask_idx: usize) -> OpStack {
     add_component(
         stack,
@@ -500,5 +504,20 @@ mod tests {
         assert_eq!(comps.len(), 1);
         assert!(matches!(comps[0].0, MaskComponent::Brush { ref strokes } if strokes.is_empty()));
         assert_eq!(comps[0].1, CompositeMode::Add);
+    }
+
+    #[test]
+    fn paint_into_a_fresh_new_brush_layer_appends_the_first_stroke() {
+        // The headline flow: "New Brush Layer" → paint. The first dragged frame
+        // sees an empty brush (base_count 0) and set_brush_with_base(base=0) must
+        // yield exactly one stroke (no loss, no panic on the empty component).
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = new_brush_layer(&s, 0);
+        let ci = last_brush_index(&s, 0).expect("the new brush layer");
+        assert_eq!(brush_stroke_count(&s, 0, ci), 0, "starts empty");
+        let s = set_brush_with_base(&s, 0, ci, 0, stroke(0.5, false));
+        let ss = brush_strokes(&s, 0, ci);
+        assert_eq!(ss.len(), 1, "first stroke appended onto the empty layer");
+        assert_eq!(ss[0].nodes[0].pos.x, 0.5);
     }
 }

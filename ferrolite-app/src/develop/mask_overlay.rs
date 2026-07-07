@@ -76,15 +76,29 @@ fn u32_to_rad_handle(v: u32) -> RadHandle {
 }
 
 /// Paint the coverage fill (if a texture is ready + overlay is on) and route tool
-/// affordances. `overlay_tex` is the app-built red-RGBA coverage texture (None
-/// until first built / when no mask is selected). `src_dims` is the source
-/// image's (w, h), needed for the display↔source coordinate mapping.
+/// affordances. `overlay_tex` is the app-global native texture id for the
+/// GPU-tinted overlay (None until first built / when no mask is selected).
+/// `highlight_tex` is the app-global native texture id for the white
+/// hover-highlight overlay (a single component's coverage, from the Components
+/// modal's row hover) — drawn over the red fill whenever
+/// `mask.highlight_component.is_some()`, INDEPENDENT of `mask.overlay_on`/
+/// `adjusting`, so hovering answers "which one" even with the red overlay off.
+/// `src_dims` is the source image's (w, h), needed for the display↔source
+/// coordinate mapping.
+// `highlight_tex` (hover-highlight, Task 4) pushed this past clippy's default
+// 7-arg threshold; all 8 are distinct per-frame overlay inputs with no natural
+// grouping (mirrors the existing `overlay_tex` — one more of the same shape,
+// not scope creep), so a wider params struct wasn't worth the churn for the
+// single caller (`develop/tools/mask.rs`, which already spreads them from a
+// tuple).
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     image_rect: egui::Rect,
     stack: &OpStack,
     mask: &mut MaskUiState,
-    overlay_tex: Option<&egui::TextureHandle>,
+    overlay_tex: Option<egui::TextureId>,
+    highlight_tex: Option<egui::TextureId>,
     src_dims: (u32, u32),
     preview_source: Option<&Arc<LinearRgbaF32>>,
 ) -> Option<EditOutcome> {
@@ -92,12 +106,24 @@ pub fn show(
     // Suppressed while `adjusting` (a Light+Color slider of this mask is being
     // dragged) so the user sees the actual effect instead of the red tint.
     if mask.overlay_on && !mask.adjusting {
-        if let Some(tex) = overlay_tex {
+        if let Some(tex_id) = overlay_tex {
             ui.painter().image(
-                tex.id(),
+                tex_id,
                 image_rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE, // the texture already carries red + per-texel alpha
+                egui::Color32::WHITE,
+            );
+        }
+    }
+    // Highlight: draws whenever a component is hovered in the Components modal
+    // AND a highlight texture exists — regardless of the red overlay toggle.
+    if mask.highlight_component.is_some() {
+        if let Some(tex_id) = highlight_tex {
+            ui.painter().image(
+                tex_id,
+                image_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
             );
         }
     }
@@ -147,32 +173,36 @@ pub fn show(
     let src_to_screen =
         |p: (f32, f32)| -> egui::Pos2 { to_screen_from_src(geo, src_w, src_h, p, &to_screen) };
 
-    // Find the first component matching the active tool in the selected mask.
+    // Find the component the canvas affordance should target: ONLY the
+    // component currently being edited (`mask.editing_component`), and only if
+    // it matches this tool's component type. Explicit-edit model — canvas
+    // handles must never fall back to "the first matching component", or they'd
+    // draw (and stay draggable) merely because the tool is active and a
+    // gradient happens to exist, even after the user clicked "Done" editing.
     let la = mask_edit::layers(stack);
-    let existing = la.layers.get(idx).and_then(|l| {
-        l.mask
-            .components
-            .iter()
-            .enumerate()
-            .find_map(|(i, (c, _))| match (tool, c) {
-                (MaskTool::Linear, MaskComponent::LinearGradient { start, end }) => {
-                    Some((i, (start.x, start.y), (end.x, end.y)))
-                }
-                _ => None,
-            })
-    });
-    let existing_radial = la.layers.get(idx).and_then(|l| {
-        l.mask
-            .components
-            .iter()
-            .enumerate()
-            .find_map(|(i, (c, _))| match (tool, c) {
-                (MaskTool::Radial, MaskComponent::RadialGradient { center, radius, .. }) => {
-                    Some((i, (center.x, center.y), (radius.x, radius.y)))
-                }
-                _ => None,
-            })
-    });
+    let comps = la
+        .layers
+        .get(idx)
+        .map(|l| l.mask.components.as_slice())
+        .unwrap_or(&[]);
+    let existing = mask
+        .editing_component
+        .filter(|_| tool == MaskTool::Linear)
+        .and_then(|i| match comps.get(i).map(|(c, _)| c) {
+            Some(MaskComponent::LinearGradient { start, end }) => {
+                Some((i, (start.x, start.y), (end.x, end.y)))
+            }
+            _ => None,
+        });
+    let existing_radial = mask
+        .editing_component
+        .filter(|_| tool == MaskTool::Radial)
+        .and_then(|i| match comps.get(i).map(|(c, _)| c) {
+            Some(MaskComponent::RadialGradient { center, radius, .. }) => {
+                Some((i, (center.x, center.y), (radius.x, radius.y)))
+            }
+            _ => None,
+        });
 
     let resp = ui.interact(
         image_rect,
@@ -227,6 +257,12 @@ pub fn show(
     }
 
     let mut outcome: Option<EditOutcome> = None;
+    // Set (outside the `&mask.gesture` borrow below) when the drag-CREATE path
+    // adds a brand-new gradient component, so it immediately becomes the edit
+    // target — its handles must appear right away without a separate "Edit"
+    // click (the `existing`/`existing_radial` finders above only match
+    // `mask.editing_component`).
+    let mut new_created: Option<usize> = None;
     if resp.dragged() || resp.drag_stopped() {
         if let (
             Some(MaskGesture::DragHandle {
@@ -257,6 +293,7 @@ pub fn show(
                             handle: lin_handle_to_u32(LinHandle::End),
                             origin_src,
                         });
+                        new_created = Some(new_idx);
                         Some(added)
                     }
                     MaskTool::Radial => {
@@ -275,6 +312,7 @@ pub fn show(
                             handle: rad_handle_to_u32(RadHandle::Both),
                             origin_src,
                         });
+                        new_created = Some(new_idx);
                         Some(added)
                     }
                     _ => None,
@@ -321,15 +359,19 @@ pub fn show(
                         }
                         let h = u32_to_rad_handle(handle);
                         let (nc, nr) = mask_affordance::radial_drag(center, radius, 0.0, h, src);
-                        let feather = la.layers[idx]
-                            .mask
-                            .components
-                            .get(comp_idx)
-                            .and_then(|(c, _)| match c {
-                                MaskComponent::RadialGradient { feather, .. } => Some(*feather),
+                        let existing_comp = la.layers[idx].mask.components.get(comp_idx).and_then(
+                            |(c, _)| match c {
+                                MaskComponent::RadialGradient {
+                                    feather,
+                                    rotation,
+                                    invert,
+                                    ..
+                                } => Some((*feather, *rotation, *invert)),
                                 _ => None,
-                            })
-                            .unwrap_or(0.3);
+                            },
+                        );
+                        let (feather, rotation, invert) =
+                            existing_comp.unwrap_or((0.3, 0.0, false));
                         Some(mask_edit::set_component(
                             stack,
                             idx,
@@ -337,9 +379,9 @@ pub fn show(
                             MaskComponent::RadialGradient {
                                 center: Vec2::new(nc.0, nc.1),
                                 radius: Vec2::new(nr.0, nr.1),
-                                rotation: 0.0,
+                                rotation,
                                 feather,
-                                invert: false,
+                                invert,
                             },
                         ))
                     }),
@@ -354,6 +396,9 @@ pub fn show(
                 });
             }
         }
+    }
+    if let Some(new_idx) = new_created {
+        mask.editing_component = Some(new_idx);
     }
     if resp.drag_stopped() {
         mask.gesture = None;
@@ -399,6 +444,20 @@ pub fn show(
                     theme::ACCENT_BRIGHT,
                     egui::Stroke::new(1.0, theme::BG_BASE),
                 );
+                // Resize handles at the RadiusX/RadiusY axis endpoints — without
+                // these there was nothing to grab even though `radial_hit_test`
+                // already hit-tests exactly these two points.
+                for p in [
+                    src_to_screen((center.0 + radius.0, center.1)),
+                    src_to_screen((center.0, center.1 + radius.1)),
+                ] {
+                    painter.circle(
+                        p,
+                        4.0,
+                        theme::ACCENT_BRIGHT,
+                        egui::Stroke::new(1.0, theme::BG_BASE),
+                    );
+                }
             }
         }
         _ => {}
@@ -463,7 +522,10 @@ fn route_brush(
 
     let mut outcome: Option<EditOutcome> = None;
     if resp.dragged() || resp.drag_stopped() {
-        if let (Some(MaskGesture::Stroke(nodes, comp_idx)), Some(p)) =
+        // Read before the `&mut mask.gesture` borrow below so the edited-component
+        // lookup doesn't conflict with it.
+        let editing = mask.editing_component;
+        if let (Some(MaskGesture::Stroke(nodes, target)), Some(p)) =
             (&mut mask.gesture, resp.interact_pointer_pos())
         {
             let norm = (
@@ -472,25 +534,45 @@ fn route_brush(
             );
             let src = display_to_source(geo, src_w, src_h, norm);
             mask_affordance::append_brush_node(nodes, src, params);
-
-            let strokes = vec![Stroke {
+            let stroke = Stroke {
                 nodes: nodes.clone(),
                 erase: mask.brush_erase,
-            }];
-            let comp = MaskComponent::Brush { strokes };
-            // Two-phase, mirroring the Linear/Radial create-then-replace: the
-            // first node append CREATES the component; every later frame
-            // REPLACES it in place so a growing stroke doesn't append a new
-            // component per dragged frame (the base `stack` passed in each
-            // frame is the previous frame's preview stack, which already
-            // carries the in-progress component).
-            let new_stack = match *comp_idx {
-                Some(ci) => mask_edit::set_component(stack, idx, ci, comp),
+            };
+            // Merge into the mask's active (last) Brush component: locate/create it
+            // on the first frame (recording base_stroke_count), then replace the
+            // live stroke in place each later frame. Strokes accumulate into ONE
+            // component instead of one-per-stroke, so component count stays bounded.
+            let new_stack = match *target {
+                Some((ci, base)) => mask_edit::set_brush_with_base(stack, idx, ci, base, stroke),
                 None => {
-                    let added = mask_edit::add_component(stack, idx, comp, mask.next_mode);
-                    let new_idx = mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
-                    *comp_idx = Some(new_idx);
-                    added
+                    // Prefer the component being edited (resume-paint), else the
+                    // mask's last brush component, else create a new one.
+                    let edited_brush = editing.filter(|&i| {
+                        matches!(
+                            mask_edit::layers(stack)
+                                .layers
+                                .get(idx)
+                                .and_then(|l| l.mask.components.get(i)),
+                            Some((MaskComponent::Brush { .. }, _))
+                        )
+                    });
+                    match edited_brush.or_else(|| mask_edit::last_brush_index(stack, idx)) {
+                        Some(ci) => {
+                            let base = mask_edit::brush_stroke_count(stack, idx, ci);
+                            *target = Some((ci, base));
+                            mask_edit::set_brush_with_base(stack, idx, ci, base, stroke)
+                        }
+                        None => {
+                            let comp = MaskComponent::Brush {
+                                strokes: vec![stroke],
+                            };
+                            let added = mask_edit::add_component(stack, idx, comp, mask.next_mode);
+                            let new_idx =
+                                mask_edit::layers(&added).layers[idx].mask.components.len() - 1;
+                            *target = Some((new_idx, 0));
+                            added
+                        }
+                    }
                 }
             };
             outcome = Some(EditOutcome {

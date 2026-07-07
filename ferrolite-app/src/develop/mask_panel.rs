@@ -150,7 +150,7 @@ pub fn show(
     // Selected-mask section (component tools + Light+Color) — Task 8.
     if let Some(idx) = mask.selected {
         if idx < la.layers.len() {
-            if let Some(o) = selected_section(ui, stack, mask, idx) {
+            if let Some(o) = selected_section(ui, stack, mask, idx, keymap) {
                 out = Some(o);
             }
         }
@@ -168,6 +168,7 @@ pub(crate) fn selected_section(
     stack: &OpStack,
     mask: &mut MaskUiState,
     idx: usize,
+    keymap: &Keymap,
 ) -> Option<EditOutcome> {
     let la = mask_edit::layers(stack);
     let layer = &la.layers[idx];
@@ -186,6 +187,18 @@ pub(crate) fn selected_section(
         {
             mask.components_modal_open = true;
             mask.overlay_on = true; // show coverage/live-preview while working on components
+        }
+        let new_layer_label = format!("New Brush Layer ({})", keymap.hint(Action::NewBrushLayer));
+        if ui
+            .button(new_layer_label)
+            .on_hover_text("Start a new, separately-deletable brush layer")
+            .clicked()
+        {
+            out = Some(EditOutcome {
+                stack: mask_edit::new_brush_layer(stack, idx),
+                kind: OpKind::LocalAdjustments,
+                commit: true,
+            });
         }
     });
 

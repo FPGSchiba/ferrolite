@@ -24,7 +24,7 @@ pub use lens_gpu::{VignetteTexture, WarpGridTexture};
 pub use local::{
     AdjustmentSet, ColorControl, ColorSwatch, LightControl, LocalAdjustments, MaskLayer,
 };
-pub use mask_overlay::MaskOverlayCompositor;
+pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{
     Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,

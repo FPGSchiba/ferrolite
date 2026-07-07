@@ -5,6 +5,7 @@
 //! compositing semantics: used by `ferrolite_pipeline::LocalAdjustmentsNode`
 //! (the edit DAG) and `MaskOverlayCompositor` (the UI overlay).
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use ferrolite_gpu::GpuContext;
@@ -106,9 +107,16 @@ impl MaskCompositor {
             }
             MaskComponent::Brush { strokes } => {
                 let mut acc = MaskBuffer::alloc_zeroed(&self.ctx, w, h);
-                for st in strokes {
-                    let dabs = stroke_dabs(st, SPACING_FRAC);
-                    acc = self.brush.stamp_onto(&acc, &dabs, st.erase, (0, 0), (w, h));
+                let mut i = 0usize;
+                while i < strokes.len() {
+                    let erase = strokes[i].erase;
+                    // Gather all dabs of the maximal run of same-`erase` strokes; stamp once.
+                    let mut dabs = Vec::new();
+                    while i < strokes.len() && strokes[i].erase == erase {
+                        dabs.extend(stroke_dabs(&strokes[i], SPACING_FRAC));
+                        i += 1;
+                    }
+                    acc = self.brush.stamp_onto(&acc, &dabs, erase, (0, 0), (w, h));
                 }
                 acc
             }
@@ -123,6 +131,16 @@ impl MaskCompositor {
         }
     }
 
+    /// Empty-def coverage (extracted from `composite` for reuse by
+    /// `composite_cached`): full (ones), or zeroed if inverted.
+    fn empty_coverage(&self, invert: bool, w: u32, h: u32) -> MaskBuffer {
+        if invert {
+            MaskBuffer::alloc_zeroed(&self.ctx, w, h)
+        } else {
+            self.ones(w, h)
+        }
+    }
+
     /// Composite `def` into one mask at `(w,h)`. Empty → ones (or zeroed if
     /// inverted); otherwise fold each component by its mode, then invert.
     pub fn composite(
@@ -134,11 +152,7 @@ impl MaskCompositor {
         rasters: &RasterStore,
     ) -> MaskBuffer {
         if def.components.is_empty() {
-            return if def.invert {
-                MaskBuffer::alloc_zeroed(&self.ctx, w, h)
-            } else {
-                self.ones(w, h)
-            };
+            return self.empty_coverage(def.invert, w, h);
         }
         let inputs: Vec<(MaskBuffer, CompositeMode)> = def
             .components
@@ -146,6 +160,169 @@ impl MaskCompositor {
             .map(|(c, m)| (self.eval(c, input, w, h, rasters), *m))
             .collect();
         self.composite.composite(&inputs, def.invert)
+    }
+
+    /// Test-only accessor exposing a single brush stamp pass, used by
+    /// `brush_erase_run_batching_matches_per_stroke_loop` to build a reference
+    /// value from the pre-refactor per-stroke loop.
+    #[cfg(test)]
+    pub(crate) fn stamp_for_test(
+        &self,
+        base: &MaskBuffer,
+        dabs: &[crate::stroke::Dab],
+        erase: bool,
+    ) -> MaskBuffer {
+        self.brush
+            .stamp_onto(base, dabs, erase, (0, 0), (base.width, base.height))
+    }
+
+    /// Incremental composite: evaluate only components whose params changed since
+    /// the last call (per `cache`), reuse the rest, then fold. Byte-identical to
+    /// `composite` for the same `def`. `input_id` identifies the input image
+    /// (range shapes sample it) — pass a value that changes when the input does.
+    // `composite_cached` mirrors `composite`'s existing 7-param shape plus the one
+    // new `input_id`/`cache` pair needed for incremental invalidation; splitting
+    // these into a params struct would obscure the 1:1 correspondence with
+    // `composite` that the correctness golden (and Task 3's callers) rely on.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite_cached(
+        &self,
+        def: &MaskDefinition,
+        input: &wgpu::TextureView,
+        input_id: u64,
+        w: u32,
+        h: u32,
+        rasters: &RasterStore,
+        cache: &mut ComponentCache,
+    ) -> MaskBuffer {
+        if def.components.is_empty() {
+            cache.slots.clear();
+            return self.empty_coverage(def.invert, w, h);
+        }
+        cache.reset_if_stale(input_id, (w, h));
+        cache.slots.truncate(def.components.len());
+        for (i, (comp, _mode)) in def.components.iter().enumerate() {
+            let hash = component_hash(comp);
+            match cache.slots.get(i) {
+                Some((h0, _)) if *h0 == hash => {}
+                _ => {
+                    let cov = self.eval(comp, input, w, h, rasters);
+                    if i < cache.slots.len() {
+                        cache.slots[i] = (hash, cov);
+                    } else {
+                        cache.slots.push((hash, cov));
+                    }
+                }
+            }
+        }
+        let inputs: Vec<(MaskBuffer, CompositeMode)> = def
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, (_, m))| (cache.slots[i].1.clone(), *m))
+            .collect();
+        self.composite.composite(&inputs, def.invert)
+    }
+}
+
+/// Cheap, allocation-free structural hash of a component's params (f32 by bits —
+/// f32 isn't Hash). Used to detect which components changed between frames so the
+/// cache re-evaluates only those. NOT serde (that was the O(n) UI-thread cost).
+fn component_hash(c: &MaskComponent) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    fn f(h: &mut impl Hasher, x: f32) {
+        x.to_bits().hash(h);
+    }
+    match c {
+        MaskComponent::LinearGradient { start, end } => {
+            0u8.hash(&mut h);
+            f(&mut h, start.x);
+            f(&mut h, start.y);
+            f(&mut h, end.x);
+            f(&mut h, end.y);
+        }
+        MaskComponent::RadialGradient {
+            center,
+            radius,
+            rotation,
+            feather,
+            invert,
+        } => {
+            1u8.hash(&mut h);
+            f(&mut h, center.x);
+            f(&mut h, center.y);
+            f(&mut h, radius.x);
+            f(&mut h, radius.y);
+            f(&mut h, *rotation);
+            f(&mut h, *feather);
+            invert.hash(&mut h);
+        }
+        MaskComponent::LumaRange { lo, hi, softness } => {
+            2u8.hash(&mut h);
+            f(&mut h, *lo);
+            f(&mut h, *hi);
+            f(&mut h, *softness);
+        }
+        MaskComponent::ColorRange {
+            samples,
+            tolerance,
+            softness,
+        } => {
+            3u8.hash(&mut h);
+            for s in samples {
+                f(&mut h, s.r);
+                f(&mut h, s.g);
+                f(&mut h, s.b);
+            }
+            f(&mut h, *tolerance);
+            f(&mut h, *softness);
+        }
+        MaskComponent::Brush { strokes } => {
+            4u8.hash(&mut h);
+            for st in strokes {
+                st.erase.hash(&mut h);
+                for n in &st.nodes {
+                    f(&mut h, n.pos.x);
+                    f(&mut h, n.pos.y);
+                    f(&mut h, n.radius);
+                    f(&mut h, n.hardness);
+                    f(&mut h, n.flow);
+                }
+            }
+        }
+        MaskComponent::Imported { handle, .. } => {
+            5u8.hash(&mut h);
+            handle.0.hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Per-component coverage cache for incremental overlay compositing. Reused across
+/// frames; only components whose `component_hash` changed are re-evaluated. Slot i
+/// corresponds to component i. `input_id` guards range shapes (which sample the
+/// input image): a new input clears the cache.
+#[derive(Default)]
+pub struct ComponentCache {
+    input_id: u64,
+    dims: (u32, u32),
+    slots: Vec<(u64, MaskBuffer)>, // (component_hash, coverage)
+}
+
+impl ComponentCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// The cached coverage of component `index`, if evaluated this generation.
+    pub fn coverage(&self, index: usize) -> Option<&MaskBuffer> {
+        self.slots.get(index).map(|(_, b)| b)
+    }
+    fn reset_if_stale(&mut self, input_id: u64, dims: (u32, u32)) {
+        if self.input_id != input_id || self.dims != dims {
+            self.slots.clear();
+            self.input_id = input_id;
+            self.dims = dims;
+        }
     }
 }
 
@@ -396,6 +573,76 @@ mod tests {
     }
 
     #[test]
+    fn composite_cached_matches_full_composite_and_after_mutation() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let comp = MaskCompositor::new(ctx.clone());
+        let input = MaskBuffer::alloc_zeroed(&ctx, 16, 16);
+        let iv = input
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // A 3-component def: radial (Add), linear (Add), radial (Subtract).
+        let mk = |cx: f32| MaskDefinition {
+            components: vec![
+                (
+                    MaskComponent::RadialGradient {
+                        center: crate::vec::Vec2::new(cx, 0.5),
+                        radius: crate::vec::Vec2::new(0.3, 0.3),
+                        rotation: 0.0,
+                        feather: 0.3,
+                        invert: false,
+                    },
+                    CompositeMode::Add,
+                ),
+                (
+                    MaskComponent::LinearGradient {
+                        start: crate::vec::Vec2::new(0.0, 0.5),
+                        end: crate::vec::Vec2::new(1.0, 0.5),
+                    },
+                    CompositeMode::Add,
+                ),
+                (
+                    MaskComponent::RadialGradient {
+                        center: crate::vec::Vec2::new(0.7, 0.5),
+                        radius: crate::vec::Vec2::new(0.2, 0.2),
+                        rotation: 0.0,
+                        feather: 0.3,
+                        invert: false,
+                    },
+                    CompositeMode::Subtract,
+                ),
+            ],
+            invert: false,
+        };
+        let def = mk(0.3);
+        let mut cache = ComponentCache::new();
+        let cached =
+            comp.composite_cached(&def, &iv, 1, 16, 16, &RasterStore::default(), &mut cache);
+        let full = comp.composite(&def, &iv, 16, 16, &RasterStore::default());
+        assert_eq!(
+            read_mask_r32f(&ctx, &cached),
+            read_mask_r32f(&ctx, &full),
+            "cached == full (initial)"
+        );
+
+        // Mutate ONLY the first component (move the radial center); cached must still
+        // equal a fresh full composite of the mutated def (proves selective re-eval).
+        let def2 = mk(0.6);
+        let cached2 =
+            comp.composite_cached(&def2, &iv, 1, 16, 16, &RasterStore::default(), &mut cache);
+        let full2 = comp.composite(&def2, &iv, 16, 16, &RasterStore::default());
+        assert_eq!(
+            read_mask_r32f(&ctx, &cached2),
+            read_mask_r32f(&ctx, &full2),
+            "cached == full (after mutation)"
+        );
+    }
+
+    #[test]
     fn imported_with_no_producer_is_inert() {
         let Some(ctx) = GpuContext::headless() else {
             eprintln!("no GPU adapter; skipping (headless CI)");
@@ -421,6 +668,61 @@ mod tests {
         assert!(
             read_mask_r32f(&ctx, &out).iter().all(|&v| v.abs() < 1e-4),
             "no producer => imported inert"
+        );
+    }
+
+    #[test]
+    fn brush_erase_run_batching_matches_per_stroke_loop() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let comp = MaskCompositor::new(ctx.clone());
+        let input = MaskBuffer::alloc_zeroed(&ctx, 32, 32);
+        let iv = input
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let node = |x: f32, erase: bool| crate::model::Stroke {
+            nodes: vec![crate::model::BrushNode {
+                pos: crate::vec::Vec2::new(x, 0.5),
+                radius: 0.2,
+                hardness: 0.5,
+                flow: 1.0,
+            }],
+            erase,
+        };
+        // paint, paint, erase, paint  → runs [P,P],[E],[P]
+        let strokes = vec![
+            node(0.3, false),
+            node(0.5, false),
+            node(0.4, true),
+            node(0.7, false),
+        ];
+        let def = MaskDefinition {
+            components: vec![(
+                MaskComponent::Brush {
+                    strokes: strokes.clone(),
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        };
+        let batched = comp.composite(&def, &iv, 32, 32, &RasterStore::default());
+
+        // Reference: the OLD per-stroke fold, computed here directly.
+        let reference = {
+            let mut acc = MaskBuffer::alloc_zeroed(&ctx, 32, 32);
+            for st in &strokes {
+                let dabs = crate::stroke::stroke_dabs(st, crate::stroke::SPACING_FRAC);
+                acc = comp.stamp_for_test(&acc, &dabs, st.erase);
+            }
+            acc
+        };
+        assert_eq!(
+            read_mask_r32f(&ctx, &batched),
+            read_mask_r32f(&ctx, &reference),
+            "erase-run batching must equal the per-stroke fold"
         );
     }
 }

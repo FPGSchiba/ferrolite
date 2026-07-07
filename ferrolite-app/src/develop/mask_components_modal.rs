@@ -1,6 +1,7 @@
 //! Non-blocking window for a selected mask's components: list + delete (any) +
-//! edit (Luma/Color via set_component) + add-new (all types). Keeps the 296px
-//! panel uncluttered (design §9.2). Editing happens IN the window (its own
+//! edit (Luma/Color/Radial via set_component; Brush/Linear route the canvas
+//! tool + target instead) + add-new (all types). Keeps the 296px panel
+//! uncluttered (design §9.2). Editing happens IN the window (its own
 //! sliders), not by routing back to the panel's Luma/Color sliders — the
 //! window is self-contained. Non-blocking (not suppressed via `modal_active`)
 //! so the canvas stays live behind it for brush drawing, gradient handles, and
@@ -18,6 +19,11 @@ use crate::widgets::EguiSlider;
 use ferrolite_mask::{CompositeMode, MaskComponent};
 use ferrolite_pipeline::{OpKind, OpStack};
 
+/// Max on-screen height (px) of the scrollable components list. Beyond this the
+/// list scrolls internally so a large mask never pushes the inline editor and
+/// the add-new section off the window / screen.
+const COMPONENTS_LIST_MAX_HEIGHT: f32 = 240.0;
+
 /// Render the modal if `mask.components_modal_open`. Returns an edit if one was made.
 pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Option<EditOutcome> {
     if !mask.components_modal_open {
@@ -27,6 +33,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
         mask.components_modal_open = false; // nothing selected -> close
         mask.editing_component = None;
         mask.preview_component = None;
+        mask.highlight_component = None;
         return None;
     };
     let layers = mask_edit::layers(stack);
@@ -34,6 +41,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
         mask.components_modal_open = false;
         mask.editing_component = None;
         mask.preview_component = None;
+        mask.highlight_component = None;
         return None;
     };
     let components = layer.mask.components.clone();
@@ -54,58 +62,94 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                         .color(crate::theme::TEXT_FAINT),
                 );
             }
-            for (i, (comp, mode)) in components.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{}. {}  [{:?}]",
-                        i + 1,
-                        component_label(comp),
-                        mode
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::widgets::tool_button(
-                            ui,
-                            crate::icons::DELETE,
-                            "Remove",
-                            false,
-                            true,
-                            None,
-                        )
-                        .clicked()
-                        {
-                            out =
-                                Some(commit_edit(mask_edit::remove_component(stack, mask_idx, i)));
-                            if mask.editing_component == Some(i) {
-                                mask.editing_component = None;
-                            }
+            // Scrollable, height-capped list so a large mask (100+ components)
+            // never grows the window past the screen and hides the editor /
+            // add-new section below.
+            let mut hovered: Option<usize> = None;
+            egui::ScrollArea::vertical()
+                .max_height(COMPONENTS_LIST_MAX_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (i, (comp, mode)) in components.iter().enumerate() {
+                        let row = ui.horizontal(|ui| {
+                            let hovered_now = mask.highlight_component == Some(i);
+                            let label = egui::RichText::new(format!(
+                                "{}. {}  [{:?}]",
+                                i + 1,
+                                component_label(comp),
+                                mode
+                            ));
+                            ui.label(if hovered_now { label.strong() } else { label });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if crate::widgets::tool_button(
+                                        ui,
+                                        crate::icons::DELETE,
+                                        "Remove",
+                                        false,
+                                        true,
+                                        None,
+                                    )
+                                    .clicked()
+                                    {
+                                        out = Some(commit_edit(mask_edit::remove_component(
+                                            stack, mask_idx, i,
+                                        )));
+                                        if mask.editing_component == Some(i) {
+                                            mask.editing_component = None;
+                                        }
+                                    }
+                                    if is_editable(comp)
+                                        && crate::widgets::tool_button(
+                                            ui,
+                                            crate::icons::EDIT,
+                                            "Edit",
+                                            mask.editing_component == Some(i),
+                                            true,
+                                            None,
+                                        )
+                                        .clicked()
+                                    {
+                                        mask.editing_component = Some(i);
+                                        mask.overlay_on = true; // show coverage while editing
+                                        if let Some(t) =
+                                            crate::develop::mask_ui::tool_for_component(comp)
+                                        {
+                                            mask.tool = t; // route canvas affordance to this type
+                                        }
+                                        load_component_into_state(comp, mask); // prime sliders
+                                    }
+                                },
+                            );
+                        });
+                        // `contains_pointer` (geometric) not `hovered()`: the row's
+                        // interactive Remove/Edit buttons capture `hovered()`, so
+                        // pointing at them would drop the highlight. We want the
+                        // component highlighted while hovering ANYWHERE on the row
+                        // — the label text or the buttons.
+                        if row.response.contains_pointer() {
+                            hovered = Some(i);
                         }
-                        if is_editable(comp)
-                            && crate::widgets::tool_button(
-                                ui,
-                                crate::icons::EDIT,
-                                "Edit",
-                                mask.editing_component == Some(i),
-                                true,
-                                None,
-                            )
-                            .clicked()
-                        {
-                            mask.editing_component = Some(i);
-                            mask.overlay_on = true; // show coverage while editing this component
-                            load_component_into_state(comp, mask); // prime the sliders
-                        }
-                    });
+                    }
                 });
-            }
-            // Inline editor for the component being edited (Luma/Color only).
+            // Hovered row wins (transient); otherwise keep the component being
+            // edited highlighted white so the user sees what their canvas edits affect.
+            mask.highlight_component = hovered.or(mask.editing_component);
+            // Inline editor for the component being edited.
             if let Some(i) = mask.editing_component {
                 if let Some((comp, _mode)) = components.get(i) {
                     ui.separator();
-                    if let Some(updated) = edit_component_ui(ui, comp, mask) {
-                        out = Some(commit_edit(mask_edit::set_component(
-                            stack, mask_idx, i, updated,
-                        )));
-                        mask.editing_component = None;
+                    if let Some((updated, commit)) = edit_component_ui(ui, comp, mask) {
+                        out = Some(EditOutcome {
+                            stack: mask_edit::set_component(stack, mask_idx, i, updated),
+                            kind: OpKind::LocalAdjustments,
+                            commit,
+                        });
+                        // Do NOT clear `editing_component` here — Radial stays in
+                        // edit mode so further drags keep emitting live edits; the
+                        // arms that finish (Done / Luma-Color Update) clear it
+                        // themselves inside `edit_component_ui`.
                     }
                 }
             }
@@ -136,6 +180,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
         mask.components_modal_open = false;
         mask.editing_component = None;
         mask.preview_component = None;
+        mask.highlight_component = None;
     }
     out
 }
@@ -152,12 +197,18 @@ fn component_label(c: &MaskComponent) -> &'static str {
     }
 }
 
-/// Only Luma/Color ranges have re-editable scalar params; the others are
-/// canvas-authored geometry/strokes with no modal editor (yet).
+/// Luma/Color ranges have re-editable scalar params edited entirely in the
+/// modal; Brush/Linear/Radial are canvas-authored geometry/strokes but are
+/// still "editable" in the sense that clicking Edit routes the canvas tool to
+/// them (and, for Radial, exposes a Feather/Invert inline editor).
 fn is_editable(c: &MaskComponent) -> bool {
     matches!(
         c,
-        MaskComponent::LumaRange { .. } | MaskComponent::ColorRange { .. }
+        MaskComponent::LumaRange { .. }
+            | MaskComponent::ColorRange { .. }
+            | MaskComponent::Brush { .. }
+            | MaskComponent::LinearGradient { .. }
+            | MaskComponent::RadialGradient { .. }
     )
 }
 
@@ -180,7 +231,38 @@ fn load_component_into_state(c: &MaskComponent, mask: &mut MaskUiState) {
             mask.color_tolerance = *tolerance;
             mask.color_softness = *softness;
         }
+        MaskComponent::RadialGradient {
+            feather, invert, ..
+        } => {
+            mask.radial_feather = *feather;
+            mask.radial_invert = *invert;
+        }
         _ => {}
+    }
+}
+
+/// Rebuild a radial component preserving its spatial params (center/radius/
+/// rotation — those are edited via canvas handles) and applying new scalar
+/// `feather`/`invert` from the inline editor. `None` if `existing` isn't radial.
+pub(crate) fn radial_with_feather_invert(
+    existing: &MaskComponent,
+    feather: f32,
+    invert: bool,
+) -> Option<MaskComponent> {
+    match existing {
+        MaskComponent::RadialGradient {
+            center,
+            radius,
+            rotation,
+            ..
+        } => Some(MaskComponent::RadialGradient {
+            center: *center,
+            radius: *radius,
+            rotation: *rotation,
+            feather,
+            invert,
+        }),
+        _ => None,
     }
 }
 
@@ -204,15 +286,22 @@ fn color_from_state(mask: &MaskUiState) -> MaskComponent {
     }
 }
 
-/// Render the Luma/Color editor for `comp` (values seeded via
-/// `load_component_into_state`). Returns `Some(rebuilt component)` when
-/// "Update" is clicked, or `None` (with `editing_component` cleared) when
-/// "Cancel" is clicked or nothing happened yet this frame.
+/// Render the inline editor for `comp` (values seeded via
+/// `load_component_into_state`). Returns `Some((rebuilt component, commit))`
+/// when an edit should reach the canvas overlay this frame — `commit` is
+/// `true` for a final/history-worthy change (Luma/Color "Update", a Radial
+/// checkbox toggle, or the end of a Radial slider drag) and `false` for a live
+/// preview mid-drag (no history entry, overlay-only). Luma/Color commit and
+/// clear `editing_component` themselves on "Update"/"Cancel". Radial stays in
+/// edit mode while live-adjusting Feather/Invert — only "Done" clears
+/// `editing_component`. Brush/Linear have no scalar params here (their
+/// geometry is authored on the canvas) so they only expose a hint + "Done" and
+/// always return `None`.
 fn edit_component_ui(
     ui: &mut egui::Ui,
     comp: &MaskComponent,
     mask: &mut MaskUiState,
-) -> Option<MaskComponent> {
+) -> Option<(MaskComponent, bool)> {
     let mut result = None;
     match comp {
         MaskComponent::LumaRange { .. } => {
@@ -254,7 +343,8 @@ fn edit_component_ui(
             });
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
-                    result = Some(luma_from_state(mask));
+                    result = Some((luma_from_state(mask), true));
+                    mask.editing_component = None;
                 }
                 if ui.button("Cancel").clicked() {
                     mask.editing_component = None;
@@ -322,14 +412,68 @@ fn edit_component_ui(
             });
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
-                    result = Some(color_from_state(mask));
+                    result = Some((color_from_state(mask), true));
                     mask.picking_color = false;
+                    mask.editing_component = None;
                 }
                 if ui.button("Cancel").clicked() {
                     mask.editing_component = None;
                     mask.picking_color = false;
                 }
             });
+        }
+        MaskComponent::RadialGradient { .. } => {
+            let feather_resp = ui.add(EguiSlider {
+                label: "Feather",
+                value: &mut mask.radial_feather,
+                min: 0.0,
+                max: 1.0,
+                default: 0.3,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+            });
+            let invert_resp = ui.checkbox(&mut mask.radial_invert, "Invert");
+            ui.label(
+                egui::RichText::new("Drag the center / radius handles on the canvas")
+                    .size(11.0)
+                    .color(crate::theme::TEXT_FAINT),
+            );
+            if ui.button("Done").clicked() {
+                mask.editing_component = None;
+            }
+            // Live: emit an edit as soon as either control changes so the
+            // overlay updates while dragging (like every other slider in the
+            // app). Commit to history only when the drag ends or the checkbox
+            // is toggled (a discrete change) — mid-drag frames stay
+            // preview-only (no history entry) via `commit: false`.
+            if feather_resp.changed() || invert_resp.changed() {
+                let commit = feather_resp.drag_stopped() || invert_resp.changed();
+                result = radial_with_feather_invert(comp, mask.radial_feather, mask.radial_invert)
+                    .map(|c| (c, commit));
+            }
+        }
+        MaskComponent::Brush { .. } => {
+            ui.label(
+                egui::RichText::new("Paint on the canvas to add to this layer")
+                    .size(11.0)
+                    .color(crate::theme::TEXT_FAINT),
+            );
+            if ui.button("Done").clicked() {
+                mask.editing_component = None;
+            }
+        }
+        MaskComponent::LinearGradient { .. } => {
+            ui.label(
+                egui::RichText::new("Drag the endpoints on the canvas")
+                    .size(11.0)
+                    .color(crate::theme::TEXT_FAINT),
+            );
+            if ui.button("Done").clicked() {
+                mask.editing_component = None;
+            }
         }
         _ => {}
     }
@@ -676,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn only_luma_and_color_are_editable() {
+    fn every_component_type_is_editable() {
         assert!(is_editable(&MaskComponent::LumaRange {
             lo: 0.0,
             hi: 1.0,
@@ -687,10 +831,61 @@ mod tests {
             tolerance: 0.0,
             softness: 0.0
         }));
-        assert!(!is_editable(&MaskComponent::Brush { strokes: vec![] }));
-        assert!(!is_editable(&MaskComponent::LinearGradient {
+        assert!(is_editable(&MaskComponent::Brush { strokes: vec![] }));
+        assert!(is_editable(&MaskComponent::LinearGradient {
             start: ferrolite_mask::Vec2::new(0.0, 0.0),
             end: ferrolite_mask::Vec2::new(1.0, 1.0),
         }));
+        assert!(is_editable(&MaskComponent::RadialGradient {
+            center: ferrolite_mask::Vec2::new(0.5, 0.5),
+            radius: ferrolite_mask::Vec2::new(0.3, 0.3),
+            rotation: 0.0,
+            feather: 0.1,
+            invert: false,
+        }));
+        // The imported/AI seam is NOT hand-editable (guards against a future
+        // accidental inclusion in `is_editable`).
+        assert!(!is_editable(&MaskComponent::Imported {
+            handle: ferrolite_mask::RasterHandle(0),
+            provenance: ferrolite_mask::MaskProvenance {
+                model_id: String::new(),
+                model_version: String::new(),
+                prompt: String::new(),
+            },
+        }));
+    }
+
+    #[test]
+    fn radial_with_feather_invert_preserves_geometry() {
+        use ferrolite_mask::{MaskComponent, Vec2};
+        let existing = MaskComponent::RadialGradient {
+            center: Vec2::new(0.4, 0.6),
+            radius: Vec2::new(0.25, 0.15),
+            rotation: 0.5,
+            feather: 0.3,
+            invert: false,
+        };
+        let out = radial_with_feather_invert(&existing, 0.8, true).unwrap();
+        match out {
+            MaskComponent::RadialGradient {
+                center,
+                radius,
+                rotation,
+                feather,
+                invert,
+            } => {
+                assert_eq!(center, Vec2::new(0.4, 0.6), "center preserved");
+                assert_eq!(radius, Vec2::new(0.25, 0.15), "radius preserved");
+                assert_eq!(rotation, 0.5, "rotation preserved");
+                assert_eq!(feather, 0.8, "feather updated");
+                assert!(invert, "invert updated");
+            }
+            _ => panic!("expected radial"),
+        }
+        // non-radial → None
+        assert!(
+            radial_with_feather_invert(&MaskComponent::Brush { strokes: vec![] }, 0.5, false)
+                .is_none()
+        );
     }
 }

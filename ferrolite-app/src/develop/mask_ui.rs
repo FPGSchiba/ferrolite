@@ -21,13 +21,12 @@ pub enum MaskTool {
 /// between gestures. Filled by the affordance routing in `mask_overlay`.
 pub enum MaskGesture {
     /// Brush stroke being captured: accumulated dab nodes (normalized source
-    /// coords), plus the index of the in-progress `MaskComponent::Brush` once
-    /// the first node has been appended to the mask's component list (`None`
-    /// until then). Frame 1 APPENDS that component; every later frame REPLACES
-    /// it in place (mirrors the `DragHandle` create-then-replace two-phase
-    /// pattern for Linear/Radial) so a growing stroke doesn't pile up one
-    /// throwaway component per dragged frame.
-    Stroke(Vec<BrushNode>, Option<usize>),
+    /// coords), plus the target `(brush_component_index, base_stroke_count)` once
+    /// located/created — the live stroke is appended after the component's first
+    /// `base_stroke_count` committed strokes (merge-into-active-brush; the mask's
+    /// last Brush component accumulates strokes). `None` until the first dragged
+    /// frame creates/locates the target.
+    Stroke(Vec<BrushNode>, Option<(usize, usize)>),
     /// A shape handle being dragged: the component index within the mask + which
     /// handle. The concrete handle payloads are defined by the affordance modules
     /// (linear/radial); this carries the raw drag origin so the affordance can
@@ -37,6 +36,19 @@ pub enum MaskGesture {
         handle: u32,
         origin_src: (f32, f32),
     },
+}
+
+/// The `MaskTool` that authors/edits a given component type (`None` for the
+/// non-authorable `Imported` seam).
+pub fn tool_for_component(c: &MaskComponent) -> Option<MaskTool> {
+    match c {
+        MaskComponent::Brush { .. } => Some(MaskTool::Brush),
+        MaskComponent::LinearGradient { .. } => Some(MaskTool::Linear),
+        MaskComponent::RadialGradient { .. } => Some(MaskTool::Radial),
+        MaskComponent::LumaRange { .. } => Some(MaskTool::LumaRange),
+        MaskComponent::ColorRange { .. } => Some(MaskTool::ColorRange),
+        MaskComponent::Imported { .. } => None,
+    }
 }
 
 pub struct MaskUiState {
@@ -56,6 +68,10 @@ pub struct MaskUiState {
     pub range_lo: f32,
     pub range_hi: f32,
     pub range_softness: f32,
+    /// Feather for the radial gradient inline editor (Components modal).
+    pub radial_feather: f32,
+    /// Invert toggle for the radial gradient inline editor (Components modal).
+    pub radial_invert: bool,
     pub color_tolerance: f32,
     pub color_softness: f32,
     pub color_samples: Vec<Rgb>,
@@ -74,6 +90,11 @@ pub struct MaskUiState {
     /// prospective full mask. `None` = no add-preview. Reset on add/close/type change
     /// (mirrors the `components_modal_open`/`editing_component` reset sites).
     pub preview_component: Option<(MaskComponent, CompositeMode)>,
+    /// Component index currently hovered in the Components modal's row list, if
+    /// any. Drives both the bolded row label (modal) and a white highlight of
+    /// that component's coverage drawn over the canvas (`mask_overlay`). `None`
+    /// when the pointer isn't over any row / the modal is closed.
+    pub highlight_component: Option<usize>,
 }
 
 impl Default for MaskUiState {
@@ -92,6 +113,8 @@ impl Default for MaskUiState {
             range_lo: 0.3,
             range_hi: 0.7,
             range_softness: 0.1,
+            radial_feather: 0.3,
+            radial_invert: false,
             color_tolerance: 0.15,
             color_softness: 0.1,
             color_samples: Vec::new(),
@@ -102,6 +125,7 @@ impl Default for MaskUiState {
             components_modal_open: false,
             editing_component: None,
             preview_component: None,
+            highlight_component: None,
         }
     }
 }
@@ -152,5 +176,67 @@ mod tests {
         };
         s2.clamp_selection(2);
         assert_eq!(s2.selected, Some(0), "in-range selection preserved");
+    }
+
+    use ferrolite_mask::{MaskComponent, Vec2};
+
+    fn linear() -> MaskComponent {
+        MaskComponent::LinearGradient {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(1.0, 1.0),
+        }
+    }
+    fn radial() -> MaskComponent {
+        MaskComponent::RadialGradient {
+            center: Vec2::new(0.5, 0.5),
+            radius: Vec2::new(0.2, 0.2),
+            rotation: 0.0,
+            feather: 0.3,
+            invert: false,
+        }
+    }
+    fn brush() -> MaskComponent {
+        MaskComponent::Brush { strokes: vec![] }
+    }
+
+    #[test]
+    fn tool_for_component_maps_every_variant() {
+        assert_eq!(tool_for_component(&brush()), Some(MaskTool::Brush));
+        assert_eq!(tool_for_component(&linear()), Some(MaskTool::Linear));
+        assert_eq!(tool_for_component(&radial()), Some(MaskTool::Radial));
+        assert_eq!(
+            tool_for_component(&MaskComponent::LumaRange {
+                lo: 0.0,
+                hi: 1.0,
+                softness: 0.0
+            }),
+            Some(MaskTool::LumaRange)
+        );
+        assert_eq!(
+            tool_for_component(&MaskComponent::ColorRange {
+                samples: vec![],
+                tolerance: 0.1,
+                softness: 0.1
+            }),
+            Some(MaskTool::ColorRange)
+        );
+        assert_eq!(
+            tool_for_component(&MaskComponent::Imported {
+                handle: ferrolite_mask::RasterHandle(0),
+                provenance: ferrolite_mask::MaskProvenance {
+                    model_id: "".into(),
+                    model_version: "".into(),
+                    prompt: "".into()
+                },
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn radial_edit_state_defaults() {
+        let s = MaskUiState::default();
+        assert_eq!(s.radial_feather, 0.3);
+        assert!(!s.radial_invert);
     }
 }

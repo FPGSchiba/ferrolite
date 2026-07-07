@@ -16,7 +16,10 @@ use crate::local::LocalAdjustments;
 use crate::uniforms::{local_adjust_uniform, LocalAdjustUniform};
 
 struct CachedMasks {
-    layers: LocalAdjustments,
+    // Keyed on the mask DEFINITIONS only (not the adjustments) so an
+    // adjustment-only change (exposure/contrast/...) reuses the cached
+    // composited masks instead of re-compositing at full resolution.
+    mask_defs: Vec<ferrolite_mask::MaskDefinition>,
     full_dims: (u32, u32),
     masks: Vec<MaskBuffer>, // one per visible layer, in visible order
 }
@@ -50,6 +53,9 @@ pub(crate) struct LocalAdjustmentsNode {
     full_dims: RefCell<Option<(u32, u32)>>, // None -> use input dims
     mask_origin: RefCell<[i32; 2]>,
     cache: RefCell<Option<CachedMasks>>,
+    // Test hook: counts mask-composite rebuilds (proves adjustment-only
+    // changes reuse the cache instead of re-compositing).
+    rebuilds: std::cell::Cell<u32>,
 }
 
 impl LocalAdjustmentsNode {
@@ -131,9 +137,16 @@ impl LocalAdjustmentsNode {
             full_dims: RefCell::new(None),
             mask_origin: RefCell::new([0, 0]),
             cache: RefCell::new(None),
+            rebuilds: std::cell::Cell::new(0),
             ctx,
             layers,
         }
+    }
+
+    /// Number of times the composited-mask cache has been rebuilt (test hook).
+    #[cfg(test)]
+    pub(crate) fn rebuild_count(&self) -> u32 {
+        self.rebuilds.get()
     }
 
     pub(crate) fn set_mask_origin(&self, origin: [i32; 2]) {
@@ -146,11 +159,6 @@ impl LocalAdjustmentsNode {
             *fd = Some(dims);
             self.cache.borrow_mut().take();
         }
-    }
-
-    /// Invalidate the cached composited masks (call when `layers` change).
-    pub(crate) fn invalidate(&self) {
-        self.cache.borrow_mut().take();
     }
 
     fn alloc_out(&self, w: u32, h: u32, label: &str) -> PipelineImage {
@@ -284,17 +292,22 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // (Re)build the composited-mask cache if layers/full_dims changed.
+        // (Re)build the composited-mask cache if the mask DEFINITIONS or
+        // full_dims changed. Adjustment-only changes (exposure/contrast/...)
+        // must NOT invalidate this — they take effect via the apply pass below.
+        let cur_defs: Vec<ferrolite_mask::MaskDefinition> =
+            layers.visible_layers().map(|l| l.mask.clone()).collect();
         let rebuild = {
             let c = self.cache.borrow();
             match &*c {
-                Some(cm) => cm.layers != *layers || cm.full_dims != (mw, mh),
+                Some(cm) => cm.mask_defs != cur_defs || cm.full_dims != (mw, mh),
                 None => true,
             }
         };
         if rebuild {
             // P1 has no mask producer, so imported components resolve to nothing here.
             // A2 threads a populated RasterStore (rebuilt from provenance prompts) in.
+            self.rebuilds.set(self.rebuilds.get() + 1);
             let masks: Vec<MaskBuffer> = layers
                 .visible_layers()
                 .map(|l| {
@@ -303,7 +316,7 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
                 })
                 .collect();
             *self.cache.borrow_mut() = Some(CachedMasks {
-                layers: layers.clone(),
+                mask_defs: cur_defs,
                 full_dims: (mw, mh),
                 masks,
             });
@@ -501,5 +514,73 @@ mod tests {
         let out2 = node.evaluate(&[&src]);
         let px2 = read_pixels(&ctx, &out2);
         assert_eq!(px1, px2, "repeated evaluate of the same inputs is stable");
+    }
+
+    /// Regression for the perf bug: dragging a per-mask adjustment slider (e.g.
+    /// exposure) used to re-composite ALL masks at full resolution every frame,
+    /// because the cache invalidated on the whole `LocalAdjustments` (masks +
+    /// adjustments). The cache must be keyed on the mask DEFINITIONS only, so
+    /// adjustment-only changes reuse the cached masks and only the (cheap) apply
+    /// pass re-runs.
+    #[test]
+    fn adjustment_only_change_does_not_recomposite_masks() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+        // One visible layer with a real mask component (so compositing does work).
+        let mut la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: true,
+                mask: MaskDefinition {
+                    components: vec![(
+                        ferrolite_mask::MaskComponent::LinearGradient {
+                            start: ferrolite_mask::Vec2::new(0.0, 0.5),
+                            end: ferrolite_mask::Vec2::new(1.0, 0.5),
+                        },
+                        ferrolite_mask::CompositeMode::Add,
+                    )],
+                    invert: false,
+                },
+                adjustments: AdjustmentSet {
+                    exposure: 0.2,
+                    ..Default::default()
+                },
+            }],
+        };
+        let layers_rc = Rc::new(RefCell::new(la.clone()));
+        let node = LocalAdjustmentsNode::new(ctx.clone(), layers_rc.clone());
+
+        let _ = node.evaluate(&[&src]);
+        assert_eq!(
+            node.rebuild_count(),
+            1,
+            "first evaluate composites masks once"
+        );
+
+        // Change ONLY the adjustment (masks identical) and re-evaluate.
+        la.layers[0].adjustments.exposure = 0.9;
+        *layers_rc.borrow_mut() = la.clone();
+        let _ = node.evaluate(&[&src]);
+        assert_eq!(
+            node.rebuild_count(),
+            1,
+            "adjustment-only change must REUSE cached masks"
+        );
+
+        // Now change the mask itself -> must recomposite.
+        la.layers[0].mask.components[0] = (
+            ferrolite_mask::MaskComponent::LinearGradient {
+                start: ferrolite_mask::Vec2::new(0.0, 0.0),
+                end: ferrolite_mask::Vec2::new(0.0, 1.0),
+            },
+            ferrolite_mask::CompositeMode::Add,
+        );
+        *layers_rc.borrow_mut() = la.clone();
+        let _ = node.evaluate(&[&src]);
+        assert_eq!(node.rebuild_count(), 2, "mask change recomposites");
     }
 }

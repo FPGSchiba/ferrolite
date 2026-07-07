@@ -1361,6 +1361,7 @@ dependencies = [
  "bytemuck",
  "ferrolite-catalog",
  "ferrolite-color",
+ "ferrolite-decode",
  "ferrolite-gpu",
  "ferrolite-image",
  "ferrolite-lens",

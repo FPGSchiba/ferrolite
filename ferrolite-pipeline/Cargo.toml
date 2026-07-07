@@ -24,3 +24,4 @@ pollster = { workspace = true }
 image = { workspace = true, features = ["png"] }
 ferrolite-color = { workspace = true }
 ferrolite-catalog = { workspace = true }
+ferrolite-decode = { workspace = true }

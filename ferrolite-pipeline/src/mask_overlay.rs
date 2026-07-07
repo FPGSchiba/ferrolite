@@ -159,6 +159,7 @@ impl MaskOverlayCompositor {
             h,
             &RasterStore::default(),
             &mut self.cache,
+            ferrolite_mask::TileTransform::whole_image(w, h),
         );
         self.tint(&coverage, [1.0, 0.0, 0.0], strength)
     }

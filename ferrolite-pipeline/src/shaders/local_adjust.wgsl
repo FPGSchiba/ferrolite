@@ -1,10 +1,8 @@
 // Local Light+Color point op, blended by a mask. Mirrors uniforms::light_color_apply
-// exactly. `dst[xy] = mix(src[xy], adjusted(src[xy]), mask[(mask_origin + xy) << mask_lod])`,
-// so a mask value of 0 leaves the pixel untouched and 1 applies the full adjustment.
-// The mask is always composited at LOD-0 (full output) resolution, but this pass may
-// run in a tile's own LOD-`mask_lod` space, so the mask coordinate is scaled by
-// `2^mask_lod` before sampling. `mask_lod = 0` (the whole-image preview default) is a
-// no-op (scale 1).
+// exactly. `dst[xy] = mix(src[xy], adjusted(src[xy]), mask[xy])`, so a mask value of 0
+// leaves the pixel untouched and 1 applies the full adjustment. The mask is composited
+// at the SAME resolution as `src` (whole image for preview, one tile for the tiled
+// tier), so it is sampled 1:1 with no origin/LOD offset.
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var mask: texture_2d<f32>;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
@@ -13,7 +11,6 @@ struct P {
     whites: f32, blacks: f32, saturation: f32, hue_deg: f32,
     wb_mul: vec3<f32>, color_amount: f32,
     color_rgb: vec3<f32>, contrast_pivot: f32,
-    mask_origin: vec2<i32>, mask_lod: i32, pad: i32,
 };
 @group(0) @binding(3) var<uniform> p: P;
 
@@ -77,10 +74,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
     let c = textureLoad(src, xy, 0);
-    let mdims = vec2<i32>(textureDimensions(mask));
-    let scale = 1i << u32(p.mask_lod);
-    let mcoord = clamp((p.mask_origin + xy) * scale, vec2<i32>(0, 0), mdims - vec2<i32>(1, 1));
-    let m = textureLoad(mask, mcoord, 0).r;
+    let m = textureLoad(mask, xy, 0).r;
     let out = mix(c.rgb, adjust(c.rgb), clamp(m, 0.0, 1.0));
     textureStore(dst, xy, vec4<f32>(out, c.a));
 }

@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
-use ferrolite_mask::{MaskBuffer, MaskCompositor, RasterStore};
+use ferrolite_mask::{MaskBuffer, MaskCompositor, RasterStore, TileTransform};
 use wgpu::util::DeviceExt;
 
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
@@ -20,7 +20,7 @@ struct CachedMasks {
     // adjustment-only change (exposure/contrast/...) reuses the cached
     // composited masks instead of re-compositing at full resolution.
     mask_defs: Vec<ferrolite_mask::MaskDefinition>,
-    full_dims: (u32, u32),
+    dims: (u32, u32),
     masks: Vec<MaskBuffer>, // one per visible layer, in visible order
 }
 
@@ -49,10 +49,10 @@ pub(crate) struct LocalAdjustmentsNode {
     // time any previously-returned `current` has already been consumed
     // downstream in that same call.
     apply_out: RefCell<Option<[PipelineImage; 2]>>,
-    // tile-tier controls
-    full_dims: RefCell<Option<(u32, u32)>>, // None -> use input dims
-    mask_origin: RefCell<[i32; 2]>,
-    mask_lod: RefCell<u32>,
+    // tile-tier placement: None = whole-image (cached, identity); Some = tiled
+    // (composite fresh at input dims with this placement so range components
+    // sample the tile's own content and spatial components map to full-image uv).
+    tile: RefCell<Option<TileTransform>>,
     cache: RefCell<Option<CachedMasks>>,
     // Test hook: counts mask-composite rebuilds (proves adjustment-only
     // changes reuse the cache instead of re-compositing).
@@ -135,9 +135,7 @@ impl LocalAdjustmentsNode {
             apply_bgl,
             apply_pipeline,
             apply_out: RefCell::new(None),
-            full_dims: RefCell::new(None),
-            mask_origin: RefCell::new([0, 0]),
-            mask_lod: RefCell::new(0),
+            tile: RefCell::new(None),
             cache: RefCell::new(None),
             rebuilds: std::cell::Cell::new(0),
             ctx,
@@ -151,18 +149,15 @@ impl LocalAdjustmentsNode {
         self.rebuilds.get()
     }
 
-    pub(crate) fn set_mask_origin(&self, origin: [i32; 2]) {
-        *self.mask_origin.borrow_mut() = origin;
-    }
-
-    pub(crate) fn set_mask_lod(&self, lod: u32) {
-        *self.mask_lod.borrow_mut() = lod;
-    }
-
-    pub(crate) fn set_full_dims(&self, dims: (u32, u32)) {
-        let mut fd = self.full_dims.borrow_mut();
-        if *fd != Some(dims) {
-            *fd = Some(dims);
+    /// Set the tile-tier placement. `None` = whole-image (identity, cached);
+    /// `Some(t)` = tiled: the mask is composited fresh each evaluate at the
+    /// input (tile) resolution with placement `t`, so content-dependent
+    /// components (Color/Luminance range) sample this tile's own edited pixels
+    /// and spatial components map to full-image uv. Clears the cache on change.
+    pub(crate) fn set_tile_transform(&self, tile: Option<TileTransform>) {
+        let mut cur = self.tile.borrow_mut();
+        if *cur != tile {
+            *cur = tile;
             self.cache.borrow_mut().take();
         }
     }
@@ -289,53 +284,63 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
         if layers.is_identity() {
             return input.clone();
         }
-        // Mask compositing resolution: full output dims (tile tier) or input dims.
-        let (mw, mh) = self
-            .full_dims
-            .borrow()
-            .unwrap_or((input.width, input.height));
+        // Composite the mask at the INPUT resolution: whole image for preview,
+        // one (haloed) tile for the tiled tier. Range components read this exact
+        // content; the tile placement maps spatial components to full-image uv.
+        let (mw, mh) = (input.width, input.height);
+        let tile = self.tile.borrow();
+        let placement = tile.unwrap_or_else(|| TileTransform::whole_image(mw, mh));
         let input_view = input
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // (Re)build the composited-mask cache if the mask DEFINITIONS or
-        // full_dims changed. Adjustment-only changes (exposure/contrast/...)
-        // must NOT invalidate this — they take effect via the apply pass below.
         let cur_defs: Vec<ferrolite_mask::MaskDefinition> =
             layers.visible_layers().map(|l| l.mask.clone()).collect();
-        let rebuild = {
-            let c = self.cache.borrow();
-            match &*c {
-                Some(cm) => cm.mask_defs != cur_defs || cm.full_dims != (mw, mh),
-                None => true,
-            }
-        };
-        if rebuild {
-            // P1 has no mask producer, so imported components resolve to nothing here.
-            // A2 threads a populated RasterStore (rebuilt from provenance prompts) in.
+
+        // The whole-image path caches masks (keyed on defs+dims) so an
+        // adjustment-only change reuses them. The tiled path composites fresh
+        // every evaluate: each produced tile has different content/placement,
+        // and content-dependent components would otherwise go stale across
+        // upstream edits. Tile masks are tile-sized, so this is cheap + bounded.
+        let use_cache = tile.is_none();
+        let composite_all = || -> Vec<MaskBuffer> {
             self.rebuilds.set(self.rebuilds.get() + 1);
-            let masks: Vec<MaskBuffer> = layers
+            layers
                 .visible_layers()
                 .map(|l| {
-                    self.compositor
-                        .composite(&l.mask, &input_view, mw, mh, &RasterStore::default())
+                    self.compositor.composite(
+                        &l.mask,
+                        &input_view,
+                        mw,
+                        mh,
+                        &RasterStore::default(),
+                        placement,
+                    )
                 })
-                .collect();
-            *self.cache.borrow_mut() = Some(CachedMasks {
-                mask_defs: cur_defs,
-                full_dims: (mw, mh),
-                masks,
-            });
-        }
-        let cache = self.cache.borrow();
-        let cm = cache.as_ref().unwrap();
+                .collect()
+        };
 
-        let origin = *self.mask_origin.borrow();
+        let masks: Vec<MaskBuffer> = if use_cache {
+            let hit = {
+                let c = self.cache.borrow();
+                matches!(&*c, Some(cm) if cm.mask_defs == cur_defs && cm.dims == (mw, mh))
+            };
+            if !hit {
+                let masks = composite_all();
+                *self.cache.borrow_mut() = Some(CachedMasks {
+                    mask_defs: cur_defs.clone(),
+                    dims: (mw, mh),
+                    masks,
+                });
+            }
+            self.cache.borrow().as_ref().unwrap().masks.clone()
+        } else {
+            composite_all()
+        };
+
         let mut current = input.clone();
-        for (layer, mask) in layers.visible_layers().zip(cm.masks.iter()) {
-            let mut u = local_adjust_uniform(&layer.adjustments);
-            u.mask_origin = origin;
-            u.mask_lod = *self.mask_lod.borrow() as i32;
+        for (layer, mask) in layers.visible_layers().zip(masks.iter()) {
+            let u = local_adjust_uniform(&layer.adjustments);
             current = self.apply(&current, mask, u);
         }
         current

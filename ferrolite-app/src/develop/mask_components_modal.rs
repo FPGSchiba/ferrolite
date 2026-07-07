@@ -1,6 +1,7 @@
 //! Non-blocking window for a selected mask's components: list + delete (any) +
-//! edit (Luma/Color via set_component) + add-new (all types). Keeps the 296px
-//! panel uncluttered (design §9.2). Editing happens IN the window (its own
+//! edit (Luma/Color/Radial via set_component; Brush/Linear route the canvas
+//! tool + target instead) + add-new (all types). Keeps the 296px panel
+//! uncluttered (design §9.2). Editing happens IN the window (its own
 //! sliders), not by routing back to the panel's Luma/Color sliders — the
 //! window is self-contained. Non-blocking (not suppressed via `modal_active`)
 //! so the canvas stays live behind it for brush drawing, gradient handles, and
@@ -112,6 +113,11 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                                     {
                                         mask.editing_component = Some(i);
                                         mask.overlay_on = true; // show coverage while editing
+                                        if let Some(t) =
+                                            crate::develop::mask_ui::tool_for_component(comp)
+                                        {
+                                            mask.tool = t; // route canvas affordance to this type
+                                        }
                                         load_component_into_state(comp, mask); // prime sliders
                                     }
                                 },
@@ -127,8 +133,10 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                         }
                     }
                 });
-            mask.highlight_component = hovered;
-            // Inline editor for the component being edited (Luma/Color only).
+            // Hovered row wins (transient); otherwise keep the component being
+            // edited highlighted white so the user sees what their canvas edits affect.
+            mask.highlight_component = hovered.or(mask.editing_component);
+            // Inline editor for the component being edited.
             if let Some(i) = mask.editing_component {
                 if let Some((comp, _mode)) = components.get(i) {
                     ui.separator();
@@ -184,12 +192,18 @@ fn component_label(c: &MaskComponent) -> &'static str {
     }
 }
 
-/// Only Luma/Color ranges have re-editable scalar params; the others are
-/// canvas-authored geometry/strokes with no modal editor (yet).
+/// Luma/Color ranges have re-editable scalar params edited entirely in the
+/// modal; Brush/Linear/Radial are canvas-authored geometry/strokes but are
+/// still "editable" in the sense that clicking Edit routes the canvas tool to
+/// them (and, for Radial, exposes a Feather/Invert inline editor).
 fn is_editable(c: &MaskComponent) -> bool {
     matches!(
         c,
-        MaskComponent::LumaRange { .. } | MaskComponent::ColorRange { .. }
+        MaskComponent::LumaRange { .. }
+            | MaskComponent::ColorRange { .. }
+            | MaskComponent::Brush { .. }
+            | MaskComponent::LinearGradient { .. }
+            | MaskComponent::RadialGradient { .. }
     )
 }
 
@@ -212,7 +226,38 @@ fn load_component_into_state(c: &MaskComponent, mask: &mut MaskUiState) {
             mask.color_tolerance = *tolerance;
             mask.color_softness = *softness;
         }
+        MaskComponent::RadialGradient {
+            feather, invert, ..
+        } => {
+            mask.radial_feather = *feather;
+            mask.radial_invert = *invert;
+        }
         _ => {}
+    }
+}
+
+/// Rebuild a radial component preserving its spatial params (center/radius/
+/// rotation — those are edited via canvas handles) and applying new scalar
+/// `feather`/`invert` from the inline editor. `None` if `existing` isn't radial.
+pub(crate) fn radial_with_feather_invert(
+    existing: &MaskComponent,
+    feather: f32,
+    invert: bool,
+) -> Option<MaskComponent> {
+    match existing {
+        MaskComponent::RadialGradient {
+            center,
+            radius,
+            rotation,
+            ..
+        } => Some(MaskComponent::RadialGradient {
+            center: *center,
+            radius: *radius,
+            rotation: *rotation,
+            feather,
+            invert,
+        }),
+        _ => None,
     }
 }
 
@@ -236,10 +281,12 @@ fn color_from_state(mask: &MaskUiState) -> MaskComponent {
     }
 }
 
-/// Render the Luma/Color editor for `comp` (values seeded via
-/// `load_component_into_state`). Returns `Some(rebuilt component)` when
-/// "Update" is clicked, or `None` (with `editing_component` cleared) when
-/// "Cancel" is clicked or nothing happened yet this frame.
+/// Render the inline editor for `comp` (values seeded via
+/// `load_component_into_state`). Luma/Color/Radial return `Some(rebuilt
+/// component)` when "Update" is clicked (committed by the caller via
+/// `mask_edit::set_component`); Brush/Linear have no scalar params here (their
+/// geometry is authored on the canvas) so they only expose a hint + "Done" and
+/// always return `None`. "Cancel"/"Done" clear `editing_component` directly.
 fn edit_component_ui(
     ui: &mut egui::Ui,
     comp: &MaskComponent,
@@ -362,6 +409,55 @@ fn edit_component_ui(
                     mask.picking_color = false;
                 }
             });
+        }
+        MaskComponent::RadialGradient { .. } => {
+            ui.add(EguiSlider {
+                label: "Feather",
+                value: &mut mask.radial_feather,
+                min: 0.0,
+                max: 1.0,
+                default: 0.3,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+            });
+            ui.checkbox(&mut mask.radial_invert, "Invert");
+            ui.label(
+                egui::RichText::new("Drag the center / radius handles on the canvas")
+                    .size(11.0)
+                    .color(crate::theme::TEXT_FAINT),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Update").clicked() {
+                    result =
+                        radial_with_feather_invert(comp, mask.radial_feather, mask.radial_invert);
+                }
+                if ui.button("Done").clicked() {
+                    mask.editing_component = None;
+                }
+            });
+        }
+        MaskComponent::Brush { .. } => {
+            ui.label(
+                egui::RichText::new("Paint on the canvas to add to this layer")
+                    .size(11.0)
+                    .color(crate::theme::TEXT_FAINT),
+            );
+            if ui.button("Done").clicked() {
+                mask.editing_component = None;
+            }
+        }
+        MaskComponent::LinearGradient { .. } => {
+            ui.label(
+                egui::RichText::new("Drag the endpoints on the canvas")
+                    .size(11.0)
+                    .color(crate::theme::TEXT_FAINT),
+            );
+            if ui.button("Done").clicked() {
+                mask.editing_component = None;
+            }
         }
         _ => {}
     }
@@ -708,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn only_luma_and_color_are_editable() {
+    fn every_component_type_is_editable() {
         assert!(is_editable(&MaskComponent::LumaRange {
             lo: 0.0,
             hi: 1.0,
@@ -719,10 +815,51 @@ mod tests {
             tolerance: 0.0,
             softness: 0.0
         }));
-        assert!(!is_editable(&MaskComponent::Brush { strokes: vec![] }));
-        assert!(!is_editable(&MaskComponent::LinearGradient {
+        assert!(is_editable(&MaskComponent::Brush { strokes: vec![] }));
+        assert!(is_editable(&MaskComponent::LinearGradient {
             start: ferrolite_mask::Vec2::new(0.0, 0.0),
             end: ferrolite_mask::Vec2::new(1.0, 1.0),
         }));
+        assert!(is_editable(&MaskComponent::RadialGradient {
+            center: ferrolite_mask::Vec2::new(0.5, 0.5),
+            radius: ferrolite_mask::Vec2::new(0.3, 0.3),
+            rotation: 0.0,
+            feather: 0.1,
+            invert: false,
+        }));
+    }
+
+    #[test]
+    fn radial_with_feather_invert_preserves_geometry() {
+        use ferrolite_mask::{MaskComponent, Vec2};
+        let existing = MaskComponent::RadialGradient {
+            center: Vec2::new(0.4, 0.6),
+            radius: Vec2::new(0.25, 0.15),
+            rotation: 0.5,
+            feather: 0.3,
+            invert: false,
+        };
+        let out = radial_with_feather_invert(&existing, 0.8, true).unwrap();
+        match out {
+            MaskComponent::RadialGradient {
+                center,
+                radius,
+                rotation,
+                feather,
+                invert,
+            } => {
+                assert_eq!(center, Vec2::new(0.4, 0.6), "center preserved");
+                assert_eq!(radius, Vec2::new(0.25, 0.15), "radius preserved");
+                assert_eq!(rotation, 0.5, "rotation preserved");
+                assert_eq!(feather, 0.8, "feather updated");
+                assert!(invert, "invert updated");
+            }
+            _ => panic!("expected radial"),
+        }
+        // non-radial → None
+        assert!(
+            radial_with_feather_invert(&MaskComponent::Brush { strokes: vec![] }, 0.5, false)
+                .is_none()
+        );
     }
 }

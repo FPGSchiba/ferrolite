@@ -40,8 +40,6 @@ pub enum MaskGesture {
 
 /// The `MaskTool` that authors/edits a given component type (`None` for the
 /// non-authorable `Imported` seam).
-// Wired into the canvas edit-target routing in a follow-up task.
-#[allow(dead_code)]
 pub fn tool_for_component(c: &MaskComponent) -> Option<MaskTool> {
     match c {
         MaskComponent::Brush { .. } => Some(MaskTool::Brush),
@@ -91,11 +89,9 @@ pub struct MaskUiState {
     pub range_lo: f32,
     pub range_hi: f32,
     pub range_softness: f32,
-    /// Wired into the radial gradient inline-edit UI in a follow-up task.
-    #[allow(dead_code)]
+    /// Feather for the radial gradient inline editor (Components modal).
     pub radial_feather: f32,
-    /// Wired into the radial gradient inline-edit UI in a follow-up task.
-    #[allow(dead_code)]
+    /// Invert toggle for the radial gradient inline editor (Components modal).
     pub radial_invert: bool,
     pub color_tolerance: f32,
     pub color_softness: f32,

@@ -1576,18 +1576,23 @@ impl FerroliteApp {
             if let Some(src) = v.preview_source.as_ref() {
                 let small = downscale_linear(src, OVERLAY_MAX_EDGE);
                 v.mask_overlay_input = Some(ferrolite_pipeline::upload_source(&gpu_ctx, &small));
+                // Bump the input generation so the compositor's per-component
+                // cache re-samples range shapes against the fresh input.
+                v.mask_overlay_input_gen = v.mask_overlay_input_gen.wrapping_add(1);
             }
         }
         let (overlay, highlight) = {
             let highlight_component = v.mask.highlight_component;
+            // Monotonic input identity for the compositor's incremental cache:
+            // changes whenever `mask_overlay_input` is re-uploaded, so range
+            // shapes re-sample the fresh image. A counter (not the texture's
+            // `Arc` pointer) avoids an ABA hazard where a freed texture's address
+            // is reused by the new upload and collides.
+            let input_id = v.mask_overlay_input_gen;
             let (Some(oc), Some(input)) = (v.mask_overlay.as_mut(), v.mask_overlay_input.as_ref())
             else {
                 return;
             };
-            // Stable id for the overlay's input texture: changes whenever the
-            // (possibly re-uploaded) `mask_overlay_input` texture changes, so the
-            // compositor's incremental cache invalidates range shapes correctly.
-            let input_id = std::sync::Arc::as_ptr(&input.texture) as u64;
             let overlay = oc.overlay_texture(
                 &def,
                 input,

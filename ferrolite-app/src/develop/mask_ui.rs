@@ -38,6 +38,42 @@ pub enum MaskGesture {
     },
 }
 
+/// The `MaskTool` that authors/edits a given component type (`None` for the
+/// non-authorable `Imported` seam).
+// Wired into the canvas edit-target routing in a follow-up task.
+#[allow(dead_code)]
+pub fn tool_for_component(c: &MaskComponent) -> Option<MaskTool> {
+    match c {
+        MaskComponent::Brush { .. } => Some(MaskTool::Brush),
+        MaskComponent::LinearGradient { .. } => Some(MaskTool::Linear),
+        MaskComponent::RadialGradient { .. } => Some(MaskTool::Radial),
+        MaskComponent::LumaRange { .. } => Some(MaskTool::LumaRange),
+        MaskComponent::ColorRange { .. } => Some(MaskTool::ColorRange),
+        MaskComponent::Imported { .. } => None,
+    }
+}
+
+/// Which component the canvas affordance for `tool` should act on: the
+/// `editing` component if it exists and matches `tool`, otherwise the first
+/// component matching `tool` (the create-a-fresh-one fallback). `None` if no
+/// component matches.
+// Wired into the canvas edit-target routing in a follow-up task.
+#[allow(dead_code)]
+pub fn edit_target_index(
+    components: &[(MaskComponent, CompositeMode)],
+    tool: MaskTool,
+    editing: Option<usize>,
+) -> Option<usize> {
+    if let Some(i) = editing {
+        if components.get(i).and_then(|(c, _)| tool_for_component(c)) == Some(tool) {
+            return Some(i);
+        }
+    }
+    components
+        .iter()
+        .position(|(c, _)| tool_for_component(c) == Some(tool))
+}
+
 pub struct MaskUiState {
     pub active: bool,
     pub selected: Option<usize>,
@@ -55,6 +91,12 @@ pub struct MaskUiState {
     pub range_lo: f32,
     pub range_hi: f32,
     pub range_softness: f32,
+    /// Wired into the radial gradient inline-edit UI in a follow-up task.
+    #[allow(dead_code)]
+    pub radial_feather: f32,
+    /// Wired into the radial gradient inline-edit UI in a follow-up task.
+    #[allow(dead_code)]
+    pub radial_invert: bool,
     pub color_tolerance: f32,
     pub color_softness: f32,
     pub color_samples: Vec<Rgb>,
@@ -96,6 +138,8 @@ impl Default for MaskUiState {
             range_lo: 0.3,
             range_hi: 0.7,
             range_softness: 0.1,
+            radial_feather: 0.3,
+            radial_invert: false,
             color_tolerance: 0.15,
             color_softness: 0.1,
             color_samples: Vec::new(),
@@ -157,5 +201,98 @@ mod tests {
         };
         s2.clamp_selection(2);
         assert_eq!(s2.selected, Some(0), "in-range selection preserved");
+    }
+
+    use ferrolite_mask::{CompositeMode, MaskComponent, Vec2};
+
+    fn linear() -> MaskComponent {
+        MaskComponent::LinearGradient {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(1.0, 1.0),
+        }
+    }
+    fn radial() -> MaskComponent {
+        MaskComponent::RadialGradient {
+            center: Vec2::new(0.5, 0.5),
+            radius: Vec2::new(0.2, 0.2),
+            rotation: 0.0,
+            feather: 0.3,
+            invert: false,
+        }
+    }
+    fn brush() -> MaskComponent {
+        MaskComponent::Brush { strokes: vec![] }
+    }
+    fn add(c: MaskComponent) -> (MaskComponent, CompositeMode) {
+        (c, CompositeMode::Add)
+    }
+
+    #[test]
+    fn tool_for_component_maps_every_variant() {
+        assert_eq!(tool_for_component(&brush()), Some(MaskTool::Brush));
+        assert_eq!(tool_for_component(&linear()), Some(MaskTool::Linear));
+        assert_eq!(tool_for_component(&radial()), Some(MaskTool::Radial));
+        assert_eq!(
+            tool_for_component(&MaskComponent::LumaRange {
+                lo: 0.0,
+                hi: 1.0,
+                softness: 0.0
+            }),
+            Some(MaskTool::LumaRange)
+        );
+        assert_eq!(
+            tool_for_component(&MaskComponent::ColorRange {
+                samples: vec![],
+                tolerance: 0.1,
+                softness: 0.1
+            }),
+            Some(MaskTool::ColorRange)
+        );
+        assert_eq!(
+            tool_for_component(&MaskComponent::Imported {
+                handle: ferrolite_mask::RasterHandle(0),
+                provenance: ferrolite_mask::MaskProvenance {
+                    model_id: "".into(),
+                    model_version: "".into(),
+                    prompt: "".into()
+                },
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn edit_target_prefers_editing_when_type_matches_else_first() {
+        // components: [linear#0, radial#1, linear#2]
+        let comps = vec![add(linear()), add(radial()), add(linear())];
+        // editing #2 (a linear) + Linear tool -> target #2 (not the first linear #0)
+        assert_eq!(
+            edit_target_index(&comps, MaskTool::Linear, Some(2)),
+            Some(2)
+        );
+        // editing #1 (a radial) but Linear tool -> type mismatch -> first linear (#0)
+        assert_eq!(
+            edit_target_index(&comps, MaskTool::Linear, Some(1)),
+            Some(0)
+        );
+        // no editing -> first matching
+        assert_eq!(edit_target_index(&comps, MaskTool::Radial, None), Some(1));
+        // editing out of range -> first matching
+        assert_eq!(
+            edit_target_index(&comps, MaskTool::Linear, Some(99)),
+            Some(0)
+        );
+        // no matching component -> None
+        assert_eq!(
+            edit_target_index(&[add(brush())], MaskTool::Linear, None),
+            None
+        );
+    }
+
+    #[test]
+    fn radial_edit_state_defaults() {
+        let s = MaskUiState::default();
+        assert_eq!(s.radial_feather, 0.3);
+        assert!(!s.radial_invert);
     }
 }

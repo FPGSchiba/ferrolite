@@ -12,6 +12,7 @@ mod mask_overlay;
 mod nodes;
 mod op;
 mod pipeline;
+mod rcd_gpu;
 mod serialize;
 mod tile_edit;
 mod uniforms;
@@ -31,6 +32,7 @@ pub use op::{
     LensCorrection, Op, OpKind, OpStack, Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, blit_to_rgba8_with_matrix, EditPipeline};
+pub use rcd_gpu::{demosaic_rcd_gpu, CfaInput};
 pub use serialize::{deserialize, serialize};
 pub use tile_edit::TileEditPipeline;
 // The uniform structs are exported as the documented GPU memory layout the

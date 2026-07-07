@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferrolite_color::WorkingSpace;
-use ferrolite_decode::{ColorProfile, DemosaicToRgb16f, QuadBin};
+use ferrolite_decode::{ColorProfile, DemosaicToRgb16f, Rcd};
 use ferrolite_export::{run_export, ExportOptions, ExportRequest};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::FileKind;
@@ -137,7 +137,7 @@ fn run_one(
         FileKind::Raw => match ferrolite_decode::decode_full(&item.path) {
             Ok(raw) => {
                 let profile = raw.color_profile.clone();
-                (QuadBin.to_linear_rgba_f32(&raw), profile)
+                (Rcd.to_linear_rgba_f32(&raw), profile)
             }
             Err(e) => return (false, format!("Decode failed: {e}")),
         },
@@ -152,14 +152,11 @@ fn run_one(
     if cancel.is_cancelled() {
         return (false, "Export cancelled".to_string());
     }
-    let camera_to_working = ferrolite_color::camera_to_working(
-        profile.xyz_to_cam,
-        ferrolite_color::Xy {
-            x: profile.white_xy[0],
-            y: profile.white_xy[1],
-        },
-        working_space,
-    );
+    // Match the on-screen path: dual-illuminant interpolation + normalize_neutral
+    // (the demosaic already applied the as-shot WB gains, so the matrix must be
+    // row-normalized or neutrals skew magenta). Identity export stack → temp 0.
+    let camera_to_working =
+        crate::camera_matrix::wb_camera_to_working(&profile, 0.0, working_space);
     let pyramid = Arc::new(GpuPyramidSource::new(gpu, &linear));
     let stack = OpStack::default();
     let req = ExportRequest {

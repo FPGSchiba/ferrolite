@@ -10,6 +10,7 @@ mod metadata;
 mod orient;
 mod preview;
 mod raw;
+mod rcd;
 mod source;
 mod standard;
 
@@ -21,6 +22,7 @@ pub use metadata::Metadata;
 pub use orient::apply_orientation_linear;
 pub use preview::PreviewSource;
 pub use raw::{decode_color_profile, decode_full, RawDecoded};
+pub use rcd::Rcd;
 pub use source::SourceKind;
 pub use standard::{
     decode_preview_standard, decode_thumb_source_standard, read_metadata_standard, StdThumbDecode,

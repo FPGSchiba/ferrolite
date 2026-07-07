@@ -140,11 +140,16 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
             if let Some(i) = mask.editing_component {
                 if let Some((comp, _mode)) = components.get(i) {
                     ui.separator();
-                    if let Some(updated) = edit_component_ui(ui, comp, mask) {
-                        out = Some(commit_edit(mask_edit::set_component(
-                            stack, mask_idx, i, updated,
-                        )));
-                        mask.editing_component = None;
+                    if let Some((updated, commit)) = edit_component_ui(ui, comp, mask) {
+                        out = Some(EditOutcome {
+                            stack: mask_edit::set_component(stack, mask_idx, i, updated),
+                            kind: OpKind::LocalAdjustments,
+                            commit,
+                        });
+                        // Do NOT clear `editing_component` here — Radial stays in
+                        // edit mode so further drags keep emitting live edits; the
+                        // arms that finish (Done / Luma-Color Update) clear it
+                        // themselves inside `edit_component_ui`.
                     }
                 }
             }
@@ -282,16 +287,21 @@ fn color_from_state(mask: &MaskUiState) -> MaskComponent {
 }
 
 /// Render the inline editor for `comp` (values seeded via
-/// `load_component_into_state`). Luma/Color/Radial return `Some(rebuilt
-/// component)` when "Update" is clicked (committed by the caller via
-/// `mask_edit::set_component`); Brush/Linear have no scalar params here (their
+/// `load_component_into_state`). Returns `Some((rebuilt component, commit))`
+/// when an edit should reach the canvas overlay this frame — `commit` is
+/// `true` for a final/history-worthy change (Luma/Color "Update", a Radial
+/// checkbox toggle, or the end of a Radial slider drag) and `false` for a live
+/// preview mid-drag (no history entry, overlay-only). Luma/Color commit and
+/// clear `editing_component` themselves on "Update"/"Cancel". Radial stays in
+/// edit mode while live-adjusting Feather/Invert — only "Done" clears
+/// `editing_component`. Brush/Linear have no scalar params here (their
 /// geometry is authored on the canvas) so they only expose a hint + "Done" and
-/// always return `None`. "Cancel"/"Done" clear `editing_component` directly.
+/// always return `None`.
 fn edit_component_ui(
     ui: &mut egui::Ui,
     comp: &MaskComponent,
     mask: &mut MaskUiState,
-) -> Option<MaskComponent> {
+) -> Option<(MaskComponent, bool)> {
     let mut result = None;
     match comp {
         MaskComponent::LumaRange { .. } => {
@@ -333,7 +343,8 @@ fn edit_component_ui(
             });
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
-                    result = Some(luma_from_state(mask));
+                    result = Some((luma_from_state(mask), true));
+                    mask.editing_component = None;
                 }
                 if ui.button("Cancel").clicked() {
                     mask.editing_component = None;
@@ -401,8 +412,9 @@ fn edit_component_ui(
             });
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
-                    result = Some(color_from_state(mask));
+                    result = Some((color_from_state(mask), true));
                     mask.picking_color = false;
+                    mask.editing_component = None;
                 }
                 if ui.button("Cancel").clicked() {
                     mask.editing_component = None;
@@ -411,7 +423,7 @@ fn edit_component_ui(
             });
         }
         MaskComponent::RadialGradient { .. } => {
-            ui.add(EguiSlider {
+            let feather_resp = ui.add(EguiSlider {
                 label: "Feather",
                 value: &mut mask.radial_feather,
                 min: 0.0,
@@ -423,21 +435,25 @@ fn edit_component_ui(
                 bipolar: false,
                 signed: false,
             });
-            ui.checkbox(&mut mask.radial_invert, "Invert");
+            let invert_resp = ui.checkbox(&mut mask.radial_invert, "Invert");
             ui.label(
                 egui::RichText::new("Drag the center / radius handles on the canvas")
                     .size(11.0)
                     .color(crate::theme::TEXT_FAINT),
             );
-            ui.horizontal(|ui| {
-                if ui.button("Update").clicked() {
-                    result =
-                        radial_with_feather_invert(comp, mask.radial_feather, mask.radial_invert);
-                }
-                if ui.button("Done").clicked() {
-                    mask.editing_component = None;
-                }
-            });
+            if ui.button("Done").clicked() {
+                mask.editing_component = None;
+            }
+            // Live: emit an edit as soon as either control changes so the
+            // overlay updates while dragging (like every other slider in the
+            // app). Commit to history only when the drag ends or the checkbox
+            // is toggled (a discrete change) — mid-drag frames stay
+            // preview-only (no history entry) via `commit: false`.
+            if feather_resp.changed() || invert_resp.changed() {
+                let commit = feather_resp.drag_stopped() || invert_resp.changed();
+                result = radial_with_feather_invert(comp, mask.radial_feather, mask.radial_invert)
+                    .map(|c| (c, commit));
+            }
         }
         MaskComponent::Brush { .. } => {
             ui.label(

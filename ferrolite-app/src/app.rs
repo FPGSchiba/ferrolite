@@ -1367,21 +1367,7 @@ impl FerroliteApp {
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
             // keep the evaluate out of the lock scope to stay close to the
             // apply_full_decoded discipline.)
-            // TEMP edit-path probe (round 5): time the WHOLE preview pipeline
-            // evaluate per edit frame, tagged with whether a mask adjustment is
-            // being dragged, so we can see if the adjustment lag is the full
-            // pipeline (not the mask composite, which Fix A now reuses).
-            let prof = crate::diag::brush_profile_enabled();
-            let t_eval = prof.then(std::time::Instant::now);
             let img = ep.evaluate();
-            if let Some(t) = t_eval {
-                crate::diag::write_log(&format!(
-                    "[brush-perf] preview ep.evaluate()={:.2}ms (mask_adjusting={} mask_active={})",
-                    t.elapsed().as_secs_f64() * 1e3,
-                    v.mask.adjusting,
-                    v.mask.active
-                ));
-            }
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == v.image_id {

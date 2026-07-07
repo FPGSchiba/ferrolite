@@ -390,6 +390,7 @@ impl TileEditPipeline {
         let gx = coord.x as i32 * TILE_SIZE as i32 - self.halo as i32;
         let gy = coord.y as i32 * TILE_SIZE as i32 - self.halo as i32;
         self.local_node.set_mask_origin([gx, gy]);
+        self.local_node.set_mask_lod(coord.lod);
         self.graph.mark_dirty(self.head_id);
         self.graph.mark_dirty(self.local_adjust_id);
         let haloed = self.graph.evaluate(self.output_id).clone();

@@ -52,6 +52,7 @@ pub(crate) struct LocalAdjustmentsNode {
     // tile-tier controls
     full_dims: RefCell<Option<(u32, u32)>>, // None -> use input dims
     mask_origin: RefCell<[i32; 2]>,
+    mask_lod: RefCell<u32>,
     cache: RefCell<Option<CachedMasks>>,
     // Test hook: counts mask-composite rebuilds (proves adjustment-only
     // changes reuse the cache instead of re-compositing).
@@ -136,6 +137,7 @@ impl LocalAdjustmentsNode {
             apply_out: RefCell::new(None),
             full_dims: RefCell::new(None),
             mask_origin: RefCell::new([0, 0]),
+            mask_lod: RefCell::new(0),
             cache: RefCell::new(None),
             rebuilds: std::cell::Cell::new(0),
             ctx,
@@ -151,6 +153,10 @@ impl LocalAdjustmentsNode {
 
     pub(crate) fn set_mask_origin(&self, origin: [i32; 2]) {
         *self.mask_origin.borrow_mut() = origin;
+    }
+
+    pub(crate) fn set_mask_lod(&self, lod: u32) {
+        *self.mask_lod.borrow_mut() = lod;
     }
 
     pub(crate) fn set_full_dims(&self, dims: (u32, u32)) {
@@ -329,6 +335,7 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
         for (layer, mask) in layers.visible_layers().zip(cm.masks.iter()) {
             let mut u = local_adjust_uniform(&layer.adjustments);
             u.mask_origin = origin;
+            u.mask_lod = *self.mask_lod.borrow() as i32;
             current = self.apply(&current, mask, u);
         }
         current

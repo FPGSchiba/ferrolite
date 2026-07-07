@@ -56,20 +56,6 @@ pub fn enabled() -> bool {
     !matches!(mode(), DiagMode::Off)
 }
 
-/// Dedicated gate for the brush-stroke perf probe (`FERROLITE_BRUSH_PROFILE`),
-/// independent of the main diag mode so a live-stroke's per-frame timings aren't
-/// drowned out by the diag overlay's per-frame counters. TEMPORARY diagnostic
-/// instrumentation for the brush-mask perf investigation (measure-before-fix).
-pub fn brush_profile_enabled() -> bool {
-    static B: OnceLock<bool> = OnceLock::new();
-    *B.get_or_init(|| {
-        std::env::var("FERROLITE_BRUSH_PROFILE")
-            .ok()
-            .map(|v| !matches!(v.trim(), "" | "0" | "off" | "false"))
-            .unwrap_or(false)
-    })
-}
-
 /// Logging is enabled if the mode includes log output.
 pub fn log_enabled() -> bool {
     mode_logs(mode())

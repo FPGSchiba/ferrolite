@@ -169,9 +169,8 @@ pub fn set_brush_with_base(
 
 /// Append a fresh empty `Brush` component (Add mode) — "New Brush Layer": the next
 /// strokes accumulate here, and it is independently deletable in the Components list.
-// NOTE: not yet called from the routing layer — Task 5 wires this into the "New
-// Brush Layer" UI affordance, at which point this allow is removed.
-#[allow(dead_code)]
+/// Wired into the "New Brush Layer" button (`mask_panel.rs`) and its rebindable
+/// keybind (`Action::NewBrushLayer`, dispatched in `app.rs`).
 pub fn new_brush_layer(stack: &OpStack, mask_idx: usize) -> OpStack {
     add_component(
         stack,

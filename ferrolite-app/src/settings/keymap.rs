@@ -31,11 +31,12 @@ pub enum Action {
     SwitchToolCrop,
     SwitchToolMask,
     ToggleMaskOverlay,
+    NewBrushLayer,
 }
 
 impl Action {
     /// All variants, for exhaustive iteration (defaults coverage + UI listing).
-    pub const ALL: [Action; 24] = [
+    pub const ALL: [Action; 25] = [
         Action::CloseViewer,
         Action::OpenImage,
         Action::SelectAll,
@@ -60,6 +61,7 @@ impl Action {
         Action::SwitchToolCrop,
         Action::SwitchToolMask,
         Action::ToggleMaskOverlay,
+        Action::NewBrushLayer,
     ];
 
     pub fn label(self) -> &'static str {
@@ -88,6 +90,7 @@ impl Action {
             Action::SwitchToolCrop => "Tool: Crop",
             Action::SwitchToolMask => "Tool: Mask",
             Action::ToggleMaskOverlay => "Toggle mask overlay",
+            Action::NewBrushLayer => "New brush layer",
         }
     }
 }
@@ -558,6 +561,8 @@ impl Keymap {
         m.insert(SwitchToolMask, plain(Key::M));
         // `O` is FlagReject's default (see above) — `T` ("toggle") is free.
         m.insert(ToggleMaskOverlay, plain(Key::T));
+        // `B` ("brush") is free — not used by any other default above.
+        m.insert(NewBrushLayer, plain(Key::B));
         // Fill any missing action (forward-compat) with a harmless default.
         for a in Action::ALL {
             m.entry(a).or_insert(plain(Key::F1));
@@ -785,6 +790,7 @@ mod tests {
             SwitchToolCrop,
             SwitchToolMask,
             ToggleMaskOverlay,
+            NewBrushLayer,
         ] {
             let _ = km.chord(a); // must not panic / must be present
         }
@@ -794,6 +800,7 @@ mod tests {
             SwitchToolCrop,
             SwitchToolMask,
             ToggleMaskOverlay,
+            NewBrushLayer,
         ];
         for &a in &news {
             if let Some(other) = km.conflict(a, km.chord(a)) {

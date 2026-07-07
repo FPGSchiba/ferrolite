@@ -3545,6 +3545,32 @@ impl eframe::App for FerroliteApp {
                         v.mask.overlay_on = !v.mask.overlay_on;
                     }
                 }
+
+                // New Brush Layer (default `B`): starts a fresh, separately-deletable
+                // `Brush` component in the selected mask — the explicit "split" for the
+                // merge-by-default brush model. Gated on the Mask tool being active
+                // (mirrors `ToggleMaskOverlay` above) plus an actual mask selection.
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::NewBrushLayer)
+                {
+                    let stack_and_idx = self.state.viewer.as_ref().and_then(|v| {
+                        (v.mask.active && v.mask.selected.is_some())
+                            .then(|| (v.op_stack.clone(), v.mask.selected.unwrap()))
+                    });
+                    if let Some((stack, idx)) = stack_and_idx {
+                        let new_stack = crate::develop::mask_edit::new_brush_layer(&stack, idx);
+                        self.apply_edit(
+                            ctx,
+                            frame,
+                            ferrolite_pipeline::OpKind::LocalAdjustments,
+                            new_stack,
+                            true,
+                        );
+                    }
+                }
             }
         }
 

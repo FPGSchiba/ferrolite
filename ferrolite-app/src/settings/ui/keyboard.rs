@@ -47,6 +47,7 @@ const GROUPS: &[(&str, &[Action])] = &[
             Action::SwitchToolCrop,
             Action::SwitchToolMask,
             Action::ToggleMaskOverlay,
+            Action::NewBrushLayer,
         ],
     ),
     ("Editing", &[Action::Undo, Action::Redo]),

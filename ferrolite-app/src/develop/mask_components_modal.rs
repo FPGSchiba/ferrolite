@@ -91,6 +91,7 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                             .clicked()
                         {
                             mask.editing_component = Some(i);
+                            mask.overlay_on = true; // show coverage while editing this component
                             load_component_into_state(comp, mask); // prime the sliders
                         }
                     });

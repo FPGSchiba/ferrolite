@@ -185,6 +185,7 @@ pub(crate) fn selected_section(
             .clicked()
         {
             mask.components_modal_open = true;
+            mask.overlay_on = true; // show coverage/live-preview while working on components
         }
     });
 

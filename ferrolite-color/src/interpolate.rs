@@ -84,8 +84,14 @@ mod tests {
     use super::*;
     use crate::matrix::approx_eq_mat3;
 
-    const A_WHITE: Xy = Xy { x: 0.4476, y: 0.4074 };
-    const D65_WHITE: Xy = Xy { x: 0.3128, y: 0.3290 };
+    const A_WHITE: Xy = Xy {
+        x: 0.4476,
+        y: 0.4074,
+    };
+    const D65_WHITE: Xy = Xy {
+        x: 0.3128,
+        y: 0.3290,
+    };
 
     // Two visibly distinct fake calibration matrices.
     const M_A: Mat3 = [[1.0, 0.1, 0.0], [0.2, 1.0, 0.1], [0.0, 0.2, 1.0]];
@@ -102,7 +108,10 @@ mod tests {
         let cal = [(D65_WHITE, M_D65)];
         let got = camera_to_working_interpolated(&cal, 5000.0, WorkingSpace::Rec2020);
         let want = camera_to_working(M_D65, D65_WHITE, WorkingSpace::Rec2020);
-        assert!(approx_eq_mat3(&got, &want, 1e-6), "got {got:?} want {want:?}");
+        assert!(
+            approx_eq_mat3(&got, &want, 1e-6),
+            "got {got:?} want {want:?}"
+        );
     }
 
     #[test]
@@ -110,7 +119,10 @@ mod tests {
         let cals = [(A_WHITE, M_A), (D65_WHITE, M_D65)];
         let (m, _white) =
             interpolate_xyz_to_cam(&cals, xy_to_cct(A_WHITE)).expect("two calibrations");
-        assert!(approx_eq_mat3(&m, &M_A, 1e-6), "at A expected M_A, got {m:?}");
+        assert!(
+            approx_eq_mat3(&m, &M_A, 1e-6),
+            "at A expected M_A, got {m:?}"
+        );
     }
 
     #[test]
@@ -118,7 +130,10 @@ mod tests {
         let cals = [(A_WHITE, M_A), (D65_WHITE, M_D65)];
         let (m, _white) =
             interpolate_xyz_to_cam(&cals, xy_to_cct(D65_WHITE)).expect("two calibrations");
-        assert!(approx_eq_mat3(&m, &M_D65, 1e-6), "at D65 expected M_D65, got {m:?}");
+        assert!(
+            approx_eq_mat3(&m, &M_D65, 1e-6),
+            "at D65 expected M_D65, got {m:?}"
+        );
     }
 
     #[test]
@@ -128,10 +143,18 @@ mod tests {
         let mid_cct = 1.0 / mid_mired;
         let (m, _white) = interpolate_xyz_to_cam(&cals, mid_cct).expect("two calibrations");
         // Element [0][0] must sit strictly between 1.0 and 1.5.
-        assert!(m[0][0] > 1.0 && m[0][0] < 1.5, "midpoint [0][0]={}", m[0][0]);
+        assert!(
+            m[0][0] > 1.0 && m[0][0] < 1.5,
+            "midpoint [0][0]={}",
+            m[0][0]
+        );
         // At the mired midpoint the blend weight is 0.5, so it is the average.
         let avg = 0.5 * (M_A[0][0] + M_D65[0][0]);
-        assert!((m[0][0] - avg).abs() < 1e-4, "expected avg {avg}, got {}", m[0][0]);
+        assert!(
+            (m[0][0] - avg).abs() < 1e-4,
+            "expected avg {avg}, got {}",
+            m[0][0]
+        );
     }
 
     #[test]

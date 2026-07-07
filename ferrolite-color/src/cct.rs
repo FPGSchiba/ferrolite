@@ -63,7 +63,10 @@ mod tests {
 
     #[test]
     fn xy_to_cct_recovers_standard_a() {
-        let cct = xy_to_cct(Xy { x: 0.4476, y: 0.4074 });
+        let cct = xy_to_cct(Xy {
+            x: 0.4476,
+            y: 0.4074,
+        });
         assert!((cct - 2856.0).abs() < 100.0, "cct={cct}");
     }
 

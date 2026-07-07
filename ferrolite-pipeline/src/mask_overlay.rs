@@ -9,20 +9,20 @@
 use std::sync::Arc;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_mask::{MaskCompositor, MaskDefinition, RasterStore};
+use ferrolite_mask::{ComponentCache, MaskBuffer, MaskCompositor, MaskDefinition, RasterStore};
 
 use crate::image::PipelineImage;
 
-/// Premultiplied **linear** red overlay tint for a coverage value, mirroring the
+/// Premultiplied **linear** tint for a coverage value, mirroring the
 /// `mask_overlay_tint.wgsl` fragment shader exactly. Returns `[r, g, b, a]` with
-/// `a = clamp(coverage) * clamp(strength)` and `r = a` (premultiplied red),
-/// `g = b = 0`. The GPU pass stores these into a linear `Rgba8Unorm` target
+/// `a = clamp(coverage) * clamp(strength)` and `[r,g,b] = color * a`
+/// (premultiplied). The GPU pass stores these into a linear `Rgba8Unorm` target
 /// (byte = value*255); an sRGB view is then handed to egui, so the on-screen
 /// texel matches the former CPU overlay (`Color32::from_rgba_unmultiplied(255,0,0,a)`
-/// premultiplies to the same `(a,0,0,a)`).
-pub fn overlay_tint(coverage: f32, strength: f32) -> [f32; 4] {
+/// premultiplies to the same `(a,0,0,a)` for red).
+pub fn overlay_tint(coverage: f32, strength: f32, color: [f32; 3]) -> [f32; 4] {
     let a = coverage.clamp(0.0, 1.0) * strength.clamp(0.0, 1.0);
-    [a, 0.0, 0.0, a]
+    [color[0] * a, color[1] * a, color[2] * a, a]
 }
 
 /// The linear render/storage format of the overlay target. An `Rgba8UnormSrgb`
@@ -55,6 +55,10 @@ pub struct MaskOverlayCompositor {
     ctx: Arc<GpuContext>,
     tint_pipeline: wgpu::RenderPipeline,
     tint_bgl: wgpu::BindGroupLayout,
+    /// Per-component coverage cache from the last `overlay_texture` call, reused
+    /// by `highlight_texture` to white-tint a single component without
+    /// recompositing it.
+    cache: ComponentCache,
 }
 
 impl MaskOverlayCompositor {
@@ -127,25 +131,51 @@ impl MaskOverlayCompositor {
             ctx,
             tint_pipeline,
             tint_bgl,
+            cache: ComponentCache::new(),
         }
     }
 
-    /// Composite `def` against `input` (on the GPU) and tint it premultiplied red
-    /// into a fresh `Rgba8Unorm` texture (dims = `input` dims). NO readback.
+    /// Composite `def` against `input` (on the GPU, incrementally via the owned
+    /// `ComponentCache`) and tint it premultiplied red into a fresh `Rgba8Unorm`
+    /// texture (dims = `input` dims). NO readback. `input_id` should change
+    /// whenever `input` changes (e.g. a generation counter), so the cache
+    /// invalidates range shapes correctly.
     pub fn overlay_texture(
-        &self,
+        &mut self,
         def: &MaskDefinition,
         input: &PipelineImage,
+        input_id: u64,
         strength: f32,
     ) -> OverlayTexture {
-        use wgpu::util::DeviceExt;
         let (w, h) = (input.width, input.height);
         let iv = input
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let coverage = self
-            .compositor
-            .composite(def, &iv, w, h, &RasterStore::default());
+        let coverage = self.compositor.composite_cached(
+            def,
+            &iv,
+            input_id,
+            w,
+            h,
+            &RasterStore::default(),
+            &mut self.cache,
+        );
+        self.tint(&coverage, [1.0, 0.0, 0.0], strength)
+    }
+
+    /// White-tint of a single component's cached coverage (from the last
+    /// `overlay_texture` call). `None` if `component` wasn't cached (e.g. index
+    /// out of range, or an empty def).
+    pub fn highlight_texture(&self, component: usize, strength: f32) -> Option<OverlayTexture> {
+        let cov = self.cache.coverage(component)?;
+        Some(self.tint(cov, [1.0, 1.0, 1.0], strength))
+    }
+
+    /// Tint a coverage buffer with `color` at `strength` into a fresh
+    /// `Rgba8Unorm` texture (dims = `coverage` dims). NO readback.
+    fn tint(&self, coverage: &MaskBuffer, color: [f32; 3], strength: f32) -> OverlayTexture {
+        use wgpu::util::DeviceExt;
+        let (w, h) = (coverage.width, coverage.height);
 
         let target = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mask-overlay-target"),
@@ -169,7 +199,10 @@ impl MaskOverlayCompositor {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let params: [f32; 4] = [strength.clamp(0.0, 1.0), 0.0, 0.0, 0.0];
+        let params: TintParams = TintParams {
+            color,
+            strength: strength.clamp(0.0, 1.0),
+        };
         let ubuf = self
             .ctx
             .device
@@ -229,36 +262,43 @@ impl MaskOverlayCompositor {
     }
 }
 
+/// GPU-side mirror of `TintParams` in `mask_overlay_tint.wgsl`:
+/// `struct { color: vec3<f32>, strength: f32 }`. In WGSL's uniform-address-space
+/// layout `vec3<f32>` has align 16 / size 12, so the trailing `f32` packs into
+/// the vec3's own padding at byte offset 12 — total struct size is 16 bytes with
+/// no explicit padding field needed here (`#[repr(C)]` on `[f32;3]` + `f32`
+/// produces the identical byte layout: 12 bytes color, 4 bytes strength).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct TintParams {
+    color: [f32; 3],
+    strength: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn overlay_tint_is_premultiplied_red_and_clamped() {
+    fn overlay_tint_is_premultiplied_and_color_parameterized() {
+        // red
         assert_eq!(
-            overlay_tint(0.0, 0.5),
-            [0.0, 0.0, 0.0, 0.0],
-            "zero coverage -> transparent"
+            overlay_tint(0.0, 0.5, [1.0, 0.0, 0.0]),
+            [0.0, 0.0, 0.0, 0.0]
         );
         assert_eq!(
-            overlay_tint(1.0, 0.5),
-            [0.5, 0.0, 0.0, 0.5],
-            "full coverage -> premul red at strength"
+            overlay_tint(1.0, 0.5, [1.0, 0.0, 0.0]),
+            [0.5, 0.0, 0.0, 0.5]
         );
-        // premultiplied: rgb.r always equals alpha
-        let t = overlay_tint(0.4, 0.5);
-        assert_eq!(t[0], t[3], "red channel is premultiplied by alpha");
-        assert_eq!([t[1], t[2]], [0.0, 0.0], "green/blue are zero");
-        // clamps coverage and strength into [0,1]
+        // white: all channels premultiplied by alpha
         assert_eq!(
-            overlay_tint(-0.2, 0.5),
-            [0.0, 0.0, 0.0, 0.0],
-            "negative coverage clamps to 0"
+            overlay_tint(1.0, 0.7, [1.0, 1.0, 1.0]),
+            [0.7, 0.7, 0.7, 0.7]
         );
+        // clamp
         assert_eq!(
-            overlay_tint(1.5, 2.0),
-            [1.0, 0.0, 0.0, 1.0],
-            "over-range clamps to 1"
+            overlay_tint(1.5, 2.0, [1.0, 1.0, 1.0]),
+            [1.0, 1.0, 1.0, 1.0]
         );
     }
 
@@ -269,7 +309,7 @@ mod tests {
             return;
         };
         let ctx = Arc::new(ctx);
-        let oc = MaskOverlayCompositor::new(ctx.clone());
+        let mut oc = MaskOverlayCompositor::new(ctx.clone());
         // 8x1 mid-grey input; a left→right linear-gradient coverage.
         let src = ferrolite_image::LinearRgbaF32::new(8, 1, vec![0.5; 8 * 4]).unwrap();
         let img = crate::nodes::upload_source(&ctx, &src);
@@ -283,7 +323,7 @@ mod tests {
             )],
             invert: false,
         };
-        let tex = oc.overlay_texture(&def, &img, 0.5);
+        let tex = oc.overlay_texture(&def, &img, 1, 0.5);
         assert_eq!((tex.width, tex.height), (8, 1));
         // Read the LINEAR view bytes: byte == round(coverage*0.5*255), premultiplied.
         let bytes = ctx.read_rgba8(&tex.texture, 8, 1);
@@ -307,5 +347,62 @@ mod tests {
             "right edge ~50% alpha, got {}",
             bytes[7 * 4 + 3]
         );
+    }
+
+    #[test]
+    fn highlight_texture_tints_premultiplied_white_for_cached_component() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let mut oc = MaskOverlayCompositor::new(ctx.clone());
+        // 8x1 mid-grey input; two components: a left→right ramp (index 0) and a
+        // right→left ramp (index 1), so component 0's coverage still ramps L->R.
+        let src = ferrolite_image::LinearRgbaF32::new(8, 1, vec![0.5; 8 * 4]).unwrap();
+        let img = crate::nodes::upload_source(&ctx, &src);
+        let def = MaskDefinition {
+            components: vec![
+                (
+                    ferrolite_mask::MaskComponent::LinearGradient {
+                        start: ferrolite_mask::Vec2::new(0.0, 0.5),
+                        end: ferrolite_mask::Vec2::new(1.0, 0.5),
+                    },
+                    ferrolite_mask::CompositeMode::Add,
+                ),
+                (
+                    ferrolite_mask::MaskComponent::LinearGradient {
+                        start: ferrolite_mask::Vec2::new(1.0, 0.5),
+                        end: ferrolite_mask::Vec2::new(0.0, 0.5),
+                    },
+                    ferrolite_mask::CompositeMode::Add,
+                ),
+            ],
+            invert: false,
+        };
+        // Populate the cache first.
+        let _ = oc.overlay_texture(&def, &img, 1, 0.5);
+
+        let tex = oc
+            .highlight_texture(0, 0.7)
+            .expect("component 0 was cached by overlay_texture");
+        assert_eq!((tex.width, tex.height), (8, 1));
+        let bytes = ctx.read_rgba8(&tex.texture, 8, 1);
+        for x in 0..8usize {
+            let px = &bytes[x * 4..x * 4 + 4];
+            assert_eq!(px[0], px[3], "r == a (premultiplied white) at {x}");
+            assert_eq!(px[1], px[3], "g == a (premultiplied white) at {x}");
+            assert_eq!(px[2], px[3], "b == a (premultiplied white) at {x}");
+        }
+        // Component 0 is the L->R ramp, so alpha ramps left→right.
+        assert!(
+            bytes[3] < bytes[7 * 4 + 3],
+            "alpha ramps L->R for component 0: {} !< {}",
+            bytes[3],
+            bytes[7 * 4 + 3]
+        );
+
+        // An out-of-range component index isn't cached.
+        assert!(oc.highlight_texture(2, 0.7).is_none());
     }
 }

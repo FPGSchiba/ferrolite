@@ -7,9 +7,11 @@
 
 mod adapt;
 mod camera;
+mod cct;
 mod display_lut;
 mod error;
 mod icc;
+mod interpolate;
 mod matrix;
 mod oetf;
 mod tail;
@@ -17,12 +19,14 @@ mod working_space;
 
 pub use adapt::chromatic_adaptation;
 pub use camera::{camera_to_working, normalize_neutral};
+pub use cct::{cct_to_xy, xy_to_cct};
 pub use display_lut::{
     bake_display_lut, shaper_decode, shaper_encode, DisplayLut, DisplayProfile,
     DISPLAY_LUT_SHAPER_GAMMA, DISPLAY_LUT_SIZE,
 };
 pub use error::ColorError;
 pub use icc::{emit_icc, parse_icc};
+pub use interpolate::camera_to_working_interpolated;
 pub use matrix::{diag, identity, inverse, mul_mat3, mul_vec3, Mat3, Xy};
 pub use oetf::{output_oetf, srgb_eotf, srgb_oetf};
 pub use tail::{working_to_display, working_to_output};

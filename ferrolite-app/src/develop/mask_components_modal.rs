@@ -117,7 +117,12 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                                 },
                             );
                         });
-                        if row.response.hovered() {
+                        // `contains_pointer` (geometric) not `hovered()`: the row's
+                        // interactive Remove/Edit buttons capture `hovered()`, so
+                        // pointing at them would drop the highlight. We want the
+                        // component highlighted while hovering ANYWHERE on the row
+                        // — the label text or the buttons.
+                        if row.response.contains_pointer() {
                             hovered = Some(i);
                         }
                     }

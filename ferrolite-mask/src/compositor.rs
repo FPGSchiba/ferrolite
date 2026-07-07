@@ -6,6 +6,18 @@
 //! (the edit DAG) and `MaskOverlayCompositor` (the UI overlay).
 
 use std::hash::{Hash, Hasher};
+
+/// TEMP brush-perf probe gate (`FERROLITE_BRUSH_PROFILE`). Resolved once.
+fn brush_profile_enabled() -> bool {
+    use std::sync::OnceLock;
+    static B: OnceLock<bool> = OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("FERROLITE_BRUSH_PROFILE")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "off" | "false"))
+            .unwrap_or(false)
+    })
+}
 use std::sync::Arc;
 
 use ferrolite_gpu::GpuContext;
@@ -180,11 +192,19 @@ impl MaskCompositor {
         }
         cache.reset_if_stale(input_id, (w, h));
         cache.slots.truncate(def.components.len());
+        // TEMP brush-perf probe (round 3b): count cache hits/misses to confirm the
+        // incremental cache is actually working (env `FERROLITE_BRUSH_PROFILE`).
+        let prof = brush_profile_enabled();
+        let (mut evaluated, mut reused) = (0usize, 0usize);
+        let t_eval = prof.then(std::time::Instant::now);
         for (i, (comp, _mode)) in def.components.iter().enumerate() {
             let hash = component_hash(comp);
             match cache.slots.get(i) {
-                Some((h0, _)) if *h0 == hash => { /* reuse */ }
+                Some((h0, _)) if *h0 == hash => {
+                    reused += 1;
+                }
                 _ => {
+                    evaluated += 1;
                     let cov = self.eval(comp, input, w, h, rasters);
                     if i < cache.slots.len() {
                         cache.slots[i] = (hash, cov);
@@ -194,13 +214,23 @@ impl MaskCompositor {
                 }
             }
         }
+        let eval_ms = t_eval.map(|t| t.elapsed().as_secs_f64() * 1e3);
         let inputs: Vec<(MaskBuffer, CompositeMode)> = def
             .components
             .iter()
             .enumerate()
             .map(|(i, (_, m))| (cache.slots[i].1.clone(), *m))
             .collect();
-        self.composite.composite(&inputs, def.invert)
+        let t_fold = prof.then(std::time::Instant::now);
+        let out = self.composite.composite(&inputs, def.invert);
+        if let (Some(e), Some(t)) = (eval_ms, t_fold) {
+            eprintln!(
+                "[brush-perf] composite_cached: components={} evaluated={evaluated} reused={reused} eval={e:.2}ms fold={:.2}ms",
+                def.components.len(),
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        out
     }
 }
 

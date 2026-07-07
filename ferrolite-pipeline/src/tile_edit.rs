@@ -11,29 +11,26 @@
 //! non-identity geometry, Sharpen operates in output space rather than source
 //! space, an accepted pragmatic difference (architecture map §2).
 //!
-//! **LocalAdjustments — output-space mask, pragmatic limitation:** because
-//! geometry runs at the head, the entire color chain (including
-//! `LocalAdjustments`) operates in **output space**, not source space. The
-//! node's mask is composited ONCE per document at the full **output**
-//! resolution (`set_full_dims`, fixed at construction from
-//! `edited_output_dims`) and cached; each `produce_tile` call only updates the
-//! per-tile `mask_origin` (a cheap uniform write) so the shader samples the
-//! correct sub-region — the mask itself is never rebuilt per tile. For
-//! identity/translation geometry this is exact and matches the whole-image
-//! preview render bit-for-bit (within float tolerance). Under crop/rotate the
-//! mask anchors to the cropped/rotated **output** frame rather than the
-//! source frame — the same accepted difference already noted above for
-//! Sharpen. Materializing the mask at full output resolution is a pragmatic
-//! P1 memory/compute cost (one extra full-frame buffer per visible layer,
-//! rebuilt only when the layers change via `set_stack` → `invalidate`); a
-//! later optimization could stream/tile mask evaluation instead.
+//! **LocalAdjustments — per-tile mask, output space:** because geometry runs at
+//! the head, the entire color chain (including `LocalAdjustments`) operates in
+//! **output space**. Each `produce_tile` composites the layer masks at that
+//! tile's own (haloed) resolution against the tile's edited content, placed via
+//! `set_tile_transform` (haloed origin + LOD level dims). Content-dependent
+//! components (Color/Luminance range) therefore sample the correct full-res
+//! pixels; spatial components (gradient/radial/brush) are mapped to full-image
+//! uv by the placement. For identity/translation geometry this matches the
+//! whole-image preview render within float tolerance. Under crop/rotate the mask
+//! anchors to the cropped/rotated **output** frame — the same accepted
+//! difference already noted for Sharpen. Per-tile masks are tile-sized (bounded,
+//! no full-frame mask buffer).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Graph, NodeId};
-use ferrolite_image::{TileCoord, TILE_SIZE};
+use ferrolite_image::{haloed_tile_origin, level_size, TileCoord, TILE_SIZE};
+use ferrolite_mask::TileTransform;
 
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
@@ -64,6 +61,8 @@ pub struct TileEditPipeline {
     vignette: Rc<Cell<VignetteUniform>>,
     vignette_node: Rc<VignetteNode>,
     halo: u32,
+    out_w: u32,
+    out_h: u32,
     // Param cells (set from the stack; Plan 4 mutates via set_stack).
     exposure: Rc<Cell<ExposureUniform>>,
     wb: Rc<Cell<WbUniform>>,
@@ -201,7 +200,6 @@ impl TileEditPipeline {
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
         let local_node = Rc::new(LocalAdjustmentsNode::new(ctx.clone(), local_layers.clone()));
         let (out_w, out_h) = crate::edited_output_dims(&stack, src_w, src_h);
-        local_node.set_full_dims((out_w, out_h));
         let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![hsl_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
@@ -248,6 +246,8 @@ impl TileEditPipeline {
             vignette,
             vignette_node,
             halo,
+            out_w,
+            out_h,
             exposure,
             wb,
             contrast,
@@ -277,10 +277,11 @@ impl TileEditPipeline {
     /// be DISCARDED and rebuilt with `TileEditPipeline::new` — calling `set_stack`
     /// alone will silently keep the old geometry/halo/grid. `needs_full_rebuild` in
     /// the app makes that decision. Amount-only lens changes are uniform updates via
-    /// the lens/vignette setters (no rebuild). The `LocalAdjustments` full-output
-    /// mask resolution (`set_full_dims`) is likewise derived from the stack's
+    /// the lens/vignette setters (no rebuild). The `LocalAdjustments` output
+    /// dims used to place each tile's mask are likewise derived from the stack's
     /// geometry at construction time and fixed thereafter — a geometry/output-dims
-    /// change requires the same full rebuild, not just a `set_stack` call.
+    /// change requires the same full rebuild, not just a `set_stack` call. The
+    /// per-tile mask placement is set per `produce_tile` via `set_tile_transform`.
     pub fn set_stack(&mut self, stack: OpStack) {
         self.exposure.set(exposure_uniform(stack.exposure()));
         self.wb
@@ -372,25 +373,18 @@ impl TileEditPipeline {
             coord,
             halo: self.halo,
         });
-        // The color chain (including LocalAdjustments) runs over the haloed
-        // tile buffer of extent `haloed_tile_extent(halo)`, and
-        // `extract_interior` later copies the interior at offset `halo`. The
-        // full-output mask was composited once at construction (`set_full_dims`);
-        // shift the per-tile origin by `-halo` so `textureLoad(mask, mask_origin
-        // + xy)` in the apply shader lands on the correct full-output pixels for
-        // every haloed-buffer coordinate `xy`, including the halo border itself.
-        // This can be negative at the top/left output edges (and can exceed the
-        // mask dims at the right/bottom edges). `textureLoad` does NOT clamp
-        // out-of-bounds coordinates under wgpu robustness (it returns 0), so the
-        // apply shader explicitly clamps the sampled coordinate to the mask's
-        // bounds, edge-replicating the mask across the halo. This matches the
-        // color halo, which `GeometryHeadNode` fills via ClampToEdge sampling of
-        // the source — so tiled Sharpen (which reads the halo) agrees with the
-        // whole-image render at image edges.
-        let gx = coord.x as i32 * TILE_SIZE as i32 - self.halo as i32;
-        let gy = coord.y as i32 * TILE_SIZE as i32 - self.halo as i32;
-        self.local_node.set_mask_origin([gx, gy]);
-        self.local_node.set_mask_lod(coord.lod);
+        // Composite the mask at THIS tile's resolution (the haloed color-chain
+        // buffer), so content-dependent components (Color/Luminance range) read
+        // the tile's own edited pixels. `origin` is the haloed tile origin in
+        // the tile's LOD level (output) pixel space; `level_dims` is that level's
+        // full size — together they map spatial components to full-image uv. The
+        // apply pass then samples the mask 1:1 (no origin/LOD offset).
+        let (lw, lh) = level_size(self.out_w, self.out_h, coord.lod);
+        let (ox, oy) = haloed_tile_origin(coord, self.halo);
+        self.local_node.set_tile_transform(Some(TileTransform {
+            origin: [ox as i32, oy as i32],
+            level_dims: [lw, lh],
+        }));
         self.graph.mark_dirty(self.head_id);
         self.graph.mark_dirty(self.local_adjust_id);
         let haloed = self.graph.evaluate(self.output_id).clone();

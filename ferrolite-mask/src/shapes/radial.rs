@@ -8,7 +8,7 @@ use crate::buffer::MaskBuffer;
 use crate::pass::GenPass;
 use crate::vec::Vec2;
 
-/// Uniform for `radial_gradient.wgsl` — 32 bytes (padded to a 16-byte multiple).
+/// Uniform for `radial_gradient.wgsl` — 48 bytes (multiple of 16).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RadialGradientUniform {
@@ -18,15 +18,20 @@ pub struct RadialGradientUniform {
     pub feather: f32,
     pub invert: f32,
     pub _pad: f32,
+    pub uv_scale: [f32; 2],
+    pub uv_offset: [f32; 2],
 }
 
 impl RadialGradientUniform {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_params(
         center: Vec2,
         radius: Vec2,
         rotation: f32,
         feather: f32,
         invert: bool,
+        uv_scale: [f32; 2],
+        uv_offset: [f32; 2],
     ) -> Self {
         Self {
             center: [center.x, center.y],
@@ -35,6 +40,8 @@ impl RadialGradientUniform {
             feather,
             invert: if invert { 1.0 } else { 0.0 },
             _pad: 0.0,
+            uv_scale,
+            uv_offset,
         }
     }
 }
@@ -62,11 +69,15 @@ impl RadialGradientPass {
         rotation: f32,
         feather: f32,
         invert: bool,
+        uv_scale: [f32; 2],
+        uv_offset: [f32; 2],
         width: u32,
         height: u32,
     ) -> MaskBuffer {
         self.inner.run(
-            RadialGradientUniform::from_params(center, radius, rotation, feather, invert),
+            RadialGradientUniform::from_params(
+                center, radius, rotation, feather, invert, uv_scale, uv_offset,
+            ),
             width,
             height,
         )
@@ -85,6 +96,8 @@ mod tests {
             0.0,
             0.1,
             false,
+            [1.0, 1.0],
+            [0.0, 0.0],
         );
         assert_eq!(a.invert, 0.0);
         let b = RadialGradientUniform::from_params(
@@ -93,6 +106,8 @@ mod tests {
             0.0,
             0.1,
             true,
+            [1.0, 1.0],
+            [0.0, 0.0],
         );
         assert_eq!(b.invert, 1.0);
     }

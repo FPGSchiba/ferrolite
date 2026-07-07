@@ -205,11 +205,11 @@ fn local_adjust_edit_only_reevaluates_node_and_downstream() {
 }
 
 /// Parity test for Task 9: `TileEditPipeline` composites the local-adjustments
-/// mask once at full output resolution and each tile samples its sub-region via
-/// `set_mask_origin`. For identity geometry the tile (0,0) interior must match
-/// the corresponding top-left region of a whole-image `EditPipeline` render
-/// (both in scene-linear space, before the display/tone-map + sRGB encode that
-/// `render_to_image`/`blit_to_rgba8` would apply).
+/// mask per tile (see `TileEditPipeline::produce_tile` → `set_tile_transform`),
+/// against that tile's own edited content. For identity geometry the tile (0,0)
+/// interior must match the corresponding top-left region of a whole-image
+/// `EditPipeline` render (both in scene-linear space, before the display/tone-map
+/// + sRGB encode that `render_to_image`/`blit_to_rgba8` would apply).
 #[test]
 fn tile_masked_adjustment_matches_preview_region_identity_geometry() {
     let Some(ctx) = GpuContext::headless() else {
@@ -436,5 +436,142 @@ fn tile_lod1_masked_adjustment_samples_correct_mask_half() {
     assert!(
         (left - v).abs() < 0.1,
         "left-half pixel should be unadjusted: got {left}, want ~{v}"
+    );
+}
+
+/// Regression for the tiled Color/Luminance range-mask bug: content-dependent
+/// mask components must be composited from each tile's OWN edited content, not
+/// from a single tile smeared across a full-output mask. A luma-range masked
+/// exposure boost on a source larger than one tile must render the SAME in a
+/// non-(0,0) tile as in the whole-image preview.
+#[test]
+fn tile_luma_range_masked_adjustment_matches_preview_region() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Two tiles wide so tile (1,0) is a genuine non-origin sub-region.
+    let sw = TILE_SIZE * 2 + 40;
+    let sh = TILE_SIZE + 24;
+    let src = common::gradient(sw, sh);
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "luma".into(),
+            visible: true,
+            mask: MaskDefinition {
+                components: vec![(
+                    MaskComponent::LumaRange {
+                        lo: 0.3,
+                        hi: 0.8,
+                        softness: 0.1,
+                    },
+                    CompositeMode::Add,
+                )],
+                invert: false,
+            },
+            adjustments: AdjustmentSet {
+                exposure: 0.8,
+                ..Default::default()
+            },
+        }],
+    };
+    let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+
+    let mut preview = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole = common::read_image_linear(&ctx, &preview.evaluate());
+
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tiles = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    // Tile (1,0): covers output columns [TILE_SIZE, 2*TILE_SIZE).
+    let tex = tiles.produce_tile(TileCoord { lod: 0, x: 1, y: 0 });
+    let tile = common::read_tile_linear(&ctx, &tex);
+
+    let base_x = TILE_SIZE; // tile (1,0) origin in output space
+    let mut max_d = 0.0f32;
+    for ty in 0..TILE_SIZE.min(sh) {
+        for tx in 0..TILE_SIZE {
+            let gx = base_x + tx;
+            if gx >= sw {
+                continue;
+            }
+            for ch in 0..3 {
+                let ti = ((ty * TILE_SIZE + tx) * 4 + ch) as usize;
+                let wi = ((ty * sw + gx) * 4 + ch) as usize;
+                max_d = max_d.max((tile[ti] - whole[wi]).abs());
+            }
+        }
+    }
+    assert!(
+        max_d < 0.02,
+        "luma-range tile (1,0) vs preview drift {max_d}"
+    );
+}
+
+/// Same as the luma golden but for a Color-range component (the other
+/// content-dependent mask). Uses a sample color taken from within tile (1,0).
+#[test]
+fn tile_color_range_masked_adjustment_matches_preview_region() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    let sw = TILE_SIZE * 2 + 40;
+    let sh = TILE_SIZE + 24;
+    let src = common::gradient(sw, sh);
+    // Sample the source color near the center of tile (1,0).
+    let cx = TILE_SIZE + TILE_SIZE / 2;
+    let cy = sh / 2;
+    let ci = ((cy * sw + cx) * 4) as usize;
+    let sample = ferrolite_mask::Rgb::new(src.pixels[ci], src.pixels[ci + 1], src.pixels[ci + 2]);
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "color".into(),
+            visible: true,
+            mask: MaskDefinition {
+                components: vec![(
+                    MaskComponent::ColorRange {
+                        samples: vec![sample],
+                        tolerance: 0.15,
+                        softness: 0.1,
+                    },
+                    CompositeMode::Add,
+                )],
+                invert: false,
+            },
+            adjustments: AdjustmentSet {
+                exposure: 0.8,
+                ..Default::default()
+            },
+        }],
+    };
+    let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+
+    let mut preview = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole = common::read_image_linear(&ctx, &preview.evaluate());
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tiles = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    let tex = tiles.produce_tile(TileCoord { lod: 0, x: 1, y: 0 });
+    let tile = common::read_tile_linear(&ctx, &tex);
+
+    let base_x = TILE_SIZE;
+    let mut max_d = 0.0f32;
+    for ty in 0..TILE_SIZE.min(sh) {
+        for tx in 0..TILE_SIZE {
+            let gx = base_x + tx;
+            if gx >= sw {
+                continue;
+            }
+            for ch in 0..3 {
+                let ti = ((ty * TILE_SIZE + tx) * 4 + ch) as usize;
+                let wi = ((ty * sw + gx) * 4 + ch) as usize;
+                max_d = max_d.max((tile[ti] - whole[wi]).abs());
+            }
+        }
+    }
+    assert!(
+        max_d < 0.02,
+        "color-range tile (1,0) vs preview drift {max_d}"
     );
 }

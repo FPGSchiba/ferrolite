@@ -16,6 +16,7 @@ use crate::shapes::{ColorRangePass, LinearGradientPass, LumaRangePass, RadialGra
 use crate::stroke::{stroke_dabs, SPACING_FRAC};
 use crate::vec::{Rgb, Vec2};
 use crate::RasterStore;
+use crate::TileTransform;
 use crate::{BrushRasterizer, CompositePass};
 
 pub struct MaskCompositor {
@@ -73,12 +74,18 @@ impl MaskCompositor {
         w: u32,
         h: u32,
         rasters: &RasterStore,
+        tile: TileTransform,
     ) -> MaskBuffer {
+        let (uv_scale, uv_offset) = tile.uv_scale_offset(w, h);
         match comp {
-            MaskComponent::LinearGradient { start, end } => {
-                self.linear
-                    .run(Vec2::new(start.x, start.y), Vec2::new(end.x, end.y), w, h)
-            }
+            MaskComponent::LinearGradient { start, end } => self.linear.run(
+                Vec2::new(start.x, start.y),
+                Vec2::new(end.x, end.y),
+                uv_scale,
+                uv_offset,
+                w,
+                h,
+            ),
             MaskComponent::RadialGradient {
                 center,
                 radius,
@@ -91,6 +98,8 @@ impl MaskCompositor {
                 *rotation,
                 *feather,
                 *invert,
+                uv_scale,
+                uv_offset,
                 w,
                 h,
             ),
@@ -116,7 +125,13 @@ impl MaskCompositor {
                         dabs.extend(stroke_dabs(&strokes[i], SPACING_FRAC));
                         i += 1;
                     }
-                    acc = self.brush.stamp_onto(&acc, &dabs, erase, (0, 0), (w, h));
+                    acc = self.brush.stamp_onto(
+                        &acc,
+                        &dabs,
+                        erase,
+                        (tile.origin[0], tile.origin[1]),
+                        (tile.level_dims[0], tile.level_dims[1]),
+                    );
                 }
                 acc
             }
@@ -150,6 +165,7 @@ impl MaskCompositor {
         w: u32,
         h: u32,
         rasters: &RasterStore,
+        tile: TileTransform,
     ) -> MaskBuffer {
         if def.components.is_empty() {
             return self.empty_coverage(def.invert, w, h);
@@ -157,7 +173,7 @@ impl MaskCompositor {
         let inputs: Vec<(MaskBuffer, CompositeMode)> = def
             .components
             .iter()
-            .map(|(c, m)| (self.eval(c, input, w, h, rasters), *m))
+            .map(|(c, m)| (self.eval(c, input, w, h, rasters, tile), *m))
             .collect();
         self.composite.composite(&inputs, def.invert)
     }
@@ -194,6 +210,7 @@ impl MaskCompositor {
         h: u32,
         rasters: &RasterStore,
         cache: &mut ComponentCache,
+        tile: TileTransform,
     ) -> MaskBuffer {
         if def.components.is_empty() {
             cache.slots.clear();
@@ -206,7 +223,7 @@ impl MaskCompositor {
             match cache.slots.get(i) {
                 Some((h0, _)) if *h0 == hash => {}
                 _ => {
-                    let cov = self.eval(comp, input, w, h, rasters);
+                    let cov = self.eval(comp, input, w, h, rasters, tile);
                     if i < cache.slots.len() {
                         cache.slots[i] = (hash, cov);
                     } else {
@@ -387,6 +404,7 @@ mod tests {
     use super::*;
     use crate::model::{CompositeMode, MaskComponent, RasterHandle};
     use crate::RasterStore;
+    use crate::TileTransform;
 
     fn constant_buffer(ctx: &Arc<GpuContext>, w: u32, h: u32, value: f32) -> MaskBuffer {
         let buf = MaskBuffer::alloc(ctx, w, h);
@@ -447,6 +465,7 @@ mod tests {
             4,
             4,
             &RasterStore::default(),
+            TileTransform::whole_image(4, 4),
         );
         assert!(
             read_mask_r32f(&ctx, &full)
@@ -463,6 +482,7 @@ mod tests {
             4,
             4,
             &RasterStore::default(),
+            TileTransform::whole_image(4, 4),
         );
         assert!(
             read_mask_r32f(&ctx, &none).iter().all(|&v| v.abs() < 1e-4),
@@ -497,6 +517,7 @@ mod tests {
             4,
             4,
             &store,
+            TileTransform::whole_image(4, 4),
         );
         assert!(
             read_mask_r32f(&ctx, &single)
@@ -515,6 +536,7 @@ mod tests {
             4,
             4,
             &store,
+            TileTransform::whole_image(4, 4),
         );
         assert!(
             read_mask_r32f(&ctx, &inv)
@@ -541,6 +563,7 @@ mod tests {
             4,
             4,
             &store,
+            TileTransform::whole_image(4, 4),
         );
         assert!(
             read_mask_r32f(&ctx, &sub)
@@ -563,6 +586,7 @@ mod tests {
             4,
             4,
             &store2,
+            TileTransform::whole_image(4, 4),
         );
         assert!(
             read_mask_r32f(&ctx, &isect)
@@ -620,9 +644,24 @@ mod tests {
         };
         let def = mk(0.3);
         let mut cache = ComponentCache::new();
-        let cached =
-            comp.composite_cached(&def, &iv, 1, 16, 16, &RasterStore::default(), &mut cache);
-        let full = comp.composite(&def, &iv, 16, 16, &RasterStore::default());
+        let cached = comp.composite_cached(
+            &def,
+            &iv,
+            1,
+            16,
+            16,
+            &RasterStore::default(),
+            &mut cache,
+            TileTransform::whole_image(16, 16),
+        );
+        let full = comp.composite(
+            &def,
+            &iv,
+            16,
+            16,
+            &RasterStore::default(),
+            TileTransform::whole_image(16, 16),
+        );
         assert_eq!(
             read_mask_r32f(&ctx, &cached),
             read_mask_r32f(&ctx, &full),
@@ -632,9 +671,24 @@ mod tests {
         // Mutate ONLY the first component (move the radial center); cached must still
         // equal a fresh full composite of the mutated def (proves selective re-eval).
         let def2 = mk(0.6);
-        let cached2 =
-            comp.composite_cached(&def2, &iv, 1, 16, 16, &RasterStore::default(), &mut cache);
-        let full2 = comp.composite(&def2, &iv, 16, 16, &RasterStore::default());
+        let cached2 = comp.composite_cached(
+            &def2,
+            &iv,
+            1,
+            16,
+            16,
+            &RasterStore::default(),
+            &mut cache,
+            TileTransform::whole_image(16, 16),
+        );
+        let full2 = comp.composite(
+            &def2,
+            &iv,
+            16,
+            16,
+            &RasterStore::default(),
+            TileTransform::whole_image(16, 16),
+        );
         assert_eq!(
             read_mask_r32f(&ctx, &cached2),
             read_mask_r32f(&ctx, &full2),
@@ -664,6 +718,7 @@ mod tests {
             4,
             4,
             &RasterStore::default(),
+            TileTransform::whole_image(4, 4),
         );
         assert!(
             read_mask_r32f(&ctx, &out).iter().all(|&v| v.abs() < 1e-4),
@@ -708,7 +763,14 @@ mod tests {
             )],
             invert: false,
         };
-        let batched = comp.composite(&def, &iv, 32, 32, &RasterStore::default());
+        let batched = comp.composite(
+            &def,
+            &iv,
+            32,
+            32,
+            &RasterStore::default(),
+            TileTransform::whole_image(32, 32),
+        );
 
         // Reference: the OLD per-stroke fold, computed here directly.
         let reference = {
@@ -723,6 +785,201 @@ mod tests {
             read_mask_r32f(&ctx, &batched),
             read_mask_r32f(&ctx, &reference),
             "erase-run batching must equal the per-stroke fold"
+        );
+    }
+
+    /// Upload an w*h Rgba16Float content texture (row-major [r,g,b,a] f32).
+    fn upload_rgba16f(ctx: &Arc<GpuContext>, w: u32, h: u32, px: &[f32]) -> MaskBuffer {
+        // MaskBuffer is R32Float; for CONTENT we need an Rgba16Float texture the
+        // range shaders textureLoad. Build it directly here (test-only).
+        let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-content"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let halfs: Vec<u8> = px
+            .iter()
+            .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+            .collect();
+        ctx.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &halfs,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 8),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        // Wrap in a MaskBuffer-like holder just for the texture view; we only need a view.
+        MaskBuffer {
+            texture: std::sync::Arc::new(tex),
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn luma_range_tile_matches_whole_image_subwindow() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let comp = MaskCompositor::new(ctx.clone());
+
+        // 16x16 content: horizontal luma ramp so a luma-range band selects a
+        // vertical stripe. r=g=b=x/16.
+        let (w, h) = (16u32, 16u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for _y in 0..h {
+            for x in 0..w {
+                let v = x as f32 / w as f32;
+                px.extend_from_slice(&[v, v, v, 1.0]);
+            }
+        }
+        let content = upload_rgba16f(&ctx, w, h, &px);
+        let cv = content
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let def = MaskDefinition {
+            components: vec![(
+                MaskComponent::LumaRange {
+                    lo: 0.4,
+                    hi: 0.7,
+                    softness: 0.05,
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        };
+
+        // Whole-image mask.
+        let whole = comp.composite(
+            &def,
+            &cv,
+            w,
+            h,
+            &RasterStore::default(),
+            TileTransform::whole_image(w, h),
+        );
+        let whole_px = read_mask_r32f(&ctx, &whole);
+
+        // A 8x8 tile covering the RIGHT half [8..16) x [0..8). In the tiled
+        // pipeline the node input for this tile would be exactly those pixels,
+        // so build that sub-window content and composite at tile placement.
+        let (tw, th) = (8u32, 8u32);
+        let (ox, oy) = (8i32, 0i32);
+        let mut tpx = Vec::with_capacity((tw * th * 4) as usize);
+        for y in 0..th {
+            for x in 0..tw {
+                let gx = ox as u32 + x;
+                let i = ((oy as u32 + y) * w + gx) as usize * 4;
+                tpx.extend_from_slice(&px[i..i + 4]);
+            }
+        }
+        let tcontent = upload_rgba16f(&ctx, tw, th, &tpx);
+        let tcv = tcontent
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        // level_dims = whole image; origin = tile origin in level space.
+        let tile_t = TileTransform {
+            origin: [ox, oy],
+            level_dims: [w, h],
+        };
+        let tmask = comp.composite(&def, &tcv, tw, th, &RasterStore::default(), tile_t);
+        let tmask_px = read_mask_r32f(&ctx, &tmask);
+
+        // Each tile pixel must equal the whole-image mask at (ox+x, oy+y).
+        let mut max_d = 0.0f32;
+        for y in 0..th {
+            for x in 0..tw {
+                let ti = (y * tw + x) as usize;
+                let wi = ((oy as u32 + y) * w + (ox as u32 + x)) as usize;
+                max_d = max_d.max((tmask_px[ti] - whole_px[wi]).abs());
+            }
+        }
+        assert!(max_d < 1e-3, "luma-range tile vs whole-image drift {max_d}");
+    }
+
+    #[test]
+    fn linear_gradient_tile_matches_whole_image_subwindow() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let comp = MaskCompositor::new(ctx.clone());
+        let (w, h) = (16u32, 16u32);
+        // Content is irrelevant for a gradient; a 1x1 dummy view still needs
+        // correct dims for range, but gradients ignore input — use a wxh zero.
+        let content = MaskBuffer::alloc_zeroed(&ctx, w, h);
+        let cv = content
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let def = MaskDefinition {
+            components: vec![(
+                MaskComponent::LinearGradient {
+                    start: crate::vec::Vec2::new(0.0, 0.5),
+                    end: crate::vec::Vec2::new(1.0, 0.5),
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        };
+        let whole = comp.composite(
+            &def,
+            &cv,
+            w,
+            h,
+            &RasterStore::default(),
+            TileTransform::whole_image(w, h),
+        );
+        let whole_px = read_mask_r32f(&ctx, &whole);
+
+        let (tw, th) = (8u32, 8u32);
+        let (ox, oy) = (8i32, 0i32);
+        // For a gradient the tile content is unused; a tw x th zero view is fine.
+        let tcontent = MaskBuffer::alloc_zeroed(&ctx, tw, th);
+        let tcv = tcontent
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let tile_t = TileTransform {
+            origin: [ox, oy],
+            level_dims: [w, h],
+        };
+        let tmask = comp.composite(&def, &tcv, tw, th, &RasterStore::default(), tile_t);
+        let tmask_px = read_mask_r32f(&ctx, &tmask);
+        let mut max_d = 0.0f32;
+        for y in 0..th {
+            for x in 0..tw {
+                let ti = (y * tw + x) as usize;
+                let wi = ((oy as u32 + y) * w + (ox as u32 + x)) as usize;
+                max_d = max_d.max((tmask_px[ti] - whole_px[wi]).abs());
+            }
+        }
+        assert!(
+            max_d < 2e-3,
+            "linear-gradient tile vs whole-image drift {max_d}"
         );
     }
 }

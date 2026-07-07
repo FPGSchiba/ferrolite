@@ -11,6 +11,8 @@ struct P {
     feather: f32,
     invert: f32,
     pad: f32,
+    uv_scale: vec2<f32>,
+    uv_offset: vec2<f32>,
 };
 @group(0) @binding(1) var<uniform> p: P;
 
@@ -18,16 +20,16 @@ struct P {
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = textureDimensions(out_tex);
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
-    let uv = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5, 0.5))
+    let uv_local = (vec2<f32>(f32(gid.x), f32(gid.y)) + vec2<f32>(0.5, 0.5))
         / vec2<f32>(f32(dims.x), f32(dims.y));
+    let uv = uv_local * p.uv_scale + p.uv_offset;
     let d0 = uv - p.center;
     let c = cos(p.rotation);
     let s = sin(p.rotation);
     let local = vec2<f32>(c * d0.x + s * d0.y, -s * d0.x + c * d0.y);
     let rx = max(p.radius.x, 1e-6);
     let ry = max(p.radius.y, 1e-6);
-    let dist = length(vec2<f32>(local.x / rx, local.y / ry)); // 1 at the edge
-    // Feather band expressed as a fraction of the radius: [1, 1 + feather].
+    let dist = length(vec2<f32>(local.x / rx, local.y / ry));
     let f = max(p.feather, 1e-6);
     var m = 1.0 - smoothstep(1.0, 1.0 + f, dist);
     if (p.invert > 0.5) { m = 1.0 - m; }

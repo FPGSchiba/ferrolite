@@ -466,8 +466,9 @@ pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
 pub const MAX_LOCAL_HUE_DEG: f32 = 180.0;
 
 /// GPU uniform for `local_adjust.wgsl`. `#[repr(C)]`, 16-byte aligned. Field order +
-/// padding MIRROR the WGSL `struct P` exactly. `mask_origin` lets the tile tier read
-/// a sub-region of a full-output mask (preview leaves it `[0,0]`).
+/// padding MIRROR the WGSL `struct P` exactly. The mask is composited at the SAME
+/// resolution as this pass's input (whole image for preview, one tile for the tiled
+/// tier), so the apply pass samples it 1:1 — no per-tile origin/LOD offset.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LocalAdjustUniform {
@@ -483,9 +484,6 @@ pub struct LocalAdjustUniform {
     pub color_amount: f32,
     pub color_rgb: [f32; 3],
     pub contrast_pivot: f32,
-    pub mask_origin: [i32; 2],
-    pub mask_lod: i32, // tile mip level; mask sampled at (origin+xy) << mask_lod. 0 = whole-image/preview.
-    pub _pad: i32,
 }
 
 /// `light_color_apply` (below) is still test-only; `local_adjust_uniform` is now
@@ -504,9 +502,6 @@ pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUnifo
         color_amount: a.color.amount,
         color_rgb: [a.color.r, a.color.g, a.color.b],
         contrast_pivot: CONTRAST_PIVOT,
-        mask_origin: [0, 0],
-        mask_lod: 0,
-        _pad: 0,
     }
 }
 

@@ -152,14 +152,11 @@ fn run_one(
     if cancel.is_cancelled() {
         return (false, "Export cancelled".to_string());
     }
-    let camera_to_working = ferrolite_color::camera_to_working(
-        profile.xyz_to_cam,
-        ferrolite_color::Xy {
-            x: profile.white_xy[0],
-            y: profile.white_xy[1],
-        },
-        working_space,
-    );
+    // Match the on-screen path: dual-illuminant interpolation + normalize_neutral
+    // (the demosaic already applied the as-shot WB gains, so the matrix must be
+    // row-normalized or neutrals skew magenta). Identity export stack → temp 0.
+    let camera_to_working =
+        crate::camera_matrix::wb_camera_to_working(&profile, 0.0, working_space);
     let pyramid = Arc::new(GpuPyramidSource::new(gpu, &linear));
     let stack = OpStack::default();
     let req = ExportRequest {

@@ -41,11 +41,10 @@ fn identity_chain_preserves_highlight_above_one() {
     let half = [[0.5, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 0.5]];
     let out = blit_to_rgba8_with_matrix(&gpu, &img, half);
     let want = u8_of(0.75);
-    for c in 0..3 {
+    for (c, &got) in out.iter().take(3).enumerate() {
         assert!(
-            (out[c] as i32 - want).abs() <= TOL,
-            "channel {c}: highlight crushed — want {want} (0.75 lin) got {} ; a crush would read {}",
-            out[c],
+            (got as i32 - want).abs() <= TOL,
+            "channel {c}: highlight crushed — want {want} (0.75 lin) got {got} ; a crush would read {}",
             u8_of(0.5)
         );
     }

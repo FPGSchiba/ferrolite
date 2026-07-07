@@ -297,7 +297,9 @@ impl TileEditPipeline {
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {
             *self.local_layers.borrow_mut() = la;
-            self.local_node.invalidate();
+            // See EditPipeline::set_stack: the node re-composites only on mask-DEF
+            // changes (keyed on `mask_defs`), so an adjustment-only change reuses
+            // the cached masks. No blanket invalidate here.
             self.graph.mark_dirty(self.local_adjust_id);
         }
         self.sharpen.set(sharpen_uniform(stack.sharpen()));

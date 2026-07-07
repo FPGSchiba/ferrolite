@@ -44,6 +44,11 @@ pub struct EditPipeline {
     hsl: Rc<Cell<HslUniform>>,
     local_adjust_id: NodeId,
     local_layers: Rc<RefCell<LocalAdjustments>>,
+    // Handle to the local-adjustments node. The graph owns its own `Rc` clone for
+    // evaluation; this handle is retained for the `local_rebuild_count` test hook
+    // (and parity with `TileEditPipeline`, which drives the node's tile controls).
+    // Read only under `cfg(test)` now that `set_stack` no longer invalidates it.
+    #[cfg_attr(not(test), allow(dead_code))]
     local_node: Rc<LocalAdjustmentsNode>,
     sharpen_id: NodeId,
     sharpen: Rc<Cell<SharpenUniform>>,
@@ -278,7 +283,14 @@ impl EditPipeline {
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {
             *self.local_layers.borrow_mut() = la;
-            self.local_node.invalidate();
+            // NOTE: do NOT blanket-invalidate the node's mask cache here. The node
+            // re-composites masks only when the mask DEFINITIONS change (keyed on
+            // `mask_defs`); a mask-adjustment-only change (exposure/contrast/...)
+            // must reuse the cached masks and re-run just the apply pass. A prior
+            // `local_node.invalidate()` here cleared the whole cache on ANY
+            // LocalAdjustments change, forcing a full re-composite every frame of a
+            // mask-adjustment drag (~40-90ms/frame measured). `mark_dirty` still
+            // re-runs the node so the new adjustment takes effect via `apply`.
             self.graph.mark_dirty(self.local_adjust_id);
         }
         let sh = sharpen_uniform(stack.sharpen());
@@ -312,6 +324,14 @@ impl EditPipeline {
     /// Total nodes in the graph (source + one per op). Used by invalidation tests.
     pub fn node_count(&self) -> usize {
         self.node_count
+    }
+
+    /// Number of times the `LocalAdjustmentsNode` has re-composited its masks
+    /// (test hook): guards that a mask-adjustment-only `set_stack` reuses the
+    /// cached masks rather than re-compositing.
+    #[cfg(test)]
+    pub(crate) fn local_rebuild_count(&self) -> u32 {
+        self.local_node.rebuild_count()
     }
 
     /// Evaluate and read back to an sRGB Rgba8 buffer (golden tests).
@@ -470,4 +490,86 @@ pub fn blit_to_rgba8_with_matrix(
     }
     ctx.queue.submit([enc.finish()]);
     ctx.read_rgba8(&target, w, h)
+}
+
+#[cfg(test)]
+mod edit_pipeline_tests {
+    use super::*;
+    use crate::local::{AdjustmentSet, MaskLayer};
+    use crate::op::Op;
+    use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Vec2};
+
+    const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+    /// A stack with one mask (a linear-gradient component) whose adjustment set
+    /// carries `exposure`. The mask DEFINITION is identical for every `exposure`.
+    fn masked_stack(exposure: f32) -> OpStack {
+        let la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: true,
+                mask: MaskDefinition {
+                    components: vec![(
+                        MaskComponent::LinearGradient {
+                            start: Vec2::new(0.0, 0.5),
+                            end: Vec2::new(1.0, 0.5),
+                        },
+                        CompositeMode::Add,
+                    )],
+                    invert: false,
+                },
+                adjustments: AdjustmentSet {
+                    exposure,
+                    ..Default::default()
+                },
+            }],
+        };
+        OpStack::default().set_op(Op::LocalAdjustments(la))
+    }
+
+    /// Regression for the mask-adjustment lag: `set_stack` must NOT blanket-clear
+    /// the composited-mask cache on a mask-adjustment-only change (it did via
+    /// `local_node.invalidate()`, forcing a full re-composite every frame of an
+    /// Exposure/Contrast drag). This exercises the REAL `set_stack` path — the
+    /// Task-1 node-level test mutated the layers Rc directly and so missed it.
+    #[test]
+    fn mask_adjustment_only_change_reuses_composited_masks() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = LinearRgbaF32::new(8, 8, vec![0.5; 8 * 8 * 4]).unwrap();
+        let mut ep = EditPipeline::new(ctx, &src, masked_stack(0.2), IDENTITY);
+
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.local_rebuild_count(),
+            1,
+            "first evaluate composites the mask once"
+        );
+
+        // Change ONLY the mask's adjustment (exposure); mask def is identical.
+        ep.set_stack(masked_stack(0.9));
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.local_rebuild_count(),
+            1,
+            "mask-adjustment-only change must REUSE the cached masks"
+        );
+
+        // Sanity: a mask-DEFINITION change still recomposites.
+        let mut la = masked_stack(0.9).local_adjustments().unwrap();
+        la.layers[0].mask.components[0].0 = MaskComponent::LinearGradient {
+            start: Vec2::new(0.0, 0.0),
+            end: Vec2::new(0.0, 1.0),
+        };
+        ep.set_stack(OpStack::default().set_op(Op::LocalAdjustments(la)));
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.local_rebuild_count(),
+            2,
+            "a mask-def change recomposites"
+        );
+    }
 }

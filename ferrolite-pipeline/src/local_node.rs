@@ -161,11 +161,6 @@ impl LocalAdjustmentsNode {
         }
     }
 
-    /// Invalidate the cached composited masks (call when `layers` change).
-    pub(crate) fn invalidate(&self) {
-        self.cache.borrow_mut().take();
-    }
-
     fn alloc_out(&self, w: u32, h: u32, label: &str) -> PipelineImage {
         let tex = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),

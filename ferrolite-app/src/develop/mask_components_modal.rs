@@ -827,6 +827,16 @@ mod tests {
             feather: 0.1,
             invert: false,
         }));
+        // The imported/AI seam is NOT hand-editable (guards against a future
+        // accidental inclusion in `is_editable`).
+        assert!(!is_editable(&MaskComponent::Imported {
+            handle: ferrolite_mask::RasterHandle(0),
+            provenance: ferrolite_mask::MaskProvenance {
+                model_id: String::new(),
+                model_version: String::new(),
+                prompt: String::new(),
+            },
+        }));
     }
 
     #[test]

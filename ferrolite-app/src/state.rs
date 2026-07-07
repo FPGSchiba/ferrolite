@@ -108,6 +108,14 @@ pub struct AppState {
     /// A folder pending a remove-confirmation (set when it has subfolders).
     pub pending_remove: Option<PendingRemove>,
 
+    /// App-global egui native texture id for the Develop mask overlay (GPU-tinted;
+    /// no readback). Registered once, updated in place for whichever viewer is
+    /// active — a single reused texture, so no per-image free is needed.
+    pub mask_overlay_native: Option<egui::TextureId>,
+    /// Keeps the current overlay `OverlayTexture` alive while egui's bind group
+    /// references it. Replaced on each overlay rebuild.
+    pub mask_overlay_gpu: Option<ferrolite_pipeline::OverlayTexture>,
+
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
 
@@ -260,6 +268,8 @@ impl AppState {
             include_subfolders: settings.filter.include_subfolders,
             expanded_folders: HashSet::new(),
             pending_remove: None,
+            mask_overlay_native: None,
+            mask_overlay_gpu: None,
             viewer: None,
             export_dialog: None,
             export_activity: None,
@@ -823,6 +833,8 @@ impl AppState {
             include_subfolders: true,
             expanded_folders: HashSet::new(),
             pending_remove: None,
+            mask_overlay_native: None,
+            mask_overlay_gpu: None,
             viewer: None,
             export_dialog: None,
             export_activity: None,

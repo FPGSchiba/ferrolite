@@ -234,10 +234,9 @@ impl FerroliteApp {
         // happy path.
         let is_raw = v.kind == ferrolite_image::FileKind::Raw;
         v.preview_source = Some(std::sync::Arc::new(linear.clone()));
-        // Invalidate the mask-overlay's bounded input + texture cache: they were
-        // derived from the previous preview source and no longer apply.
+        // Invalidate the mask-overlay's bounded input cache: it was derived from
+        // the previous preview source and no longer applies.
         v.mask_overlay_input = None;
-        v.mask_overlay_tex = None;
 
         // RAW: do NOT reveal the embedded JPEG. Keep the spinner up until the
         // color-managed raw render is built at full-decode (`apply_full_decoded`),
@@ -1125,10 +1124,9 @@ impl FerroliteApp {
             Some(v) if v.image_id == image_id => {
                 // Reuse the sRGB reveal path, which reads `preview_source`.
                 v.preview_source = Some(std::sync::Arc::new(linear.clone()));
-                // Invalidate the mask-overlay's bounded input + texture cache: they
-                // were derived from the previous preview source and no longer apply.
+                // Invalidate the mask-overlay's bounded input cache: it was derived
+                // from the previous preview source and no longer applies.
                 v.mask_overlay_input = None;
-                v.mask_overlay_tex = None;
             }
             _ => return, // stale: viewer closed or a different image is open
         }
@@ -1517,9 +1515,9 @@ impl FerroliteApp {
     /// readback) + only-on-change, so it is safe on the UI thread even mid-stroke
     /// (CLAUDE.md §1). The `MaskOverlayCompositor` is built once and cached on
     /// `ViewerState`, never rebuilt per frame (CLAUDE.md §2).
-    fn rebuild_mask_overlay_if_needed(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    fn rebuild_mask_overlay_if_needed(&mut self, frame: &eframe::Frame) {
         use crate::develop::mask_edit;
-        use crate::develop::mask_overlay_color::{overlay_rgba, OVERLAY_MAX_EDGE};
+        use crate::develop::mask_overlay_color::OVERLAY_MAX_EDGE;
         use std::hash::{Hash, Hasher};
 
         let Some(v) = self.state.viewer.as_mut() else {
@@ -1527,7 +1525,6 @@ impl FerroliteApp {
         };
         let la = mask_edit::layers(&v.op_stack);
         let Some(sel) = v.mask.selected.filter(|&i| i < la.layers.len()) else {
-            v.mask_overlay_tex = None;
             v.mask.overlay_key = None;
             return;
         };
@@ -1554,7 +1551,7 @@ impl FerroliteApp {
             .hash(&mut h);
         v.opstack_version.hash(&mut h); // preview regen bumps this
         let key = h.finish();
-        if v.mask.overlay_key == Some(key) && v.mask_overlay_tex.is_some() {
+        if v.mask.overlay_key == Some(key) && self.state.mask_overlay_native.is_some() {
             return;
         }
 
@@ -1582,59 +1579,41 @@ impl FerroliteApp {
                 v.mask_overlay_input = Some(ferrolite_pipeline::upload_source(&gpu_ctx, &small));
             }
         }
-        let (Some(oc), Some(input)) = (v.mask_overlay.as_ref(), v.mask_overlay_input.as_ref())
-        else {
-            return;
-        };
-        // PERF (non-blocking, follow-up): during a brush stroke this rebuild runs
-        // every dragged frame (the mask def hash changes each dab), so the bounded
-        // 512² mask composite + `read_mask_r32f` GPU readback below executes on
-        // every such frame. A per-frame GPU readback can stall the pipeline
-        // (map+wait for the readback buffer), which is the likely source of the
-        // slight brush lag the author noticed — acceptable for now, but a
-        // follow-up could throttle the overlay rebuild while a stroke is active
-        // (e.g. only rebuild on `drag_stopped()`, or at a capped rate), or replace
-        // this readback-based overlay entirely with a GPU-side display-pipeline
-        // overlay pass (the option deferred at plan time, avoiding the
-        // GPU→CPU→GPU round trip altogether).
-        // TEMP brush-perf probe (measure-before-fix): time the overlay path's
-        // three sub-costs — coverage (mask composite + the blocking GPU→CPU
-        // readback), the RGBA tint build, and the egui texture upload — plus the
-        // in-progress stroke's node count, so we can see which dominates and
-        // whether it grows with stroke length. Only while a brush stroke is live.
-        let profile = crate::diag::brush_profile_enabled()
-            && matches!(
-                v.mask.gesture,
-                Some(crate::develop::mask_ui::MaskGesture::Stroke(..))
+        let overlay = {
+            let (Some(oc), Some(input)) = (v.mask_overlay.as_ref(), v.mask_overlay_input.as_ref())
+            else {
+                return;
+            };
+            let overlay = oc.overlay_texture(
+                &def,
+                input,
+                crate::develop::mask_overlay_color::OVERLAY_STRENGTH,
             );
-        let t_cov = profile.then(std::time::Instant::now);
-        let (w, h2, cov) = oc.coverage(&gpu_ctx, &def, input);
-        let cov_ms = t_cov.map(|t| t.elapsed().as_secs_f64() * 1e3);
-        let t_rgba = profile.then(std::time::Instant::now);
-        let rgba = overlay_rgba(&cov, 0.5); // 50% red tint
-        let rgba_ms = t_rgba.map(|t| t.elapsed().as_secs_f64() * 1e3);
-        let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h2 as usize], &rgba);
-        let t_up = profile.then(std::time::Instant::now);
-        v.mask_overlay_tex =
-            Some(ctx.load_texture("mask-overlay", img, egui::TextureOptions::LINEAR));
-        let up_ms = t_up.map(|t| t.elapsed().as_secs_f64() * 1e3);
-        if let (Some(c), Some(r), Some(u)) = (cov_ms, rgba_ms, up_ms) {
-            let brush_nodes: usize = def
-                .components
-                .iter()
-                .map(|(comp, _)| match comp {
-                    ferrolite_mask::MaskComponent::Brush { strokes } => {
-                        strokes.iter().map(|s| s.nodes.len()).sum()
-                    }
-                    _ => 0,
-                })
-                .sum();
-            crate::diag::write_log(&format!(
-                "[brush-perf] overlay {}x{} nodes={brush_nodes} coverage(composite+readback)={c:.2}ms rgba={r:.2}ms upload={u:.2}ms",
-                w, h2
-            ));
+            v.mask.overlay_key = Some(key);
+            overlay
+        };
+        // `v` borrow ends here; the renderer + app-global texture id are disjoint.
+        let view = overlay.srgb_view();
+        {
+            let mut renderer = rs.renderer.write();
+            match self.state.mask_overlay_native {
+                Some(id) => renderer.update_egui_texture_from_wgpu_texture(
+                    &gpu_ctx.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                    id,
+                ),
+                None => {
+                    let id = renderer.register_native_texture(
+                        &gpu_ctx.device,
+                        &view,
+                        wgpu::FilterMode::Linear,
+                    );
+                    self.state.mask_overlay_native = Some(id);
+                }
+            }
         }
-        v.mask.overlay_key = Some(key);
+        self.state.mask_overlay_gpu = Some(overlay);
     }
 
     /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the bake-relevant lens
@@ -3922,12 +3901,12 @@ impl eframe::App for FerroliteApp {
                         // Active-tool canvas overlay (crop handles, mask coverage tint,
                         // etc.) — a single dispatch to the active tool's `canvas()`
                         // replaces the old per-section crop_overlay/mask_overlay calls.
-                        // Keep the mask overlay's bounded rebuild glue (needs ctx +
-                        // &mut self) here, before dispatch, so `mask_overlay_tex` is
+                        // Keep the mask overlay's bounded rebuild glue (needs &mut self)
+                        // here, before dispatch, so `state.mask_overlay_native` is
                         // current when `MaskTool::canvas` reads it.
                         let active_tool = self.state.viewer.as_ref().map(|v| v.tool_state.active);
                         if active_tool == Some(crate::develop::tool::ToolId::Mask) {
-                            self.rebuild_mask_overlay_if_needed(ctx, frame);
+                            self.rebuild_mask_overlay_if_needed(frame);
                         }
                         if let Some(id) = active_tool {
                             if let Some((dims, view, viewport)) = self

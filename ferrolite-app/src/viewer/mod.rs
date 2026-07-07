@@ -208,9 +208,6 @@ pub struct ViewerState {
     /// used as the compositor's input for range shapes. Cached; rebuilt only when
     /// `preview_source` changes (cleared alongside it).
     pub mask_overlay_input: Option<ferrolite_pipeline::PipelineImage>,
-    /// The egui texture for the current overlay fill; rebuilt only when
-    /// `mask.overlay_key` changes (selected mask definition + `opstack_version`).
-    pub mask_overlay_tex: Option<egui::TextureHandle>,
     /// `true` once the `OpsLoaded` event for this image has been received (the
     /// op-stack read job finished and the stack has been applied).
     pub ops_loaded: bool,
@@ -331,7 +328,6 @@ impl ViewerState {
             tool_state: crate::develop::tool_state::ToolState::default(),
             mask_overlay: None,
             mask_overlay_input: None,
-            mask_overlay_tex: None,
             ops_loaded: false,
             ops_read_handle: None,
             histogram: HistogramState::new(),

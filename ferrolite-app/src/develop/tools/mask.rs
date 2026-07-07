@@ -3,9 +3,9 @@
 //! Both wrap existing, already-tested code (`mask_overlay::show`,
 //! `mask_panel::show`) so this migration is behavior-preserving.
 //!
-//! NOTE: the app must call `rebuild_mask_overlay_if_needed(ctx)` before this
-//! tool's `canvas()` runs while Mask is active, so `v.mask_overlay_tex` is
-//! current — that glue is wired in a later task (Task 11); not this one's job.
+//! NOTE: the app calls `rebuild_mask_overlay_if_needed` before this tool's
+//! `canvas()` runs while Mask is active, so `state.mask_overlay_native` (the
+//! app-global GPU-native overlay texture id) is current.
 
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::tool::{DevelopCtx, DevelopTool, PanelTab, TabId, ToolId};
@@ -43,7 +43,7 @@ impl DevelopTool for MaskTool {
             (
                 v.op_stack.clone(),
                 v.image_dims.unwrap_or((1, 1)),
-                v.mask_overlay_tex.clone(),
+                state.mask_overlay_native,
                 v.preview_source.clone(),
             )
         };
@@ -53,7 +53,7 @@ impl DevelopTool for MaskTool {
             image_rect,
             &stack,
             &mut v.mask,
-            tex.as_ref(),
+            tex,
             dims,
             preview_source.as_ref(),
         )

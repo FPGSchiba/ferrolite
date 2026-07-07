@@ -5,7 +5,17 @@
 /// small enough to rebuild every frame during a stroke (CLAUDE.md §1).
 pub const OVERLAY_MAX_EDGE: u32 = 512;
 
+/// Red-overlay tint strength (alpha multiplier). Matches the former 50% tint.
+pub const OVERLAY_STRENGTH: f32 = 0.5;
+
 /// Red overlay: each texel becomes (255, 0, 0, coverage·strength·255).
+///
+/// No longer called from the app: the CPU readback + tint path this fed
+/// (`rebuild_mask_overlay_if_needed`) was replaced by the GPU-native
+/// `MaskOverlayCompositor::overlay_texture` (no readback). Kept + tested for
+/// the equivalent `ferrolite_pipeline::overlay_tint` GPU tint math and pending
+/// final removal alongside `MaskOverlayCompositor::coverage`.
+#[allow(dead_code)]
 pub fn overlay_rgba(coverage: &[f32], strength: f32) -> Vec<u8> {
     let s = strength.clamp(0.0, 1.0);
     let mut out = Vec::with_capacity(coverage.len() * 4);

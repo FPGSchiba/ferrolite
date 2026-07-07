@@ -76,15 +76,16 @@ fn u32_to_rad_handle(v: u32) -> RadHandle {
 }
 
 /// Paint the coverage fill (if a texture is ready + overlay is on) and route tool
-/// affordances. `overlay_tex` is the app-built red-RGBA coverage texture (None
-/// until first built / when no mask is selected). `src_dims` is the source
-/// image's (w, h), needed for the display↔source coordinate mapping.
+/// affordances. `overlay_tex` is the app-global native texture id for the
+/// GPU-tinted overlay (None until first built / when no mask is selected).
+/// `src_dims` is the source image's (w, h), needed for the display↔source
+/// coordinate mapping.
 pub fn show(
     ui: &mut egui::Ui,
     image_rect: egui::Rect,
     stack: &OpStack,
     mask: &mut MaskUiState,
-    overlay_tex: Option<&egui::TextureHandle>,
+    overlay_tex: Option<egui::TextureId>,
     src_dims: (u32, u32),
     preview_source: Option<&Arc<LinearRgbaF32>>,
 ) -> Option<EditOutcome> {
@@ -92,12 +93,12 @@ pub fn show(
     // Suppressed while `adjusting` (a Light+Color slider of this mask is being
     // dragged) so the user sees the actual effect instead of the red tint.
     if mask.overlay_on && !mask.adjusting {
-        if let Some(tex) = overlay_tex {
+        if let Some(tex_id) = overlay_tex {
             ui.painter().image(
-                tex.id(),
+                tex_id,
                 image_rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE, // the texture already carries red + per-texel alpha
+                egui::Color32::WHITE,
             );
         }
     }

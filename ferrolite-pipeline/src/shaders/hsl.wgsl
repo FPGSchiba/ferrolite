@@ -1,6 +1,7 @@
 // HSL: 8-band hue/sat/lum adjustment. Point op (reuses the point-op bind layout:
-// 0 = src texture, 1 = dst storage texture, 2 = uniform). Display-linear input is
-// clamped to [0,1] for the HSL round-trip (a documented Spec-3 placeholder).
+// 0 = src texture, 1 = dst storage texture, 2 = uniform). Out-of-[0,1] channels
+// bypass the HSL round-trip additively (P2 §5.3): HSL is applied to the in-gamut
+// part and the excess is re-added, so highlights >1 and negatives are preserved.
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba16float, write>;
 struct P { bands: array<vec4<f32>, 8> };
@@ -73,7 +74,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
     let c = textureLoad(src, xy, 0);
-    let hsl = rgb2hsl(clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    // The HSL round-trip is only defined on [0,1]; adjust the in-gamut part and
+    // re-add the out-of-range excess so highlights >1 and negative wide-gamut
+    // channels survive (identity bands ⇒ exact pass-through). P2 §5.3.
+    let in_gamut = clamp(c.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    let excess = c.rgb - in_gamut;
+    let hsl = rgb2hsl(in_gamut);
 
     var hue_acc = 0.0;
     var sat_acc = 0.0;
@@ -93,5 +99,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     out_hsl.z = clamp(hsl.z * (1.0 + lum_acc), 0.0, 1.0);
 
     let rgb = hsl2rgb(out_hsl);
-    textureStore(dst, xy, vec4<f32>(max(rgb, vec3<f32>(0.0)), c.a));
+    textureStore(dst, xy, vec4<f32>(rgb + excess, c.a));
 }

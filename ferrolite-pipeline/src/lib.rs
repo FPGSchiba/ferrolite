@@ -30,7 +30,7 @@ pub use op::{
     Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,
     LensCorrection, Op, OpKind, OpStack, Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
-pub use pipeline::{blit_to_rgba8, EditPipeline};
+pub use pipeline::{blit_to_rgba8, blit_to_rgba8_with_matrix, EditPipeline};
 pub use serialize::{deserialize, serialize};
 pub use tile_edit::TileEditPipeline;
 // The uniform structs are exported as the documented GPU memory layout the

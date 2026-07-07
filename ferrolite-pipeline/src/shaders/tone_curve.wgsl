@@ -5,7 +5,12 @@
 @group(0) @binding(2) var<storage, read> lut: array<f32, 256>;
 
 fn apply_lut(v: f32) -> f32 {
-    let x = clamp(v, 0.0, 1.0) * 255.0;
+    // Preserve out-of-[0,1] values (P2 §5.3): extrapolate from the LUT endpoints
+    // with unit slope so highlights >1 and negatives pass through (identity curve
+    // ⇒ exact pass-through), instead of clamping them onto lut[0]/lut[255].
+    if (v < 0.0) { return lut[0] + v; }
+    if (v > 1.0) { return lut[255] + (v - 1.0); }
+    let x = v * 255.0;
     let i0 = u32(floor(x));
     let i1 = min(i0 + 1u, 255u);
     let f = x - floor(x);

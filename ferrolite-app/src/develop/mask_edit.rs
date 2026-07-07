@@ -2,8 +2,13 @@
 //! `LocalAdjustments` with zero layers REMOVES the op (reset) so
 //! `is_identity()`/`has_edits` stay correct — mirroring `ops_edit`. All edits
 //! carry `OpKind::LocalAdjustments`; the app pushes one history entry per gesture.
+//!
+//! NOTE: the brush-merge helpers (`last_brush_index`, `brush_stroke_count`,
+//! `set_brush_with_base`, `new_brush_layer`) are consumed by the brush routing task
+//! that lands next; the module-level allow is REMOVED once that routing lands.
+#![allow(dead_code)]
 
-use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition};
+use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Stroke};
 use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Op, OpKind, OpStack};
 
 pub fn layers(stack: &OpStack) -> LocalAdjustments {
@@ -112,6 +117,70 @@ pub fn prospective_def(
     let mut def = base.clone();
     def.components.push((tentative, mode));
     def
+}
+
+/// Index of the mask's LAST `Brush` component (the one strokes accumulate into),
+/// or `None` if the mask has no brush component yet.
+pub fn last_brush_index(stack: &OpStack, mask_idx: usize) -> Option<usize> {
+    let la = layers(stack);
+    let comps = &la.layers.get(mask_idx)?.mask.components;
+    comps
+        .iter()
+        .rposition(|(c, _)| matches!(c, MaskComponent::Brush { .. }))
+}
+
+/// Number of strokes in the `Brush` component at `comp_idx` (0 if out of range or
+/// not a brush).
+pub fn brush_stroke_count(stack: &OpStack, mask_idx: usize, comp_idx: usize) -> usize {
+    let la = layers(stack);
+    match la
+        .layers
+        .get(mask_idx)
+        .and_then(|l| l.mask.components.get(comp_idx))
+    {
+        Some((MaskComponent::Brush { strokes }, _)) => strokes.len(),
+        _ => 0,
+    }
+}
+
+/// Replace the `Brush` component at `comp_idx` with its first `base_count` strokes
+/// plus `stroke` appended — the in-progress-stroke preview/commit primitive: the
+/// committed base is `strokes[..base_count]`, the live stroke sits at `base_count`.
+/// Out-of-range or non-brush → unchanged stack.
+pub fn set_brush_with_base(
+    stack: &OpStack,
+    mask_idx: usize,
+    comp_idx: usize,
+    base_count: usize,
+    stroke: Stroke,
+) -> OpStack {
+    let la = layers(stack);
+    let Some((MaskComponent::Brush { strokes }, _)) = la
+        .layers
+        .get(mask_idx)
+        .and_then(|l| l.mask.components.get(comp_idx))
+    else {
+        return stack.clone();
+    };
+    let mut next: Vec<Stroke> = strokes.iter().take(base_count).cloned().collect();
+    next.push(stroke);
+    set_component(
+        stack,
+        mask_idx,
+        comp_idx,
+        MaskComponent::Brush { strokes: next },
+    )
+}
+
+/// Append a fresh empty `Brush` component (Add mode) — "New Brush Layer": the next
+/// strokes accumulate here, and it is independently deletable in the Components list.
+pub fn new_brush_layer(stack: &OpStack, mask_idx: usize) -> OpStack {
+    add_component(
+        stack,
+        mask_idx,
+        MaskComponent::Brush { strokes: vec![] },
+        CompositeMode::Add,
+    )
 }
 
 #[cfg(test)]
@@ -332,5 +401,107 @@ mod tests {
         let out = remove_component(&s, 0, 0);
         assert_eq!(layers(&out).layers.len(), 1, "layer stays");
         assert!(layers(&out).layers[0].mask.components.is_empty());
+    }
+
+    fn stroke(x: f32, erase: bool) -> ferrolite_mask::Stroke {
+        ferrolite_mask::Stroke {
+            nodes: vec![ferrolite_mask::BrushNode {
+                pos: Vec2::new(x, 0.5),
+                radius: 0.1,
+                hardness: 0.5,
+                flow: 1.0,
+            }],
+            erase,
+        }
+    }
+    fn brush_strokes(
+        stack: &OpStack,
+        mask_idx: usize,
+        comp_idx: usize,
+    ) -> Vec<ferrolite_mask::Stroke> {
+        match &layers(stack).layers[mask_idx].mask.components[comp_idx].0 {
+            MaskComponent::Brush { strokes } => strokes.clone(),
+            _ => panic!("not a brush"),
+        }
+    }
+
+    #[test]
+    fn last_brush_index_finds_the_last_brush_component() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        assert_eq!(last_brush_index(&s, 0), None, "no components yet");
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::LumaRange {
+                lo: 0.0,
+                hi: 1.0,
+                softness: 0.0,
+            },
+            CompositeMode::Add,
+        );
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::Brush { strokes: vec![] },
+            CompositeMode::Add,
+        );
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::LumaRange {
+                lo: 0.0,
+                hi: 1.0,
+                softness: 0.0,
+            },
+            CompositeMode::Add,
+        );
+        assert_eq!(last_brush_index(&s, 0), Some(1), "the brush at index 1");
+    }
+
+    #[test]
+    fn set_brush_with_base_truncates_then_appends() {
+        // A brush component with 2 committed strokes; base_count=1 drops the 2nd and appends a new one.
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::Brush {
+                strokes: vec![stroke(0.1, false), stroke(0.2, false)],
+            },
+            CompositeMode::Add,
+        );
+        let s = set_brush_with_base(&s, 0, 0, 1, stroke(0.9, false));
+        let ss = brush_strokes(&s, 0, 0);
+        assert_eq!(ss.len(), 2, "kept 1 base + 1 new");
+        assert_eq!(ss[0].nodes[0].pos.x, 0.1);
+        assert_eq!(
+            ss[1].nodes[0].pos.x, 0.9,
+            "in-progress stroke replaced the tail"
+        );
+    }
+
+    #[test]
+    fn brush_stroke_count_reports_len_or_zero() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::Brush {
+                strokes: vec![stroke(0.1, false)],
+            },
+            CompositeMode::Add,
+        );
+        assert_eq!(brush_stroke_count(&s, 0, 0), 1);
+        assert_eq!(brush_stroke_count(&s, 0, 9), 0, "out of range");
+    }
+
+    #[test]
+    fn new_brush_layer_appends_empty_brush() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = new_brush_layer(&s, 0);
+        let comps = &layers(&s).layers[0].mask.components;
+        assert_eq!(comps.len(), 1);
+        assert!(matches!(comps[0].0, MaskComponent::Brush { ref strokes } if strokes.is_empty()));
+        assert_eq!(comps[0].1, CompositeMode::Add);
     }
 }

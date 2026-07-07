@@ -74,9 +74,11 @@ impl DemosaicToRgb16f for QuadBin {
         // serial and parallel paths below so they cannot drift apart.
         let compute_row = |y: u32, row: &mut [f32]| {
             for x in 0..out_w {
-                let r = (sample(x, y, r_pos) * wb[0]).clamp(0.0, 1.0);
-                let g = (((sample(x, y, g0) + sample(x, y, g1)) * 0.5) * wb[1]).clamp(0.0, 1.0);
-                let b = (sample(x, y, b_pos) * wb[2]).clamp(0.0, 1.0);
+                // No [0,1] clamp: carry highlights >1 to the RGBA16F working buffer
+                // (P2 §5.3, gamut-preserving). The black-level floor stays in `sample`.
+                let r = sample(x, y, r_pos) * wb[0];
+                let g = ((sample(x, y, g0) + sample(x, y, g1)) * 0.5) * wb[1];
+                let b = sample(x, y, b_pos) * wb[2];
                 let base = x as usize * 4;
                 row[base] = r;
                 row[base + 1] = g;
@@ -145,17 +147,36 @@ mod tests {
 
     #[test]
     fn quadbin_applies_black_level_and_wb() {
-        // black 10 on all; wb R=2.0. R=(100-10)*2/(100-10)=2.0 -> clamps to 1.0.
+        // black 10 on all; wb R=2.0. R=(100-10)*2/(100-10)=2.0 — carried unclamped now (no [0,1] clip).
         let mut raw = raw_2x2(100, 50, 50, 10);
         raw.black_levels = [10.0; 4];
         raw.wb_coeffs = [2.0, 1.0, 1.0, 1.0];
         let out = QuadBin.to_linear_rgba_f32(&raw);
+        // R = (100-10)*2/(100-10) = 2.0 — carried unclamped now (no [0,1] clip).
         assert!(
-            (out.pixels[0] - 1.0).abs() < 1e-6,
-            "R saturates to 1.0 after WB"
+            (out.pixels[0] - 2.0).abs() < 1e-6,
+            "R carries >1 after WB (got {})",
+            out.pixels[0]
         );
         // G=(50-10)/(100-10)=0.444...
         assert!((out.pixels[1] - (40.0 / 90.0)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn quadbin_retains_values_above_one() {
+        // White balance pushes a channel past the normalized white level: the
+        // demosaic must carry the highlight (>1), not crush it to 1.0.
+        // R = (100-0)/100 * wb(2.0) = 2.0 ; G = 50/100 * 1 = 0.5 ; B = 0.
+        let mut raw = raw_2x2(100, 50, 50, 0);
+        raw.wb_coeffs = [2.0, 1.0, 1.0, 1.0];
+        let out = QuadBin.to_linear_rgba_f32(&raw);
+        assert!(
+            (out.pixels[0] - 2.0).abs() < 1e-6,
+            "R must carry >1 (got {})",
+            out.pixels[0]
+        );
+        assert!((out.pixels[1] - 0.5).abs() < 1e-6);
+        assert!((out.pixels[2] - 0.0).abs() < 1e-6);
     }
 
     #[test]
@@ -209,10 +230,9 @@ mod tests {
         let mut expected = Vec::with_capacity(LinearRgbaF32::expected_len(out_w, out_h));
         for y in 0..out_h {
             for x in 0..out_w {
-                let r = (sample_ref(x, y, 0) * wb[0]).clamp(0.0, 1.0);
-                let g =
-                    (((sample_ref(x, y, 1) + sample_ref(x, y, 2)) * 0.5) * wb[1]).clamp(0.0, 1.0);
-                let b = (sample_ref(x, y, 3) * wb[2]).clamp(0.0, 1.0);
+                let r = sample_ref(x, y, 0) * wb[0];
+                let g = ((sample_ref(x, y, 1) + sample_ref(x, y, 2)) * 0.5) * wb[1];
+                let b = sample_ref(x, y, 3) * wb[2];
                 expected.extend_from_slice(&[r, g, b, 1.0]);
             }
         }

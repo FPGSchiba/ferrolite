@@ -1501,7 +1501,7 @@ impl FerroliteApp {
     /// readback) + only-on-change, so it is safe on the UI thread even mid-stroke
     /// (CLAUDE.md §1). The `MaskOverlayCompositor` is built once and cached on
     /// `ViewerState`, never rebuilt per frame (CLAUDE.md §2).
-    fn rebuild_mask_overlay_if_needed(&mut self, ctx: &egui::Context) {
+    fn rebuild_mask_overlay_if_needed(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         use crate::develop::mask_edit;
         use crate::develop::mask_overlay_color::{overlay_rgba, OVERLAY_MAX_EDGE};
         use std::hash::{Hash, Hasher};
@@ -1542,11 +1542,19 @@ impl FerroliteApp {
             return;
         }
 
-        // Ensure the compositor + bounded input exist.
-        let Some(pipe) = v.preview_edit.as_ref() else {
+        // GPU context from the eframe render state, NOT from `v.preview_edit`: the
+        // mask overlay must be able to build on a freshly-(re)opened image BEFORE
+        // any edit exists. `preview_edit` is created lazily — for Standard images
+        // only on the first edit (`set_preview_and_full`), for RAW at full-decode —
+        // so gating the overlay on it meant a just-opened mask showed no overlay
+        // until the first component edit / invert toggle forced a rebuild. Sourcing
+        // the context here (same wgpu device eframe uses; `from_render_state` is the
+        // established ad-hoc-context pattern) fixes that. Compositor/input below are
+        // still cached once and reused (CLAUDE.md GPU rule).
+        let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
-        let gpu_ctx = pipe.gpu_context();
+        let gpu_ctx = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
         if v.mask_overlay.is_none() {
             v.mask_overlay = Some(ferrolite_pipeline::MaskOverlayCompositor::new(
                 gpu_ctx.clone(),
@@ -3871,7 +3879,7 @@ impl eframe::App for FerroliteApp {
                         // current when `MaskTool::canvas` reads it.
                         let active_tool = self.state.viewer.as_ref().map(|v| v.tool_state.active);
                         if active_tool == Some(crate::develop::tool::ToolId::Mask) {
-                            self.rebuild_mask_overlay_if_needed(ctx);
+                            self.rebuild_mask_overlay_if_needed(ctx, frame);
                         }
                         if let Some(id) = active_tool {
                             if let Some((dims, view, viewport)) = self

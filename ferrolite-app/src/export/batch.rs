@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ferrolite_color::WorkingSpace;
-use ferrolite_decode::{ColorProfile, DemosaicToRgb16f, QuadBin};
+use ferrolite_decode::{ColorProfile, DemosaicToRgb16f, Rcd};
 use ferrolite_export::{run_export, ExportOptions, ExportRequest};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::FileKind;
@@ -137,7 +137,7 @@ fn run_one(
         FileKind::Raw => match ferrolite_decode::decode_full(&item.path) {
             Ok(raw) => {
                 let profile = raw.color_profile.clone();
-                (QuadBin.to_linear_rgba_f32(&raw), profile)
+                (Rcd.to_linear_rgba_f32(&raw), profile)
             }
             Err(e) => return (false, format!("Decode failed: {e}")),
         },

@@ -1494,11 +1494,12 @@ impl FerroliteApp {
         self.persist_ops(ctx, image_id, path, stack);
     }
 
-    /// Rebuild the mask-overlay egui texture iff the selected mask definition or
+    /// Rebuild the mask-overlay GPU texture iff the selected mask definition or
     /// the preview generation changed. Bounded (≤ OVERLAY_MAX_EDGE composite +
-    /// readback) + only-on-change, so it is safe on the UI thread even mid-stroke
-    /// (CLAUDE.md §1). The `MaskOverlayCompositor` is built once and cached on
-    /// `ViewerState`, never rebuilt per frame (CLAUDE.md §2).
+    /// GPU-side red tint, NO GPU→CPU readback) + only-on-change, so it is safe on
+    /// the UI thread even mid-stroke (CLAUDE.md §1). The `MaskOverlayCompositor`
+    /// (incl. its tint pipeline) is built once and cached on `ViewerState`, never
+    /// rebuilt per frame (CLAUDE.md §2).
     fn rebuild_mask_overlay_if_needed(&mut self, frame: &eframe::Frame) {
         use crate::develop::mask_edit;
         use crate::develop::mask_overlay_color::OVERLAY_MAX_EDGE;
@@ -1535,6 +1536,10 @@ impl FerroliteApp {
             .hash(&mut h);
         v.opstack_version.hash(&mut h); // preview regen bumps this
         let key = h.finish();
+        // Dedup: `overlay_key` is the per-viewer correctness signal (it resets to
+        // None on image switch / stack change, so a fresh viewer always rebuilds
+        // before its first draw); `mask_overlay_native.is_some()` is only the
+        // app-global first-registration guard. Both must hold to skip.
         if v.mask.overlay_key == Some(key) && self.state.mask_overlay_native.is_some() {
             return;
         }

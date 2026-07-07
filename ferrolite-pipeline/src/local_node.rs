@@ -330,14 +330,37 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
         let cm = cache.as_ref().unwrap();
 
         let origin = *self.mask_origin.borrow();
+        // TEMP edit-path probe (round 5): time the apply loop + report whether the
+        // masks were recomposited this evaluate. During an adjustment-slider drag
+        // this should show rebuild=false (Fix A) with only the apply passes running.
+        let t_apply = local_brush_profile().then(std::time::Instant::now);
         let mut current = input.clone();
         for (layer, mask) in layers.visible_layers().zip(cm.masks.iter()) {
             let mut u = local_adjust_uniform(&layer.adjustments);
             u.mask_origin = origin;
             current = self.apply(&current, mask, u);
         }
+        if let Some(t) = t_apply {
+            eprintln!(
+                "[brush-perf] local_node rebuild={rebuild} layers={} apply={:.2}ms",
+                cm.masks.len(),
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
         current
     }
+}
+
+/// TEMP edit-path probe gate (`FERROLITE_BRUSH_PROFILE`). Resolved once.
+fn local_brush_profile() -> bool {
+    use std::sync::OnceLock;
+    static B: OnceLock<bool> = OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("FERROLITE_BRUSH_PROFILE")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "off" | "false"))
+            .unwrap_or(false)
+    })
 }
 
 impl Node<PipelineImage> for Rc<LocalAdjustmentsNode> {

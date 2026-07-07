@@ -56,6 +56,17 @@ pub fn enabled() -> bool {
     !matches!(mode(), DiagMode::Off)
 }
 
+/// TEMP gate for the edit-path perf probe (`FERROLITE_BRUSH_PROFILE`). Resolved once.
+pub fn brush_profile_enabled() -> bool {
+    static B: OnceLock<bool> = OnceLock::new();
+    *B.get_or_init(|| {
+        std::env::var("FERROLITE_BRUSH_PROFILE")
+            .ok()
+            .map(|v| !matches!(v.trim(), "" | "0" | "off" | "false"))
+            .unwrap_or(false)
+    })
+}
+
 /// Logging is enabled if the mode includes log output.
 pub fn log_enabled() -> bool {
     mode_logs(mode())

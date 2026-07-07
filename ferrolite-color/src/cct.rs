@@ -41,6 +41,25 @@ pub fn xy_to_cct(xy: Xy) -> f32 {
     449.0 * n * n * n + 3525.0 * n * n + 6823.3 * n + 5520.33
 }
 
+/// Map the `WhiteBalance` op's normalized temperature (`[-1, 1]`, warm positive,
+/// 0 = D65 baseline) to an absolute correlated colour temperature (Kelvin), for
+/// driving dual-illuminant matrix interpolation (P2 §5.1 / §8).
+///
+/// Anchored at D65 (temp 0 → 6504 K) and linear in **mired** (reciprocal
+/// megakelvin) — the perceptually even, DNG-native domain — so equal slider
+/// steps are equal perceived colour-temperature steps. Warm (`temp > 0`) raises
+/// mired → lowers Kelvin; `TEMP_MIRED_SPAN` sets how far ±1 reaches (≈ Standard-A
+/// at +1). Clamped to the Kim-locus valid range so downstream `cct_to_xy` stays
+/// finite.
+pub fn wb_temp_to_cct(temp_norm: f32) -> f32 {
+    const D65_CCT: f32 = 6504.0;
+    const TEMP_MIRED_SPAN: f32 = 200.0; // mired per unit of normalized temp
+    let baseline_mired = 1.0e6 / D65_CCT;
+    // mired ∈ [40, 600] ⇒ CCT ∈ [1667, 25000] (Kim-locus valid range).
+    let mired = (baseline_mired + temp_norm * TEMP_MIRED_SPAN).clamp(40.0, 599.0);
+    1.0e6 / mired
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +104,54 @@ mod tests {
         for &t in &[100.0_f32, 1e6] {
             let xy = cct_to_xy(t);
             assert!(xy.x.is_finite() && xy.y.is_finite(), "T={t} -> {xy:?}");
+        }
+    }
+
+    #[test]
+    fn wb_temp_zero_is_d65() {
+        assert!(
+            (wb_temp_to_cct(0.0) - 6504.0).abs() < 1.0,
+            "{}",
+            wb_temp_to_cct(0.0)
+        );
+    }
+
+    #[test]
+    fn wb_temp_warm_lowers_cct_cool_raises_it() {
+        // Warm (positive) is a lower colour temperature than neutral; cool higher.
+        assert!(wb_temp_to_cct(0.5) < wb_temp_to_cct(0.0));
+        assert!(wb_temp_to_cct(-0.5) > wb_temp_to_cct(0.0));
+    }
+
+    #[test]
+    fn wb_temp_is_monotonic_decreasing() {
+        let mut prev = f32::INFINITY;
+        for i in -10..=10 {
+            let t = i as f32 / 10.0;
+            let cct = wb_temp_to_cct(t);
+            assert!(cct < prev, "not decreasing at t={t}: {cct} !< {prev}");
+            prev = cct;
+        }
+    }
+
+    #[test]
+    fn wb_temp_plus_one_is_near_standard_a() {
+        // +1 reaches roughly Standard illuminant A (2856 K).
+        assert!(
+            (wb_temp_to_cct(1.0) - 2856.0).abs() < 200.0,
+            "{}",
+            wb_temp_to_cct(1.0)
+        );
+    }
+
+    #[test]
+    fn wb_temp_clamps_finite_beyond_range() {
+        for &t in &[-5.0_f32, 5.0] {
+            let cct = wb_temp_to_cct(t);
+            assert!(
+                cct.is_finite() && (1667.0..=25000.0).contains(&cct),
+                "t={t} -> {cct}"
+            );
         }
     }
 }

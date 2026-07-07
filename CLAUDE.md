@@ -92,3 +92,14 @@ rebindable `Action` appears in BOTH the Settings keyboard tab (add it to a `GROU
 entry — enforced by `every_action_is_in_a_settings_group`) AND the Help panel's shortcut
 list. A non-rebindable input gesture (e.g. Ctrl+scroll = brush size) appears at least in
 the Help panel and is noted in the Settings keyboard tab's gestures line.
+
+## Subagent-driven-development scratch (`.superpowers/sdd/`)
+
+`.superpowers/` is git-ignored scratch. When `superpowers:subagent-driven-development`
+runs, it fills `.superpowers/sdd/` with per-task briefs, reports, review-package diffs,
+and a `progress.md` ledger — these accumulate fast (hundreds of files across a
+multi-round effort). **When `superpowers:finishing-a-development-branch` completes by
+merging or discarding a branch, clean that scratch** (`rm -rf .superpowers/sdd/*`, which
+keeps the folder's own `.gitignore`) so the next task starts without stale briefs/reports
+to wade through. Do NOT clean it for the "keep as-is" or "create PR" finish options (that
+work is still in flight). Nothing there is tracked, so no commit is involved.

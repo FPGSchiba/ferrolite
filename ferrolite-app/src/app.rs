@@ -1528,13 +1528,19 @@ impl FerroliteApp {
         // aren't reflected in `def`/`committed_def` otherwise since it's not
         // committed to the OpStack yet).
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_string(committed_def)
-            .unwrap_or_default()
-            .hash(&mut h);
+        // Committed mask changes are already captured by `opstack_version` (it
+        // bumps on every edit, incl. undo/redo) plus the selected-mask index (a
+        // mask switch changes the shown def without an edit). Hashing those two is
+        // O(1). We deliberately do NOT serde-serialize `committed_def` here: that
+        // is O(all-components · brush-nodes) on the UI thread EVERY frame during a
+        // stroke, which made large masks (100+ components) lag. Only the
+        // uncommitted `preview_component` (one tentative component, small) still
+        // needs hashing, since it is not reflected in `opstack_version`.
+        sel.hash(&mut h);
+        v.opstack_version.hash(&mut h); // bumps on every committed edit / preview regen
         serde_json::to_string(&v.mask.preview_component)
             .unwrap_or_default()
             .hash(&mut h);
-        v.opstack_version.hash(&mut h); // preview regen bumps this
         let key = h.finish();
         // Dedup: `overlay_key` is the per-viewer correctness signal (it resets to
         // None on image switch / stack change, so a fresh viewer always rebuilds

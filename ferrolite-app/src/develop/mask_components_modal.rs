@@ -18,6 +18,11 @@ use crate::widgets::EguiSlider;
 use ferrolite_mask::{CompositeMode, MaskComponent};
 use ferrolite_pipeline::{OpKind, OpStack};
 
+/// Max on-screen height (px) of the scrollable components list. Beyond this the
+/// list scrolls internally so a large mask never pushes the inline editor and
+/// the add-new section off the window / screen.
+const COMPONENTS_LIST_MAX_HEIGHT: f32 = 240.0;
+
 /// Render the modal if `mask.components_modal_open`. Returns an edit if one was made.
 pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Option<EditOutcome> {
     if !mask.components_modal_open {
@@ -54,49 +59,61 @@ pub fn show(ctx: &egui::Context, stack: &OpStack, mask: &mut MaskUiState) -> Opt
                         .color(crate::theme::TEXT_FAINT),
                 );
             }
-            for (i, (comp, mode)) in components.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{}. {}  [{:?}]",
-                        i + 1,
-                        component_label(comp),
-                        mode
-                    ));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::widgets::tool_button(
-                            ui,
-                            crate::icons::DELETE,
-                            "Remove",
-                            false,
-                            true,
-                            None,
-                        )
-                        .clicked()
-                        {
-                            out =
-                                Some(commit_edit(mask_edit::remove_component(stack, mask_idx, i)));
-                            if mask.editing_component == Some(i) {
-                                mask.editing_component = None;
-                            }
-                        }
-                        if is_editable(comp)
-                            && crate::widgets::tool_button(
-                                ui,
-                                crate::icons::EDIT,
-                                "Edit",
-                                mask.editing_component == Some(i),
-                                true,
-                                None,
-                            )
-                            .clicked()
-                        {
-                            mask.editing_component = Some(i);
-                            mask.overlay_on = true; // show coverage while editing this component
-                            load_component_into_state(comp, mask); // prime the sliders
-                        }
-                    });
+            // Scrollable, height-capped list so a large mask (100+ components)
+            // never grows the window past the screen and hides the editor /
+            // add-new section below.
+            egui::ScrollArea::vertical()
+                .max_height(COMPONENTS_LIST_MAX_HEIGHT)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for (i, (comp, mode)) in components.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(format!(
+                                "{}. {}  [{:?}]",
+                                i + 1,
+                                component_label(comp),
+                                mode
+                            ));
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if crate::widgets::tool_button(
+                                        ui,
+                                        crate::icons::DELETE,
+                                        "Remove",
+                                        false,
+                                        true,
+                                        None,
+                                    )
+                                    .clicked()
+                                    {
+                                        out = Some(commit_edit(mask_edit::remove_component(
+                                            stack, mask_idx, i,
+                                        )));
+                                        if mask.editing_component == Some(i) {
+                                            mask.editing_component = None;
+                                        }
+                                    }
+                                    if is_editable(comp)
+                                        && crate::widgets::tool_button(
+                                            ui,
+                                            crate::icons::EDIT,
+                                            "Edit",
+                                            mask.editing_component == Some(i),
+                                            true,
+                                            None,
+                                        )
+                                        .clicked()
+                                    {
+                                        mask.editing_component = Some(i);
+                                        mask.overlay_on = true; // show coverage while editing
+                                        load_component_into_state(comp, mask); // prime sliders
+                                    }
+                                },
+                            );
+                        });
+                    }
                 });
-            }
             // Inline editor for the component being edited (Luma/Color only).
             if let Some(i) = mask.editing_component {
                 if let Some((comp, _mode)) = components.get(i) {

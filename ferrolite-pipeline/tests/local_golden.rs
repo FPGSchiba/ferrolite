@@ -1,7 +1,7 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
-use ferrolite_image::{TileCoord, TILE_SIZE};
+use ferrolite_image::{LinearRgbaF32, TileCoord, TILE_SIZE};
 use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Vec2 as MVec2};
 use ferrolite_pipeline::{
     sharpen_halo, AdjustmentSet, EditPipeline, GpuPyramidSource, LocalAdjustments, MaskLayer, Op,
@@ -345,4 +345,96 @@ fn tile_masked_adjustment_with_sharpen_halo_matches_preview_region() {
         }
     }
     assert!(max_d < 0.02, "tile vs preview region drift {max_d}");
+}
+
+/// A uniform mid-gray source (display-linear), large enough that `lod = 1`
+/// (half-resolution) is still bigger than one `TILE_SIZE`.
+fn uniform_gray(w: u32, h: u32, v: f32) -> LinearRgbaF32 {
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for _ in 0..(w * h) {
+        px.extend_from_slice(&[v, v, v, 1.0]);
+    }
+    LinearRgbaF32::new(w, h, px).expect("uniform gray length")
+}
+
+/// Regression test for the tiled-mask-LOD bug: `produce_tile` at `lod > 0` used
+/// to sample the LOD-0 composited mask using LOD-`lod` (i.e. unscaled) tile
+/// coordinates, so a tile at `lod >= 1` only ever saw the top-left
+/// `1 / 2^lod` sub-region of the mask. A near-step horizontal-split mask (left
+/// half ~0, right half ~1) over a 512x512 source therefore rendered adjusted
+/// only in the LEFT half of a `lod = 1` tile (which covers the FULL width at
+/// half-res) instead of the RIGHT half — masked edits silently vanished
+/// whenever the fit-view idled at `lod >= 1`. After the fix, the tile's mask
+/// coordinate is scaled by `2^lod` before sampling the LOD-0 mask, so the
+/// right half of the tile (mask ~1) is adjusted and the left half (mask ~0)
+/// is not, matching a whole-image render.
+#[test]
+fn tile_lod1_masked_adjustment_samples_correct_mask_half() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+
+    // 512x512 -> level_size(1) = 256x256 = exactly one TILE_SIZE tile.
+    let sw = 512u32;
+    let sh = 512u32;
+    let v = 0.5f32;
+    let src = uniform_gray(sw, sh, v);
+
+    // Near-step horizontal split: mask ~0 for x < 0.5 of the LOD-0 width,
+    // ~1 for x > 0.5. exposure +2.0 EV -> gain 4.0 (adjust() at identity is
+    // just `rgb * exposure_gain`).
+    let exposure_ev = 2.0f32;
+    let gain = 2.0f32.powf(exposure_ev);
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "split".into(),
+            visible: true,
+            mask: MaskDefinition {
+                components: vec![(
+                    MaskComponent::LinearGradient {
+                        start: MVec2::new(0.499, 0.5),
+                        end: MVec2::new(0.501, 0.5),
+                    },
+                    CompositeMode::Add,
+                )],
+                invert: false,
+            },
+            adjustments: AdjustmentSet {
+                exposure: exposure_ev,
+                ..Default::default()
+            },
+        }],
+    };
+    let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    assert_eq!(
+        pyramid.level_size(1),
+        (256, 256),
+        "test assumes lod=1 halves a 512x512 source to exactly one tile"
+    );
+    let mut tiles = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    let tex = tiles.produce_tile(TileCoord { lod: 1, x: 0, y: 0 });
+    let tile = common::read_tile_linear(&ctx, &tex);
+
+    let px = |tx: u32, ty: u32, ch: u32| -> f32 { tile[((ty * TILE_SIZE + tx) * 4 + ch) as usize] };
+
+    // Well into the RIGHT half of the lod=1 tile (tile x ~ 230 -> LOD-0 x ~
+    // 460): mask ~1, so this pixel must be adjusted (out ~ v * gain).
+    let right = px(230, 128, 0);
+    assert!(
+        (right - v * gain).abs() < 0.1,
+        "right-half pixel should be adjusted: got {right}, want ~{}",
+        v * gain
+    );
+
+    // Well into the LEFT half (tile x ~ 25 -> LOD-0 x ~ 50): mask ~0, so this
+    // pixel must stay unadjusted (out ~ v), both before and after the fix.
+    let left = px(25, 128, 0);
+    assert!(
+        (left - v).abs() < 0.1,
+        "left-half pixel should be unadjusted: got {left}, want ~{v}"
+    );
 }

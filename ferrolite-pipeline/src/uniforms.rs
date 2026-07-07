@@ -484,7 +484,8 @@ pub struct LocalAdjustUniform {
     pub color_rgb: [f32; 3],
     pub contrast_pivot: f32,
     pub mask_origin: [i32; 2],
-    pub _pad: [f32; 2],
+    pub mask_lod: i32, // tile mip level; mask sampled at (origin+xy) << mask_lod. 0 = whole-image/preview.
+    pub _pad: i32,
 }
 
 /// `light_color_apply` (below) is still test-only; `local_adjust_uniform` is now
@@ -504,7 +505,8 @@ pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUnifo
         color_rgb: [a.color.r, a.color.g, a.color.b],
         contrast_pivot: CONTRAST_PIVOT,
         mask_origin: [0, 0],
-        _pad: [0.0; 2],
+        mask_lod: 0,
+        _pad: 0,
     }
 }
 

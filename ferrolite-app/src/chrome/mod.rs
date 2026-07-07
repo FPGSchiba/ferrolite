@@ -27,6 +27,7 @@ pub enum MenuAction {
     ZoomFit,
     ZoomActual,
     ToggleHistogram,
+    ToggleToolPalette,
     OpenHelp,
     OpenSettings,
 }
@@ -65,6 +66,7 @@ pub fn title_bar(
     can_undo: bool,
     can_redo: bool,
     show_histogram: bool,
+    show_tool_palette: bool,
 ) -> Option<MenuAction> {
     let bar = ui.max_rect();
 
@@ -226,6 +228,14 @@ pub fn title_bar(
                     .clicked()
                 {
                     action = Some(MenuAction::ToggleHistogram);
+                    ui.close_menu();
+                }
+                let mut palette_checked = show_tool_palette;
+                if ui
+                    .checkbox(&mut palette_checked, "Show tool palette")
+                    .clicked()
+                {
+                    action = Some(MenuAction::ToggleToolPalette);
                     ui.close_menu();
                 }
             });

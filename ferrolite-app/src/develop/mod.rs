@@ -2,6 +2,7 @@
 //! op-stack edit helpers + undo/redo history, and off-thread frl:ops persistence.
 
 pub mod adjustment_panel;
+pub mod base_tabs;
 pub mod coverage;
 pub mod crop_math;
 pub mod crop_overlay;
@@ -15,6 +16,7 @@ pub mod lens_caps_ui;
 pub mod lens_match;
 pub mod lens_picker;
 pub mod mask_affordance;
+pub mod mask_components_modal;
 pub mod mask_edit;
 pub mod mask_overlay;
 pub mod mask_overlay_color;
@@ -26,4 +28,9 @@ pub mod ops_persist;
 pub mod preview_cache;
 pub mod split;
 pub mod thumb_regen;
+pub mod tool;
+pub mod tool_palette;
+pub mod tool_panel;
+pub mod tool_state;
+pub mod tools;
 pub mod vignette_mode;

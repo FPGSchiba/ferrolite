@@ -27,11 +27,15 @@ pub enum Action {
     Redo,
     OpenSettings,
     OpenHelp,
+    SwitchToolAdjust,
+    SwitchToolCrop,
+    SwitchToolMask,
+    ToggleMaskOverlay,
 }
 
 impl Action {
     /// All variants, for exhaustive iteration (defaults coverage + UI listing).
-    pub const ALL: [Action; 20] = [
+    pub const ALL: [Action; 24] = [
         Action::CloseViewer,
         Action::OpenImage,
         Action::SelectAll,
@@ -52,6 +56,10 @@ impl Action {
         Action::Redo,
         Action::OpenSettings,
         Action::OpenHelp,
+        Action::SwitchToolAdjust,
+        Action::SwitchToolCrop,
+        Action::SwitchToolMask,
+        Action::ToggleMaskOverlay,
     ];
 
     pub fn label(self) -> &'static str {
@@ -76,6 +84,10 @@ impl Action {
             Action::Redo => "Redo",
             Action::OpenSettings => "Open Settings",
             Action::OpenHelp => "Open Help",
+            Action::SwitchToolAdjust => "Tool: Adjust",
+            Action::SwitchToolCrop => "Tool: Crop",
+            Action::SwitchToolMask => "Tool: Mask",
+            Action::ToggleMaskOverlay => "Toggle mask overlay",
         }
     }
 }
@@ -541,6 +553,11 @@ impl Keymap {
         m.insert(Redo, ctrl_shift(Key::Z));
         m.insert(OpenSettings, ctrl(Key::Comma));
         m.insert(OpenHelp, plain(Key::F1));
+        m.insert(SwitchToolAdjust, plain(Key::A));
+        m.insert(SwitchToolCrop, plain(Key::C));
+        m.insert(SwitchToolMask, plain(Key::M));
+        // `O` is FlagReject's default (see above) — `T` ("toggle") is free.
+        m.insert(ToggleMaskOverlay, plain(Key::T));
         // Fill any missing action (forward-compat) with a harmless default.
         for a in Action::ALL {
             m.entry(a).or_insert(plain(Key::F1));
@@ -550,6 +567,14 @@ impl Keymap {
 
     pub fn chord(&self, a: Action) -> Chord {
         *self.map.get(&a).unwrap_or(&plain(Key::F1))
+    }
+
+    /// The bound chord for `action` as a short display string (e.g. "Ctrl+Z",
+    /// "C"). Delegates to `Chord::label()` (same modifier order: Ctrl, Shift,
+    /// Alt, then the key) so a rebind updates the shown key everywhere a
+    /// tooltip calls this (CLAUDE.md "UI keybind tooltips" rule).
+    pub fn hint(&self, action: Action) -> String {
+        self.chord(action).label()
     }
 
     pub fn set(&mut self, a: Action, c: Chord) {
@@ -747,6 +772,65 @@ mod tests {
             );
             assert_eq!(ours.unwrap().to_egui(), k, "round-trip failed for {k:?}");
         }
+    }
+
+    #[test]
+    fn new_develop_actions_have_defaults_and_no_internal_conflict() {
+        let km = Keymap::defaults();
+        use Action::*;
+        // Every action (incl. the new ones) is bound — the existing exhaustiveness
+        // test already covers this via Action::ALL; here assert the new ones resolve.
+        for a in [
+            SwitchToolAdjust,
+            SwitchToolCrop,
+            SwitchToolMask,
+            ToggleMaskOverlay,
+        ] {
+            let _ = km.chord(a); // must not panic / must be present
+        }
+        // The new defaults must not collide with each other.
+        let news = [
+            SwitchToolAdjust,
+            SwitchToolCrop,
+            SwitchToolMask,
+            ToggleMaskOverlay,
+        ];
+        for &a in &news {
+            if let Some(other) = km.conflict(a, km.chord(a)) {
+                assert!(
+                    !news.contains(&other) || other == a,
+                    "new action {a:?} conflicts with {other:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn toggle_mask_overlay_does_not_collide_with_flag_reject() {
+        // `O` is FlagReject's default; ToggleMaskOverlay must use a different
+        // key so the two don't collide despite living in different contexts.
+        let km = Keymap::defaults();
+        assert_eq!(
+            km.conflict(
+                Action::ToggleMaskOverlay,
+                km.chord(Action::ToggleMaskOverlay)
+            ),
+            None
+        );
+        assert_ne!(
+            km.chord(Action::ToggleMaskOverlay).key,
+            Key::O,
+            "ToggleMaskOverlay must not default to O (FlagReject's key)"
+        );
+    }
+
+    #[test]
+    fn hint_formats_chords() {
+        let km = Keymap::defaults();
+        assert_eq!(km.hint(Action::SwitchToolCrop), "C");
+        assert_eq!(km.hint(Action::Undo), "Ctrl+Z");
+        assert_eq!(km.hint(Action::Redo), "Ctrl+Shift+Z");
+        assert_eq!(km.hint(Action::ToggleMaskOverlay), "T");
     }
 
     #[test]

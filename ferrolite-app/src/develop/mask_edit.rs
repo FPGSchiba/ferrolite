@@ -3,7 +3,7 @@
 //! `is_identity()`/`has_edits` stay correct — mirroring `ops_edit`. All edits
 //! carry `OpKind::LocalAdjustments`; the app pushes one history entry per gesture.
 
-use ferrolite_mask::{CompositeMode, MaskComponent};
+use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition};
 use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Op, OpKind, OpStack};
 
 pub fn layers(stack: &OpStack) -> LocalAdjustments {
@@ -65,6 +65,18 @@ pub fn add_component(stack: &OpStack, idx: usize, c: MaskComponent, m: Composite
     edit_layer(stack, idx, |l| l.mask.components.push((c, m)))
 }
 
+/// Remove one component (by index) from a mask's definition. No-op if `mask_idx` or
+/// `comp_idx` is out of range. The layer itself stays (even if it becomes empty).
+pub fn remove_component(stack: &OpStack, mask_idx: usize, comp_idx: usize) -> OpStack {
+    let la = layers(stack);
+    if mask_idx >= la.layers.len() || comp_idx >= la.layers[mask_idx].mask.components.len() {
+        return stack.clone();
+    }
+    edit_layer(stack, mask_idx, |layer| {
+        layer.mask.components.remove(comp_idx);
+    })
+}
+
 /// Replace the component at `comp_idx` within the mask layer at `mask_idx`,
 /// keeping its composite mode. Out-of-range `mask_idx` or `comp_idx` → unchanged
 /// stack (mirrors `edit_layer`'s out-of-range behavior).
@@ -87,6 +99,19 @@ pub fn set_component(
 
 pub fn set_adjustments(stack: &OpStack, idx: usize, a: AdjustmentSet) -> OpStack {
     edit_layer(stack, idx, |l| l.adjustments = a)
+}
+
+/// The mask definition AS IT WOULD BE with `tentative` folded in at `mode` after the
+/// existing `base` components — used to preview an in-progress "add component"
+/// (Task 6) without touching the committed `OpStack`.
+pub fn prospective_def(
+    base: &MaskDefinition,
+    tentative: MaskComponent,
+    mode: CompositeMode,
+) -> MaskDefinition {
+    let mut def = base.clone();
+    def.components.push((tentative, mode));
+    def
 }
 
 #[cfg(test)]
@@ -229,5 +254,83 @@ mod tests {
             1
         );
         let _ = OpKind::LocalAdjustments; // kind used by the app when pushing history
+    }
+
+    #[test]
+    fn remove_component_removes_the_indexed_component() {
+        let luma = |lo| MaskComponent::LumaRange {
+            lo,
+            hi: 1.0,
+            softness: 0.1,
+        };
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(&s, 0, luma(0.1), CompositeMode::Add);
+        let s = add_component(&s, 0, luma(0.2), CompositeMode::Add);
+        let s = add_component(&s, 0, luma(0.3), CompositeMode::Add);
+        let out = remove_component(&s, 0, 1); // remove the middle one
+        let comps = &layers(&out).layers[0].mask.components;
+        assert_eq!(comps.len(), 2);
+        assert_eq!(comps[0].0, luma(0.1));
+        assert_eq!(comps[1].0, luma(0.3), "index 2 shifted down to 1");
+    }
+
+    #[test]
+    fn remove_component_out_of_range_is_noop() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::LumaRange {
+                lo: 0.1,
+                hi: 1.0,
+                softness: 0.1,
+            },
+            CompositeMode::Add,
+        );
+        assert_eq!(remove_component(&s, 0, 9), s, "bad comp idx -> unchanged");
+        assert_eq!(remove_component(&s, 9, 0), s, "bad mask idx -> unchanged");
+    }
+
+    #[test]
+    fn prospective_def_appends_tentative() {
+        use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition};
+        let base = MaskDefinition {
+            components: vec![(
+                MaskComponent::LumaRange {
+                    lo: 0.0,
+                    hi: 1.0,
+                    softness: 0.0,
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        };
+        let t = MaskComponent::LumaRange {
+            lo: 0.2,
+            hi: 0.7,
+            softness: 0.1,
+        };
+        let out = prospective_def(&base, t.clone(), CompositeMode::Subtract);
+        assert_eq!(out.components.len(), 2);
+        assert_eq!(out.components[1], (t, CompositeMode::Subtract));
+        assert_eq!(out.components[0], base.components[0], "base preserved");
+    }
+
+    #[test]
+    fn remove_last_component_keeps_the_layer() {
+        let s = create_mask(&OpStack::default(), "m".into());
+        let s = add_component(
+            &s,
+            0,
+            MaskComponent::LumaRange {
+                lo: 0.1,
+                hi: 1.0,
+                softness: 0.1,
+            },
+            CompositeMode::Add,
+        );
+        let out = remove_component(&s, 0, 0);
+        assert_eq!(layers(&out).layers.len(), 1, "layer stays");
+        assert!(layers(&out).layers[0].mask.components.is_empty());
     }
 }

@@ -96,11 +96,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                             );
                         }
                         let flag_color = match flag {
-                            ferrolite_image::Flag::Pick => Some(theme::SEMANTIC_GREEN),
-                            ferrolite_image::Flag::Reject => Some(theme::SEMANTIC_RED),
+                            ferrolite_image::Flag::Pick => Some((theme::SEMANTIC_GREEN, false)),
+                            ferrolite_image::Flag::Reject => Some((theme::SEMANTIC_RED, true)),
                             ferrolite_image::Flag::None => None,
                         };
-                        if let Some(c) = flag_color {
+                        if let Some((c, reject)) = flag_color {
                             crate::library::icons::flag(
                                 ui.painter(),
                                 rect.left_top() + egui::vec2(7.0, 12.0),
@@ -108,6 +108,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                                 true,
                                 c,
                                 true,
+                                reject,
                             );
                         }
                         // "Edited" pip (top-right) when the image carries edits.

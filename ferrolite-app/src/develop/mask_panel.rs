@@ -6,13 +6,24 @@
 
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::mask_edit;
-use crate::develop::mask_ui::{MaskTool, MaskUiState};
+use crate::develop::mask_ui::MaskUiState;
+use crate::settings::keymap::{Action, Keymap};
 use crate::theme;
 use crate::widgets::slider::EguiSlider;
-use ferrolite_mask::{CompositeMode, MaskComponent};
 use ferrolite_pipeline::{OpKind, OpStack};
 
-pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Option<EditOutcome> {
+/// Brush-radius slider bounds (fraction of the image's smaller edge). Shared
+/// with the canvas Ctrl+scroll brush-size gesture (`mask_overlay::route_brush`)
+/// so both entry points clamp to the exact same range.
+pub const BRUSH_RADIUS_MIN: f32 = 0.005;
+pub const BRUSH_RADIUS_MAX: f32 = 0.5;
+
+pub fn show(
+    ui: &mut egui::Ui,
+    stack: &OpStack,
+    mask: &mut MaskUiState,
+    keymap: &Keymap,
+) -> Option<EditOutcome> {
     let la = mask_edit::layers(stack);
     mask.clamp_selection(la.layers.len());
     let mut out: Option<EditOutcome> = None;
@@ -23,11 +34,28 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
         commit: true,
     };
 
-    if ui.button("Create New Mask").clicked() {
-        let name = format!("Mask {}", la.layers.len() + 1);
-        mask.selected = Some(la.layers.len()); // select the new one
-        out = Some(commit(mask_edit::create_mask(stack, name)));
-    }
+    ui.horizontal(|ui| {
+        if ui.button("Create New Mask").clicked() {
+            let name = format!("Mask {}", la.layers.len() + 1);
+            mask.selected = Some(la.layers.len()); // select the new one
+            mask.overlay_on = true;
+            mask.components_modal_open = false;
+            mask.editing_component = None;
+            mask.preview_component = None;
+            out = Some(commit(mask_edit::create_mask(stack, name)));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (icon, tip) = if mask.overlay_on {
+                (crate::icons::OVERLAY_ON, "Hide mask overlay")
+            } else {
+                (crate::icons::OVERLAY_OFF, "Show mask overlay")
+            };
+            let tip = format!("{} ({})", tip, keymap.hint(Action::ToggleMaskOverlay));
+            if crate::widgets::tool_button(ui, icon, &tip, mask.overlay_on, true, None).clicked() {
+                mask.overlay_on = !mask.overlay_on;
+            }
+        });
+    });
 
     ui.add_space(4.0);
 
@@ -63,6 +91,9 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
                 let resp = ui.selectable_label(selected, &layer.name);
                 if resp.clicked() {
                     mask.selected = Some(i);
+                    mask.components_modal_open = false;
+                    mask.editing_component = None;
+                    mask.preview_component = None;
                 }
                 if resp.double_clicked() {
                     mask.rename_buf = Some((i, layer.name.clone()));
@@ -70,13 +101,18 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .small_button("\u{1f5d1}")
+                    .add(egui::Button::new(
+                        egui::RichText::new(crate::icons::DELETE).font(crate::icons::font(12.0)),
+                    ))
                     .on_hover_text("Delete mask")
                     .clicked()
                 {
                     out = Some(commit(mask_edit::delete_mask(stack, i)));
                     if mask.selected == Some(i) {
                         mask.selected = None;
+                        mask.components_modal_open = false;
+                        mask.editing_component = None;
+                        mask.preview_component = None;
                     }
                 }
             });
@@ -88,6 +124,25 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
             egui::RichText::new("No masks yet")
                 .color(theme::TEXT_FAINT)
                 .size(11.0),
+        );
+    }
+
+    // The color eyedropper stages samples in `mask.color_samples` independent of
+    // any selected mask (mask_overlay's routing lets it sample regardless of
+    // selection so arming it never dead-ends silently). But "Add Color range"
+    // lives in `selected_section` below, which only renders with a selection —
+    // so if samples were collected while a mask was selected and the user then
+    // deselects it (switches rows, or the mask is deleted), the button
+    // disappears with them still queued. Surface that here so it's never a
+    // silent dead end.
+    if !mask.color_samples.is_empty() && mask.selected.is_none() {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} color sample(s) queued — select or create a mask to add them",
+                mask.color_samples.len()
+            ))
+            .size(11.0)
+            .color(theme::TEXT_FAINT),
         );
     }
 
@@ -104,11 +159,10 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, mask: &mut MaskUiState) -> Optio
     out
 }
 
-/// The selected mask's component tools + Light/Color adjustments (design §9.2).
-/// Non-canvas components (Luma-range, using the current slider values) can be
-/// added directly from the panel; Brush/Linear/Radial/Color-range are captured
-/// on the canvas (Tasks 10-12) — this picker only selects the tool + composite
-/// mode so the canvas overlay knows what to create.
+/// The selected mask's Light/Color adjustments + a link to the Components
+/// window (design §9.2). Component creation (type picker, brush/luma/color
+/// params, add buttons) lives in `mask_components_modal` (Task 5) — this
+/// section only shows the component count and a button to open that window.
 pub(crate) fn selected_section(
     ui: &mut egui::Ui,
     stack: &OpStack,
@@ -118,225 +172,22 @@ pub(crate) fn selected_section(
     let la = mask_edit::layers(stack);
     let layer = &la.layers[idx];
     let mut out: Option<EditOutcome> = None;
-    let commit = |s: OpStack| EditOutcome {
-        stack: s,
-        kind: OpKind::LocalAdjustments,
-        commit: true,
-    };
 
     ui.separator();
 
-    // ── Component tool picker + composite mode ──
-    ui.horizontal(|ui| {
-        for (tool, label) in [
-            (MaskTool::Brush, "Brush"),
-            (MaskTool::Linear, "Linear"),
-            (MaskTool::Radial, "Radial"),
-            (MaskTool::LumaRange, "Luma"),
-            (MaskTool::ColorRange, "Color"),
-        ] {
-            if ui.selectable_label(mask.tool == tool, label).clicked() {
-                mask.tool = tool;
-            }
-        }
-    });
     ui.horizontal(|ui| {
         ui.label(
-            egui::RichText::new("Add mode")
+            egui::RichText::new(format!("{} components", layer.mask.components.len()))
                 .size(11.0)
-                .color(theme::TEXT_DIM),
+                .color(theme::TEXT_FAINT),
         );
-        for (m, label) in [
-            (CompositeMode::Add, "Add"),
-            (CompositeMode::Subtract, "Subtract"),
-            (CompositeMode::Intersect, "Intersect"),
-        ] {
-            if ui.selectable_label(mask.next_mode == m, label).clicked() {
-                mask.next_mode = m;
-            }
-        }
-    });
-
-    // Brush params: captured live by the canvas overlay (Task 11), so no "Add"
-    // button here — these sliders just set the radius/hardness/flow/erase used
-    // for the NEXT stroke (and shown by the cursor ring while brushing).
-    if mask.tool == MaskTool::Brush {
-        ui.add(EguiSlider {
-            label: "Radius",
-            value: &mut mask.brush_radius,
-            min: 0.005,
-            max: 0.5,
-            default: 0.08,
-            step: 0.005,
-            decimals: 3,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        ui.add(EguiSlider {
-            label: "Hardness",
-            value: &mut mask.brush_hardness,
-            min: 0.0,
-            max: 1.0,
-            default: 0.5,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        ui.add(EguiSlider {
-            label: "Flow",
-            value: &mut mask.brush_flow,
-            min: 0.0,
-            max: 1.0,
-            default: 1.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        ui.checkbox(&mut mask.brush_erase, "Erase");
-    }
-
-    // Luma-range can be added directly from the panel with the current slider
-    // values (it needs no canvas gesture). The other tools are captured on the
-    // canvas (Tasks 10-12); the tool+mode selection above tells the overlay what
-    // to create. Show the range params + an "Add component" button when Luma is
-    // the active tool.
-    if mask.tool == MaskTool::LumaRange {
-        ui.add(EguiSlider {
-            label: "Lo",
-            value: &mut mask.range_lo,
-            min: 0.0,
-            max: 1.0,
-            default: 0.3,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        ui.add(EguiSlider {
-            label: "Hi",
-            value: &mut mask.range_hi,
-            min: 0.0,
-            max: 1.0,
-            default: 0.7,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        ui.add(EguiSlider {
-            label: "Softness",
-            value: &mut mask.range_softness,
-            min: 0.0,
-            max: 0.5,
-            default: 0.1,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        if ui.button("Add Luma range").clicked() {
-            let c = MaskComponent::LumaRange {
-                lo: mask.range_lo,
-                hi: mask.range_hi,
-                softness: mask.range_softness,
-            };
-            out = Some(commit(mask_edit::add_component(
-                stack,
-                idx,
-                c,
-                mask.next_mode,
-            )));
-        }
-    }
-
-    // Color-range: samples are collected by clicking the canvas with the
-    // eyedropper (mask_overlay's `route_color_eyedropper`, UI state only — no
-    // OpStack edit on pick). Show the collected swatches + Tolerance/Softness,
-    // then "Add Color range" commits the component and clears the samples.
-    if mask.tool == MaskTool::ColorRange {
-        if mask.color_samples.is_empty() {
-            ui.label(
-                egui::RichText::new("Click the image to sample colors")
-                    .size(11.0)
-                    .color(theme::TEXT_FAINT),
-            );
-        } else {
-            ui.horizontal(|ui| {
-                for s in &mask.color_samples {
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
-                    ui.painter().rect_filled(
-                        rect,
-                        2.0,
-                        egui::Color32::from_rgb(
-                            (s.r.clamp(0.0, 1.0) * 255.0) as u8,
-                            (s.g.clamp(0.0, 1.0) * 255.0) as u8,
-                            (s.b.clamp(0.0, 1.0) * 255.0) as u8,
-                        ),
-                    );
-                }
-                if ui.small_button("Clear").clicked() {
-                    mask.color_samples.clear();
-                }
-            });
-        }
-        ui.add(EguiSlider {
-            label: "Tolerance",
-            value: &mut mask.color_tolerance,
-            min: 0.0,
-            max: 1.0,
-            default: 0.15,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        ui.add(EguiSlider {
-            label: "Softness",
-            value: &mut mask.color_softness,
-            min: 0.0,
-            max: 0.5,
-            default: 0.1,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-        });
-        let can_add = !mask.color_samples.is_empty();
-        if ui
-            .add_enabled(can_add, egui::Button::new("Add Color range"))
+        if crate::widgets::tool_button(ui, crate::icons::EDIT, "Components", false, true, None)
             .clicked()
         {
-            let c = MaskComponent::ColorRange {
-                samples: mask.color_samples.clone(),
-                tolerance: mask.color_tolerance,
-                softness: mask.color_softness,
-            };
-            out = Some(commit(mask_edit::add_component(
-                stack,
-                idx,
-                c,
-                mask.next_mode,
-            )));
-            mask.color_samples.clear();
+            mask.components_modal_open = true;
+            mask.overlay_on = true; // show coverage/live-preview while working on components
         }
-    }
-
-    ui.label(
-        egui::RichText::new(format!("{} components", layer.mask.components.len()))
-            .size(11.0)
-            .color(theme::TEXT_FAINT),
-    );
+    });
 
     ui.separator();
 

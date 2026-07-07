@@ -38,6 +38,10 @@ pub struct FerroliteApp {
     /// (pipelines pre-warmed), after kicking off the initial display-profile
     /// detect. Ensures the startup detect fires exactly once.
     did_display_detect: bool,
+    /// The Develop tool/tab registry (design §4): base adjustment tabs + the
+    /// ordered canvas tools shown in the palette. Built once here; read in
+    /// Tasks 10-11 to render the palette/tab bar/canvas overlay.
+    tool_registry: crate::develop::tool::DevelopToolRegistry,
 }
 
 impl FerroliteApp {
@@ -86,6 +90,7 @@ impl FerroliteApp {
             show_help: false,
             show_settings: false,
             did_display_detect: false,
+            tool_registry: crate::develop::tool::DevelopToolRegistry::standard(),
         }
     }
 
@@ -129,6 +134,12 @@ impl FerroliteApp {
                 // gesture and force the overlay to rebuild against the new stack.
                 v.mask.gesture = None;
                 v.mask.overlay_key = None;
+                // A restored stack may have removed/reordered components out from
+                // under an open components modal (or the component being edited in
+                // it): drop both so the modal never shows/edits stale indices.
+                v.mask.components_modal_open = false;
+                v.mask.editing_component = None;
+                v.mask.preview_component = None;
                 v.mask
                     .clamp_selection(crate::develop::mask_edit::layers(&stack).layers.len());
             }
@@ -434,11 +445,16 @@ impl FerroliteApp {
     }
 
     /// True while any modal overlay is on screen (Help, Settings, the
-    /// remove-folder confirmation). Used to suppress the app's global
-    /// keyboard shortcuts underneath the modal so its own input handling
-    /// (e.g. Esc) is the only thing that reacts, and so shortcuts like
-    /// Enter/Ctrl+A don't leak through to the grid/viewer while a modal is
-    /// up. Extend this with new modals as they're added.
+    /// remove-folder confirmation). Used to suppress the app's global keyboard
+    /// shortcuts underneath the modal so its own input handling (e.g. Esc) is
+    /// the only thing that reacts, and so shortcuts like Enter/Ctrl+A don't
+    /// leak through to the grid/viewer while a modal is up. Extend this with
+    /// new modals as they're added.
+    ///
+    /// The mask Components window is intentionally NOT included here: unlike
+    /// the modals above, it must stay non-blocking so the canvas keeps
+    /// receiving input behind it (live preview, color-eyedropper sampling,
+    /// brush drawing all route through the canvas while the window is open).
     fn modal_active(&self) -> bool {
         self.show_help || self.show_settings || self.state.pending_remove.is_some()
     }
@@ -1485,7 +1501,7 @@ impl FerroliteApp {
     /// readback) + only-on-change, so it is safe on the UI thread even mid-stroke
     /// (CLAUDE.md §1). The `MaskOverlayCompositor` is built once and cached on
     /// `ViewerState`, never rebuilt per frame (CLAUDE.md §2).
-    fn rebuild_mask_overlay_if_needed(&mut self, ctx: &egui::Context) {
+    fn rebuild_mask_overlay_if_needed(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         use crate::develop::mask_edit;
         use crate::develop::mask_overlay_color::{overlay_rgba, OVERLAY_MAX_EDGE};
         use std::hash::{Hash, Hasher};
@@ -1499,21 +1515,46 @@ impl FerroliteApp {
             v.mask.overlay_key = None;
             return;
         };
-        let def = la.layers[sel].mask.clone();
-        // Key: which mask def + preview generation. serde-hash the def (small).
+        let committed_def = &la.layers[sel].mask;
+        // While the Components window's Add section is tuning a Luma/Color
+        // component (Task 6), composite the PROSPECTIVE def (committed + the
+        // tentative component at its mode) instead of the committed one, so the
+        // red overlay live-previews the in-progress add.
+        let def = match v.mask.preview_component.clone() {
+            Some((c, mode)) => mask_edit::prospective_def(committed_def, c, mode),
+            None => committed_def.clone(),
+        };
+        // Key: which mask def + preview generation + any in-progress preview
+        // component. serde-hash the def (small); fold the tentative component in
+        // too so the overlay rebuilds live as the Add sliders move (its params
+        // aren't reflected in `def`/`committed_def` otherwise since it's not
+        // committed to the OpStack yet).
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_string(&def).unwrap_or_default().hash(&mut h);
+        serde_json::to_string(committed_def)
+            .unwrap_or_default()
+            .hash(&mut h);
+        serde_json::to_string(&v.mask.preview_component)
+            .unwrap_or_default()
+            .hash(&mut h);
         v.opstack_version.hash(&mut h); // preview regen bumps this
         let key = h.finish();
         if v.mask.overlay_key == Some(key) && v.mask_overlay_tex.is_some() {
             return;
         }
 
-        // Ensure the compositor + bounded input exist.
-        let Some(pipe) = v.preview_edit.as_ref() else {
+        // GPU context from the eframe render state, NOT from `v.preview_edit`: the
+        // mask overlay must be able to build on a freshly-(re)opened image BEFORE
+        // any edit exists. `preview_edit` is created lazily — for Standard images
+        // only on the first edit (`set_preview_and_full`), for RAW at full-decode —
+        // so gating the overlay on it meant a just-opened mask showed no overlay
+        // until the first component edit / invert toggle forced a rebuild. Sourcing
+        // the context here (same wgpu device eframe uses; `from_render_state` is the
+        // established ad-hoc-context pattern) fixes that. Compositor/input below are
+        // still cached once and reused (CLAUDE.md GPU rule).
+        let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
-        let gpu_ctx = pipe.gpu_context();
+        let gpu_ctx = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
         if v.mask_overlay.is_none() {
             v.mask_overlay = Some(ferrolite_pipeline::MaskOverlayCompositor::new(
                 gpu_ctx.clone(),
@@ -2902,6 +2943,7 @@ impl eframe::App for FerroliteApp {
                     can_undo,
                     can_redo,
                     self.state.settings.show_histogram,
+                    self.state.settings.show_tool_palette,
                 );
                 if self.module != module_before {
                     self.state.settings.last_module =
@@ -2974,6 +3016,11 @@ impl eframe::App for FerroliteApp {
                     }
                     Some(crate::chrome::MenuAction::ToggleHistogram) => {
                         self.state.settings.show_histogram = !self.state.settings.show_histogram;
+                        self.mark_settings_dirty();
+                    }
+                    Some(crate::chrome::MenuAction::ToggleToolPalette) => {
+                        self.state.settings.show_tool_palette =
+                            !self.state.settings.show_tool_palette;
                         self.mark_settings_dirty();
                     }
                     Some(crate::chrome::MenuAction::OpenHelp) => {
@@ -3388,6 +3435,44 @@ impl eframe::App for FerroliteApp {
                 {
                     self.toggle_split_compare();
                 }
+
+                // Tool-switch keybinds (A/C/M by default) and mask-overlay toggle.
+                // Mirrors the tool palette's `SelectTool` handler's borrow
+                // discipline: resolve `enabled` via a shared borrow first, then
+                // take `&mut self.state.viewer` to apply it.
+                let km = &self.state.settings.keymap;
+                let tool = if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolAdjust) {
+                    Some(crate::develop::tool::ToolId::Adjust)
+                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolCrop) {
+                    Some(crate::develop::tool::ToolId::Crop)
+                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolMask) {
+                    Some(crate::develop::tool::ToolId::Mask)
+                } else {
+                    None
+                };
+                if let Some(id) = tool {
+                    let enabled = self
+                        .tool_registry
+                        .get(id)
+                        .map(|t| {
+                            t.enabled(&crate::develop::tool::DevelopCtx { state: &self.state })
+                        })
+                        .unwrap_or(false);
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.tool_state.select_tool(id, enabled, &self.tool_registry);
+                    }
+                }
+
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::ToggleMaskOverlay)
+                {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        v.mask.overlay_on = !v.mask.overlay_on;
+                    }
+                }
             }
         }
 
@@ -3536,9 +3621,20 @@ impl eframe::App for FerroliteApp {
 
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
             if let Some(v) = self.state.viewer.as_mut() {
-                v.crop_active = false; // re-armed by the open Geometry section
-                v.mask.active = false; // re-armed by the open Masks section
-                v.mask.adjusting = false; // re-set by the panel on a drag frame (panel runs before the canvas overlay below, so no lag)
+                let active = v.tool_state.active;
+                v.crop_active = active == crate::develop::tool::ToolId::Crop;
+                let mask_active = active == crate::develop::tool::ToolId::Mask;
+                if v.mask.active && !mask_active {
+                    // Mask tool deselected: close the components modal along with
+                    // any in-progress edit so it doesn't linger over a different
+                    // tool's panel (mirrors the gesture/overlay_key resets on
+                    // stack-invalidating transitions).
+                    v.mask.components_modal_open = false;
+                    v.mask.editing_component = None;
+                    v.mask.preview_component = None;
+                }
+                v.mask.active = mask_active;
+                v.mask.adjusting = false; // still reset each frame; panel sets it on a drag
             }
             let mut outcome = None;
             let working_space = self.state.working_space;
@@ -3555,9 +3651,10 @@ impl eframe::App for FerroliteApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            outcome = Some(crate::develop::adjustment_panel::show(
+                            outcome = Some(crate::develop::tool_panel::show(
                                 ui,
                                 &mut self.state,
+                                &self.tool_registry,
                                 working_space,
                             ));
                         });
@@ -3666,94 +3763,155 @@ impl eframe::App for FerroliteApp {
                             }
                             self.crop_active_prev = crop_active;
                         }
+                        // Ctrl+scroll brush-size gesture (Mask tool active, a mask
+                        // selected, Brush sub-tool — the same three conditions
+                        // `mask_overlay::show` requires before it dispatches to
+                        // `route_brush`, so the gesture only fires when the brush
+                        // cursor/affordance is actually shown — pointer over the
+                        // image): must run BEFORE `drive_viewer`,
+                        // because `drive_viewer` → `viewer::paint` reads the same
+                        // `i.raw_scroll_delta.y` this frame to drive canvas zoom
+                        // (viewer/mod.rs `paint`). Handling the brush gesture first
+                        // and zeroing `raw_scroll_delta` here (via `ctx.input_mut`)
+                        // consumes the scroll so the zoom handler sees none left —
+                        // the only place both concerns are close enough to serialize
+                        // without restructuring `viewer::paint`'s own scroll read.
+                        if let Some(v) = self.state.viewer.as_ref() {
+                            if v.mask.active
+                                && v.mask.selected.is_some()
+                                && v.mask.tool == crate::develop::mask_ui::MaskTool::Brush
+                            {
+                                let dims = v.image_dims.unwrap_or((1, 1));
+                                let image_rect = crate::viewer::image_screen_rect(
+                                    ui.min_rect(),
+                                    dims,
+                                    v.view,
+                                    v.viewport,
+                                );
+                                let ctrl_scroll_over_image = ctx.input(|i| {
+                                    let ctrl = i.modifiers.command || i.modifiers.ctrl;
+                                    let scroll_y = i.raw_scroll_delta.y;
+                                    let over_image = i
+                                        .pointer
+                                        .hover_pos()
+                                        .is_some_and(|p| image_rect.contains(p));
+                                    (ctrl && scroll_y.abs() > f32::EPSILON && over_image)
+                                        .then_some(scroll_y)
+                                });
+                                if let Some(scroll_y) = ctrl_scroll_over_image {
+                                    if let Some(v) = self.state.viewer.as_mut() {
+                                        v.mask.brush_radius =
+                                            crate::develop::mask_overlay::brush_radius_from_scroll(
+                                                v.mask.brush_radius,
+                                                scroll_y,
+                                                crate::develop::mask_panel::BRUSH_RADIUS_MIN,
+                                                crate::develop::mask_panel::BRUSH_RADIUS_MAX,
+                                            );
+                                    }
+                                    // Consume: zero the scroll so `drive_viewer`'s zoom
+                                    // handler (reading the same field) does not also fire.
+                                    ctx.input_mut(|i| i.raw_scroll_delta = egui::Vec2::ZERO);
+                                }
+                            }
+                        }
                         self.drive_viewer(ui, frame);
                         if self.state.settings.show_histogram {
                             self.draw_histogram_overlay(ui);
                         }
-                        // Crop overlay: shown while the Geometry section is open.
-                        // Gather all viewer data into locals BEFORE calling apply_edit
-                        // (which needs &mut self) — mirrors the panel-outcome pattern.
-                        if self
-                            .state
-                            .viewer
-                            .as_ref()
-                            .map(|v| v.crop_active)
-                            .unwrap_or(false)
-                        {
-                            let (stack, dims, view, viewport) = {
-                                let v = self.state.viewer.as_ref().unwrap();
-                                (
-                                    v.op_stack.clone(),
-                                    v.image_dims.unwrap_or((1, 1)),
-                                    v.view,
-                                    v.viewport,
-                                )
-                            };
-                            let image_rect = crate::viewer::image_screen_rect(
-                                ui.min_rect(),
-                                dims,
-                                view,
-                                viewport,
+                        if self.state.settings.show_tool_palette && self.state.viewer.is_some() {
+                            let ts = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .map(|v| v.tool_state)
+                                .unwrap_or_default();
+                            let can_undo = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .is_some_and(|v| v.history.can_undo());
+                            let can_redo = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .is_some_and(|v| v.history.can_redo());
+                            let ctx_ro = crate::develop::tool::DevelopCtx { state: &self.state };
+                            let action = crate::develop::tool_palette::show(
+                                ui,
+                                &self.tool_registry,
+                                ts,
+                                &ctx_ro,
+                                can_undo,
+                                can_redo,
                             );
-                            if let Some(o) =
-                                crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)
+                            match action {
+                                Some(crate::develop::tool_palette::PaletteAction::SelectTool(
+                                    id,
+                                )) => {
+                                    let enabled = self
+                                        .tool_registry
+                                        .get(id)
+                                        .map(|t| {
+                                            let c = crate::develop::tool::DevelopCtx {
+                                                state: &self.state,
+                                            };
+                                            t.enabled(&c)
+                                        })
+                                        .unwrap_or(false);
+                                    if let Some(v) = self.state.viewer.as_mut() {
+                                        v.tool_state.select_tool(id, enabled, &self.tool_registry);
+                                    }
+                                }
+                                Some(crate::develop::tool_palette::PaletteAction::Undo) => {
+                                    self.apply_undo_redo(ctx, frame, true)
+                                }
+                                Some(crate::develop::tool_palette::PaletteAction::Redo) => {
+                                    self.apply_undo_redo(ctx, frame, false)
+                                }
+                                None => {}
+                            }
+                        }
+                        // Active-tool canvas overlay (crop handles, mask coverage tint,
+                        // etc.) — a single dispatch to the active tool's `canvas()`
+                        // replaces the old per-section crop_overlay/mask_overlay calls.
+                        // Keep the mask overlay's bounded rebuild glue (needs ctx +
+                        // &mut self) here, before dispatch, so `mask_overlay_tex` is
+                        // current when `MaskTool::canvas` reads it.
+                        let active_tool = self.state.viewer.as_ref().map(|v| v.tool_state.active);
+                        if active_tool == Some(crate::develop::tool::ToolId::Mask) {
+                            self.rebuild_mask_overlay_if_needed(ctx, frame);
+                        }
+                        if let Some(id) = active_tool {
+                            if let Some((dims, view, viewport)) = self
+                                .state
+                                .viewer
+                                .as_ref()
+                                .map(|v| (v.image_dims.unwrap_or((1, 1)), v.view, v.viewport))
                             {
-                                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
-                            }
-                        }
-                        // Mask overlay: shown while the Masks section is open. Rebuild
-                        // the coverage texture only when the selected mask / preview
-                        // generation changed (bounded + on-change, CLAUDE.md §1), then
-                        // paint the fill. Gather locals BEFORE calling apply_edit, same
-                        // borrow discipline as the crop overlay above.
-                        let mask_active = self
-                            .state
-                            .viewer
-                            .as_ref()
-                            .map(|v| v.mask.active)
-                            .unwrap_or(false);
-                        if mask_active {
-                            self.rebuild_mask_overlay_if_needed(ctx);
-                            let (stack, dims, view, viewport, tex, preview_source) = {
-                                let v = self.state.viewer.as_ref().unwrap();
-                                (
-                                    v.op_stack.clone(),
-                                    v.image_dims.unwrap_or((1, 1)),
-                                    v.view,
-                                    v.viewport,
-                                    v.mask_overlay_tex.clone(),
-                                    v.preview_source.clone(),
-                                )
-                            };
-                            let image_rect = crate::viewer::image_screen_rect(
-                                ui.min_rect(),
-                                dims,
-                                view,
-                                viewport,
-                            );
-                            let mask_out = self.state.viewer.as_mut().and_then(|v| {
-                                crate::develop::mask_overlay::show(
-                                    ui,
-                                    image_rect,
-                                    &stack,
-                                    &mut v.mask,
-                                    tex.as_ref(),
+                                let image_rect = crate::viewer::image_screen_rect(
+                                    ui.min_rect(),
                                     dims,
-                                    preview_source.as_ref(),
-                                )
-                            });
-                            if let Some(o) = mask_out {
-                                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                                    view,
+                                    viewport,
+                                );
+                                if let Some(tool) = self.tool_registry.get(id) {
+                                    if let Some(o) = tool.canvas(ui, image_rect, &mut self.state) {
+                                        self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                                    }
+                                }
                             }
                         }
-                        // Loupe context-menu widget covers the whole canvas; while
-                        // cropping it must NOT be registered, or it competes with the
-                        // crop overlay for input. Gate it on `!crop_active`.
+                        // Loupe context-menu widget covers the whole canvas; while any
+                        // canvas tool (Crop/Mask/Heal) is active it must NOT be
+                        // registered, or it competes with that tool's own interact for
+                        // input (e.g. it stole clicks from the mask color-eyedropper).
+                        // Only register it in the Adjust tool, where no canvas tool
+                        // owns the pointer.
                         let ctx_menu_id = self
                             .state
                             .viewer
                             .as_ref()
-                            .filter(|v| !v.crop_active)
+                            .filter(|v| v.tool_state.active == crate::develop::tool::ToolId::Adjust)
                             .map(|v| v.image_id);
                         if let Some(image_id) = ctx_menu_id {
                             let rect = ui.min_rect();
@@ -3840,6 +3998,25 @@ impl eframe::App for FerroliteApp {
                 self.redetect_display_profile(ctx, frame);
             }
             self.show_settings = open;
+        }
+
+        // Mask component-management modal (list + delete + Luma/Color edit).
+        // `egui::Window` renders directly on `ctx`, so this can run outside the
+        // SidePanel/CentralPanel closures like the other modals above. Mirrors
+        // the mask-panel borrow pattern: pre-extract the (cheap, Arc-backed)
+        // `OpStack` clone first, releasing the shared borrow, before taking
+        // `&mut v.mask` for the call.
+        {
+            let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
+            let modal_out = match (stack, self.state.viewer.as_mut()) {
+                (Some(stack), Some(v)) => {
+                    crate::develop::mask_components_modal::show(ctx, &stack, &mut v.mask)
+                }
+                _ => None,
+            };
+            if let Some(o) = modal_out {
+                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+            }
         }
 
         // Single-file export dialog (spec §8.3). Non-modal (see

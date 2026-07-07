@@ -7,6 +7,7 @@ mod events;
 mod export;
 mod export_module;
 mod help;
+mod icons;
 mod ingest;
 mod library;
 mod metadata;

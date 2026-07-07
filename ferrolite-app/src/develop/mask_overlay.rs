@@ -15,6 +15,27 @@ use std::sync::Arc;
 
 const HANDLE_R: f32 = 0.04; // normalized (source-space) hit radius, matches brief tests
 
+/// New brush radius from a scroll delta, applied MULTIPLICATIVELY so each scroll
+/// tick is a constant percentage change — fine-grained at small radii, coarser at
+/// large radii (smooth size ramp). Clamped to [min, max]. `scroll_y == 0` is a no-op.
+/// `scroll_y > 0` (wheel up) grows the brush; negative shrinks it. Callers pass the same
+/// bounds as the panel's brush-radius slider (`mask_panel::BRUSH_RADIUS_MIN/MAX`)
+/// so the Ctrl+scroll canvas gesture and the slider agree on range. Pure/egui-free
+/// so it's unit-testable without a UI context.
+///
+/// Only called from `app.rs`'s Ctrl+scroll dispatch, which — like the rest of
+/// the `app`/`chrome`/`canvas` module tree — is compiled into the `ferrolite-app`
+/// *binary* target only, not the library target (`lib.rs` intentionally omits
+/// `app`; see its module comment). The `--lib` build/test therefore has no
+/// caller for this function even though the real app does; hence the explicit
+/// allow rather than a false "dead code" failure under `-D warnings`.
+#[allow(dead_code)]
+pub(crate) fn brush_radius_from_scroll(current: f32, scroll_y: f32, min: f32, max: f32) -> f32 {
+    // Per-"tick" growth factor; egui scroll deltas are ~pixels, so scale down.
+    const PER_UNIT: f32 = 0.0012; // ln-space rate; tuned in the visual test
+    (current * (scroll_y * PER_UNIT).exp()).clamp(min, max)
+}
+
 /// Tag bits packed into `MaskGesture::DragHandle.handle` so a single `u32` field
 /// can carry either a `LinHandle` or a `RadHandle`. Decoding uses `mask.tool` to
 /// know which enum applies (a mask's active gesture is always for its current
@@ -79,6 +100,18 @@ pub fn show(
                 egui::Color32::WHITE, // the texture already carries red + per-texel alpha
             );
         }
+    }
+
+    // Color eyedropper is armed-mode and stages samples in `mask.color_samples`
+    // (UI state only — not tied to a selected mask until "Add Color range" is
+    // clicked in the panel), so route it whenever the Mask tool is active,
+    // BEFORE the selection gate below that brush/linear/radial need. Without
+    // this, arming "Pick color" with no mask selected made the eyedropper's
+    // `ui.interact`, cursor, loupe, and sampling a silent no-op — the click
+    // fell through to `drive_viewer`'s canvas interact instead.
+    if mask.active && mask.tool == MaskTool::ColorRange && mask.picking_color {
+        route_color_eyedropper(ui, image_rect, mask, src_dims, stack, preview_source);
+        return None;
     }
 
     let (Some(idx), true) = (mask.selected, mask.active) else {
@@ -489,11 +522,16 @@ fn route_color_eyedropper(
     stack: &OpStack,
     preview_source: Option<&Arc<LinearRgbaF32>>,
 ) {
+    if !mask.picking_color {
+        return; // sampling (and the loupe) only while the "Pick color" toggle is armed
+    }
+
     let resp = ui.interact(
         image_rect,
         ui.id().with("mask_overlay_affordance"),
         egui::Sense::click(),
     );
+    let hover = resp.hover_pos().or_else(|| resp.interact_pointer_pos());
 
     if resp.clicked() {
         if let (Some(p), Some(src_img)) = (resp.interact_pointer_pos(), preview_source) {
@@ -507,6 +545,66 @@ fn route_color_eyedropper(
             let rgb = mask_affordance::sample_source(src_img, src_norm);
             mask.color_samples.push(rgb);
         }
+    }
+
+    // Picker cursor + zoom loupe while armed: a small grid of source pixels
+    // around the pointer, magnified, with a crosshair on the exact sampled
+    // pixel (bounded egui vector drawing — mirrors the brush cursor ring in
+    // `route_brush`; no texture/sub-Ui allocation, no per-frame heavy work).
+    if let (Some(p), Some(src_img)) = (hover, preview_source) {
+        let painter = ui.painter();
+        const LOUPE_R: f32 = 44.0;
+        const ZOOM: f32 = 8.0; // source px per loupe px
+        let center = p - egui::vec2(0.0, LOUPE_R + 16.0); // float above the pointer
+        let geo = stack.geometry();
+        let (src_w, src_h) = src_dims;
+        let span = (LOUPE_R / ZOOM) as i32; // half-width in source px
+        for dy in -span..=span {
+            for dx in -span..=span {
+                let n = (
+                    ((p.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0)
+                        + dx as f32 / src_w as f32,
+                    ((p.y - image_rect.top()) / image_rect.height()).clamp(0.0, 1.0)
+                        + dy as f32 / src_h as f32,
+                );
+                let sn = display_to_source(
+                    geo,
+                    src_w,
+                    src_h,
+                    (n.0.clamp(0.0, 1.0), n.1.clamp(0.0, 1.0)),
+                );
+                let rgb = mask_affordance::sample_source(src_img, sn);
+                let cell = egui::Rect::from_center_size(
+                    center + egui::vec2(dx as f32 * ZOOM, dy as f32 * ZOOM),
+                    egui::vec2(ZOOM, ZOOM),
+                );
+                painter.rect_filled(
+                    cell,
+                    0.0,
+                    egui::Color32::from_rgb(
+                        (rgb.r.clamp(0.0, 1.0) * 255.0) as u8,
+                        (rgb.g.clamp(0.0, 1.0) * 255.0) as u8,
+                        (rgb.b.clamp(0.0, 1.0) * 255.0) as u8,
+                    ),
+                );
+            }
+        }
+        painter.circle_stroke(
+            center,
+            LOUPE_R,
+            egui::Stroke::new(1.5, theme::ACCENT_BRIGHT),
+        );
+        // Crosshair on the exact sampled (center) pixel.
+        painter.line_segment(
+            [center - egui::vec2(6.0, 0.0), center + egui::vec2(6.0, 0.0)],
+            egui::Stroke::new(1.0, theme::BG_BASE),
+        );
+        painter.line_segment(
+            [center - egui::vec2(0.0, 6.0), center + egui::vec2(0.0, 6.0)],
+            egui::Stroke::new(1.0, theme::BG_BASE),
+        );
+        // Picker dot at the pointer itself.
+        painter.circle_stroke(p, 3.0, egui::Stroke::new(1.5, theme::ACCENT_BRIGHT));
     }
 
     // Small swatches for the collected samples, stacked along the top-left of
@@ -530,5 +628,52 @@ fn route_color_eyedropper(
             color,
             egui::Stroke::new(1.0, theme::BG_BASE),
         );
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+    #[test]
+    fn scroll_is_multiplicative_and_clamped() {
+        let (min, max) = (0.005f32, 0.5f32);
+        // up grows, down shrinks
+        assert!(
+            brush_radius_from_scroll(0.1, 120.0, min, max) > 0.1,
+            "up grows"
+        );
+        assert!(
+            brush_radius_from_scroll(0.1, -120.0, min, max) < 0.1,
+            "down shrinks"
+        );
+        // clamps
+        assert_eq!(
+            brush_radius_from_scroll(0.49, 100_000.0, min, max),
+            max,
+            "clamp hi"
+        );
+        assert_eq!(
+            brush_radius_from_scroll(0.01, -100_000.0, min, max),
+            min,
+            "clamp lo"
+        );
+        // exponential: same scroll delta => larger ABSOLUTE change at a larger radius
+        let small_delta = brush_radius_from_scroll(0.02, 120.0, min, max) - 0.02;
+        let large_delta = brush_radius_from_scroll(0.20, 120.0, min, max) - 0.20;
+        assert!(
+            large_delta > small_delta,
+            "bigger absolute step when larger (exponential feel)"
+        );
+        // and the RATIO is ~constant (multiplicative)
+        let r_small = brush_radius_from_scroll(0.02, 120.0, min, max) / 0.02;
+        let r_large = brush_radius_from_scroll(0.20, 120.0, min, max) / 0.20;
+        assert!(
+            (r_small - r_large).abs() < 1e-3,
+            "constant multiplicative ratio"
+        );
+    }
+    #[test]
+    fn zero_scroll_is_noop() {
+        assert_eq!(brush_radius_from_scroll(0.1, 0.0, 0.005, 0.5), 0.1);
     }
 }

@@ -43,6 +43,10 @@ const GROUPS: &[(&str, &[Action])] = &[
             Action::HoldBeforePeek,
             Action::ToggleSplitCompare,
             Action::AddToQueue,
+            Action::SwitchToolAdjust,
+            Action::SwitchToolCrop,
+            Action::SwitchToolMask,
+            Action::ToggleMaskOverlay,
         ],
     ),
     ("Editing", &[Action::Undo, Action::Redo]),
@@ -181,6 +185,15 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             }
         });
 
+    ui.add_space(6.0);
+    ui.label(
+        egui::RichText::new(
+            "Gestures: Ctrl + scroll over the image resizes the brush (Mask > Brush).",
+        )
+        .size(11.0)
+        .color(crate::theme::TEXT_DIM),
+    );
+
     set_listen_state(&ctx, listen);
     changed
 }
@@ -259,5 +272,24 @@ fn draw_row(
         }
     } else {
         ui.label("");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GROUPS;
+
+    /// Guards against a future new `Action` being silently undiscoverable in
+    /// Settings: every variant of `Action::ALL` must appear in exactly one
+    /// `GROUPS` entry (not zero — missing from the rebind UI — and not more
+    /// than one, which would make the row a confusing duplicate). See
+    /// CLAUDE.md "Keybind discoverability".
+    #[test]
+    fn every_action_is_in_a_settings_group() {
+        use crate::settings::keymap::Action;
+        for a in Action::ALL {
+            let count = GROUPS.iter().filter(|(_, acts)| acts.contains(&a)).count();
+            assert_eq!(count, 1, "{a:?} must be in exactly one Settings group");
+        }
     }
 }

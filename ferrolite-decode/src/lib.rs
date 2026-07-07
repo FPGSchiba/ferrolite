@@ -13,7 +13,7 @@ mod raw;
 mod source;
 mod standard;
 
-pub use color::ColorProfile;
+pub use color::{CameraCalibration, ColorProfile};
 pub use demosaic::{DemosaicParams, DemosaicToRgb16f, QuadBin};
 pub use error::DecodeError;
 pub use ifd::{preview_span_end, PreviewSpan};

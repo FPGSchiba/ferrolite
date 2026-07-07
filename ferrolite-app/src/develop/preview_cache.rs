@@ -347,10 +347,16 @@ mod tests {
     use std::io::Write;
 
     fn sample_profile() -> ColorProfile {
+        let xyz_to_cam = [[1.0, 0.1, 0.2], [0.3, 1.1, 0.4], [0.5, 0.6, 1.2]];
+        let white_xy = [0.3127, 0.3290];
         ColorProfile {
-            xyz_to_cam: [[1.0, 0.1, 0.2], [0.3, 1.1, 0.4], [0.5, 0.6, 1.2]],
-            white_xy: [0.3127, 0.3290],
+            xyz_to_cam,
+            white_xy,
             is_fallback: false,
+            calibrations: vec![ferrolite_decode::CameraCalibration {
+                xyz_to_cam,
+                white_xy,
+            }],
         }
     }
 

@@ -1369,7 +1369,23 @@ impl FerroliteApp {
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
             // keep the evaluate out of the lock scope to stay close to the
             // apply_full_decoded discipline.)
+            // TEMP brush-perf probe: time the preview edit-pipeline evaluate
+            // (which re-composites the LocalAdjustments mask — re-rasterizing the
+            // whole growing stroke — then re-runs downstream) only while a brush
+            // stroke is live, so we can compare it against the overlay cost.
+            let profile = crate::diag::brush_profile_enabled()
+                && matches!(
+                    v.mask.gesture,
+                    Some(crate::develop::mask_ui::MaskGesture::Stroke(..))
+                );
+            let t_eval = profile.then(std::time::Instant::now);
             let img = ep.evaluate();
+            if let Some(t) = t_eval {
+                crate::diag::write_log(&format!(
+                    "[brush-perf] preview ep.evaluate()={:.2}ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                ));
+            }
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == v.image_id {
@@ -1581,11 +1597,43 @@ impl FerroliteApp {
         // this readback-based overlay entirely with a GPU-side display-pipeline
         // overlay pass (the option deferred at plan time, avoiding the
         // GPU→CPU→GPU round trip altogether).
+        // TEMP brush-perf probe (measure-before-fix): time the overlay path's
+        // three sub-costs — coverage (mask composite + the blocking GPU→CPU
+        // readback), the RGBA tint build, and the egui texture upload — plus the
+        // in-progress stroke's node count, so we can see which dominates and
+        // whether it grows with stroke length. Only while a brush stroke is live.
+        let profile = crate::diag::brush_profile_enabled()
+            && matches!(
+                v.mask.gesture,
+                Some(crate::develop::mask_ui::MaskGesture::Stroke(..))
+            );
+        let t_cov = profile.then(std::time::Instant::now);
         let (w, h2, cov) = oc.coverage(&gpu_ctx, &def, input);
+        let cov_ms = t_cov.map(|t| t.elapsed().as_secs_f64() * 1e3);
+        let t_rgba = profile.then(std::time::Instant::now);
         let rgba = overlay_rgba(&cov, 0.5); // 50% red tint
+        let rgba_ms = t_rgba.map(|t| t.elapsed().as_secs_f64() * 1e3);
         let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h2 as usize], &rgba);
+        let t_up = profile.then(std::time::Instant::now);
         v.mask_overlay_tex =
             Some(ctx.load_texture("mask-overlay", img, egui::TextureOptions::LINEAR));
+        let up_ms = t_up.map(|t| t.elapsed().as_secs_f64() * 1e3);
+        if let (Some(c), Some(r), Some(u)) = (cov_ms, rgba_ms, up_ms) {
+            let brush_nodes: usize = def
+                .components
+                .iter()
+                .map(|(comp, _)| match comp {
+                    ferrolite_mask::MaskComponent::Brush { strokes } => {
+                        strokes.iter().map(|s| s.nodes.len()).sum()
+                    }
+                    _ => 0,
+                })
+                .sum();
+            crate::diag::write_log(&format!(
+                "[brush-perf] overlay {}x{} nodes={brush_nodes} coverage(composite+readback)={c:.2}ms rgba={r:.2}ms upload={u:.2}ms",
+                w, h2
+            ));
+        }
         v.mask.overlay_key = Some(key);
     }
 

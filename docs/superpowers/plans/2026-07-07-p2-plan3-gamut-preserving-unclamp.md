@@ -400,10 +400,21 @@ Add to the `#[cfg(test)] mod tests` in `ferrolite-export/src/convert.rs`:
     #[test]
     fn sanitizes_non_finite_channels() {
         let m = identity();
-        // NaN -> 0; +Inf -> clamps to white (1.0); -Inf -> clamps to black (0.0).
-        let out = convert_pixel([f32::NAN, f32::INFINITY, f32::NEG_INFINITY], &m, WorkingSpace::Srgb);
-        assert!(out.iter().all(|v| v.is_finite()), "output must be finite, got {out:?}");
-        assert_eq!(to_u8(out), [0, 255, 0]);
+        // Isolate each non-finite input: the identity dot product would otherwise
+        // cross-contaminate via 0*Inf = NaN, so drive one channel at a time (the
+        // identity diagonal passes it through; the others become NaN → masked to 0).
+        // NaN -> 0 (nz guard); +Inf -> white and -Inf -> black (output_oetf clamp).
+        let nan_ch = convert_pixel([f32::NAN, 0.0, 0.0], &m, WorkingSpace::Srgb);
+        assert!(nan_ch.iter().all(|v| v.is_finite()), "NaN must sanitize, got {nan_ch:?}");
+        assert_eq!(to_u8(nan_ch)[0], 0, "NaN channel -> 0");
+
+        let pos_inf = convert_pixel([0.0, f32::INFINITY, 0.0], &m, WorkingSpace::Srgb);
+        assert!(pos_inf.iter().all(|v| v.is_finite()), "output must be finite, got {pos_inf:?}");
+        assert_eq!(to_u8(pos_inf)[1], 255, "+Inf channel clamps to white via output_oetf");
+
+        let neg_inf = convert_pixel([0.0, 0.0, f32::NEG_INFINITY], &m, WorkingSpace::Srgb);
+        assert!(neg_inf.iter().all(|v| v.is_finite()), "output must be finite, got {neg_inf:?}");
+        assert_eq!(to_u8(neg_inf)[2], 0, "-Inf channel clamps to black via output_oetf");
     }
 ```
 

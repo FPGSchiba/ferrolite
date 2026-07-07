@@ -1,4 +1,5 @@
 mod app;
+mod camera_matrix;
 mod canvas;
 mod chrome;
 mod develop;

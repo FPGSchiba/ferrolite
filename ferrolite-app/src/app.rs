@@ -429,16 +429,29 @@ impl FerroliteApp {
         )
     }
 
-    /// camera→working for the open viewer's RAW profile (full-res tier).
-    ///
-    /// Row-normalized (`normalize_neutral`) because the RAW demosaic already
-    /// applied the as-shot white-balance gains; without this the DNG color
-    /// matrix re-neutralizes the camera response and neutrals skew red (double
-    /// white balance). The sRGB preview tier is NOT normalized — see
-    /// `preview_to_working`.
-    fn camera_to_working(&self) -> [[f32; 3]; 3] {
+    /// Normalized WhiteBalance temperature of the open viewer's current op stack
+    /// (0.0 = as-shot/identity when there is no WB op or no viewer).
+    fn current_wb_temp(&self) -> f32 {
+        self.state
+            .viewer
+            .as_ref()
+            .and_then(|v| v.op_stack.white_balance())
+            .map(|w| w.temp)
+            .unwrap_or(0.0)
+    }
+
+    /// camera→working for the open viewer's RAW profile at the given normalized WB
+    /// `temp` (full-res tier). Dual-illuminant profiles re-interpolate with `temp`
+    /// (P2 Plan 2 / S3); single-illuminant reduce to the static matrix. Already
+    /// row-normalized by `wb_camera_to_working` (the demosaic applied as-shot
+    /// gains). The sRGB preview tier is NOT normalized — see `preview_to_working`.
+    fn camera_to_working(&self, temp: f32) -> [[f32; 3]; 3] {
         match self.state.viewer.as_ref() {
-            Some(v) => ferrolite_color::normalize_neutral(self.source_to_working(&v.color_profile)),
+            Some(v) => crate::camera_matrix::wb_camera_to_working(
+                &v.color_profile,
+                temp,
+                self.state.working_space,
+            ),
             None => [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
         }
     }
@@ -537,7 +550,7 @@ impl FerroliteApp {
 
         // Compute camera→working BEFORE any borrow of `self.state.viewer` is held,
         // since `camera_to_working()` itself immutably borrows `self`.
-        let camera_to_working = self.camera_to_working();
+        let camera_to_working = self.camera_to_working(self.current_wb_temp());
 
         let Some(v) = self.state.viewer.as_ref() else {
             return;
@@ -748,7 +761,7 @@ impl FerroliteApp {
         // Standard via the sRGB `color_convert`.
         let (tex, dims) = if is_raw {
             // `cam` borrows the viewer immutably; compute before the write below.
-            let cam = self.camera_to_working();
+            let cam = self.camera_to_working(self.current_wb_temp());
             let Some(src) = raw_src else {
                 return; // RAW before-view not available until the full decode.
             };
@@ -816,7 +829,7 @@ impl FerroliteApp {
 
         // Compute camera→working BEFORE any exclusive `viewer` borrow below:
         // `camera_to_working` itself borrows `self.state.viewer` immutably.
-        let cam = self.camera_to_working();
+        let cam = self.camera_to_working(self.current_wb_temp());
         let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
 
         // RAW rung-1 reveal render (Approach A): run the demosaiced camera-native
@@ -1182,7 +1195,7 @@ impl FerroliteApp {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
-        let cam = self.camera_to_working();
+        let cam = self.camera_to_working(self.current_wb_temp());
         let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
@@ -1283,7 +1296,10 @@ impl FerroliteApp {
         // Compute before taking the exclusive `viewer` borrow below:
         // `camera_to_working`/`preview_to_working` themselves borrow
         // `self.state.viewer` immutably.
-        let cam = self.camera_to_working();
+        // WB temp of the INCOMING stack (v.op_stack is updated below), so a WB
+        // temp edit re-interpolates the dual-illuminant matrix this same frame.
+        let temp = stack.white_balance().map(|w| w.temp).unwrap_or(0.0);
+        let cam = self.camera_to_working(temp);
         let pw = self.preview_to_working();
         let Some(v) = self.state.viewer.as_mut() else {
             return;
@@ -1291,6 +1307,11 @@ impl FerroliteApp {
         let old = v.op_stack.clone();
         v.op_stack = stack.clone();
         v.opstack_version = v.opstack_version.wrapping_add(1);
+
+        // Preview-tier matrix (RAW = WB-driven camera→working `cam`; Standard =
+        // sRGB `pw`). Recomputed each edit; `set_color_matrix` no-ops when
+        // unchanged, so only a WB temp change actually dirties the head (P2 §5.1).
+        let pv_matrix = v.preview_tier_source(cam, pw).1;
 
         // What the preview should show: the live stack, or the empty stack in
         // before/after mode. While the crop tool is active, keep the ROTATION
@@ -1345,6 +1366,7 @@ impl FerroliteApp {
         }
         if let Some(ep) = v.preview_edit.as_mut() {
             ep.set_stack(shown.clone());
+            ep.set_color_matrix(pv_matrix);
             // Apply the current lens amounts + vig lerp to the preview too, so a
             // lens Amount-only drag (no bake, no rebuild) updates the fit-zoom
             // image live — mirroring the full-res producer's amount-only branch
@@ -1424,6 +1446,7 @@ impl FerroliteApp {
                 // Amount-only change (no rebuild per `needs_full_rebuild`): the
                 // grid/LUT are unchanged, only the uniform lerp amounts move.
                 producer.set_stack(shown.clone());
+                producer.set_color_matrix(cam);
                 let lc = shown.lens_correction();
                 producer.set_lens_uniform(ferrolite_pipeline::lens_uniform(
                     lc.as_ref(),
@@ -1884,7 +1907,7 @@ impl FerroliteApp {
         // event handler restores the analytic matrix above — a cheap no-op.
         self.redetect_display_profile(ctx, frame);
 
-        let cam = self.camera_to_working();
+        let cam = self.camera_to_working(self.current_wb_temp());
         let pw = self.preview_to_working();
         let Some(v) = self.state.viewer.as_mut() else {
             ctx.request_repaint();

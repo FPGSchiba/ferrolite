@@ -19,7 +19,7 @@ mod working_space;
 
 pub use adapt::chromatic_adaptation;
 pub use camera::{camera_to_working, normalize_neutral};
-pub use cct::{cct_to_xy, xy_to_cct};
+pub use cct::{cct_to_xy, wb_temp_to_cct, xy_to_cct};
 pub use display_lut::{
     bake_display_lut, shaper_decode, shaper_encode, DisplayLut, DisplayProfile,
     DISPLAY_LUT_SHAPER_GAMMA, DISPLAY_LUT_SIZE,

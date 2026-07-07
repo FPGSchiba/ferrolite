@@ -119,9 +119,16 @@ impl MaskCompositor {
             }
             MaskComponent::Brush { strokes } => {
                 let mut acc = MaskBuffer::alloc_zeroed(&self.ctx, w, h);
-                for st in strokes {
-                    let dabs = stroke_dabs(st, SPACING_FRAC);
-                    acc = self.brush.stamp_onto(&acc, &dabs, st.erase, (0, 0), (w, h));
+                let mut i = 0usize;
+                while i < strokes.len() {
+                    let erase = strokes[i].erase;
+                    // Gather all dabs of the maximal run of same-`erase` strokes; stamp once.
+                    let mut dabs = Vec::new();
+                    while i < strokes.len() && strokes[i].erase == erase {
+                        dabs.extend(stroke_dabs(&strokes[i], SPACING_FRAC));
+                        i += 1;
+                    }
+                    acc = self.brush.stamp_onto(&acc, &dabs, erase, (0, 0), (w, h));
                 }
                 acc
             }
@@ -165,6 +172,20 @@ impl MaskCompositor {
             .map(|(c, m)| (self.eval(c, input, w, h, rasters), *m))
             .collect();
         self.composite.composite(&inputs, def.invert)
+    }
+
+    /// Test-only accessor exposing a single brush stamp pass, used by
+    /// `brush_erase_run_batching_matches_per_stroke_loop` to build a reference
+    /// value from the pre-refactor per-stroke loop.
+    #[cfg(test)]
+    pub(crate) fn stamp_for_test(
+        &self,
+        base: &MaskBuffer,
+        dabs: &[crate::stroke::Dab],
+        erase: bool,
+    ) -> MaskBuffer {
+        self.brush
+            .stamp_onto(base, dabs, erase, (0, 0), (base.width, base.height))
     }
 
     /// Incremental composite: evaluate only components whose params changed since
@@ -677,6 +698,61 @@ mod tests {
         assert!(
             read_mask_r32f(&ctx, &out).iter().all(|&v| v.abs() < 1e-4),
             "no producer => imported inert"
+        );
+    }
+
+    #[test]
+    fn brush_erase_run_batching_matches_per_stroke_loop() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let comp = MaskCompositor::new(ctx.clone());
+        let input = MaskBuffer::alloc_zeroed(&ctx, 32, 32);
+        let iv = input
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let node = |x: f32, erase: bool| crate::model::Stroke {
+            nodes: vec![crate::model::BrushNode {
+                pos: crate::vec::Vec2::new(x, 0.5),
+                radius: 0.2,
+                hardness: 0.5,
+                flow: 1.0,
+            }],
+            erase,
+        };
+        // paint, paint, erase, paint  → runs [P,P],[E],[P]
+        let strokes = vec![
+            node(0.3, false),
+            node(0.5, false),
+            node(0.4, true),
+            node(0.7, false),
+        ];
+        let def = MaskDefinition {
+            components: vec![(
+                MaskComponent::Brush {
+                    strokes: strokes.clone(),
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        };
+        let batched = comp.composite(&def, &iv, 32, 32, &RasterStore::default());
+
+        // Reference: the OLD per-stroke fold, computed here directly.
+        let reference = {
+            let mut acc = MaskBuffer::alloc_zeroed(&ctx, 32, 32);
+            for st in &strokes {
+                let dabs = crate::stroke::stroke_dabs(st, crate::stroke::SPACING_FRAC);
+                acc = comp.stamp_for_test(&acc, &dabs, st.erase);
+            }
+            acc
+        };
+        assert_eq!(
+            read_mask_r32f(&ctx, &batched),
+            read_mask_r32f(&ctx, &reference),
+            "erase-run batching must equal the per-stroke fold"
         );
     }
 }

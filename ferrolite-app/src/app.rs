@@ -1367,23 +1367,7 @@ impl FerroliteApp {
             // `renderer` borrows `frame` — disjoint, so they may coexist, but we
             // keep the evaluate out of the lock scope to stay close to the
             // apply_full_decoded discipline.)
-            // TEMP brush-perf probe: time the preview edit-pipeline evaluate
-            // (which re-composites the LocalAdjustments mask — re-rasterizing the
-            // whole growing stroke — then re-runs downstream) only while a brush
-            // stroke is live, so we can compare it against the overlay cost.
-            let profile = crate::diag::brush_profile_enabled()
-                && matches!(
-                    v.mask.gesture,
-                    Some(crate::develop::mask_ui::MaskGesture::Stroke(..))
-                );
-            let t_eval = profile.then(std::time::Instant::now);
             let img = ep.evaluate();
-            if let Some(t) = t_eval {
-                crate::diag::write_log(&format!(
-                    "[brush-perf] preview ep.evaluate()={:.2}ms",
-                    t.elapsed().as_secs_f64() * 1e3
-                ));
-            }
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == v.image_id {

@@ -152,10 +152,117 @@ fn cfa_to_pattern(cfa: &rawler::CFA) -> [u8; 4] {
     [idx(0, 0), idx(0, 1), idx(1, 0), idx(1, 1)]
 }
 
+/// Copy the `cw`×`ch` sub-rectangle whose top-left is sensor pixel `(cx, cy)`
+/// out of a row-major `full_w`×`full_h` buffer with `cpp` components per pixel.
+/// The caller guarantees `cx + cw <= full_w` and `cy + ch <= full_h`.
+// TODO(decode-active-area-crop Task 2): drop these two `allow`s once `decode_full`
+// calls this helper — `dead_code` disappears because it becomes reachable outside
+// tests, and the 8-argument shape mirrors rawler's `Rect{p:{x,y}, d:{w,h}}` plus
+// source-buffer geometry, which is the plan's fixed public interface for Task 2.
+#[allow(dead_code, clippy::too_many_arguments)]
+fn crop_sensor_buffer(
+    pixels: &[u16],
+    full_w: usize,
+    full_h: usize,
+    cpp: usize,
+    cx: usize,
+    cy: usize,
+    cw: usize,
+    ch: usize,
+) -> Vec<u16> {
+    debug_assert!(
+        cx + cw <= full_w && cy + ch <= full_h,
+        "crop rect out of bounds"
+    );
+    debug_assert_eq!(
+        pixels.len(),
+        full_w * full_h * cpp,
+        "pixel buffer size mismatch"
+    );
+    let mut out = Vec::with_capacity(cw * ch * cpp);
+    for row in 0..ch {
+        let src_y = cy + row;
+        let row_start = (src_y * full_w + cx) * cpp;
+        out.extend_from_slice(&pixels[row_start..row_start + cw * cpp]);
+    }
+    out
+}
+
+/// Reorder a 2×2 per-position black-level array (indexed `row*2 + col`) so it
+/// matches the CFA phase after cropping at sensor origin `(cx, cy)`. Cropped
+/// position `(r, c)` reads sensor position `((cy + r) % 2, (cx + c) % 2)`.
+/// Identity when `cx` and `cy` are both even.
+// TODO(decode-active-area-crop Task 2): drop this `allow` once `decode_full` calls
+// this helper, making it reachable outside tests.
+#[allow(dead_code)]
+fn permute_black_levels_by_origin(bl: [f32; 4], cx: usize, cy: usize) -> [f32; 4] {
+    let mut out = [0.0f32; 4];
+    for r in 0..2 {
+        for c in 0..2 {
+            let src = (((cy + r) % 2) * 2) + ((cx + c) % 2);
+            out[r * 2 + c] = bl[src];
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn crop_sensor_buffer_extracts_subrect_cpp1() {
+        // 4x3 single-component buffer, values = y*10 + x.
+        let full_w = 4usize;
+        let full_h = 3usize;
+        let px: Vec<u16> = (0..full_h)
+            .flat_map(|y| (0..full_w).map(move |x| (y * 10 + x) as u16))
+            .collect();
+        // Crop the 2x2 starting at (1,1): expect [11,12, 21,22].
+        let out = crop_sensor_buffer(&px, full_w, full_h, 1, 1, 1, 2, 2);
+        assert_eq!(out, vec![11, 12, 21, 22]);
+    }
+
+    #[test]
+    fn crop_sensor_buffer_respects_cpp() {
+        // 2x2, cpp=2: pixel (x,y) -> [y*10+x, 100+y*10+x].
+        let (full_w, full_h, cpp) = (2usize, 2usize, 2usize);
+        let mut px = Vec::new();
+        for y in 0..full_h {
+            for x in 0..full_w {
+                px.push((y * 10 + x) as u16);
+                px.push((100 + y * 10 + x) as u16);
+            }
+        }
+        // Crop the 1x2 column starting at (1,0): pixels (1,0) and (1,1).
+        let out = crop_sensor_buffer(&px, full_w, full_h, cpp, 1, 0, 1, 2);
+        assert_eq!(out, vec![1, 101, 11, 111]);
+    }
+
+    #[test]
+    fn black_levels_permute_is_identity_for_even_origin() {
+        let bl = [1.0, 2.0, 3.0, 4.0]; // [(0,0),(0,1),(1,0),(1,1)]
+        assert_eq!(permute_black_levels_by_origin(bl, 8, 6), bl);
+        assert_eq!(permute_black_levels_by_origin(bl, 0, 0), bl);
+    }
+
+    #[test]
+    fn black_levels_permute_shifts_phase_for_odd_origin() {
+        // bl indexed r*2+c: (0,0)=1 (0,1)=2 (1,0)=3 (1,1)=4.
+        // Odd x (cx=1), even y (cy=0): cropped (r,c) -> sensor ((0+r)%2,(1+c)%2).
+        //   (0,0)->(0,1)=2  (0,1)->(0,0)=1  (1,0)->(1,1)=4  (1,1)->(1,0)=3
+        assert_eq!(
+            permute_black_levels_by_origin([1.0, 2.0, 3.0, 4.0], 1, 0),
+            [2.0, 1.0, 4.0, 3.0]
+        );
+        // Odd x and odd y (cx=1,cy=1): cropped (r,c) -> sensor ((1+r)%2,(1+c)%2).
+        //   (0,0)->(1,1)=4  (0,1)->(1,0)=3  (1,0)->(0,1)=2  (1,1)->(0,0)=1
+        assert_eq!(
+            permute_black_levels_by_origin([1.0, 2.0, 3.0, 4.0], 1, 1),
+            [4.0, 3.0, 2.0, 1.0]
+        );
+    }
 
     #[test]
     fn decode_full_surfaces_cfa_and_levels() {

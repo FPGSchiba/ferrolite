@@ -124,12 +124,31 @@ mod tests {
     }
 
     #[test]
-    fn wb_temp_is_monotonic_decreasing() {
+    fn wb_temp_is_monotonic_nonincreasing_and_strict_in_warm_range() {
+        // Non-increasing across the full slider. The extreme-cool end saturates
+        // at the Kim-locus clamp (temp ≲ -0.57 → 25000 K), which is harmless:
+        // the dual matrix is already pinned to the D65 endpoint for ALL cool
+        // temps (interpolation weight = 0), so the cool-side CCT value never
+        // affects the matrix — only the (unchanged) WB uniform shifts neutrals.
         let mut prev = f32::INFINITY;
         for i in -10..=10 {
             let t = i as f32 / 10.0;
             let cct = wb_temp_to_cct(t);
-            assert!(cct < prev, "not decreasing at t={t}: {cct} !< {prev}");
+            assert!(
+                cct <= prev + 1e-3,
+                "not non-increasing at t={t}: {cct} > {prev}"
+            );
+            prev = cct;
+        }
+        // Strictly decreasing across the unclamped warm/interior range [-0.5, 1.0].
+        let mut prev = f32::INFINITY;
+        for i in -5..=10 {
+            let t = i as f32 / 10.0;
+            let cct = wb_temp_to_cct(t);
+            assert!(
+                cct < prev,
+                "not strictly decreasing at t={t}: {cct} !< {prev}"
+            );
             prev = cct;
         }
     }

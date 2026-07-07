@@ -4,8 +4,10 @@
 use std::path::PathBuf;
 
 use ferrolite_decode::{DemosaicToRgb16f, QuadBin};
+use ferrolite_gpu::GpuContext;
 use ferrolite_image::{FileKind, ImageBuffer, LinearRgbaF32, PixelFormat};
 use ferrolite_jobs::{JobHandle, JobSystem, Priority};
+use std::sync::Arc;
 
 use crate::events::AppEvent;
 
@@ -70,7 +72,7 @@ pub fn spawn_preview(
 }
 
 /// Submit a `Visible`-priority tier-2 full-decode job: full RAW decode →
-/// `QuadBin.to_linear_rgba_f32` (display-linear half-res), then send
+/// GPU RCD (RGGB) / QuadBin (else), full-res, then send
 /// `AppEvent::FullDecoded { image_id, image }`. On decode error sends
 /// `AppEvent::FullFailed { image_id }` and logs.
 ///
@@ -91,6 +93,7 @@ pub fn spawn_full(
     ctx: &egui::Context,
     image_id: i64,
     path: PathBuf,
+    gpu: Arc<GpuContext>,
 ) -> JobHandle {
     let tx = tx.clone();
     let ctx = ctx.clone();
@@ -107,10 +110,26 @@ pub fn spawn_full(
                 // Demosaic is sensor-native; upright it to match the already-
                 // oriented embedded preview (the RAW path has no image-crate
                 // DynamicImage to run `apply_orientation` on).
-                let image = ferrolite_decode::apply_orientation_linear(
-                    QuadBin.to_linear_rgba_f32(&raw),
-                    raw.orientation,
-                );
+                // Full-res demosaic: GPU RCD for RGGB sensors (P2 Plan 5), QuadBin
+                // otherwise. Runs here on the job worker thread (never the UI thread,
+                // CLAUDE.md §1); RCD runs once per open (CLAUDE.md §2).
+                let demosaiced = if raw.cfa_pattern == [0, 1, 1, 2] {
+                    ferrolite_pipeline::demosaic_rcd_gpu(
+                        &gpu,
+                        &ferrolite_pipeline::CfaInput {
+                            pixels: &raw.pixels,
+                            width: raw.width,
+                            height: raw.height,
+                            cfa_pattern: raw.cfa_pattern,
+                            black_levels: raw.black_levels,
+                            white_level: raw.white_level,
+                            wb_coeffs: raw.wb_coeffs,
+                        },
+                    )
+                } else {
+                    QuadBin.to_linear_rgba_f32(&raw)
+                };
+                let image = ferrolite_decode::apply_orientation_linear(demosaiced, raw.orientation);
                 let _ = tx.send(AppEvent::FullDecoded {
                     image_id,
                     image,

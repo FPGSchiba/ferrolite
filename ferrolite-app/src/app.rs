@@ -3642,15 +3642,21 @@ impl eframe::App for FerroliteApp {
                         v.cache_read_handle = Some(h);
                         v.cache_read_requested = true;
                     } else if !v.full_requested && v.cache_resolved {
-                        let h = viewer::load::spawn_full(
-                            &self.state.jobs,
-                            &self.state.tx,
-                            ctx,
-                            v.image_id,
-                            v.path.clone(),
-                        );
-                        v.full_handle = Some(h);
-                        v.full_requested = true;
+                        if let Some(rs) = frame.wgpu_render_state() {
+                            let gpu = std::sync::Arc::new(
+                                ferrolite_gpu::GpuContext::from_render_state(rs),
+                            );
+                            let h = viewer::load::spawn_full(
+                                &self.state.jobs,
+                                &self.state.tx,
+                                ctx,
+                                v.image_id,
+                                v.path.clone(),
+                                gpu,
+                            );
+                            v.full_handle = Some(h);
+                            v.full_requested = true;
+                        }
                     }
                 } else {
                     // Guarantee a frame fires once the debounce elapses even if

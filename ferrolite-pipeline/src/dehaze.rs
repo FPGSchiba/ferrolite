@@ -46,7 +46,7 @@ pub fn estimate_atmospheric_light(img: &LinearRgbaF32) -> [f32; 3] {
     if n == 0 {
         return DEHAZE_ATMOS_NEUTRAL;
     }
-    let stride = (n / MAX_ATMOS_SAMPLES).max(1);
+    let stride = n.div_ceil(MAX_ATMOS_SAMPLES).max(1);
     // (dark_channel, [r,g,b]) for each sampled pixel.
     let mut samples: Vec<(f32, [f32; 3])> = Vec::new();
     let mut i = 0usize;
@@ -124,7 +124,7 @@ pub struct DehazeUniform {
 /// Absent/identity op → `amount 0`, `radius 0` (the shader takes its passthrough
 /// branch). `atmos` is floored so the shader's `I/A` division is finite.
 #[allow(dead_code)]
-fn dehaze_uniform(op: Option<Dehaze>, atmos: [f32; 3]) -> DehazeUniform {
+pub(crate) fn dehaze_uniform(op: Option<Dehaze>, atmos: [f32; 3]) -> DehazeUniform {
     let (amount, r) = op.map(|d| (d.amount, d.radius)).unwrap_or((0.0, 0));
     // A no-op amount contributes no radius (shader passthrough); otherwise clamp.
     let radius = if amount != 0.0 {

@@ -228,6 +228,61 @@ pub struct Geometry {
     pub aspect: Aspect,
 }
 
+/// One color-grading wheel: a hue-sat tint direction plus a luminance offset.
+/// `hue` in [0,360) degrees (wheel angle), `sat` in [0,1] (distance from center,
+/// 0 = no tint), `lum` in [-1,1] (region luminance offset). Default = neutral.
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct GradeWheel {
+    pub hue: f32,
+    pub sat: f32,
+    pub lum: f32,
+}
+
+impl GradeWheel {
+    /// True when this wheel applies no tint and no luminance shift.
+    pub fn is_neutral(&self) -> bool {
+        self.sat == 0.0 && self.lum == 0.0
+    }
+}
+
+/// Lightroom-style color grading: four wheels (Shadows/Midtones/Highlights/
+/// Global) plus region `blending` (overlap width, [0,1]) and `balance` (shifts
+/// the shadow↔highlight midpoint, [-1,1]). Default = identity.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ColorGrade {
+    pub shadows: GradeWheel,
+    pub midtones: GradeWheel,
+    pub highlights: GradeWheel,
+    pub global: GradeWheel,
+    pub blending: f32,
+    pub balance: f32,
+}
+
+impl Default for ColorGrade {
+    fn default() -> Self {
+        // Neutral wheels, mid blending, centered balance → identity.
+        Self {
+            shadows: GradeWheel::default(),
+            midtones: GradeWheel::default(),
+            highlights: GradeWheel::default(),
+            global: GradeWheel::default(),
+            blending: 0.5,
+            balance: 0.0,
+        }
+    }
+}
+
+impl ColorGrade {
+    /// True when every wheel is neutral (no tint, no lum). Blending/balance are
+    /// no-ops when nothing is tinted, so they do not affect identity.
+    pub fn is_identity(&self) -> bool {
+        self.shadows.is_neutral()
+            && self.midtones.is_neutral()
+            && self.highlights.is_neutral()
+            && self.global.is_neutral()
+    }
+}
+
 /// One adjustment in the stack. `Op` is `Clone` (not `Copy`) because `ToneCurve`
 /// carries a `Vec` of control points.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
@@ -237,6 +292,7 @@ pub enum Op {
     Contrast(Contrast),
     ToneCurve(ToneCurve),
     Hsl(Hsl),
+    ColorGrade(ColorGrade),
     LocalAdjustments(LocalAdjustments),
     Sharpen(Sharpen),
     LensCorrection(LensCorrection),
@@ -253,10 +309,11 @@ pub enum OpKind {
     Contrast = 2,
     ToneCurve = 3,
     Hsl = 4,
-    LocalAdjustments = 5,
-    Sharpen = 6,
-    LensCorrection = 7,
-    Geometry = 8,
+    ColorGrade = 5,
+    LocalAdjustments = 6,
+    Sharpen = 7,
+    LensCorrection = 8,
+    Geometry = 9,
 }
 
 impl Op {
@@ -267,6 +324,7 @@ impl Op {
             Op::Contrast(_) => OpKind::Contrast,
             Op::ToneCurve(_) => OpKind::ToneCurve,
             Op::Hsl(_) => OpKind::Hsl,
+            Op::ColorGrade(_) => OpKind::ColorGrade,
             Op::LocalAdjustments(_) => OpKind::LocalAdjustments,
             Op::Sharpen(_) => OpKind::Sharpen,
             Op::LensCorrection(_) => OpKind::LensCorrection,
@@ -354,6 +412,13 @@ impl OpStack {
     pub fn hsl(&self) -> Option<Hsl> {
         self.ops.iter().find_map(|o| match o {
             Op::Hsl(h) => Some(*h),
+            _ => None,
+        })
+    }
+
+    pub fn color_grade(&self) -> Option<ColorGrade> {
+        self.ops.iter().find_map(|o| match o {
+            Op::ColorGrade(c) => Some(*c),
             _ => None,
         })
     }
@@ -627,12 +692,123 @@ mod tests {
     }
 
     #[test]
-    fn opkind_discriminants_place_local_adjustments_after_hsl() {
+    fn grade_wheel_default_is_neutral() {
+        let w = GradeWheel::default();
+        assert_eq!((w.hue, w.sat, w.lum), (0.0, 0.0, 0.0));
+        assert!(w.is_neutral());
+    }
+
+    #[test]
+    fn color_grade_default_is_identity_with_half_blending() {
+        let cg = ColorGrade::default();
+        assert_eq!(cg.blending, 0.5);
+        assert_eq!(cg.balance, 0.0);
+        assert!(cg.shadows.is_neutral() && cg.global.is_neutral());
+        assert!(
+            cg.is_identity(),
+            "all-neutral wheels = identity regardless of blending/balance"
+        );
+    }
+
+    #[test]
+    fn color_grade_tinted_wheel_is_non_identity() {
+        let cg = ColorGrade {
+            shadows: GradeWheel {
+                hue: 210.0,
+                sat: 0.4,
+                lum: 0.0,
+            },
+            ..Default::default()
+        };
+        assert!(!cg.is_identity());
+        // A lum-only wheel is also non-identity.
+        let cg2 = ColorGrade {
+            highlights: GradeWheel {
+                hue: 0.0,
+                sat: 0.0,
+                lum: 0.3,
+            },
+            ..Default::default()
+        };
+        assert!(!cg2.is_identity());
+        // Blending/balance alone (no tint, no lum) stay identity.
+        let cg3 = ColorGrade {
+            blending: 0.9,
+            balance: -0.5,
+            ..Default::default()
+        };
+        assert!(cg3.is_identity());
+    }
+
+    #[test]
+    fn color_grade_sorts_between_hsl_and_local_adjustments() {
+        let cg = Op::ColorGrade(ColorGrade {
+            midtones: GradeWheel {
+                hue: 120.0,
+                sat: 0.2,
+                lum: 0.0,
+            },
+            ..Default::default()
+        });
+        let s = OpStack::default()
+            .set_op(Op::Sharpen(Sharpen {
+                amount: 0.3,
+                radius: 1,
+            }))
+            .set_op(cg.clone())
+            .set_op(Op::Hsl(Hsl {
+                bands: [HslBand {
+                    hue: 0.0,
+                    sat: 0.0,
+                    lum: 0.0,
+                }; 8],
+            }));
+        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
+        assert_eq!(
+            kinds,
+            vec![OpKind::Hsl, OpKind::ColorGrade, OpKind::Sharpen]
+        );
+        assert_eq!(s.color_grade().unwrap().midtones.hue, 120.0);
+    }
+
+    #[test]
+    fn opkind_discriminants_after_colorgrade_insert() {
         assert_eq!(OpKind::Hsl as u8, 4);
-        assert_eq!(OpKind::LocalAdjustments as u8, 5);
-        assert_eq!(OpKind::Sharpen as u8, 6);
-        assert_eq!(OpKind::LensCorrection as u8, 7);
-        assert_eq!(OpKind::Geometry as u8, 8);
+        assert_eq!(OpKind::ColorGrade as u8, 5);
+        assert_eq!(OpKind::LocalAdjustments as u8, 6);
+        assert_eq!(OpKind::Sharpen as u8, 7);
+        assert_eq!(OpKind::LensCorrection as u8, 8);
+        assert_eq!(OpKind::Geometry as u8, 9);
+    }
+
+    #[test]
+    fn color_grade_roundtrips() {
+        let cg = ColorGrade {
+            shadows: GradeWheel {
+                hue: 210.0,
+                sat: 0.5,
+                lum: -0.2,
+            },
+            midtones: GradeWheel {
+                hue: 90.0,
+                sat: 0.1,
+                lum: 0.0,
+            },
+            highlights: GradeWheel {
+                hue: 40.0,
+                sat: 0.3,
+                lum: 0.15,
+            },
+            global: GradeWheel {
+                hue: 0.0,
+                sat: 0.0,
+                lum: 0.05,
+            },
+            blending: 0.7,
+            balance: -0.3,
+        };
+        let s = serde_json::to_string(&cg).unwrap();
+        assert_eq!(serde_json::from_str::<ColorGrade>(&s).unwrap(), cg);
     }
 
     #[test]

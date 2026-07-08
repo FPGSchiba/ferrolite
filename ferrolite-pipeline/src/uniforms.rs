@@ -78,8 +78,11 @@ pub const MAX_PARAMETRIC_SHIFT: f32 = 0.25;
 
 /// Partition-of-unity weights for the four parametric regions
 /// [shadows, darks, lights, highlights] at sample `x`, given the four region
-/// centers (strictly ascending). Weights sum to 1 everywhere and transition
-/// smoothly (smoothstep) between adjacent centers; flat past the end centers.
+/// centers (ascending, but adjacent centers may be equal after sanitizing
+/// degenerate splits). Weights sum to 1 everywhere; adjacent centers with
+/// positive width transition smoothly (smoothstep), a zero-width (collapsed)
+/// pair transitions as a hard split instead, and it is flat past the end
+/// centers.
 fn region_weights(x: f32, centers: [f32; 4]) -> [f32; 4] {
     let mut w = [0.0f32; 4];
     if x <= centers[0] {
@@ -92,14 +95,27 @@ fn region_weights(x: f32, centers: [f32; 4]) -> [f32; 4] {
     }
     for k in 0..3 {
         if x >= centers[k] && x <= centers[k + 1] {
-            // smoothstep guards a degenerate (equal) center pair by clamping to 0/1.
+            // A zero-width band (centers[k] == centers[k+1], e.g. from a
+            // sanitized/collapsed split) would make smoothstep divide by
+            // zero and produce NaN, which `clamp` does NOT turn into 0/1.
+            // Guard it explicitly as a hard split instead of relying on
+            // smoothstep: everything at or past a collapsed center belongs
+            // to the later region. Bands with positive width still get the
+            // smooth transition.
+            if (centers[k + 1] - centers[k]).abs() < f32::EPSILON {
+                w[k + 1] = 1.0;
+                return w;
+            }
             let t = smoothstep(centers[k], centers[k + 1], x);
             w[k] = 1.0 - t;
             w[k + 1] = t;
             return w;
         }
     }
-    w[3] = 1.0; // numerical fallthrough (shouldn't hit)
+    // Unreachable given ascending centers and the two early returns above:
+    // every x either hits an early return or falls into exactly one [k,k+1]
+    // window in the loop. Kept as a defensive fallback, not a live path.
+    w[3] = 1.0;
     w
 }
 
@@ -1205,6 +1221,41 @@ mod tests {
         let lut = parametric_curve_lut(&p);
         for i in 1..256 {
             assert!(lut[i] >= lut[i - 1] - 1e-6, "dipped at {i}");
+        }
+    }
+
+    #[test]
+    fn parametric_degenerate_splits_no_nan_and_stays_monotone() {
+        use crate::op::ParametricCurve;
+        // Collapsed split configs: (shadow_split, midtone_split, highlight_split).
+        let configs = [(0.0, 0.0, 0.5), (0.5, 1.0, 1.0), (0.5, 0.5, 0.5)];
+        for (shadow_split, midtone_split, highlight_split) in configs {
+            let p = ParametricCurve {
+                shadows: 0.5,
+                highlights: 0.5,
+                shadow_split,
+                midtone_split,
+                highlight_split,
+                ..Default::default()
+            };
+            let lut = parametric_curve_lut(&p);
+            for i in 0..256 {
+                assert!(
+                    lut[i].is_finite(),
+                    "NaN/inf at {i} for splits ({shadow_split}, {midtone_split}, {highlight_split})"
+                );
+                assert!(
+                    (0.0..=1.0).contains(&lut[i]),
+                    "out of range at {i}: {} for splits ({shadow_split}, {midtone_split}, {highlight_split})",
+                    lut[i]
+                );
+                if i > 0 {
+                    assert!(
+                        lut[i] >= lut[i - 1] - 1e-6,
+                        "dipped at {i} for splits ({shadow_split}, {midtone_split}, {highlight_split})"
+                    );
+                }
+            }
         }
     }
 }

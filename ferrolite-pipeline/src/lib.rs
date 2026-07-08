@@ -38,11 +38,11 @@ pub use serialize::{deserialize, serialize};
 pub use tile_edit::TileEditPipeline;
 // The uniform structs are exported as the documented GPU memory layout the
 // edit passes consume. Most param→uniform helpers are crate-internal; the pure
-// LUT-baking fns (`curve_lut`, `parametric_curve_lut`, `tone_curve_luts`) are
-// public per design §2.5 so the future per-mask path reuses them with no rework.
+// reusable transforms (`color_grade_px`, `curve_lut`, `parametric_curve_lut`, `tone_curve_luts`)
+// are public per design §2.5 so the future per-mask path reuses them with no rework.
 // `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
 pub use uniforms::{
-    curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform, parametric_curve_lut,
+    color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform, parametric_curve_lut,
     sharpen_halo, tone_curve_luts, vignette_amount, ContrastUniform, ExposureUniform,
     GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
     WbUniform, MAX_SHARPEN_RADIUS,

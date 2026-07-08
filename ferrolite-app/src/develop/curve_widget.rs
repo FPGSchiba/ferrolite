@@ -51,6 +51,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         stack: stack.set_op(Op::ToneCurve(ToneCurve {
             points: edit.points,
             mode: edit.mode,
+            ..Default::default()
         })),
         kind: OpKind::ToneCurve,
         commit: edit.commit,

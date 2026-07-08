@@ -41,14 +41,97 @@ pub enum CurveMode {
     Smooth,
 }
 
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+/// A single point-curve channel (control points + interpolation mode).
+/// Identity = empty `points` (or `[(0,0),(1,1)]`). Reuses the shared
+/// `curve_lut` bake; `Default` is identity so it is a valid `#[serde(default)]`.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PointCurve {
+    pub points: Vec<(f32, f32)>,
+    #[serde(default)]
+    pub mode: CurveMode,
+}
+
+impl PointCurve {
+    /// True when this channel is the identity ramp (no effect).
+    pub fn is_identity(&self) -> bool {
+        points_are_identity(&self.points)
+    }
+}
+
+/// Lightroom-style parametric region curve applied to all channels via the
+/// composited LUT. Region values in `[-1,1]` (0 = identity); split points in
+/// `[0,1]` partition the tonal range into Shadows|Darks|Lights|Highlights.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct ParametricCurve {
+    pub highlights: f32,
+    pub lights: f32,
+    pub darks: f32,
+    pub shadows: f32,
+    pub shadow_split: f32,
+    pub midtone_split: f32,
+    pub highlight_split: f32,
+}
+
+impl Default for ParametricCurve {
+    fn default() -> Self {
+        // All region shifts 0, splits at the LR defaults → identity.
+        Self {
+            highlights: 0.0,
+            lights: 0.0,
+            darks: 0.0,
+            shadows: 0.0,
+            shadow_split: 0.25,
+            midtone_split: 0.50,
+            highlight_split: 0.75,
+        }
+    }
+}
+
+impl ParametricCurve {
+    /// True when no region is shifted (splits alone have no effect).
+    pub fn is_identity(&self) -> bool {
+        self.highlights == 0.0 && self.lights == 0.0 && self.darks == 0.0 && self.shadows == 0.0
+    }
+}
+
+/// Control points form the identity ramp when empty or exactly the two corners.
+fn points_are_identity(points: &[(f32, f32)]) -> bool {
+    points.is_empty()
+        || (points.len() == 2
+            && (points[0].0).abs() < 1e-6
+            && (points[0].1).abs() < 1e-6
+            && (points[1].0 - 1.0).abs() < 1e-6
+            && (points[1].1 - 1.0).abs() < 1e-6)
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ToneCurve {
-    /// Control points in [0,1]×[0,1] (x ascending). Identity = `[(0,0),(1,1)]`
-    /// or empty. Baked to a 256-entry monotone LUT by `uniforms::curve_lut`.
+    /// Master (RGB/luminance) curve — legacy field names, unchanged for
+    /// back-compat. Baked to a 256-entry monotone LUT by `uniforms::curve_lut`.
     pub points: Vec<(f32, f32)>,
     /// Interpolation mode. Absent in pre-feature sidecars → Linear (serde default).
     #[serde(default)]
     pub mode: CurveMode,
+    // New in P3 — all `#[serde(default)]` = identity, so pre-P3 sidecars load unchanged.
+    #[serde(default)]
+    pub red: PointCurve,
+    #[serde(default)]
+    pub green: PointCurve,
+    #[serde(default)]
+    pub blue: PointCurve,
+    #[serde(default)]
+    pub parametric: ParametricCurve,
+}
+
+impl ToneCurve {
+    /// True when Master + R/G/B + parametric are all identity (op can be dropped).
+    pub fn is_identity(&self) -> bool {
+        points_are_identity(&self.points)
+            && self.red.is_identity()
+            && self.green.is_identity()
+            && self.blue.is_identity()
+            && self.parametric.is_identity()
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -366,6 +449,7 @@ mod tests {
             .set_op(Op::ToneCurve(ToneCurve {
                 points: vec![(0.0, 0.0), (1.0, 1.0)],
                 mode: CurveMode::Linear,
+                ..Default::default()
             }))
             .set_op(Op::Hsl(Hsl {
                 bands: [HslBand {
@@ -427,6 +511,7 @@ mod tests {
             .set_op(Op::ToneCurve(ToneCurve {
                 points: vec![],
                 mode: CurveMode::Linear,
+                ..Default::default()
             }))
             .set_op(Op::Contrast(Contrast { amount: 0.1 }))
             .set_op(Op::WhiteBalance(WhiteBalance {
@@ -462,6 +547,7 @@ mod tests {
         let tc = ToneCurve {
             points: vec![(0.0, 0.0), (1.0, 1.0)],
             mode: CurveMode::Smooth,
+            ..Default::default()
         };
         let s = serde_json::to_string(&tc).unwrap();
         assert_eq!(serde_json::from_str::<ToneCurve>(&s).unwrap(), tc);
@@ -547,6 +633,96 @@ mod tests {
         assert_eq!(OpKind::Sharpen as u8, 6);
         assert_eq!(OpKind::LensCorrection as u8, 7);
         assert_eq!(OpKind::Geometry as u8, 8);
+    }
+
+    #[test]
+    fn point_curve_default_is_identity() {
+        let p = PointCurve::default();
+        assert!(p.points.is_empty());
+        assert_eq!(p.mode, CurveMode::Linear);
+        assert!(p.is_identity());
+    }
+
+    #[test]
+    fn parametric_default_splits_are_quarter_half_threequarter() {
+        let p = ParametricCurve::default();
+        assert_eq!(p.shadow_split, 0.25);
+        assert_eq!(p.midtone_split, 0.50);
+        assert_eq!(p.highlight_split, 0.75);
+        assert_eq!(
+            (p.highlights, p.lights, p.darks, p.shadows),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+        assert!(
+            p.is_identity(),
+            "zero regions = identity regardless of splits"
+        );
+    }
+
+    #[test]
+    fn tone_curve_default_is_fully_identity() {
+        let tc = ToneCurve::default();
+        assert!(tc.is_identity());
+        assert!(tc.red.is_identity() && tc.green.is_identity() && tc.blue.is_identity());
+        assert!(tc.parametric.is_identity());
+    }
+
+    #[test]
+    fn tone_curve_red_channel_makes_it_non_identity() {
+        let tc = ToneCurve {
+            red: PointCurve {
+                points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
+                mode: CurveMode::Smooth,
+            },
+            ..Default::default()
+        };
+        assert!(
+            !tc.is_identity(),
+            "a non-identity red curve makes the op non-identity"
+        );
+    }
+
+    #[test]
+    fn tone_curve_parametric_makes_it_non_identity() {
+        let tc = ToneCurve {
+            parametric: ParametricCurve {
+                shadows: 0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!tc.is_identity());
+    }
+
+    #[test]
+    fn pre_p3_tonecurve_loads_with_identity_new_fields() {
+        // A sidecar written before P3 has only points + mode.
+        let json = r#"{ "points": [[0.0,0.0],[1.0,1.0]], "mode": "Linear" }"#;
+        let tc: ToneCurve = serde_json::from_str(json).unwrap();
+        assert_eq!(tc.points, vec![(0.0, 0.0), (1.0, 1.0)]);
+        assert!(tc.red.is_identity() && tc.green.is_identity() && tc.blue.is_identity());
+        assert!(tc.parametric.is_identity());
+    }
+
+    #[test]
+    fn tonecurve_with_new_fields_roundtrips() {
+        let tc = ToneCurve {
+            points: vec![(0.0, 0.0), (1.0, 1.0)],
+            mode: CurveMode::Smooth,
+            red: PointCurve {
+                points: vec![(0.0, 0.0), (0.4, 0.6), (1.0, 1.0)],
+                mode: CurveMode::Smooth,
+            },
+            green: PointCurve::default(),
+            blue: PointCurve::default(),
+            parametric: ParametricCurve {
+                shadows: 0.3,
+                highlight_split: 0.8,
+                ..Default::default()
+            },
+        };
+        let s = serde_json::to_string(&tc).unwrap();
+        assert_eq!(serde_json::from_str::<ToneCurve>(&s).unwrap(), tc);
     }
 
     #[test]

@@ -68,6 +68,7 @@ mod tests {
             .set_op(Op::ToneCurve(ToneCurve {
                 points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
                 mode: CurveMode::Linear,
+                ..Default::default()
             }))
             .set_op(Op::Hsl(Hsl {
                 bands: [HslBand {

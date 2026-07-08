@@ -580,6 +580,17 @@ impl FerroliteApp {
             self.state.warning = Some("Image still loading; cannot export yet.".to_string());
             return;
         };
+        // Whole-image dehaze atmospheric light (design §5.3), estimated once here
+        // from the decoded CPU preview source — regardless of which `source`
+        // variant above was chosen, so a RAW export (which only carries a GPU
+        // `Pyramid`, no CPU buffer, into `spawn_export`) still gets the real
+        // estimate rather than the neutral fallback.
+        let atmospheric_light = v
+            .raw_preview_source
+            .as_ref()
+            .or(v.preview_source.as_ref())
+            .map(|src| ferrolite_pipeline::estimate_atmospheric_light(src))
+            .unwrap_or(ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL);
         let source_path = v.path.clone();
         let image_id = v.image_id;
         let stack = v.op_stack.clone();
@@ -622,6 +633,7 @@ impl FerroliteApp {
             source_path,
             dest,
             image_id,
+            atmospheric_light,
         );
         let mut activity = crate::export::ExportActivity::new_single(current_name);
         activity.handles = vec![handle];
@@ -1220,6 +1232,13 @@ impl FerroliteApp {
             let mut producer = viewer::EditTileProducer::new(tep);
             producer.set_vig_amount(vig_amount);
             producer.set_vig_manual(vig_manual);
+            // Whole-image atmospheric light for dehaze (design §5.3): estimate once
+            // from the decoded preview source and hand it to the tiled producer.
+            // Same fn + same source the preview EditPipeline uses internally, so
+            // the two tiers agree. Cheap + bounded (subsampled) — safe here.
+            if let Some(src) = v.raw_preview_source.as_ref().or(v.preview_source.as_ref()) {
+                producer.set_dehaze_atmos(ferrolite_pipeline::estimate_atmospheric_light(src));
+            }
             v.edit_producer = Some(producer);
             v.full_ready = true;
             version = v.opstack_version.max(1);
@@ -1388,6 +1407,13 @@ impl FerroliteApp {
             let mut producer = viewer::EditTileProducer::new(tep);
             producer.set_vig_amount(vig_amount);
             producer.set_vig_manual(vig_manual);
+            // Whole-image atmospheric light for dehaze (design §5.3): estimate once
+            // from the decoded preview source and hand it to the tiled producer.
+            // Same fn + same source the preview EditPipeline uses internally, so
+            // the two tiers agree. Cheap + bounded (subsampled) — safe here.
+            if let Some(src) = v.raw_preview_source.as_ref().or(v.preview_source.as_ref()) {
+                producer.set_dehaze_atmos(ferrolite_pipeline::estimate_atmospheric_light(src));
+            }
             v.edit_producer = Some(producer);
             v.opstack_version = v.opstack_version.wrapping_add(1);
             let version = v.opstack_version;
@@ -1560,6 +1586,14 @@ impl FerroliteApp {
                     let mut producer = viewer::EditTileProducer::new(tep);
                     producer.set_vig_amount(vig_amount);
                     producer.set_vig_manual(vig_manual);
+                    // Whole-image atmospheric light for dehaze (design §5.3): estimate
+                    // once from the decoded preview source and hand it to the tiled
+                    // producer. Same fn + same source the preview EditPipeline uses
+                    // internally, so the two tiers agree. Cheap + bounded (subsampled).
+                    if let Some(src) = v.raw_preview_source.as_ref().or(v.preview_source.as_ref()) {
+                        producer
+                            .set_dehaze_atmos(ferrolite_pipeline::estimate_atmospheric_light(src));
+                    }
                     v.edit_producer = Some(producer);
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {

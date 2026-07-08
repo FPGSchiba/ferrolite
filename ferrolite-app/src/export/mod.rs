@@ -86,6 +86,11 @@ pub fn spawn_export(
     source_path: PathBuf,
     dest: PathBuf,
     image_id: i64,
+    // Whole-image dehaze atmospheric light (design §5.3), estimated once by the
+    // caller from the CPU preview source (the app owns the CPU image; this fn
+    // only has a `GpuPyramidSource` for the RAW/`Pyramid` variant, which has no
+    // CPU buffer to estimate from — see `App::confirm_export`).
+    atmospheric_light: [f32; 3],
 ) -> ferrolite_jobs::JobHandle {
     let tx = state.tx.clone();
     let egui_ctx = egui_ctx.clone();
@@ -122,8 +127,7 @@ pub fn spawn_export(
             options: &options,
             dest: &dest,
             source_path: &source_path,
-            // TODO(dehaze): replaced with the real estimate in the app A-wiring task
-            atmospheric_light: ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+            atmospheric_light,
         };
         let (ok, message) = match run_export(req, cancel, &mut progress) {
             Ok(outcome) => {

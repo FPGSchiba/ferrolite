@@ -171,8 +171,11 @@ fn run_one(
         options,
         dest: &item.dest,
         source_path: &item.path,
-        // TODO(dehaze): replaced with the real estimate in the app A-wiring task
-        atmospheric_light: ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+        // Whole-image dehaze atmospheric light (design §5.3): the batch export
+        // always has the decoded CPU `linear` in scope (it built the pyramid
+        // from it above), so it can estimate the real value here — no fallback
+        // needed for this path.
+        atmospheric_light: ferrolite_pipeline::estimate_atmospheric_light(&linear),
     };
     match run_export(req, cancel, progress) {
         Ok(outcome) => {

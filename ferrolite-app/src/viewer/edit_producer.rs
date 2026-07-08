@@ -56,6 +56,12 @@ impl EditTileProducer {
     pub fn set_vig_manual(&mut self, manual: f32) {
         self.pipeline.set_vig_manual(manual);
     }
+
+    /// Set the dehaze atmospheric light on the underlying tiled pipeline (design
+    /// §5.3). Called once per image after the producer is built.
+    pub fn set_dehaze_atmos(&mut self, atmos: [f32; 3]) {
+        self.pipeline.set_dehaze_atmos(atmos);
+    }
 }
 
 impl TileProducer for EditTileProducer {

@@ -106,9 +106,13 @@ pub fn dehaze_recover(px: [f32; 3], dark: f32, a: [f32; 3], amount: f32) -> [f32
 /// Guided-filter regularization ε (design step 5): larger = smoother/less edge-aware.
 pub const DEHAZE_GUIDED_EPS: f32 = 1e-3;
 
-/// Guided-filter window radius as a function of the patch radius (one knob: gr = r).
+/// Guided-filter window radius as a function of the patch radius (one knob).
+/// Must be a large enough multiple of `r` that the guided window straddles the
+/// luma edge across the FULL width of the block-min dilation halo (width ≈ `r`),
+/// otherwise the far end of the halo band never sees the edge and the filter
+/// blurs it instead of removing it (see `guided_refinement_removes_most_of_the_block_min_halo`).
 pub fn guided_radius(r: u32) -> u32 {
-    r
+    r.saturating_mul(3)
 }
 
 /// Separable clamp-to-edge min over a `(2r+1)²` window: horizontal min pass then
@@ -385,20 +389,20 @@ mod tests {
             })),
             0
         );
-        // With guided filter: halo = r + 2*gr = r + 2*r = 3*r
+        // With guided filter: halo = r + 2*gr(r).
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: 0.5,
                 radius: 10
             })),
-            30
+            10 + 2 * guided_radius(10)
         );
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: -0.5,
                 radius: 6
             })),
-            18
+            6 + 2 * guided_radius(6)
         );
         // Clamped to MAX_DEHAZE_RADIUS (no u32→i32 wrap).
         assert_eq!(
@@ -406,7 +410,7 @@ mod tests {
                 amount: 0.5,
                 radius: u32::MAX
             })),
-            3 * MAX_DEHAZE_RADIUS
+            MAX_DEHAZE_RADIUS + 2 * guided_radius(MAX_DEHAZE_RADIUS)
         );
     }
 
@@ -482,11 +486,12 @@ mod tests {
     }
 
     #[test]
-    fn guided_transmission_follows_the_luma_edge_not_a_dilated_block() {
-        // Left half dark, right half bright (a vertical edge at x=w/2). The refined
-        // transmission must transition SHARPLY at the edge (guided by luma), NOT be
-        // dilated by the patch radius the way an un-refined block-min transmission is.
-        let (w, h) = (32usize, 8usize);
+    fn guided_refinement_removes_most_of_the_block_min_halo() {
+        // Vertical luma edge (left dark 0.05, right bright 0.9). The raw block-min
+        // transmission dilates the dark region `radius` px into the bright side (a
+        // bright halo). The guided-filter refinement, keyed on the luma guide, must
+        // pull that halo band back toward the clean bright-field transmission.
+        let (w, h) = (64usize, 8usize);
         let mut img = vec![[0.0f32; 3]; w * h];
         for y in 0..h {
             for x in 0..w {
@@ -495,19 +500,36 @@ mod tests {
             }
         }
         let a = [0.9, 0.9, 0.9];
-        let radius = 6;
+        let radius = 6u32;
+        let edge = w / 2;
+        // Raw (unrefined) block-min transmission, for comparison.
+        let n = w * h;
+        let mut dc0 = vec![0.0f32; n];
+        for i in 0..n {
+            let c = img[i];
+            dc0[i] = (c[0] / a[0]).min(c[1] / a[1]).min(c[2] / a[2]);
+        }
+        let dc = min_filter_separable(&dc0, w, h, radius as i32);
+        let praw: Vec<f32> = dc
+            .iter()
+            .map(|&d| (1.0 - DEHAZE_OMEGA * d).clamp(0.0, 1.0))
+            .collect();
         let q = transmission_map(&img, w, h, a, radius);
-        // Sample a row: the transmission on the bright side, just past the edge +
-        // (radius) px, must be close to the deep-bright transmission (i.e. the dark
-        // side did NOT bleed `radius` px into the bright side). Compare the value at
-        // x = w/2 + radius + 1 to the far-bright value at x = w-1.
         let row = (h / 2) * w;
-        let near = q[row + w / 2 + radius as usize + 1];
-        let far = q[row + w - 1];
+        let clean = q[row + w - 1]; // far bright-field refined transmission
+        let halo_x = row + edge + radius as usize / 2; // squarely in the dilated band
+        let raw_halo = praw[halo_x];
+        let refined_halo = q[halo_x];
         assert!(
-            (near - far).abs() < 0.15,
-            "guided transmission must not dilate the dark region across the edge \
-             (near={near}, far={far}) — this is the halo the refinement removes"
+            raw_halo - clean > 0.3,
+            "raw block-min must have a real halo to remove (raw={raw_halo}, clean={clean})"
+        );
+        let removed = (raw_halo - refined_halo) / (raw_halo - clean);
+        assert!(
+            removed >= 0.6,
+            "guided filter must remove >=60% of the halo at its location \
+             (removed {:.0}%, raw={raw_halo}, refined={refined_halo}, clean={clean})",
+            removed * 100.0
         );
     }
 
@@ -519,7 +541,7 @@ mod tests {
                 amount: 0.5,
                 radius: 8
             })),
-            8 + 2 * 8
+            8 + 2 * guided_radius(8)
         );
         assert_eq!(
             dehaze_halo(Some(Dehaze {

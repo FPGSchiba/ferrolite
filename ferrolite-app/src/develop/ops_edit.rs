@@ -2,8 +2,8 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    sharpen_halo, ColorGrade, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
-    WhiteBalance,
+    dehaze_halo, sharpen_halo, ColorGrade, Contrast, Dehaze, Exposure, LensCorrection, Op, OpStack,
+    Sharpen, ToneCurve, WhiteBalance,
 };
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
@@ -35,6 +35,15 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
         s.reset(ferrolite_pipeline::OpKind::Sharpen)
     } else {
         s.set_op(Op::Sharpen(Sharpen { amount, radius }))
+    }
+}
+
+#[allow(dead_code)]
+pub fn set_dehaze(s: &OpStack, amount: f32, radius: u32) -> OpStack {
+    if amount == 0.0 {
+        s.reset(ferrolite_pipeline::OpKind::Dehaze)
+    } else {
+        s.set_op(Op::Dehaze(Dehaze { amount, radius }))
     }
 }
 
@@ -126,6 +135,7 @@ pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32
 pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
     old.geometry() != new.geometry()
         || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
+        || dehaze_halo(old.dehaze()) != dehaze_halo(new.dehaze())
         || lens_rebuild_key(old) != lens_rebuild_key(new)
 }
 
@@ -440,5 +450,46 @@ mod tests {
             s.color_grade().is_some(),
             "a lum-only grade is not identity"
         );
+    }
+
+    #[test]
+    fn set_dehaze_identity_when_amount_zero() {
+        // Radius alone (amount 0) creates no op.
+        let s = set_dehaze(&OpStack::default(), 0.0, 8);
+        assert!(s.dehaze().is_none(), "zero amount = no dehaze op");
+        let s = set_dehaze(&OpStack::default(), 0.5, 8);
+        assert_eq!(
+            s.dehaze(),
+            Some(ferrolite_pipeline::Dehaze {
+                amount: 0.5,
+                radius: 8
+            })
+        );
+        // Negative (add-haze) is a real edit too.
+        let s = set_dehaze(&OpStack::default(), -0.3, 12);
+        assert_eq!(
+            s.dehaze(),
+            Some(ferrolite_pipeline::Dehaze {
+                amount: -0.3,
+                radius: 12
+            })
+        );
+    }
+
+    #[test]
+    fn needs_full_rebuild_on_dehaze_halo_change() {
+        let base = OpStack::default();
+        // Enabling dehaze introduces a halo → must rebuild the tiled producer.
+        let on = set_dehaze(&base, 0.5, 8);
+        assert!(needs_full_rebuild(&base, &on), "dehaze on = halo change");
+        // Amount-only change (radius unchanged): halo is unchanged → NO rebuild
+        // (uniform-only, like a color op).
+        let on2 = set_dehaze(&base, 0.9, 8);
+        assert!(!needs_full_rebuild(&on, &on2), "amount-only: no rebuild");
+        // Radius change alters the halo → rebuild (same as Sharpen's radius).
+        let on3 = set_dehaze(&base, 0.9, 16);
+        assert!(needs_full_rebuild(&on2, &on3), "radius change: rebuild");
+        // Turning dehaze off removes the halo → rebuild.
+        assert!(needs_full_rebuild(&on, &base), "dehaze off = halo change");
     }
 }

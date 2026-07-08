@@ -1178,9 +1178,9 @@ mod tests {
     fn parametric_identity_is_a_linear_ramp() {
         use crate::op::ParametricCurve;
         let lut = parametric_curve_lut(&ParametricCurve::default());
-        for i in 0..256 {
+        for (i, &v) in lut.iter().enumerate() {
             assert!(
-                (lut[i] - i as f32 / 255.0).abs() < 1e-4,
+                (v - i as f32 / 255.0).abs() < 1e-4,
                 "identity parametric must be the identity ramp at {i}"
             );
         }
@@ -1306,10 +1306,10 @@ mod tests {
     #[test]
     fn tone_curve_luts_none_is_three_identity_ramps() {
         let luts = tone_curve_luts(None);
-        for ch in 0..3 {
-            for i in 0..256 {
+        for (ch, row) in luts.iter().enumerate() {
+            for (i, &v) in row.iter().enumerate() {
                 assert!(
-                    (luts[ch][i] - i as f32 / 255.0).abs() < 1e-4,
+                    (v - i as f32 / 255.0).abs() < 1e-4,
                     "channel {ch} entry {i} must be identity"
                 );
             }
@@ -1329,13 +1329,11 @@ mod tests {
         };
         let master = curve_lut(&pts, CurveMode::Linear);
         let luts = tone_curve_luts(Some(&tc));
-        for ch in 0..3 {
-            for i in 0..256 {
+        for (ch, row) in luts.iter().enumerate() {
+            for (i, (&v, &m)) in row.iter().zip(master.iter()).enumerate() {
                 assert!(
-                    (luts[ch][i] - master[i]).abs() < 1e-4,
-                    "channel {ch} entry {i}: {} vs master {}",
-                    luts[ch][i],
-                    master[i]
+                    (v - m).abs() < 1e-4,
+                    "channel {ch} entry {i}: {v} vs master {m}"
                 );
             }
         }
@@ -1356,9 +1354,9 @@ mod tests {
         assert!(luts[0][128] < 128.0 / 255.0 - 0.02, "red midtones darkened");
         // Green and Blue remain the identity ramp.
         for ch in [1usize, 2usize] {
-            for i in 0..256 {
+            for (i, &v) in luts[ch].iter().enumerate() {
                 assert!(
-                    (luts[ch][i] - i as f32 / 255.0).abs() < 1e-4,
+                    (v - i as f32 / 255.0).abs() < 1e-4,
                     "channel {ch} entry {i} must stay identity"
                 );
             }

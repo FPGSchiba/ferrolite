@@ -599,7 +599,8 @@ impl Node<PipelineImage> for Rc<GeometryNode> {
 }
 
 /// Bind-group layout for the tone-curve pass: 0 = input texture,
-/// 1 = output storage texture, 2 = 256-entry LUT (read-only storage buffer).
+/// 1 = output storage texture, 2 = 768-entry packed R/G/B LUT (read-only
+/// storage buffer). Unchanged by the move from one shared LUT to three.
 fn curve_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("curve-bgl"),
@@ -638,19 +639,20 @@ fn curve_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-/// Tone-curve compute pass. Owns its (once-built) pipeline + a 256-entry LUT
-/// storage buffer; re-reads its LUT from a shared `Cell` each evaluate.
+/// Tone-curve compute pass. Owns its (once-built) pipeline + a 768-entry
+/// (3×256, R/G/B rows) LUT storage buffer; re-reads its LUT from a shared
+/// `Cell` each evaluate.
 pub(crate) struct CurveNode {
     ctx: Arc<GpuContext>,
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     lut_buf: wgpu::Buffer,
-    lut: Rc<Cell<[f32; 256]>>,
+    lut: Rc<Cell<[[f32; 256]; 3]>>,
     out: RefCell<Option<PipelineImage>>,
 }
 
 impl CurveNode {
-    pub(crate) fn new(ctx: Arc<GpuContext>, lut: Rc<Cell<[f32; 256]>>) -> Self {
+    pub(crate) fn new(ctx: Arc<GpuContext>, lut: Rc<Cell<[[f32; 256]; 3]>>) -> Self {
         let bgl = curve_bgl(&ctx.device);
         let module = ctx.shader_module("tone-curve", include_str!("shaders/tone_curve.wgsl"));
         let layout = ctx
@@ -672,7 +674,7 @@ impl CurveNode {
             });
         let lut_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tone-curve-lut"),
-            size: (std::mem::size_of::<f32>() * 256) as u64,
+            size: (std::mem::size_of::<f32>() * 768) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -721,7 +723,7 @@ impl Node<PipelineImage> for CurveNode {
         let dst = self.ensure_out(src.width, src.height);
 
         let lut = self.lut.get();
-        // `[f32; 256]: Pod` via bytemuck's const-generic array impl.
+        // `[[f32; 256]; 3]: Pod` → 768 contiguous f32 (R,G,B rows).
         self.ctx
             .queue
             .write_buffer(&self.lut_buf, 0, bytemuck::bytes_of(&lut));

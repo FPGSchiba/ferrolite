@@ -15,9 +15,10 @@ use crate::local_node::LocalAdjustmentsNode;
 use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode, VignetteNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, geometry_uniform,
-    hsl_uniform, sharpen_uniform, wb_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform,
-    GeometryUniform, HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
+    color_matrix_uniform, contrast_uniform, exposure_uniform, geometry_uniform, hsl_uniform,
+    sharpen_uniform, tone_curve_luts, wb_uniform, ColorMatrixUniform, ContrastUniform,
+    ExposureUniform, GeometryUniform, HslUniform, LensUniform, SharpenUniform, VignetteUniform,
+    WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -39,7 +40,7 @@ pub struct EditPipeline {
     contrast_id: NodeId,
     contrast: Rc<Cell<ContrastUniform>>,
     tone_curve_id: NodeId,
-    tone_curve: Rc<Cell<[f32; 256]>>,
+    tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl_id: NodeId,
     hsl: Rc<Cell<HslUniform>>,
     local_adjust_id: NodeId,
@@ -117,13 +118,7 @@ impl EditPipeline {
         );
         let contrast_id = graph.add_node(Box::new(contrast_node), vec![wb_id]);
 
-        let tone_curve = Rc::new(Cell::new(curve_lut(
-            &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
-            stack
-                .tone_curve()
-                .map(|t| t.mode)
-                .unwrap_or(crate::op::CurveMode::Linear),
-        )));
+        let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
         let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![contrast_id]);
 
@@ -264,15 +259,9 @@ impl EditPipeline {
             self.contrast.set(c);
             self.graph.mark_dirty(self.contrast_id);
         }
-        let lut = curve_lut(
-            &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
-            stack
-                .tone_curve()
-                .map(|t| t.mode)
-                .unwrap_or(crate::op::CurveMode::Linear),
-        );
-        if lut != self.tone_curve.get() {
-            self.tone_curve.set(lut);
+        let luts = tone_curve_luts(stack.tone_curve().as_ref());
+        if luts != self.tone_curve.get() {
+            self.tone_curve.set(luts);
             self.graph.mark_dirty(self.tone_curve_id);
         }
         let h = hsl_uniform(stack.hsl());

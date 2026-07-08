@@ -30,6 +30,27 @@ pub struct Contrast {
     pub amount: f32,
 }
 
+/// Dehaze via the Dark Channel Prior (He et al.). Bipolar: `amount > 0` removes
+/// haze; `amount < 0` re-adds haze (symmetric synthesis). 0 = identity. The
+/// atmospheric light `A` is a whole-image estimate supplied to the GPU pass as a
+/// uniform (never stored here — it is derived from the image, not a user param).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Dehaze {
+    /// Dehaze strength in [-1, 1]. 0 = identity; >0 removes haze, <0 adds haze.
+    pub amount: f32,
+    /// Dark-channel min-filter patch radius in pixels (drives the halo, plumbed
+    /// like `Sharpen::radius`). Larger = coarser/softer transmission estimate.
+    pub radius: u32,
+}
+
+impl Dehaze {
+    /// True when the op has no effect (can be dropped from the stack). Keyed on
+    /// `amount` only — a radius alone shapes nothing when `amount == 0`.
+    pub fn is_identity(&self) -> bool {
+        self.amount == 0.0
+    }
+}
+
 /// Interpolation between tone-curve control points.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub enum CurveMode {
@@ -296,6 +317,7 @@ pub enum Op {
     Exposure(Exposure),
     WhiteBalance(WhiteBalance),
     Contrast(Contrast),
+    Dehaze(Dehaze),
     ToneCurve(ToneCurve),
     Hsl(Hsl),
     ColorGrade(ColorGrade),
@@ -313,13 +335,14 @@ pub enum OpKind {
     Exposure = 0,
     WhiteBalance = 1,
     Contrast = 2,
-    ToneCurve = 3,
-    Hsl = 4,
-    ColorGrade = 5,
-    LocalAdjustments = 6,
-    Sharpen = 7,
-    LensCorrection = 8,
-    Geometry = 9,
+    Dehaze = 3,
+    ToneCurve = 4,
+    Hsl = 5,
+    ColorGrade = 6,
+    LocalAdjustments = 7,
+    Sharpen = 8,
+    LensCorrection = 9,
+    Geometry = 10,
 }
 
 impl Op {
@@ -328,6 +351,7 @@ impl Op {
             Op::Exposure(_) => OpKind::Exposure,
             Op::WhiteBalance(_) => OpKind::WhiteBalance,
             Op::Contrast(_) => OpKind::Contrast,
+            Op::Dehaze(_) => OpKind::Dehaze,
             Op::ToneCurve(_) => OpKind::ToneCurve,
             Op::Hsl(_) => OpKind::Hsl,
             Op::ColorGrade(_) => OpKind::ColorGrade,
@@ -404,6 +428,13 @@ impl OpStack {
     pub fn contrast(&self) -> Option<Contrast> {
         self.ops.iter().find_map(|o| match o {
             Op::Contrast(c) => Some(*c),
+            _ => None,
+        })
+    }
+
+    pub fn dehaze(&self) -> Option<Dehaze> {
+        self.ops.iter().find_map(|o| match o {
+            Op::Dehaze(d) => Some(*d),
             _ => None,
         })
     }
@@ -787,16 +818,6 @@ mod tests {
     }
 
     #[test]
-    fn opkind_discriminants_after_colorgrade_insert() {
-        assert_eq!(OpKind::Hsl as u8, 4);
-        assert_eq!(OpKind::ColorGrade as u8, 5);
-        assert_eq!(OpKind::LocalAdjustments as u8, 6);
-        assert_eq!(OpKind::Sharpen as u8, 7);
-        assert_eq!(OpKind::LensCorrection as u8, 8);
-        assert_eq!(OpKind::Geometry as u8, 9);
-    }
-
-    #[test]
     fn color_grade_roundtrips() {
         let cg = ColorGrade {
             shadows: GradeWheel {
@@ -935,6 +956,84 @@ mod tests {
         };
         let s = serde_json::to_string(&tc).unwrap();
         assert_eq!(serde_json::from_str::<ToneCurve>(&s).unwrap(), tc);
+    }
+
+    #[test]
+    fn dehaze_default_and_identity() {
+        // A radius alone (amount 0) has no render effect → identity.
+        assert!(Dehaze {
+            amount: 0.0,
+            radius: 8
+        }
+        .is_identity());
+        assert!(!Dehaze {
+            amount: 0.5,
+            radius: 8
+        }
+        .is_identity());
+        assert!(!Dehaze {
+            amount: -0.5,
+            radius: 8
+        }
+        .is_identity());
+    }
+
+    #[test]
+    fn dehaze_sorts_between_contrast_and_tone_curve() {
+        let s = OpStack::default()
+            .set_op(Op::ToneCurve(ToneCurve::default()))
+            .set_op(Op::Dehaze(Dehaze {
+                amount: 0.4,
+                radius: 8,
+            }))
+            .set_op(Op::Contrast(Contrast { amount: 0.1 }));
+        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
+        assert_eq!(
+            kinds,
+            vec![OpKind::Contrast, OpKind::Dehaze, OpKind::ToneCurve]
+        );
+        assert_eq!(
+            s.dehaze(),
+            Some(Dehaze {
+                amount: 0.4,
+                radius: 8
+            })
+        );
+    }
+
+    #[test]
+    fn opkind_discriminants_after_dehaze_insert() {
+        assert_eq!(OpKind::Contrast as u8, 2);
+        assert_eq!(OpKind::Dehaze as u8, 3);
+        assert_eq!(OpKind::ToneCurve as u8, 4);
+        assert_eq!(OpKind::Hsl as u8, 5);
+        assert_eq!(OpKind::ColorGrade as u8, 6);
+        assert_eq!(OpKind::LocalAdjustments as u8, 7);
+        assert_eq!(OpKind::Sharpen as u8, 8);
+        assert_eq!(OpKind::LensCorrection as u8, 9);
+        assert_eq!(OpKind::Geometry as u8, 10);
+    }
+
+    #[test]
+    fn dehaze_roundtrips_and_renumber_is_serde_stable() {
+        // OpKind is a sort key, never serialized; Op serializes by variant name,
+        // so inserting Dehaze must not perturb the JSON of other ops.
+        let s = OpStack::default()
+            .set_op(Op::Exposure(Exposure { ev: 0.5 }))
+            .set_op(Op::Dehaze(Dehaze {
+                amount: -0.25,
+                radius: 8,
+            }))
+            .set_op(Op::Sharpen(Sharpen {
+                amount: 0.6,
+                radius: 3,
+            }));
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(
+            json,
+            r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}},{"Dehaze":{"amount":-0.25,"radius":8}},{"Sharpen":{"amount":0.6,"radius":3}}]}"#
+        );
+        assert_eq!(serde_json::from_str::<OpStack>(&json).unwrap(), s);
     }
 
     #[test]

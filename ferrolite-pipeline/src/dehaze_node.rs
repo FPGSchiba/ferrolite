@@ -91,6 +91,24 @@ pub(crate) struct TransmissionParams {
     pub eps: f32,
 }
 
+/// Public params for `DehazeRecoveryNode` (QS-Task 3), read from a shared `Cell`
+/// each `evaluate`. `amount` drives the blend from I toward the recovered J
+/// (amount >= 0) or toward the hazed version (amount < 0). `t0` is the transmission
+/// floor (DEHAZE_T0), `atmos` is `[r,g,b,pad]`. Field order MIRRORS the WGSL
+/// `struct P` in `dehaze_recovery.wgsl` exactly (both must be 16-byte aligned).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct RecoveryParams {
+    pub amount: f32,
+    pub t0: f32,
+    pub pad0: f32,
+    pub pad1: f32,
+    pub atmos: [f32; 4],
+}
+
+const _: () = assert!(std::mem::size_of::<RecoveryParams>() == 32);
+const _: () = assert!(std::mem::size_of::<RecoveryParams>().is_multiple_of(16));
+
 /// All fifteen `R32Float` intermediate planes, keyed on `(w, h)` and
 /// reallocated together when the input dims change (mirrors
 /// `local_node.rs::CachedMasks`'s dims-keyed cache).
@@ -895,6 +913,211 @@ impl Node<PipelineImage> for Rc<DehazeTransmissionNode> {
     }
 }
 
+/// Two-input recovery + blend node (QS-Task 3): takes the original image `I`
+/// and the refined transmission `q`, and produces the recovered/haze-adjusted
+/// image by blending per-pixel via the `amount` parameter. Mirrors the pure
+/// `dehaze_recover` reference exactly, but takes `q` directly in the shader
+/// (while the CPU reference takes `dark` derived as `(1-q)/DEHAZE_OMEGA`).
+pub(crate) struct DehazeRecoveryNode {
+    ctx: Arc<GpuContext>,
+    params: Rc<Cell<RecoveryParams>>,
+    pipeline: wgpu::ComputePipeline,
+    bgl: wgpu::BindGroupLayout,
+    uniform_buf: wgpu::Buffer,
+    out: RefCell<Option<PipelineImage>>,
+}
+
+impl DehazeRecoveryNode {
+    pub(crate) fn new(ctx: Arc<GpuContext>, params: Rc<Cell<RecoveryParams>>) -> Self {
+        let device = &ctx.device;
+
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dehaze-recovery-uniform"),
+            size: std::mem::size_of::<RecoveryParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Two-input variant: 0 = img texture, 1 = trans texture, 2 = dst storage, 3 = uniform
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("dehaze-recovery-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: PIPELINE_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let module = ctx.shader_module(
+            "dehaze-recovery",
+            include_str!("shaders/dehaze_recovery.wgsl"),
+        );
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("dehaze-recovery"),
+            bind_group_layouts: &[&bgl],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("dehaze-recovery"),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: "main",
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        Self {
+            ctx,
+            params,
+            pipeline,
+            bgl,
+            uniform_buf,
+            out: RefCell::new(None),
+        }
+    }
+
+    fn ensure_out(&self, w: u32, h: u32) -> PipelineImage {
+        let mut out = self.out.borrow_mut();
+        if out.as_ref().map(|o| (o.width, o.height)) != Some((w, h)) {
+            let tex = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("dehaze-recovery-out"),
+                size: wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: PIPELINE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            *out = Some(PipelineImage {
+                texture: Arc::new(tex),
+                width: w,
+                height: h,
+            });
+        }
+        out.as_ref().unwrap().clone()
+    }
+}
+
+impl Node<PipelineImage> for DehazeRecoveryNode {
+    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
+        let img = inputs[0];
+        let trans = inputs[1];
+        let (w, h) = (img.width, img.height);
+        let out = self.ensure_out(w, h);
+
+        self.ctx
+            .queue
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&self.params.get()));
+
+        let img_view = img
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let trans_view = trans
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let out_view = out
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let bind = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-recovery-bind"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&img_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&trans_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&out_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                ],
+            });
+
+        let mut enc = self
+            .ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("dehaze-recovery"),
+            });
+
+        {
+            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("dehaze-recovery"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+        }
+
+        self.ctx.queue.submit([enc.finish()]);
+        out
+    }
+}
+
+/// Delegating `Node` impl so a `DehazeRecoveryNode` can be shared via `Rc`.
+impl Node<PipelineImage> for Rc<DehazeRecoveryNode> {
+    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
+        (**self).evaluate(inputs)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,5 +1244,152 @@ mod tests {
             max_d < 2e-2,
             "GPU transmission drifted from CPU reference: max abs diff {max_d}"
         );
+    }
+
+    /// Read all four RGBA channels as f32 (for recovery node test).
+    fn read_rgba_channels(ctx: &GpuContext, img: &PipelineImage) -> Vec<[f32; 4]> {
+        let (w, h) = (img.width, img.height);
+        let bpp = 8u32; // RGBA16F
+        let bpr_unpadded = w * bpp;
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let bpr_padded = bpr_unpadded.div_ceil(align) * align;
+        let buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("dehaze-recovery-test-readback"),
+            size: (bpr_padded * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = ctx
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &img.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &buf,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr_padded),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        ctx.queue.submit([enc.finish()]);
+        let slice = buf.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        ctx.device.poll(wgpu::Maintain::Wait);
+        let data = slice.get_mapped_range();
+        let mut out = vec![[0.0f32; 4]; (w * h) as usize];
+        for row in 0..h {
+            let start = (row * bpr_padded) as usize;
+            for x in 0..w {
+                // Each RGBA16F texel is 8 bytes (4 channels × 2 bytes).
+                let o = start + (x * 4) as usize * 2;
+                let r = half::f16::from_le_bytes([data[o], data[o + 1]]).to_f32();
+                let g = half::f16::from_le_bytes([data[o + 2], data[o + 3]]).to_f32();
+                let b = half::f16::from_le_bytes([data[o + 4], data[o + 5]]).to_f32();
+                let a = half::f16::from_le_bytes([data[o + 6], data[o + 7]]).to_f32();
+                out[(row * w + x) as usize] = [r, g, b, a];
+            }
+        }
+        drop(data);
+        buf.unmap();
+        out
+    }
+
+    #[test]
+    fn recovery_node_matches_dehaze_recover() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let (w, h) = (16u32, 16u32);
+
+        // Simple test image: grey, all pixels same.
+        let mut img_pixels = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            img_pixels.extend_from_slice(&[0.5f32, 0.5, 0.5, 1.0]);
+        }
+        let img = LinearRgbaF32::new(w, h, img_pixels).expect("test image");
+        let gpu_img = upload_source(&ctx, &img);
+
+        // Constant transmission texture: fill with a constant q value.
+        // We'll test with q=0.5 (bright), q=0.8 (foggy), and q=0.3 (dark).
+        let test_cases = vec![
+            (0.5f32, "mid-transmission"),
+            (0.8f32, "high-transmission"),
+            (0.3f32, "low-transmission"),
+        ];
+
+        let a = [0.9f32, 0.9, 0.9];
+        const DEHAZE_T0: f32 = 0.1;
+        use crate::dehaze::dehaze_recover;
+
+        for (q_val, case_name) in test_cases {
+            // Create constant transmission texture.
+            let mut trans_pixels = Vec::with_capacity((w * h * 4) as usize);
+            for _ in 0..(w * h) {
+                trans_pixels.extend_from_slice(&[q_val, q_val, q_val, 1.0]);
+            }
+            let trans_img = LinearRgbaF32::new(w, h, trans_pixels).expect("transmission image");
+            let gpu_trans = upload_source(&ctx, &trans_img);
+
+            // Test amount = 0 (identity), positive, and negative.
+            for amount in [0.0f32, 0.5, -0.5] {
+                let params = Rc::new(Cell::new(RecoveryParams {
+                    amount,
+                    t0: DEHAZE_T0,
+                    pad0: 0.0,
+                    pad1: 0.0,
+                    atmos: [a[0], a[1], a[2], 0.0],
+                }));
+
+                let node = DehazeRecoveryNode::new(ctx.clone(), params);
+                let gpu_out = node.evaluate(&[&gpu_img, &gpu_trans]);
+
+                let gpu_result = read_rgba_channels(&ctx, &gpu_out);
+
+                // Reference: for each pixel, compute the expected output.
+                // The CPU reference dehaze_recover takes dark = (1 - q) / DEHAZE_OMEGA,
+                // while the GPU shader takes q directly.
+                let orig_px = [0.5f32, 0.5, 0.5];
+                let dark = (1.0 - q_val) / DEHAZE_OMEGA;
+                let expected = dehaze_recover(orig_px, dark, a, amount);
+
+                // Compare all pixels (they should all be identical since input is constant).
+                for (i, &gpu_px) in gpu_result.iter().enumerate() {
+                    let gpu_rgb = [gpu_px[0], gpu_px[1], gpu_px[2]];
+                    for c in 0..3 {
+                        let diff = (gpu_rgb[c] - expected[c]).abs();
+                        assert!(
+                            diff < 2e-3,
+                            "recovery_node_matches_dehaze_recover ({}, amount={}, pixel {}, channel {}):\n\
+                             GPU={:.6}, CPU={:.6}, diff={:.6}",
+                            case_name, amount, i, c, gpu_rgb[c], expected[c], diff
+                        );
+                    }
+                    // Alpha should pass through unchanged.
+                    assert!(
+                        (gpu_px[3] - 1.0).abs() < 1e-6,
+                        "alpha mismatch at pixel {}",
+                        i
+                    );
+                }
+                eprintln!(
+                    "recovery_node_matches_dehaze_recover: {} amount={} PASS",
+                    case_name, amount
+                );
+            }
+        }
     }
 }

@@ -89,6 +89,10 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "dehaze-guided-q",
             include_str!("shaders/dehaze_guided_q.wgsl"),
         ),
+        (
+            "dehaze-recovery",
+            include_str!("shaders/dehaze_recovery.wgsl"),
+        ),
         ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
         ("hsl", include_str!("shaders/hsl.wgsl")),
         ("color-grade", include_str!("shaders/color_grade.wgsl")),

@@ -30,6 +30,18 @@ impl GpuPyramidSource {
             cpu.push(box_downsample(&cpu[(lod - 1) as usize], w, h));
         }
         let levels = cpu.iter().map(|l| upload_level(ctx, l)).collect();
+        // Flush the staged level uploads and wait for GPU completion so the
+        // textures are populated before ANY caller samples them. `create_texture_
+        // with_data` only STAGES the copy on the queue; it executes on the next
+        // submit. When this pyramid is built on a `ferrolite-jobs` WORKER thread
+        // (the interactive open path) and then sampled on the RENDER thread, the
+        // render thread could otherwise produce tiles before the staged uploads
+        // ran — reading black textures (black full-res tier, grey letterbox).
+        // A one-time submit+poll here makes the cross-thread handoff safe; it is
+        // negligible for same-thread callers (prewarm/export) and only runs once
+        // per pyramid at build (CLAUDE.md GPU rule 2).
+        ctx.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
+        ctx.device.poll(wgpu::Maintain::Wait);
         Self { levels }
     }
 

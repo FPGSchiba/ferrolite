@@ -2,8 +2,7 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    sharpen_halo, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
-    WhiteBalance,
+    sharpen_halo, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
 };
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
@@ -41,7 +40,6 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
 /// Set the tone curve, or REMOVE the op entirely when the whole curve (Master +
 /// R/G/B + parametric) is identity — so `is_identity()`/`has_edits` stay correct,
 /// mirroring every other `set_*` helper here.
-#[allow(dead_code)]
 pub fn set_tone_curve(s: &OpStack, tc: ToneCurve) -> OpStack {
     if tc.is_identity() {
         s.reset(ferrolite_pipeline::OpKind::ToneCurve)
@@ -323,7 +321,10 @@ mod tests {
             ..Default::default()
         };
         let s = set_tone_curve(&OpStack::default(), tc);
-        assert!(s.tone_curve().is_some(), "a blue-only curve is not identity");
+        assert!(
+            s.tone_curve().is_some(),
+            "a blue-only curve is not identity"
+        );
     }
 
     #[test]

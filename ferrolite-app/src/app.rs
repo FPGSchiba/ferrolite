@@ -877,7 +877,6 @@ impl FerroliteApp {
                     v.raw_preview_source = raw_preview_source.clone();
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let __prof_reveal = std::time::Instant::now();
                     let mut ep = ferrolite_pipeline::EditPipeline::new(
                         ctx_arc.clone(),
                         src,
@@ -909,10 +908,6 @@ impl FerroliteApp {
                     ep.set_vig_amount(vig_amount);
                     ep.set_vig_manual(vig_manual);
                     let out = ep.evaluate();
-                    eprintln!(
-                        "[open-profile] reveal EditPipeline::new + evaluate: {} ms",
-                        __prof_reveal.elapsed().as_millis()
-                    );
                     let tex = out.texture.clone();
                     let dims = (out.width, out.height);
                     v.preview_edit = Some(ep);
@@ -1035,43 +1030,34 @@ impl FerroliteApp {
             let gpu_job = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
             let tx = self.state.tx.clone();
             let repaint = ctx.clone();
-            let pyramid_handle = self
-                .state
-                .jobs
-                .submit(ferrolite_jobs::Priority::Background, move |cancel| {
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    let __prof_ptsrc = std::time::Instant::now();
-                    let tile_source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
-                        std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(
+            let pyramid_handle =
+                self.state
+                    .jobs
+                    .submit(ferrolite_jobs::Priority::Background, move |cancel| {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        let tile_source: std::sync::Arc<
+                            dyn ferrolite_vt::TileSource + Send + Sync,
+                        > = std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(
                             (*image_full).clone(),
                         ));
-                    eprintln!(
-                        "[open-profile] PyramidTileSource::new (off-thread CPU pyramid): {} ms",
-                        __prof_ptsrc.elapsed().as_millis()
-                    );
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    let __prof_gpupyr = std::time::Instant::now();
-                    let gpu_pyramid = std::sync::Arc::new(
-                        ferrolite_pipeline::GpuPyramidSource::new(&gpu_job, &image_full),
-                    );
-                    eprintln!(
-                        "[open-profile] GpuPyramidSource::new (off-thread CPU pyramid + GPU upload): {} ms",
-                        __prof_gpupyr.elapsed().as_millis()
-                    );
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    let _ = tx.send(crate::events::AppEvent::PyramidReady {
-                        image_id,
-                        tile_source,
-                        gpu_pyramid,
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        let gpu_pyramid = std::sync::Arc::new(
+                            ferrolite_pipeline::GpuPyramidSource::new(&gpu_job, &image_full),
+                        );
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        let _ = tx.send(crate::events::AppEvent::PyramidReady {
+                            image_id,
+                            tile_source,
+                            gpu_pyramid,
+                        });
+                        repaint.request_repaint();
                     });
-                    repaint.request_repaint();
-                });
             // Store the handle so a later navigation (`cancel_loads`) can cancel
             // this Background pyramid build. Guard on `image_id` matching in case
             // a newer image already superseded this one between submit and now.
@@ -1223,7 +1209,6 @@ impl FerroliteApp {
                 v.op_stack.lens_correction().as_ref(),
                 v.lens_vignette.is_some(),
             );
-            let __prof_tep = std::time::Instant::now();
             let tep = ferrolite_pipeline::TileEditPipeline::new(
                 ctx_arc,
                 std::sync::Arc::clone(gpu_pyramid),
@@ -1231,10 +1216,6 @@ impl FerroliteApp {
                 cam,
                 v.lens_warp.as_ref(),
                 v.lens_vignette.as_ref(),
-            );
-            eprintln!(
-                "[open-profile] TileEditPipeline::new (on PyramidReady): {} ms",
-                __prof_tep.elapsed().as_millis()
             );
             let mut producer = viewer::EditTileProducer::new(tep);
             producer.set_vig_amount(vig_amount);

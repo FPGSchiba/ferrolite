@@ -938,7 +938,12 @@ impl FerroliteApp {
                         __prof_reveal.elapsed().as_millis()
                     );
                     let tex = out.texture.clone();
-                    let dims = (out.width, out.height);
+                    // Report the FULL-res-equivalent extent, not the downsampled
+                    // reveal output: the present transform scales the quad by
+                    // image_dims × view.zoom, and view.zoom is fit to the full
+                    // image, so a downsampled dims here renders the reveal zoomed
+                    // out by `scale` (large-image regression; see fn docs).
+                    let dims = full_res_reveal_dims((out.width, out.height), scale);
                     v.preview_edit = Some(ep);
                     Some((tex, dims))
                 }
@@ -4453,5 +4458,51 @@ impl eframe::App for FerroliteApp {
                 before, joined, timeout_ms, on_exit_ms,
             ));
         }
+    }
+}
+
+/// The FULL-image extent that a downsampled rung-1 reveal texture represents.
+///
+/// The reveal is rendered from a source downsampled by `scale` (≤ 1.0) for speed
+/// (see `apply_full_decoded`), but the single-texture present transform sizes the
+/// on-screen quad as `image_dims × view.zoom`, and `view.zoom` is fit to the FULL
+/// image. So the reveal preview VT must report the full-res-equivalent extent
+/// (`out / scale`) — NOT the downsampled output dims — or the reveal renders
+/// zoomed out by exactly `scale` (only visible on large images, where `scale < 1`).
+/// `scale == 1.0` (small images, no downsample) is the identity case.
+fn full_res_reveal_dims(out: (u32, u32), scale: f32) -> (u32, u32) {
+    if scale >= 1.0 || scale <= 0.0 {
+        return out;
+    }
+    (
+        ((out.0 as f32 / scale).round() as u32).max(1),
+        ((out.1 as f32 / scale).round() as u32).max(1),
+    )
+}
+
+#[cfg(test)]
+mod reveal_dims_tests {
+    use super::full_res_reveal_dims;
+
+    #[test]
+    fn unit_scale_is_identity() {
+        assert_eq!(full_res_reveal_dims((6000, 4000), 1.0), (6000, 4000));
+    }
+
+    #[test]
+    fn downsampled_reports_full_extent() {
+        // 6000×4000 downsampled to fit a ~2048 long edge (scale ≈ 0.3413): the
+        // reveal output ≈ (2048, 1365), but the VT must report ≈ the full extent
+        // so the present quad (image_dims × full-fit zoom) fills the viewport.
+        let scale = 2048.0f32 / 6000.0;
+        let out = ((6000.0 * scale) as u32, (4000.0 * scale) as u32);
+        let (w, h) = full_res_reveal_dims(out, scale);
+        assert!((w as i32 - 6000).abs() <= 2, "w ≈ 6000, got {w}");
+        assert!((h as i32 - 4000).abs() <= 2, "h ≈ 4000, got {h}");
+    }
+
+    #[test]
+    fn degenerate_scale_returns_out() {
+        assert_eq!(full_res_reveal_dims((100, 50), 0.0), (100, 50));
     }
 }

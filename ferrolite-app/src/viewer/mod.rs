@@ -138,6 +138,12 @@ pub struct ViewerState {
     /// superseded image's decode does not race the newly-opened one.
     pub preview_handle: Option<JobHandle>,
     pub full_handle: Option<JobHandle>,
+    /// Handle for the off-thread full-res pyramid build (sparse-VT tile source
+    /// and GPU edit pyramid, submitted from `apply_full_decoded`). Cancelled on
+    /// navigation so a superseded image's ~1.2s CPU pyramid build and GPU
+    /// upload doesn't keep running after its result would be discarded anyway
+    /// by the `image_id` staleness guard in `apply_pyramid_ready`.
+    pub pyramid_handle: Option<JobHandle>,
 
     // ── Preview-cache read gating (Task 6) ─────────────────────────────────
     /// Handle for the in-flight preview-cache read job; cancelled on navigation
@@ -314,6 +320,7 @@ impl ViewerState {
             image_dims: None,
             preview_handle: None,
             full_handle: None,
+            pyramid_handle: None,
             cache_read_handle: None,
             cache_read_requested: false,
             cache_resolved: false,
@@ -412,6 +419,9 @@ impl ViewerState {
             h.cancel();
         }
         if let Some(h) = self.full_handle.as_ref() {
+            h.cancel();
+        }
+        if let Some(h) = self.pyramid_handle.as_ref() {
             h.cancel();
         }
         if let Some(h) = self.ops_read_handle.as_ref() {

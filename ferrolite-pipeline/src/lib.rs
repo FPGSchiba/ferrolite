@@ -73,6 +73,28 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     }
 }
 
+/// Force first-use driver compilation of every edit pipeline at startup by
+/// building + evaluating tiny dummy `EditPipeline`/`TileEditPipeline`s. Companion
+/// to `prewarm_shaders` (which only compiles shader MODULES): the driver compiles
+/// a pipeline on its first DISPATCH, so we must evaluate once here, not merely
+/// construct. Startup-only; the dummies are dropped, only the driver's cache
+/// persists. Call once, after `prewarm_shaders`, on the render thread.
+pub fn prewarm_pipelines(ctx: std::sync::Arc<ferrolite_gpu::GpuContext>) {
+    const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    // 64×64 opaque grey dummy — size-independent for compilation.
+    let px = vec![0.5f32; 64 * 64 * 4];
+    let img = ferrolite_image::LinearRgbaF32::new(64, 64, px).expect("dummy image");
+
+    // Whole-image edit chain (reveal + preview path).
+    let mut ep = EditPipeline::new(ctx.clone(), &img, OpStack::default(), IDENTITY);
+    let _ = ep.evaluate();
+
+    // Tiled edit chain (full-res producer path: geometry-head + tiled passes).
+    let pyramid = std::sync::Arc::new(GpuPyramidSource::new(&ctx, &img));
+    let mut tep = TileEditPipeline::new(ctx, pyramid, OpStack::default(), IDENTITY, None, None);
+    let _ = tep.produce_tile(ferrolite_image::TileCoord { lod: 0, x: 0, y: 0 });
+}
+
 /// Output image dimensions after the stack's geometry (crop/rotate) is applied to
 /// a `src_w × src_h` source. For an identity/absent geometry op this is the source
 /// size. The tiled full-res export renders `ceil(out_w/TILE_SIZE) × ceil(out_h/

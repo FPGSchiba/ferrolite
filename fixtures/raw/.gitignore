@@ -1,0 +1,7 @@
+# Large RAW test fixtures are not committed. `sample.rw2` is the one committed
+# fixture the decode tests depend on (see ferrolite-decode/tests/decode.rs and
+# the fixture-gated tests in src/raw.rs); it stays tracked. Any other RAW (or
+# sidecar / exported image) dropped here for local hands-on testing is ignored.
+*
+!.gitignore
+!sample.rw2

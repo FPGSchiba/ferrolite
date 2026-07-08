@@ -2,7 +2,8 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    sharpen_halo, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
+    sharpen_halo, ColorGrade, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
+    WhiteBalance,
 };
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
@@ -45,6 +46,18 @@ pub fn set_tone_curve(s: &OpStack, tc: ToneCurve) -> OpStack {
         s.reset(ferrolite_pipeline::OpKind::ToneCurve)
     } else {
         s.set_op(Op::ToneCurve(tc))
+    }
+}
+
+/// Set the color grade, or REMOVE the op entirely when every wheel is neutral
+/// (no tint, no lum) — so `is_identity()`/`has_edits` stay correct, mirroring
+/// every other `set_*` helper here.
+#[allow(dead_code)] // wired into the Grade tab in Task 7 — remove then
+pub fn set_color_grade(s: &OpStack, cg: ColorGrade) -> OpStack {
+    if cg.is_identity() {
+        s.reset(ferrolite_pipeline::OpKind::ColorGrade)
+    } else {
+        s.set_op(Op::ColorGrade(cg))
     }
 }
 
@@ -339,5 +352,35 @@ mod tests {
         };
         let s = set_tone_curve(&OpStack::default(), tc);
         assert!(s.tone_curve().is_some());
+    }
+
+    #[test]
+    fn set_color_grade_identity_removes_the_op() {
+        use ferrolite_pipeline::ColorGrade;
+        let s = set_color_grade(&OpStack::default(), ColorGrade::default());
+        assert!(s.color_grade().is_none(), "neutral grade = no op");
+        assert!(s.is_identity());
+    }
+
+    #[test]
+    fn set_color_grade_tinted_wheel_sets_the_op() {
+        use ferrolite_pipeline::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            highlights: GradeWheel { hue: 40.0, sat: 0.3, lum: 0.0 },
+            ..Default::default()
+        };
+        let s = set_color_grade(&OpStack::default(), cg);
+        assert_eq!(s.color_grade(), Some(cg));
+    }
+
+    #[test]
+    fn set_color_grade_lum_only_is_kept() {
+        use ferrolite_pipeline::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            global: GradeWheel { hue: 0.0, sat: 0.0, lum: 0.25 },
+            ..Default::default()
+        };
+        let s = set_color_grade(&OpStack::default(), cg);
+        assert!(s.color_grade().is_some(), "a lum-only grade is not identity");
     }
 }

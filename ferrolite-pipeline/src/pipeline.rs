@@ -8,6 +8,7 @@ use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::LinearRgbaF32;
 use wgpu::util::DeviceExt;
 
+use crate::dehaze::{dehaze_uniform, estimate_atmospheric_light, DehazeUniform};
 use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::LocalAdjustments;
@@ -39,6 +40,12 @@ pub struct EditPipeline {
     wb: Rc<Cell<WbUniform>>,
     contrast_id: NodeId,
     contrast: Rc<Cell<ContrastUniform>>,
+    dehaze_id: NodeId,
+    dehaze: Rc<Cell<DehazeUniform>>,
+    /// Whole-image atmospheric light, estimated once from the CPU source at
+    /// construction (design §5.3) and reused by every `set_stack` (it is an image
+    /// property, independent of the edit stack).
+    dehaze_atmos: [f32; 3],
     tone_curve_id: NodeId,
     tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl_id: NodeId,
@@ -120,9 +127,19 @@ impl EditPipeline {
         );
         let contrast_id = graph.add_node(Box::new(contrast_node), vec![wb_id]);
 
+        let dehaze_atmos = estimate_atmospheric_light(source);
+        let dehaze = Rc::new(Cell::new(dehaze_uniform(stack.dehaze(), dehaze_atmos)));
+        let dehaze_node = PointOpNode::new(
+            ctx.clone(),
+            include_str!("shaders/dehaze.wgsl"),
+            "dehaze",
+            dehaze.clone(),
+        );
+        let dehaze_id = graph.add_node(Box::new(dehaze_node), vec![contrast_id]);
+
         let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
-        let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![contrast_id]);
+        let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![dehaze_id]);
 
         let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
         let hsl_node = PointOpNode::new(
@@ -175,6 +192,9 @@ impl EditPipeline {
             wb,
             contrast_id,
             contrast,
+            dehaze_id,
+            dehaze,
+            dehaze_atmos,
             tone_curve_id,
             tone_curve,
             hsl_id,
@@ -191,7 +211,7 @@ impl EditPipeline {
             geometry_node,
             src_w,
             src_h,
-            node_count: 12,
+            node_count: 13,
             stack,
         }
     }
@@ -271,6 +291,11 @@ impl EditPipeline {
         if c != self.contrast.get() {
             self.contrast.set(c);
             self.graph.mark_dirty(self.contrast_id);
+        }
+        let d = dehaze_uniform(stack.dehaze(), self.dehaze_atmos);
+        if d != self.dehaze.get() {
+            self.dehaze.set(d);
+            self.graph.mark_dirty(self.dehaze_id);
         }
         let luts = tone_curve_luts(stack.tone_curve().as_ref());
         if luts != self.tone_curve.get() {

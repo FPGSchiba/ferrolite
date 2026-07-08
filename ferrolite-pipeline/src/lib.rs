@@ -55,17 +55,18 @@ pub use uniforms::{
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Eleven passes: the seven original
+/// alongside the display-pipeline pre-warm. Twelve passes: the seven original
 /// color/tone/geometry passes, the two lens passes (geometry now carries the
 /// warp; `vignette` is the radial-gain pass), `local-adjust` (the masked
-/// Light+Color point op), plus `color-grade` (the three-way + global grading
-/// wheels point op).
+/// Light+Color point op), `color-grade` (the three-way + global grading wheels
+/// point op), plus `dehaze` (the Dark Channel Prior neighbourhood pass).
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
         ("exposure", include_str!("shaders/exposure.wgsl")),
         ("white-balance", include_str!("shaders/white_balance.wgsl")),
         ("contrast", include_str!("shaders/contrast.wgsl")),
+        ("dehaze", include_str!("shaders/dehaze.wgsl")),
         ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
         ("hsl", include_str!("shaders/hsl.wgsl")),
         ("color-grade", include_str!("shaders/color_grade.wgsl")),

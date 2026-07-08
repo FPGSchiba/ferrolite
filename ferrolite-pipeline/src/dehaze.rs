@@ -123,7 +123,6 @@ pub struct DehazeUniform {
 /// Build the dehaze uniform from the op + the whole-image atmospheric light.
 /// Absent/identity op → `amount 0`, `radius 0` (the shader takes its passthrough
 /// branch). `atmos` is floored so the shader's `I/A` division is finite.
-#[allow(dead_code)]
 pub(crate) fn dehaze_uniform(op: Option<Dehaze>, atmos: [f32; 3]) -> DehazeUniform {
     let (amount, r) = op.map(|d| (d.amount, d.radius)).unwrap_or((0.0, 0));
     // A no-op amount contributes no radius (shader passthrough); otherwise clamp.

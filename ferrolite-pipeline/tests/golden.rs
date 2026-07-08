@@ -1,10 +1,12 @@
 mod common;
 
 use ferrolite_gpu::GpuContext;
+use ferrolite_image::LinearRgbaF32;
 use ferrolite_pipeline::{
-    blit_to_rgba8, upload_source, Aspect, ColorGrade, Contrast, CropRect, CurveMode, EditPipeline,
-    Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, Op, OpStack, ParametricCurve,
-    PointCurve, Sharpen, TileEditPipeline, ToneCurve, WhiteBalance,
+    blit_to_rgba8, upload_source, Aspect, ColorGrade, Contrast, CropRect, CurveMode, Dehaze,
+    EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, Op, OpStack,
+    ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve, WhiteBalance,
+    DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -85,6 +87,52 @@ fn contrast_boost_matches_golden() {
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "contrast_boost.png");
+}
+
+#[test]
+fn dehaze_positive_increases_contrast_on_hazy_image() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // A low-contrast "hazy" gradient: values compressed toward a bright floor.
+    let (w, h) = (64u32, 64u32);
+    let mut px = Vec::with_capacity((w * h) as usize * 4);
+    for y in 0..h {
+        for _x in 0..w {
+            let v = 0.6 + 0.25 * (y as f32 / h as f32); // 0.60..0.85, low spread
+            px.extend_from_slice(&[v, v, v, 1.0]);
+        }
+    }
+    let src = LinearRgbaF32::new(w, h, px).unwrap();
+
+    let base = OpStack::default();
+    let dehazed = base.set_op(Op::Dehaze(Dehaze {
+        amount: 1.0,
+        radius: DEHAZE_DEFAULT_RADIUS,
+    }));
+
+    let mut p0 = EditPipeline::new(ctx.clone(), &src, base, IDENTITY);
+    let mut p1 = EditPipeline::new(ctx.clone(), &src, dehazed, IDENTITY);
+    let a = p0.render_to_image();
+    let b = p1.render_to_image();
+
+    // Range (max - min) over the red channel: dehaze must widen it (more contrast).
+    let range = |buf: &[u8]| {
+        let (mut lo, mut hi) = (255u8, 0u8);
+        for px in buf.chunks_exact(4) {
+            lo = lo.min(px[0]);
+            hi = hi.max(px[0]);
+        }
+        hi as i32 - lo as i32
+    };
+    assert!(
+        range(&b) > range(&a),
+        "positive dehaze widens tonal range: before={} after={}",
+        range(&a),
+        range(&b)
+    );
 }
 
 #[test]

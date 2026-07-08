@@ -103,13 +103,141 @@ pub fn dehaze_recover(px: [f32; 3], dark: f32, a: [f32; 3], amount: f32) -> [f32
     out
 }
 
+/// Guided-filter regularization ε (design step 5): larger = smoother/less edge-aware.
+pub const DEHAZE_GUIDED_EPS: f32 = 1e-3;
+
+/// Guided-filter window radius as a function of the patch radius (one knob: gr = r).
+pub fn guided_radius(r: u32) -> u32 {
+    r
+}
+
+/// Separable clamp-to-edge min over a `(2r+1)²` window: horizontal min pass then
+/// vertical min pass. Equals the naïve patch min but O(2r) per pixel, not O(r²).
+pub(crate) fn min_filter_separable(plane: &[f32], w: usize, h: usize, r: i32) -> Vec<f32> {
+    let idx = |x: i32, y: i32| -> usize {
+        (y.clamp(0, h as i32 - 1) as usize) * w + x.clamp(0, w as i32 - 1) as usize
+    };
+    let mut horiz = vec![0.0f32; w * h];
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let mut m = f32::INFINITY;
+            for dx in -r..=r {
+                m = m.min(plane[idx(x + dx, y)]);
+            }
+            horiz[idx(x, y)] = m;
+        }
+    }
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let mut m = f32::INFINITY;
+            for dy in -r..=r {
+                m = m.min(horiz[idx(x, y + dy)]);
+            }
+            out[idx(x, y)] = m;
+        }
+    }
+    out
+}
+
+/// Separable clamp-to-edge normalized box average of radius `r` (H then V).
+pub(crate) fn box_blur_separable(plane: &[f32], w: usize, h: usize, r: i32) -> Vec<f32> {
+    let idx = |x: i32, y: i32| -> usize {
+        (y.clamp(0, h as i32 - 1) as usize) * w + x.clamp(0, w as i32 - 1) as usize
+    };
+    let n = (2 * r + 1) as f32;
+    let mut horiz = vec![0.0f32; w * h];
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let mut s = 0.0;
+            for dx in -r..=r {
+                s += plane[idx(x + dx, y)];
+            }
+            horiz[idx(x, y)] = s / n;
+        }
+    }
+    let mut out = vec![0.0f32; w * h];
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let mut s = 0.0;
+            for dy in -r..=r {
+                s += horiz[idx(x, y + dy)];
+            }
+            out[idx(x, y)] = s / n;
+        }
+    }
+    out
+}
+
+/// Rec.709 luma of a display-linear RGB triple.
+fn luma709_px(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+}
+
+/// Refined dehaze transmission map `q` (design steps 1–5): normalized dark channel
+/// → separable block-min over `radius` → guided-filter refinement (guide = luma).
+/// Pure CPU reference the WGSL passes are golden-tested against. Deterministic.
+pub fn transmission_map(
+    img: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    a: [f32; 3],
+    radius: u32,
+) -> Vec<f32> {
+    let n = w * h;
+    let af = [
+        a[0].max(DEHAZE_ATMOS_MIN),
+        a[1].max(DEHAZE_ATMOS_MIN),
+        a[2].max(DEHAZE_ATMOS_MIN),
+    ];
+    // 1. normalized dark channel; 4. guide (luma)
+    let mut dc0 = vec![0.0f32; n];
+    let mut guide = vec![0.0f32; n];
+    for i in 0..n {
+        let c = img[i];
+        dc0[i] = (c[0] / af[0]).min(c[1] / af[1]).min(c[2] / af[2]);
+        guide[i] = luma709_px(c);
+    }
+    // 2. block min (separable)
+    let dc = min_filter_separable(&dc0, w, h, radius as i32);
+    // 3. raw transmission
+    let praw: Vec<f32> = dc
+        .iter()
+        .map(|&d| (1.0 - DEHAZE_OMEGA * d).clamp(0.0, 1.0))
+        .collect();
+    // 5. guided filter (guide = luma), window gr, eps
+    let gr = guided_radius(radius) as i32;
+    let gg: Vec<f32> = guide.iter().map(|&g| g * g).collect();
+    let gp: Vec<f32> = guide.iter().zip(&praw).map(|(&g, &p)| g * p).collect();
+    let mean_g = box_blur_separable(&guide, w, h, gr);
+    let mean_p = box_blur_separable(&praw, w, h, gr);
+    let corr_g = box_blur_separable(&gg, w, h, gr);
+    let corr_gp = box_blur_separable(&gp, w, h, gr);
+    let mut av = vec![0.0f32; n];
+    let mut bv = vec![0.0f32; n];
+    for i in 0..n {
+        let var_g = corr_g[i] - mean_g[i] * mean_g[i];
+        let cov_gp = corr_gp[i] - mean_g[i] * mean_p[i];
+        av[i] = cov_gp / (var_g + DEHAZE_GUIDED_EPS);
+        bv[i] = mean_p[i] - av[i] * mean_g[i];
+    }
+    let mean_a = box_blur_separable(&av, w, h, gr);
+    let mean_b = box_blur_separable(&bv, w, h, gr);
+    (0..n)
+        .map(|i| (mean_a[i] * guide[i] + mean_b[i]).clamp(0.0, 1.0))
+        .collect()
+}
+
 /// Halo (px) a tiled full-res dehaze pass must over-fetch: the op's patch radius
-/// (clamped) when active, else 0 (mirrors `sharpen_halo`). Consumed by the tile
-/// producer; a radius change therefore triggers `needs_full_rebuild`, an
-/// amount-only change does not.
+/// plus the guided filter window (clamped) when active, else 0 (mirrors `sharpen_halo`).
+/// Consumed by the tile producer; a radius change therefore triggers `needs_full_rebuild`,
+/// an amount-only change does not.
 pub fn dehaze_halo(op: Option<Dehaze>) -> u32 {
     match op {
-        Some(d) if d.amount != 0.0 => d.radius.min(MAX_DEHAZE_RADIUS),
+        Some(d) if d.amount != 0.0 => {
+            let r = d.radius.min(MAX_DEHAZE_RADIUS);
+            r + 2 * guided_radius(r)
+        }
         _ => 0,
     }
 }
@@ -257,19 +385,20 @@ mod tests {
             })),
             0
         );
+        // With guided filter: halo = r + 2*gr = r + 2*r = 3*r
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: 0.5,
                 radius: 10
             })),
-            10
+            30
         );
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: -0.5,
                 radius: 6
             })),
-            6
+            18
         );
         // Clamped to MAX_DEHAZE_RADIUS (no u32→i32 wrap).
         assert_eq!(
@@ -277,7 +406,7 @@ mod tests {
                 amount: 0.5,
                 radius: u32::MAX
             })),
-            MAX_DEHAZE_RADIUS
+            3 * MAX_DEHAZE_RADIUS
         );
     }
 
@@ -308,5 +437,96 @@ mod tests {
             DEHAZE_ATMOS_NEUTRAL,
         );
         assert_eq!(u3.radius, MAX_DEHAZE_RADIUS as i32);
+    }
+
+    #[test]
+    fn min_filter_separable_matches_naive_patch_min() {
+        // 6x5 plane, radius 2: separable (H then V) min == naive (2r+1)^2 patch min.
+        let (w, h) = (6usize, 5usize);
+        let plane: Vec<f32> = (0..w * h).map(|i| ((i * 37) % 11) as f32 / 11.0).collect();
+        let sep = min_filter_separable(&plane, w, h, 2);
+        // naive reference
+        let mut naive = vec![0.0f32; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let mut m = f32::INFINITY;
+                for dy in -2i32..=2 {
+                    for dx in -2i32..=2 {
+                        let qx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                        let qy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                        m = m.min(plane[qy * w + qx]);
+                    }
+                }
+                naive[y * w + x] = m;
+            }
+        }
+        for (a, b) in sep.iter().zip(naive.iter()) {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "separable min must equal naive patch min"
+            );
+        }
+    }
+
+    #[test]
+    fn transmission_identity_on_flat_image_has_no_structure() {
+        // A flat grey image → transmission is spatially constant (no halos, no NaN).
+        let (w, h) = (16usize, 16usize);
+        let img = vec![[0.5f32, 0.5, 0.5]; w * h];
+        let q = transmission_map(&img, w, h, [0.9, 0.9, 0.9], 4);
+        let first = q[0];
+        for &v in &q {
+            assert!(v.is_finite());
+            assert!((v - first).abs() < 1e-4, "flat image → flat transmission");
+        }
+    }
+
+    #[test]
+    fn guided_transmission_follows_the_luma_edge_not_a_dilated_block() {
+        // Left half dark, right half bright (a vertical edge at x=w/2). The refined
+        // transmission must transition SHARPLY at the edge (guided by luma), NOT be
+        // dilated by the patch radius the way an un-refined block-min transmission is.
+        let (w, h) = (32usize, 8usize);
+        let mut img = vec![[0.0f32; 3]; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let v = if x < w / 2 { 0.05 } else { 0.9 };
+                img[y * w + x] = [v, v, v];
+            }
+        }
+        let a = [0.9, 0.9, 0.9];
+        let radius = 6;
+        let q = transmission_map(&img, w, h, a, radius);
+        // Sample a row: the transmission on the bright side, just past the edge +
+        // (radius) px, must be close to the deep-bright transmission (i.e. the dark
+        // side did NOT bleed `radius` px into the bright side). Compare the value at
+        // x = w/2 + radius + 1 to the far-bright value at x = w-1.
+        let row = (h / 2) * w;
+        let near = q[row + w / 2 + radius as usize + 1];
+        let far = q[row + w - 1];
+        assert!(
+            (near - far).abs() < 0.15,
+            "guided transmission must not dilate the dark region across the edge \
+             (near={near}, far={far}) — this is the halo the refinement removes"
+        );
+    }
+
+    #[test]
+    fn dehaze_halo_includes_guided_window() {
+        // Halo now covers the block-min radius PLUS the two guided-filter box windows.
+        assert_eq!(
+            dehaze_halo(Some(Dehaze {
+                amount: 0.5,
+                radius: 8
+            })),
+            8 + 2 * 8
+        );
+        assert_eq!(
+            dehaze_halo(Some(Dehaze {
+                amount: 0.0,
+                radius: 8
+            })),
+            0
+        );
     }
 }

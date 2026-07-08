@@ -2,7 +2,8 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    sharpen_halo, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, WhiteBalance,
+    sharpen_halo, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
+    WhiteBalance,
 };
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
@@ -34,6 +35,18 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
         s.reset(ferrolite_pipeline::OpKind::Sharpen)
     } else {
         s.set_op(Op::Sharpen(Sharpen { amount, radius }))
+    }
+}
+
+/// Set the tone curve, or REMOVE the op entirely when the whole curve (Master +
+/// R/G/B + parametric) is identity — so `is_identity()`/`has_edits` stay correct,
+/// mirroring every other `set_*` helper here.
+#[allow(dead_code)]
+pub fn set_tone_curve(s: &OpStack, tc: ToneCurve) -> OpStack {
+    if tc.is_identity() {
+        s.reset(ferrolite_pipeline::OpKind::ToneCurve)
+    } else {
+        s.set_op(Op::ToneCurve(tc))
     }
 }
 
@@ -277,5 +290,53 @@ mod tests {
         // Different lens id → rebuild (new grid + halo):
         let other = base.set_op(Op::LensCorrection(lc(true, "B")));
         assert!(needs_full_rebuild(&on, &other));
+    }
+
+    #[test]
+    fn set_tone_curve_identity_removes_the_op() {
+        use ferrolite_pipeline::ToneCurve;
+        let s = set_tone_curve(&OpStack::default(), ToneCurve::default());
+        assert!(s.tone_curve().is_none(), "fully-identity curve = no op");
+        assert!(s.is_identity());
+    }
+
+    #[test]
+    fn set_tone_curve_master_edit_sets_the_op() {
+        use ferrolite_pipeline::{CurveMode, ToneCurve};
+        let tc = ToneCurve {
+            points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
+            mode: CurveMode::Smooth,
+            ..Default::default()
+        };
+        let s = set_tone_curve(&OpStack::default(), tc.clone());
+        assert_eq!(s.tone_curve(), Some(tc));
+    }
+
+    #[test]
+    fn set_tone_curve_channel_only_edit_is_kept() {
+        use ferrolite_pipeline::{CurveMode, PointCurve, ToneCurve};
+        let tc = ToneCurve {
+            blue: PointCurve {
+                points: vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)],
+                mode: CurveMode::Linear,
+            },
+            ..Default::default()
+        };
+        let s = set_tone_curve(&OpStack::default(), tc);
+        assert!(s.tone_curve().is_some(), "a blue-only curve is not identity");
+    }
+
+    #[test]
+    fn set_tone_curve_parametric_only_edit_is_kept() {
+        use ferrolite_pipeline::{ParametricCurve, ToneCurve};
+        let tc = ToneCurve {
+            parametric: ParametricCurve {
+                highlights: -0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let s = set_tone_curve(&OpStack::default(), tc);
+        assert!(s.tone_curve().is_some());
     }
 }

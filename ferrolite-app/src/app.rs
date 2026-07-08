@@ -75,6 +75,13 @@ impl FerroliteApp {
             // first image open reuses cached modules instead of compiling
             // ~8 compute shaders synchronously on the UI thread.
             ferrolite_pipeline::prewarm_shaders(&gpu);
+            // `prewarm_shaders` only compiles shader MODULES; the driver compiles
+            // a pipeline on its first DISPATCH. Build + evaluate tiny dummy edit
+            // pipelines now so that first-use compile cost lands at startup, not
+            // on the first image open (~2.4s cold-open spike).
+            ferrolite_pipeline::prewarm_pipelines(std::sync::Arc::new(
+                ferrolite_gpu::GpuContext::from_render_state(rs),
+            ));
         }
         let state = crate::state::AppState::new().expect("open catalog");
         let thumb_size = state.settings.grid_size;

@@ -148,6 +148,50 @@ pub fn parametric_curve_lut(p: &crate::op::ParametricCurve) -> [f32; 256] {
     lut
 }
 
+/// Sample a 256-entry LUT at a continuous input `v`, mirroring
+/// `tone_curve.wgsl`'s `apply_lut`: linear interpolation inside `[0,1]`, and
+/// unit-slope extrapolation from the endpoints outside it (so an identity LUT is
+/// exact pass-through). Kept in lock-step with the shader.
+fn sample_lut(lut: &[f32; 256], v: f32) -> f32 {
+    if v < 0.0 {
+        return lut[0] + v;
+    }
+    if v > 1.0 {
+        return lut[255] + (v - 1.0);
+    }
+    let x = v * 255.0;
+    let i0 = x.floor() as usize;
+    let i1 = (i0 + 1).min(255);
+    let f = x - x.floor();
+    lut[i0] * (1.0 - f) + lut[i1] * f
+}
+
+/// Compose two LUTs: `result[i] = sample_lut(outer, inner[i])` — i.e. apply
+/// `inner` first, then `outer` (function composition `outer ∘ inner`).
+fn compose_lut(inner: &[f32; 256], outer: &[f32; 256]) -> [f32; 256] {
+    let mut out = [0.0f32; 256];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = sample_lut(outer, inner[i]);
+    }
+    out
+}
+
+/// Bake the three per-channel final tone-curve LUTs:
+/// `finalₖ(x) = channelₖ( master( parametric(x) ) )` for k ∈ {R,G,B}.
+/// Returns `[R, G, B]` rows. `None` (or a fully-identity curve) yields three
+/// identity ramps. Pure — no GPU; the reusable transform per design §2.5.
+pub fn tone_curve_luts(tc: Option<&crate::op::ToneCurve>) -> [[f32; 256]; 3] {
+    let default = crate::op::ToneCurve::default();
+    let tc = tc.unwrap_or(&default);
+    let param = parametric_curve_lut(&tc.parametric);
+    let master = curve_lut(&tc.points, tc.mode);
+    let base = compose_lut(&param, &master); // master ∘ parametric
+    let r = compose_lut(&base, &curve_lut(&tc.red.points, tc.red.mode));
+    let g = compose_lut(&base, &curve_lut(&tc.green.points, tc.green.mode));
+    let b = compose_lut(&base, &curve_lut(&tc.blue.points, tc.blue.mode));
+    [r, g, b]
+}
+
 /// Piecewise-linear sample of sorted control points; flat (clamped) outside.
 fn curve_interp_linear(pts: &[(f32, f32)], x: f32) -> f32 {
     if x <= pts[0].0 {
@@ -1256,6 +1300,101 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn tone_curve_luts_none_is_three_identity_ramps() {
+        let luts = tone_curve_luts(None);
+        for ch in 0..3 {
+            for i in 0..256 {
+                assert!(
+                    (luts[ch][i] - i as f32 / 255.0).abs() < 1e-4,
+                    "channel {ch} entry {i} must be identity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn master_only_curve_equals_legacy_lut_on_all_channels() {
+        use crate::op::{CurveMode, ToneCurve};
+        // A master-only edit must bake the SAME curve onto R, G and B (regression
+        // guard: existing single-LUT goldens must stay valid).
+        let pts = vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)];
+        let tc = ToneCurve {
+            points: pts.clone(),
+            mode: CurveMode::Linear,
+            ..Default::default()
+        };
+        let master = curve_lut(&pts, CurveMode::Linear);
+        let luts = tone_curve_luts(Some(&tc));
+        for ch in 0..3 {
+            for i in 0..256 {
+                assert!(
+                    (luts[ch][i] - master[i]).abs() < 1e-4,
+                    "channel {ch} entry {i}: {} vs master {}",
+                    luts[ch][i],
+                    master[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn red_only_curve_changes_red_row_leaves_green_blue_identity() {
+        use crate::op::{CurveMode, PointCurve, ToneCurve};
+        let tc = ToneCurve {
+            red: PointCurve {
+                points: vec![(0.0, 0.0), (0.5, 0.2), (1.0, 1.0)],
+                mode: CurveMode::Linear,
+            },
+            ..Default::default()
+        };
+        let luts = tone_curve_luts(Some(&tc));
+        // Red midtone pulled below the diagonal.
+        assert!(luts[0][128] < 128.0 / 255.0 - 0.02, "red midtones darkened");
+        // Green and Blue remain the identity ramp.
+        for ch in [1usize, 2usize] {
+            for i in 0..256 {
+                assert!(
+                    (luts[ch][i] - i as f32 / 255.0).abs() < 1e-4,
+                    "channel {ch} entry {i} must stay identity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compose_order_is_channel_of_master_of_parametric() {
+        use crate::op::{CurveMode, ParametricCurve, PointCurve, ToneCurve};
+        // Parametric lifts shadows; master is identity; red darkens midtones.
+        // The red row must equal red_curve( parametric(x) ) since master is identity.
+        let param = ParametricCurve {
+            shadows: 0.5,
+            ..Default::default()
+        };
+        let red = PointCurve {
+            points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
+            mode: CurveMode::Linear,
+        };
+        let tc = ToneCurve {
+            parametric: param,
+            red: red.clone(),
+            ..Default::default()
+        };
+        let luts = tone_curve_luts(Some(&tc));
+        // Hand-compose the expected red row.
+        let p_lut = parametric_curve_lut(&param);
+        let r_lut = curve_lut(&red.points, red.mode);
+        for i in 0..256 {
+            let expected = sample_lut(&r_lut, p_lut[i]); // master identity is a no-op
+            assert!(
+                (luts[0][i] - expected).abs() < 2e-3,
+                "red row entry {i}: {} vs expected {}",
+                luts[0][i],
+                expected
+            );
         }
     }
 }

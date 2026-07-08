@@ -80,9 +80,9 @@ const _: () = assert!(std::mem::size_of::<PassUniform>().is_multiple_of(16));
 /// block-min patch radius (`Dehaze::radius`, UNCLAMPED — the node defensively
 /// clamps to `MAX_DEHAZE_RADIUS` before use, since a prior review noted the
 /// pure `transmission_map`/its loops don't self-clamp). `atmos` is `[r,g,b,pad]`
-/// (floored to `DEHAZE_ATMOS_MIN` by `from_op`, mirroring `dehaze_uniform`).
-/// `omega`/`eps` mirror `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`. `active` is 1 when a
-/// `Dehaze` op with non-zero `amount` is present, else 0 — see `from_op` and
+/// (floored to `DEHAZE_ATMOS_MIN` by `from_op`). `omega`/`eps` mirror
+/// `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`. `active` is 1 when a `Dehaze` op with
+/// non-zero `amount` is present, else 0 — see `from_op` and
 /// `DehazeTransmissionNode::evaluate`'s early-return gate. CRITICAL: `active`
 /// deliberately does NOT carry the `amount` magnitude — it only flips on the
 /// zero<->nonzero transition, so an amount-only drag (0.5 -> 0.9) leaves this

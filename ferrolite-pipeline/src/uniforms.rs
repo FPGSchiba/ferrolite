@@ -797,7 +797,10 @@ pub fn color_grade_px(rgb: [f32; 3], cg: &crate::op::ColorGrade) -> [f32; 3] {
     let t_hi = grade_tint(cg.highlights.hue, cg.highlights.sat);
     let t_gl = grade_tint(cg.global.hue, cg.global.sat);
     let lum = GRADE_LUM_STRENGTH
-        * (w_sh * cg.shadows.lum + w_mid * cg.midtones.lum + w_hi * cg.highlights.lum + cg.global.lum);
+        * (w_sh * cg.shadows.lum
+            + w_mid * cg.midtones.lum
+            + w_hi * cg.highlights.lum
+            + cg.global.lum);
     let mut out = [0.0f32; 3];
     for (c, slot) in out.iter_mut().enumerate() {
         let tint = w_sh * t_sh[c] + w_mid * t_mid[c] + w_hi * t_hi[c] + t_gl[c];
@@ -821,7 +824,6 @@ pub struct ColorGradeUniform {
     pub params: [f32; 4],
 }
 
-#[allow(dead_code)]
 pub fn color_grade_uniform(op: Option<crate::op::ColorGrade>) -> ColorGradeUniform {
     let cg = op.unwrap_or_default();
     let pack = |w: &crate::op::GradeWheel| {
@@ -1508,7 +1510,9 @@ mod tests {
     fn color_grade_identity_when_neutral() {
         use crate::op::ColorGrade;
         let c = color_grade_px([0.3, 0.5, 0.7], &ColorGrade::default());
-        assert!((c[0] - 0.3).abs() < 1e-6 && (c[1] - 0.5).abs() < 1e-6 && (c[2] - 0.7).abs() < 1e-6);
+        assert!(
+            (c[0] - 0.3).abs() < 1e-6 && (c[1] - 0.5).abs() < 1e-6 && (c[2] - 0.7).abs() < 1e-6
+        );
     }
 
     #[test]
@@ -1516,13 +1520,20 @@ mod tests {
         use crate::op::{ColorGrade, GradeWheel};
         // A blue (hue 240) shadow tint.
         let cg = ColorGrade {
-            shadows: GradeWheel { hue: 240.0, sat: 1.0, lum: 0.0 },
+            shadows: GradeWheel {
+                hue: 240.0,
+                sat: 1.0,
+                lum: 0.0,
+            },
             ..Default::default()
         };
         let dark = color_grade_px([0.1, 0.1, 0.1], &cg);
         let light = color_grade_px([0.9, 0.9, 0.9], &cg);
         // Darks gain blue (B rises above R). Highlights are ~unchanged.
-        assert!(dark[2] > dark[0] + 0.02, "shadow tint bluened the darks: {dark:?}");
+        assert!(
+            dark[2] > dark[0] + 0.02,
+            "shadow tint bluened the darks: {dark:?}"
+        );
         assert!(
             (light[0] - 0.9).abs() < 0.03 && (light[2] - 0.9).abs() < 0.03,
             "highlights ~unchanged by a shadows-only tint: {light:?}"
@@ -1533,13 +1544,20 @@ mod tests {
     fn global_tint_affects_all_luminances() {
         use crate::op::{ColorGrade, GradeWheel};
         let cg = ColorGrade {
-            global: GradeWheel { hue: 120.0, sat: 1.0, lum: 0.0 }, // green
+            global: GradeWheel {
+                hue: 120.0,
+                sat: 1.0,
+                lum: 0.0,
+            }, // green
             ..Default::default()
         };
         let dark = color_grade_px([0.1, 0.1, 0.1], &cg);
         let light = color_grade_px([0.8, 0.8, 0.8], &cg);
         assert!(dark[1] > dark[0] + 0.02, "global greened the darks");
-        assert!(light[1] > light[0] + 0.02, "global greened the highlights too");
+        assert!(
+            light[1] > light[0] + 0.02,
+            "global greened the highlights too"
+        );
     }
 
     #[test]
@@ -1548,7 +1566,10 @@ mod tests {
         // mid-dark pixel leans more highlight; with balance positive it leans shadow.
         let (sh_lo, _, _) = grade_region_weights(0.4, 0.5, -0.6);
         let (sh_hi, _, _) = grade_region_weights(0.4, 0.5, 0.6);
-        assert!(sh_hi > sh_lo, "positive balance raises the shadow weight at a fixed Y");
+        assert!(
+            sh_hi > sh_lo,
+            "positive balance raises the shadow weight at a fixed Y"
+        );
     }
 
     #[test]
@@ -1557,7 +1578,10 @@ mod tests {
         // 0.5 (more overlap); narrow blending pushes them apart.
         let (sh_wide, _, _) = grade_region_weights(0.25, 1.0, 0.0);
         let (sh_narrow, _, _) = grade_region_weights(0.25, 0.0, 0.0);
-        assert!(sh_narrow > sh_wide, "narrow blending keeps low-Y firmly in shadows");
+        assert!(
+            sh_narrow > sh_wide,
+            "narrow blending keeps low-Y firmly in shadows"
+        );
     }
 
     #[test]
@@ -1569,12 +1593,18 @@ mod tests {
     fn lum_only_wheel_shifts_brightness_without_tint() {
         use crate::op::{ColorGrade, GradeWheel};
         let cg = ColorGrade {
-            global: GradeWheel { hue: 0.0, sat: 0.0, lum: 0.5 },
+            global: GradeWheel {
+                hue: 0.0,
+                sat: 0.0,
+                lum: 0.5,
+            },
             ..Default::default()
         };
         let c = color_grade_px([0.4, 0.4, 0.4], &cg);
-        assert!(c[0] > 0.4 && (c[0] - c[1]).abs() < 1e-6 && (c[1] - c[2]).abs() < 1e-6,
-            "uniform brighten, no tint: {c:?}");
+        assert!(
+            c[0] > 0.4 && (c[0] - c[1]).abs() < 1e-6 && (c[1] - c[2]).abs() < 1e-6,
+            "uniform brighten, no tint: {c:?}"
+        );
     }
 
     #[test]
@@ -1592,7 +1622,11 @@ mod tests {
     fn color_grade_uniform_prescales_tint_and_lum() {
         use crate::op::{ColorGrade, GradeWheel};
         let cg = ColorGrade {
-            shadows: GradeWheel { hue: 240.0, sat: 1.0, lum: 0.4 },
+            shadows: GradeWheel {
+                hue: 240.0,
+                sat: 1.0,
+                lum: 0.4,
+            },
             blending: 0.7,
             balance: -0.2,
             ..Default::default()

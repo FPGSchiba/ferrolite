@@ -15,10 +15,10 @@ use crate::local_node::LocalAdjustmentsNode;
 use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode, VignetteNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    color_matrix_uniform, contrast_uniform, exposure_uniform, geometry_uniform, hsl_uniform,
-    sharpen_uniform, tone_curve_luts, wb_uniform, ColorMatrixUniform, ContrastUniform,
-    ExposureUniform, GeometryUniform, HslUniform, LensUniform, SharpenUniform, VignetteUniform,
-    WbUniform,
+    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform,
+    geometry_uniform, hsl_uniform, sharpen_uniform, tone_curve_luts, wb_uniform, ColorGradeUniform,
+    ColorMatrixUniform, ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform,
+    SharpenUniform, VignetteUniform, WbUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -43,6 +43,8 @@ pub struct EditPipeline {
     tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl_id: NodeId,
     hsl: Rc<Cell<HslUniform>>,
+    color_grade_id: NodeId,
+    color_grade: Rc<Cell<ColorGradeUniform>>,
     local_adjust_id: NodeId,
     local_layers: Rc<RefCell<LocalAdjustments>>,
     // Handle to the local-adjustments node. The graph owns its own `Rc` clone for
@@ -131,9 +133,18 @@ impl EditPipeline {
         );
         let hsl_id = graph.add_node(Box::new(hsl_node), vec![tone_curve_id]);
 
+        let color_grade = Rc::new(Cell::new(color_grade_uniform(stack.color_grade())));
+        let color_grade_node = PointOpNode::new(
+            ctx.clone(),
+            include_str!("shaders/color_grade.wgsl"),
+            "color-grade",
+            color_grade.clone(),
+        );
+        let color_grade_id = graph.add_node(Box::new(color_grade_node), vec![hsl_id]);
+
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
         let local_node = Rc::new(LocalAdjustmentsNode::new(ctx.clone(), local_layers.clone()));
-        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![hsl_id]);
+        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![color_grade_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_node = PointOpNode::new(
@@ -168,6 +179,8 @@ impl EditPipeline {
             tone_curve,
             hsl_id,
             hsl,
+            color_grade_id,
+            color_grade,
             local_adjust_id,
             local_layers,
             local_node,
@@ -178,7 +191,7 @@ impl EditPipeline {
             geometry_node,
             src_w,
             src_h,
-            node_count: 11,
+            node_count: 12,
             stack,
         }
     }
@@ -268,6 +281,11 @@ impl EditPipeline {
         if h != self.hsl.get() {
             self.hsl.set(h);
             self.graph.mark_dirty(self.hsl_id);
+        }
+        let cg = color_grade_uniform(stack.color_grade());
+        if cg != self.color_grade.get() {
+            self.color_grade.set(cg);
+            self.graph.mark_dirty(self.color_grade_id);
         }
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {

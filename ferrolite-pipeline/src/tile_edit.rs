@@ -42,9 +42,10 @@ use crate::nodes::{
 };
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
-    color_matrix_uniform, contrast_uniform, exposure_uniform, hsl_uniform, lens_halo_px,
-    sharpen_halo, sharpen_uniform, tone_curve_luts, ColorMatrixUniform, ContrastUniform,
-    ExposureUniform, HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
+    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform, hsl_uniform,
+    lens_halo_px, sharpen_halo, sharpen_uniform, tone_curve_luts, ColorGradeUniform,
+    ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform, LensUniform, SharpenUniform,
+    VignetteUniform, WbUniform,
 };
 use ferrolite_lens::{VignetteMap, WarpGrid};
 
@@ -69,6 +70,7 @@ pub struct TileEditPipeline {
     contrast: Rc<Cell<ContrastUniform>>,
     tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl: Rc<Cell<HslUniform>>,
+    color_grade: Rc<Cell<ColorGradeUniform>>,
     local_adjust_id: NodeId,
     local_layers: Rc<RefCell<LocalAdjustments>>,
     local_node: Rc<LocalAdjustmentsNode>,
@@ -191,10 +193,20 @@ impl TileEditPipeline {
             )),
             vec![tone_curve_id],
         );
+        let color_grade = Rc::new(Cell::new(color_grade_uniform(stack.color_grade())));
+        let color_grade_id = graph.add_node(
+            Box::new(PointOpNode::new(
+                ctx.clone(),
+                include_str!("shaders/color_grade.wgsl"),
+                "color-grade",
+                color_grade.clone(),
+            )),
+            vec![hsl_id],
+        );
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
         let local_node = Rc::new(LocalAdjustmentsNode::new(ctx.clone(), local_layers.clone()));
         let (out_w, out_h) = crate::edited_output_dims(&stack, src_w, src_h);
-        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![hsl_id]);
+        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![color_grade_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_id = graph.add_node(
@@ -247,6 +259,7 @@ impl TileEditPipeline {
             contrast,
             tone_curve,
             hsl,
+            color_grade,
             local_adjust_id,
             local_layers,
             local_node,
@@ -284,6 +297,8 @@ impl TileEditPipeline {
         self.tone_curve
             .set(tone_curve_luts(stack.tone_curve().as_ref()));
         self.hsl.set(hsl_uniform(stack.hsl()));
+        self.color_grade
+            .set(color_grade_uniform(stack.color_grade()));
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {
             *self.local_layers.borrow_mut() = la;

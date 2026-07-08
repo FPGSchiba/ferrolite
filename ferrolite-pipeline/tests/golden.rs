@@ -2,9 +2,9 @@ mod common;
 
 use ferrolite_gpu::GpuContext;
 use ferrolite_pipeline::{
-    blit_to_rgba8, upload_source, Aspect, Contrast, CropRect, CurveMode, EditPipeline, Exposure,
-    Geometry, GpuPyramidSource, Hsl, HslBand, Op, OpStack, ParametricCurve, PointCurve, Sharpen,
-    TileEditPipeline, ToneCurve, WhiteBalance,
+    blit_to_rgba8, upload_source, Aspect, ColorGrade, Contrast, CropRect, CurveMode, EditPipeline,
+    Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, Op, OpStack, ParametricCurve,
+    PointCurve, Sharpen, TileEditPipeline, ToneCurve, WhiteBalance,
 };
 use std::sync::Arc;
 
@@ -241,6 +241,41 @@ fn hsl_shift_matches_golden() {
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "hsl.png");
+}
+
+#[test]
+fn color_grade_three_way_plus_global_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = OpStack::default().set_op(Op::ColorGrade(ColorGrade {
+        shadows: GradeWheel {
+            hue: 220.0,
+            sat: 0.6,
+            lum: -0.1,
+        }, // cool shadows
+        midtones: GradeWheel {
+            hue: 120.0,
+            sat: 0.2,
+            lum: 0.0,
+        }, // slight green mids
+        highlights: GradeWheel {
+            hue: 40.0,
+            sat: 0.5,
+            lum: 0.1,
+        }, // warm highlights
+        global: GradeWheel {
+            hue: 300.0,
+            sat: 0.15,
+            lum: 0.0,
+        }, // faint magenta cast
+        blending: 0.6,
+        balance: -0.1,
+    }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "color_grade.png");
 }
 
 #[test]

@@ -734,6 +734,116 @@ pub fn light_color_apply(rgb: [f32; 3], a: &crate::local::AdjustmentSet) -> [f32
     [c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]
 }
 
+/// Chroma strength added per unit (sat × weight). Pragmatic constant (image
+/// science secondary, like `wb_multipliers`); sat 1 in a region adds ~0.5 chroma.
+pub const GRADE_TINT_STRENGTH: f32 = 0.5;
+/// Luminance offset strength added per unit (lum × weight).
+pub const GRADE_LUM_STRENGTH: f32 = 0.5;
+
+/// HSV → linear RGB (h in degrees, s/v in [0,1]). Standard sextant conversion.
+fn hsv_to_rgb(h_deg: f32, s: f32, v: f32) -> [f32; 3] {
+    let h = h_deg.rem_euclid(360.0) / 60.0;
+    let c = v * s;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let m = v - c;
+    let (r, g, b) = match h.floor() as i32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [r + m, g + m, b + m]
+}
+
+/// The zero-luminance chroma vector for a wheel (hue, sat): the wheel color's
+/// hue-sat direction with its luminance removed, so adding it tints without a
+/// net brightness shift. Zero at `sat == 0` (identity).
+fn grade_tint(hue: f32, sat: f32) -> [f32; 3] {
+    let s = sat.clamp(0.0, 1.0);
+    if s <= 0.0 {
+        return [0.0, 0.0, 0.0];
+    }
+    let c = hsv_to_rgb(hue, s, 1.0);
+    let y = luma709(c);
+    [c[0] - y, c[1] - y, c[2] - y]
+}
+
+/// Region weights (shadow, midtone, highlight) for pixel luminance `y`, shaped by
+/// `blending` (overlap width, [0,1]) and `balance` (shifts the shadow↔highlight
+/// midpoint, [-1,1]). Highlight rises with `y`; shadow is its complement; midtone
+/// is a bump peaking at the pivot. Not a strict partition (regions overlap, as in
+/// LR grading); the WGSL kernel mirrors this exactly.
+fn grade_region_weights(y: f32, blending: f32, balance: f32) -> (f32, f32, f32) {
+    let pivot = 0.5 + 0.5 * balance.clamp(-1.0, 1.0);
+    let width = 0.15 + 0.35 * blending.clamp(0.0, 1.0);
+    let w_hi = smoothstep(pivot - width, pivot + width, y);
+    let w_sh = 1.0 - w_hi;
+    let w_mid = 4.0 * w_sh * w_hi;
+    (w_sh, w_mid, w_hi)
+}
+
+/// Pure per-pixel color grade — the reusable transform (design §2.5) and the
+/// `color_grade.wgsl` kernel's reference. Adds each region's tint (weighted by
+/// its luminance region) plus the region's luminance offset; the Global wheel
+/// applies uniformly. Identity when all wheels are neutral. Not clamped (out-of-
+/// range values pass through, honoring P2 §5.3; display clamps later).
+pub fn color_grade_px(rgb: [f32; 3], cg: &crate::op::ColorGrade) -> [f32; 3] {
+    let y = luma709(rgb);
+    let (w_sh, w_mid, w_hi) = grade_region_weights(y, cg.blending, cg.balance);
+    let t_sh = grade_tint(cg.shadows.hue, cg.shadows.sat);
+    let t_mid = grade_tint(cg.midtones.hue, cg.midtones.sat);
+    let t_hi = grade_tint(cg.highlights.hue, cg.highlights.sat);
+    let t_gl = grade_tint(cg.global.hue, cg.global.sat);
+    let lum = GRADE_LUM_STRENGTH
+        * (w_sh * cg.shadows.lum
+            + w_mid * cg.midtones.lum
+            + w_hi * cg.highlights.lum
+            + cg.global.lum);
+    let mut out = [0.0f32; 3];
+    for (c, slot) in out.iter_mut().enumerate() {
+        let tint = w_sh * t_sh[c] + w_mid * t_mid[c] + w_hi * t_hi[c] + t_gl[c];
+        *slot = rgb[c] + GRADE_TINT_STRENGTH * tint + lum;
+    }
+    out
+}
+
+/// GPU uniform for `color_grade.wgsl`. `#[repr(C)]`, 16-byte aligned; field order
+/// MIRRORS the WGSL `struct P`. Each wheel row is `[tint_r, tint_g, tint_b, lum]`
+/// with tint pre-scaled by `GRADE_TINT_STRENGTH` and lum by `GRADE_LUM_STRENGTH`,
+/// so the shader adds them directly (no magic constants in WGSL). `params` =
+/// `[blending, balance, 0, 0]`.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ColorGradeUniform {
+    pub shadows: [f32; 4],
+    pub midtones: [f32; 4],
+    pub highlights: [f32; 4],
+    pub global: [f32; 4],
+    pub params: [f32; 4],
+}
+
+pub fn color_grade_uniform(op: Option<crate::op::ColorGrade>) -> ColorGradeUniform {
+    let cg = op.unwrap_or_default();
+    let pack = |w: &crate::op::GradeWheel| {
+        let t = grade_tint(w.hue, w.sat);
+        [
+            t[0] * GRADE_TINT_STRENGTH,
+            t[1] * GRADE_TINT_STRENGTH,
+            t[2] * GRADE_TINT_STRENGTH,
+            w.lum * GRADE_LUM_STRENGTH,
+        ]
+    };
+    ColorGradeUniform {
+        shadows: pack(&cg.shadows),
+        midtones: pack(&cg.midtones),
+        highlights: pack(&cg.highlights),
+        global: pack(&cg.global),
+        params: [cg.blending, cg.balance, 0.0, 0.0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1394,5 +1504,140 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn color_grade_identity_when_neutral() {
+        use crate::op::ColorGrade;
+        let c = color_grade_px([0.3, 0.5, 0.7], &ColorGrade::default());
+        assert!(
+            (c[0] - 0.3).abs() < 1e-6 && (c[1] - 0.5).abs() < 1e-6 && (c[2] - 0.7).abs() < 1e-6
+        );
+    }
+
+    #[test]
+    fn shadows_tint_colors_darks_not_highlights() {
+        use crate::op::{ColorGrade, GradeWheel};
+        // A blue (hue 240) shadow tint.
+        let cg = ColorGrade {
+            shadows: GradeWheel {
+                hue: 240.0,
+                sat: 1.0,
+                lum: 0.0,
+            },
+            ..Default::default()
+        };
+        let dark = color_grade_px([0.1, 0.1, 0.1], &cg);
+        let light = color_grade_px([0.9, 0.9, 0.9], &cg);
+        // Darks gain blue (B rises above R). Highlights are ~unchanged.
+        assert!(
+            dark[2] > dark[0] + 0.02,
+            "shadow tint bluened the darks: {dark:?}"
+        );
+        assert!(
+            (light[0] - 0.9).abs() < 0.03 && (light[2] - 0.9).abs() < 0.03,
+            "highlights ~unchanged by a shadows-only tint: {light:?}"
+        );
+    }
+
+    #[test]
+    fn global_tint_affects_all_luminances() {
+        use crate::op::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            global: GradeWheel {
+                hue: 120.0,
+                sat: 1.0,
+                lum: 0.0,
+            }, // green
+            ..Default::default()
+        };
+        let dark = color_grade_px([0.1, 0.1, 0.1], &cg);
+        let light = color_grade_px([0.8, 0.8, 0.8], &cg);
+        assert!(dark[1] > dark[0] + 0.02, "global greened the darks");
+        assert!(
+            light[1] > light[0] + 0.02,
+            "global greened the highlights too"
+        );
+    }
+
+    #[test]
+    fn balance_shifts_the_region_split() {
+        // With balance negative, the shadow region shrinks (pivot moves down), so a
+        // mid-dark pixel leans more highlight; with balance positive it leans shadow.
+        let (sh_lo, _, _) = grade_region_weights(0.4, 0.5, -0.6);
+        let (sh_hi, _, _) = grade_region_weights(0.4, 0.5, 0.6);
+        assert!(
+            sh_hi > sh_lo,
+            "positive balance raises the shadow weight at a fixed Y"
+        );
+    }
+
+    #[test]
+    fn blending_widens_region_overlap() {
+        // At the extremes, wider blending pulls the shadow/highlight weights toward
+        // 0.5 (more overlap); narrow blending pushes them apart.
+        let (sh_wide, _, _) = grade_region_weights(0.25, 1.0, 0.0);
+        let (sh_narrow, _, _) = grade_region_weights(0.25, 0.0, 0.0);
+        assert!(
+            sh_narrow > sh_wide,
+            "narrow blending keeps low-Y firmly in shadows"
+        );
+    }
+
+    #[test]
+    fn grade_tint_is_zero_at_zero_sat() {
+        assert_eq!(grade_tint(123.0, 0.0), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn lum_only_wheel_shifts_brightness_without_tint() {
+        use crate::op::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            global: GradeWheel {
+                hue: 0.0,
+                sat: 0.0,
+                lum: 0.5,
+            },
+            ..Default::default()
+        };
+        let c = color_grade_px([0.4, 0.4, 0.4], &cg);
+        assert!(
+            c[0] > 0.4 && (c[0] - c[1]).abs() < 1e-6 && (c[1] - c[2]).abs() < 1e-6,
+            "uniform brighten, no tint: {c:?}"
+        );
+    }
+
+    #[test]
+    fn color_grade_uniform_identity_is_all_zero_tints() {
+        let u = color_grade_uniform(None);
+        assert_eq!(u.shadows, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.midtones, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.highlights, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.global, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.params, [0.5, 0.0, 0.0, 0.0]); // default blending/balance
+        assert_eq!(std::mem::size_of::<ColorGradeUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn color_grade_uniform_prescales_tint_and_lum() {
+        use crate::op::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            shadows: GradeWheel {
+                hue: 240.0,
+                sat: 1.0,
+                lum: 0.4,
+            },
+            blending: 0.7,
+            balance: -0.2,
+            ..Default::default()
+        };
+        let u = color_grade_uniform(Some(cg));
+        // Tint row = grade_tint(...) * GRADE_TINT_STRENGTH; lum = 0.4 * GRADE_LUM_STRENGTH.
+        let t = grade_tint(240.0, 1.0);
+        assert!((u.shadows[0] - t[0] * GRADE_TINT_STRENGTH).abs() < 1e-6);
+        assert!((u.shadows[1] - t[1] * GRADE_TINT_STRENGTH).abs() < 1e-6);
+        assert!((u.shadows[2] - t[2] * GRADE_TINT_STRENGTH).abs() < 1e-6);
+        assert!((u.shadows[3] - 0.4 * GRADE_LUM_STRENGTH).abs() < 1e-6);
+        assert_eq!(u.params, [0.7, -0.2, 0.0, 0.0]);
     }
 }

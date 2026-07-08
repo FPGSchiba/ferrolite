@@ -28,9 +28,9 @@ pub use local::{
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{
-    Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,
-    LensCorrection, Op, OpKind, OpStack, ParametricCurve, PointCurve, Sharpen, ToneCurve,
-    WhiteBalance, STACK_VERSION,
+    Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, GradeWheel,
+    Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve, PointCurve, Sharpen,
+    ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, blit_to_rgba8_with_matrix, EditPipeline};
 pub use rcd_gpu::{demosaic_rcd_gpu, CfaInput};
@@ -38,22 +38,23 @@ pub use serialize::{deserialize, serialize};
 pub use tile_edit::TileEditPipeline;
 // The uniform structs are exported as the documented GPU memory layout the
 // edit passes consume. Most param→uniform helpers are crate-internal; the pure
-// LUT-baking fns (`curve_lut`, `parametric_curve_lut`, `tone_curve_luts`) are
-// public per design §2.5 so the future per-mask path reuses them with no rework.
+// reusable transforms (`color_grade_px`, `curve_lut`, `parametric_curve_lut`, `tone_curve_luts`)
+// are public per design §2.5 so the future per-mask path reuses them with no rework.
 // `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
 pub use uniforms::{
-    curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform, parametric_curve_lut,
-    sharpen_halo, tone_curve_luts, vignette_amount, ContrastUniform, ExposureUniform,
-    GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
-    WbUniform, MAX_SHARPEN_RADIUS,
+    color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform,
+    parametric_curve_lut, sharpen_halo, tone_curve_luts, vignette_amount, ColorGradeUniform,
+    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
+    SharpenUniform, VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Ten passes: the seven original
+/// alongside the display-pipeline pre-warm. Eleven passes: the seven original
 /// color/tone/geometry passes, the two lens passes (geometry now carries the
-/// warp; `vignette` is the radial-gain pass), plus `local-adjust` (the masked
-/// Light+Color point op).
+/// warp; `vignette` is the radial-gain pass), `local-adjust` (the masked
+/// Light+Color point op), plus `color-grade` (the three-way + global grading
+/// wheels point op).
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
@@ -62,6 +63,7 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         ("contrast", include_str!("shaders/contrast.wgsl")),
         ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
         ("hsl", include_str!("shaders/hsl.wgsl")),
+        ("color-grade", include_str!("shaders/color_grade.wgsl")),
         ("sharpen", include_str!("shaders/sharpen.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),

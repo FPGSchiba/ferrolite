@@ -21,8 +21,8 @@ pub fn deserialize(s: &str) -> Option<OpStack> {
 mod tests {
     use super::*;
     use crate::op::{
-        Aspect, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, Hsl, HslBand,
-        LensCorrection, Op, Sharpen, ToneCurve, WhiteBalance,
+        Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry,
+        GradeWheel, Hsl, HslBand, LensCorrection, Op, Sharpen, ToneCurve, WhiteBalance,
     };
 
     #[test]
@@ -114,6 +114,19 @@ mod tests {
                 enabled: false,
                 amount: 1.0,
             },
+        }));
+        assert_eq!(deserialize(&serialize(&s)), Some(s));
+    }
+
+    #[test]
+    fn round_trips_color_grade() {
+        let s = OpStack::default().set_op(Op::ColorGrade(ColorGrade {
+            shadows: GradeWheel {
+                hue: 210.0,
+                sat: 0.4,
+                lum: -0.1,
+            },
+            ..Default::default()
         }));
         assert_eq!(deserialize(&serialize(&s)), Some(s));
     }

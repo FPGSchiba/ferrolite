@@ -2,7 +2,8 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    sharpen_halo, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
+    sharpen_halo, ColorGrade, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
+    WhiteBalance,
 };
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
@@ -45,6 +46,17 @@ pub fn set_tone_curve(s: &OpStack, tc: ToneCurve) -> OpStack {
         s.reset(ferrolite_pipeline::OpKind::ToneCurve)
     } else {
         s.set_op(Op::ToneCurve(tc))
+    }
+}
+
+/// Set the color grade, or REMOVE the op entirely when every wheel is neutral
+/// (no tint, no lum) — so `is_identity()`/`has_edits` stay correct, mirroring
+/// every other `set_*` helper here.
+pub fn set_color_grade(s: &OpStack, cg: ColorGrade) -> OpStack {
+    if cg.is_identity() {
+        s.reset(ferrolite_pipeline::OpKind::ColorGrade)
+    } else {
+        s.set_op(Op::ColorGrade(cg))
     }
 }
 
@@ -339,5 +351,94 @@ mod tests {
         };
         let s = set_tone_curve(&OpStack::default(), tc);
         assert!(s.tone_curve().is_some());
+    }
+
+    #[test]
+    fn set_tone_curve_split_only_edit_is_kept() {
+        // Regression: a parametric SPLIT moved off default (zero regions) must
+        // keep the op so the split slider persists instead of snapping back.
+        use ferrolite_pipeline::{ParametricCurve, ToneCurve};
+        let tc = ToneCurve {
+            parametric: ParametricCurve {
+                midtone_split: 0.65,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let s = set_tone_curve(&OpStack::default(), tc);
+        assert!(
+            s.tone_curve().is_some(),
+            "a split-only parametric edit must not be elided"
+        );
+    }
+
+    #[test]
+    fn set_color_grade_blending_or_balance_only_edit_is_kept() {
+        // Regression: Blending/Balance moved off default (neutral wheels) must
+        // keep the op so those sliders persist instead of snapping back.
+        use ferrolite_pipeline::ColorGrade;
+        let s = set_color_grade(
+            &OpStack::default(),
+            ColorGrade {
+                blending: 0.8,
+                ..Default::default()
+            },
+        );
+        assert!(
+            s.color_grade().is_some(),
+            "a blending-only grade edit must not be elided"
+        );
+        let s2 = set_color_grade(
+            &OpStack::default(),
+            ColorGrade {
+                balance: -0.4,
+                ..Default::default()
+            },
+        );
+        assert!(
+            s2.color_grade().is_some(),
+            "a balance-only grade edit must not be elided"
+        );
+    }
+
+    #[test]
+    fn set_color_grade_identity_removes_the_op() {
+        use ferrolite_pipeline::ColorGrade;
+        let s = set_color_grade(&OpStack::default(), ColorGrade::default());
+        assert!(s.color_grade().is_none(), "neutral grade = no op");
+        assert!(s.is_identity());
+    }
+
+    #[test]
+    fn set_color_grade_tinted_wheel_sets_the_op() {
+        use ferrolite_pipeline::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            highlights: GradeWheel {
+                hue: 40.0,
+                sat: 0.3,
+                lum: 0.0,
+            },
+            ..Default::default()
+        };
+        let s = set_color_grade(&OpStack::default(), cg);
+        assert_eq!(s.color_grade(), Some(cg));
+    }
+
+    #[test]
+    fn set_color_grade_lum_only_is_kept() {
+        use ferrolite_pipeline::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            global: GradeWheel {
+                hue: 0.0,
+                sat: 0.0,
+                lum: 0.25,
+            },
+            ..Default::default()
+        };
+        let s = set_color_grade(&OpStack::default(), cg);
+        assert!(
+            s.color_grade().is_some(),
+            "a lum-only grade is not identity"
+        );
     }
 }

@@ -58,7 +58,9 @@ Let `I` = the input RGB image (post-Contrast, display-linear), `A` = the whole-i
 
 **Halo:** a pixel's `q` depends on inputs within `r` (block min) + `gr` (var/cov box) + `gr` (mean_a/mean_b box) = **`r + 2·gr`**. `dehaze_halo` returns this.
 
-**Parameters (constants, Task 1):** `DEHAZE_GUIDED_RADIUS_FACTOR` → `gr = r` (guided radius equals patch radius; keeps one knob). `DEHAZE_GUIDED_EPS = 1e-3` (edge sensitivity; tuned in the visual test). `MAX_DEHAZE_RADIUS` stays 64, but the effective halo `r+2·gr = 3r` (cap 192) — verify the haloed tile extent stays within limits (Task 5); if not, clamp `gr` so `r+2gr` ≤ a documented max.
+**Parameters (constants, Task 1):** `guided_radius(r)` and `DEHAZE_GUIDED_EPS = 1e-3` (edge sensitivity; tuned in the visual test). `MAX_DEHAZE_RADIUS` stays 64.
+
+> **SHIPPED VALUE (reconciliation, commit b93f412):** the code blocks below show `gr = r` as the initial draft, but empirical tuning during Task 1 found `gr = r` too small to actually remove the block-min halo (it blurs rather than snaps to the luma edge). The **shipped** `guided_radius(r) = r.saturating_mul(3)` — i.e. **`gr = 3r`**, making the effective halo **`r + 2·gr = 7r`** (not `3r`). This met the ≥60%-halo-removed property test. The tiled haloed extent at the UI-max radius 24 is ~592² (halo 168) and at `MAX_DEHAZE_RADIUS`=64 is ~1152² (halo 448) — both well within `max_texture_dimension_2d` (≥8192), so no cap was needed (Task 5 verified). Read `gr`/halo below as `3r`/`7r`, not `r`/`3r`.
 
 ---
 

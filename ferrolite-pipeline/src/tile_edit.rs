@@ -10,9 +10,22 @@
 //! and to a whole-image render — this is what the tile-seam golden asserts. For
 //! non-identity geometry, Sharpen operates in output space rather than source
 //! space, an accepted pragmatic difference (architecture map §2). Dehaze is the
-//! same neighbourhood-op class (a patch-radius dark-channel min-filter, like
-//! Sharpen's convolution) and inherits this same accepted output-space
-//! difference under non-identity geometry.
+//! same neighbourhood-op class (a patch-radius dark-channel min-filter + a
+//! guided-filter transmission refinement, halo `r + 2·guided_radius = 7r`) and
+//! inherits this same accepted output-space difference under non-identity
+//! geometry.
+//!
+//! **Dehaze cost — no per-tile transmission cache (known limitation):** unlike
+//! the whole-image `EditPipeline` (where the retained `Graph` caches the
+//! transmission node so an amount-only drag re-runs only the cheap recovery
+//! pass), `produce_tile` marks the geometry head dirty every call, so the whole
+//! chain — including the multi-pass `DehazeTransmissionNode` — re-runs per tile
+//! per frame. An amount drag at 1:1 therefore recomputes the full (separable,
+//! but ~14-dispatch, `7r`-haloed) transmission for every visible tile; the
+//! amount-drag caching that keeps the fit/preview view responsive does NOT apply
+//! here. Acceptable for now (separable min keeps it O(r), tiles are bounded); if
+//! 1:1 amount-drag latency is a problem, a per-tile transmission cache keyed on
+//! `(coord, radius, atmos)` is the targeted follow-up.
 //!
 //! **LocalAdjustments — per-tile mask, output space:** because geometry runs at
 //! the head, the entire color chain (including `LocalAdjustments`) operates in

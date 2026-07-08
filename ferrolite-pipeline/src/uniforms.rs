@@ -71,6 +71,127 @@ pub fn curve_lut(points: &[(f32, f32)], mode: crate::op::CurveMode) -> [f32; 256
     lut
 }
 
+/// Maximum tonal shift (in display-linear `[0,1]`) applied by a single region at
+/// its extreme (region value ±1). Pragmatic constant (image science secondary,
+/// same spirit as `wb_multipliers`); a region of +1 lifts its band by ~0.25.
+pub const MAX_PARAMETRIC_SHIFT: f32 = 0.25;
+
+/// Partition-of-unity weights for the four parametric regions
+/// [shadows, darks, lights, highlights] at sample `x`, given the four region
+/// centers (ascending, but adjacent centers may be equal after sanitizing
+/// degenerate splits). Weights sum to 1 everywhere; adjacent centers with
+/// positive width transition smoothly (smoothstep), a zero-width (collapsed)
+/// pair transitions as a hard split instead, and it is flat past the end
+/// centers.
+fn region_weights(x: f32, centers: [f32; 4]) -> [f32; 4] {
+    let mut w = [0.0f32; 4];
+    if x <= centers[0] {
+        w[0] = 1.0;
+        return w;
+    }
+    if x >= centers[3] {
+        w[3] = 1.0;
+        return w;
+    }
+    for k in 0..3 {
+        if x >= centers[k] && x <= centers[k + 1] {
+            // A zero-width band (centers[k] == centers[k+1], e.g. from a
+            // sanitized/collapsed split) would make smoothstep divide by
+            // zero and produce NaN, which `clamp` does NOT turn into 0/1.
+            // Guard it explicitly as a hard split instead of relying on
+            // smoothstep: everything at or past a collapsed center belongs
+            // to the later region. Bands with positive width still get the
+            // smooth transition.
+            if (centers[k + 1] - centers[k]).abs() < f32::EPSILON {
+                w[k + 1] = 1.0;
+                return w;
+            }
+            let t = smoothstep(centers[k], centers[k + 1], x);
+            w[k] = 1.0 - t;
+            w[k + 1] = t;
+            return w;
+        }
+    }
+    // Unreachable given ascending centers and the two early returns above:
+    // every x either hits an early return or falls into exactly one [k,k+1]
+    // window in the loop. Kept as a defensive fallback, not a live path.
+    w[3] = 1.0;
+    w
+}
+
+/// Bake a parametric region curve into a 256-entry display-linear LUT. Each
+/// sample is offset by the weighted sum of the four region shifts, then the
+/// result is clamped to `[0,1]` and forced monotone non-decreasing (mirroring
+/// `curve_lut`). All-zero regions → the identity ramp. Pure — no GPU.
+pub fn parametric_curve_lut(p: &crate::op::ParametricCurve) -> [f32; 256] {
+    // Sanitize splits into ascending order in [0,1] so a user-dragged
+    // out-of-order set can't produce non-ascending centers.
+    let s1 = p.shadow_split.clamp(0.0, 1.0);
+    let s2 = p.midtone_split.clamp(0.0, 1.0).max(s1);
+    let s3 = p.highlight_split.clamp(0.0, 1.0).max(s2);
+    let centers = [s1 * 0.5, (s1 + s2) * 0.5, (s2 + s3) * 0.5, (s3 + 1.0) * 0.5];
+    let region = [p.shadows, p.darks, p.lights, p.highlights];
+
+    let mut lut = [0.0f32; 256];
+    for (i, slot) in lut.iter_mut().enumerate() {
+        let x = i as f32 / 255.0;
+        let w = region_weights(x, centers);
+        let shift = MAX_PARAMETRIC_SHIFT
+            * (region[0] * w[0] + region[1] * w[1] + region[2] * w[2] + region[3] * w[3]);
+        *slot = (x + shift).clamp(0.0, 1.0);
+    }
+    for i in 1..256 {
+        if lut[i] < lut[i - 1] {
+            lut[i] = lut[i - 1];
+        }
+    }
+    lut
+}
+
+/// Sample a 256-entry LUT at a continuous input `v`, mirroring
+/// `tone_curve.wgsl`'s `apply_lut`: linear interpolation inside `[0,1]`, and
+/// unit-slope extrapolation from the endpoints outside it (so an identity LUT is
+/// exact pass-through). Kept in lock-step with the shader.
+fn sample_lut(lut: &[f32; 256], v: f32) -> f32 {
+    if v < 0.0 {
+        return lut[0] + v;
+    }
+    if v > 1.0 {
+        return lut[255] + (v - 1.0);
+    }
+    let x = v * 255.0;
+    let i0 = x.floor() as usize;
+    let i1 = (i0 + 1).min(255);
+    let f = x - x.floor();
+    lut[i0] * (1.0 - f) + lut[i1] * f
+}
+
+/// Compose two LUTs: `result[i] = sample_lut(outer, inner[i])` — i.e. apply
+/// `inner` first, then `outer` (function composition `outer ∘ inner`).
+fn compose_lut(inner: &[f32; 256], outer: &[f32; 256]) -> [f32; 256] {
+    let mut out = [0.0f32; 256];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = sample_lut(outer, inner[i]);
+    }
+    out
+}
+
+/// Bake the three per-channel final tone-curve LUTs:
+/// `finalₖ(x) = channelₖ( master( parametric(x) ) )` for k ∈ {R,G,B}.
+/// Returns `[R, G, B]` rows. `None` (or a fully-identity curve) yields three
+/// identity ramps. Pure — no GPU; the reusable transform per design §2.5.
+pub fn tone_curve_luts(tc: Option<&crate::op::ToneCurve>) -> [[f32; 256]; 3] {
+    let default = crate::op::ToneCurve::default();
+    let tc = tc.unwrap_or(&default);
+    let param = parametric_curve_lut(&tc.parametric);
+    let master = curve_lut(&tc.points, tc.mode);
+    let base = compose_lut(&param, &master); // master ∘ parametric
+    let r = compose_lut(&base, &curve_lut(&tc.red.points, tc.red.mode));
+    let g = compose_lut(&base, &curve_lut(&tc.green.points, tc.green.mode));
+    let b = compose_lut(&base, &curve_lut(&tc.blue.points, tc.blue.mode));
+    [r, g, b]
+}
+
 /// Piecewise-linear sample of sorted control points; flat (clamped) outside.
 fn curve_interp_linear(pts: &[(f32, f32)], x: f32) -> f32 {
     if x <= pts[0].0 {
@@ -1051,5 +1172,227 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(light_color_apply([0.3, 0.4, 0.5], &a), [0.3, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn parametric_identity_is_a_linear_ramp() {
+        use crate::op::ParametricCurve;
+        let lut = parametric_curve_lut(&ParametricCurve::default());
+        for (i, &v) in lut.iter().enumerate() {
+            assert!(
+                (v - i as f32 / 255.0).abs() < 1e-4,
+                "identity parametric must be the identity ramp at {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn parametric_is_monotone_non_decreasing() {
+        use crate::op::ParametricCurve;
+        // Opposing extreme regions — still must not dip.
+        let p = ParametricCurve {
+            shadows: 1.0,
+            darks: -1.0,
+            lights: 1.0,
+            highlights: -1.0,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        for i in 1..256 {
+            assert!(lut[i] >= lut[i - 1] - 1e-6, "dipped at {i}");
+            assert!(
+                (0.0..=1.0).contains(&lut[i]),
+                "out of range at {i}: {}",
+                lut[i]
+            );
+        }
+    }
+
+    #[test]
+    fn raising_shadows_lifts_low_end_only() {
+        use crate::op::ParametricCurve;
+        let p = ParametricCurve {
+            shadows: 1.0,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        // Low quarter is lifted above the identity ramp.
+        let x_lo = 32usize;
+        assert!(
+            lut[x_lo] > x_lo as f32 / 255.0 + 0.01,
+            "shadows lifted low end"
+        );
+        // The far highlight end is essentially untouched.
+        let x_hi = 240usize;
+        assert!(
+            (lut[x_hi] - x_hi as f32 / 255.0).abs() < 0.02,
+            "highlights end unchanged by a shadows lift"
+        );
+    }
+
+    #[test]
+    fn raising_highlights_lifts_high_end_only() {
+        use crate::op::ParametricCurve;
+        let p = ParametricCurve {
+            highlights: 1.0,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        let x_hi = 224usize;
+        assert!(
+            lut[x_hi] > x_hi as f32 / 255.0 + 0.01,
+            "highlights lifted high end"
+        );
+        let x_lo = 16usize;
+        assert!(
+            (lut[x_lo] - x_lo as f32 / 255.0).abs() < 0.02,
+            "shadows end unchanged by a highlights lift"
+        );
+    }
+
+    #[test]
+    fn out_of_order_splits_do_not_panic_and_stay_monotone() {
+        use crate::op::ParametricCurve;
+        // User dragged splits into a degenerate/reversed order.
+        let p = ParametricCurve {
+            shadows: 0.5,
+            highlights: 0.5,
+            shadow_split: 0.9,
+            midtone_split: 0.1,
+            highlight_split: 0.5,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        for i in 1..256 {
+            assert!(lut[i] >= lut[i - 1] - 1e-6, "dipped at {i}");
+        }
+    }
+
+    #[test]
+    fn parametric_degenerate_splits_no_nan_and_stays_monotone() {
+        use crate::op::ParametricCurve;
+        // Collapsed split configs: (shadow_split, midtone_split, highlight_split).
+        let configs = [(0.0, 0.0, 0.5), (0.5, 1.0, 1.0), (0.5, 0.5, 0.5)];
+        for (shadow_split, midtone_split, highlight_split) in configs {
+            let p = ParametricCurve {
+                shadows: 0.5,
+                highlights: 0.5,
+                shadow_split,
+                midtone_split,
+                highlight_split,
+                ..Default::default()
+            };
+            let lut = parametric_curve_lut(&p);
+            for i in 0..256 {
+                assert!(
+                    lut[i].is_finite(),
+                    "NaN/inf at {i} for splits ({shadow_split}, {midtone_split}, {highlight_split})"
+                );
+                assert!(
+                    (0.0..=1.0).contains(&lut[i]),
+                    "out of range at {i}: {} for splits ({shadow_split}, {midtone_split}, {highlight_split})",
+                    lut[i]
+                );
+                if i > 0 {
+                    assert!(
+                        lut[i] >= lut[i - 1] - 1e-6,
+                        "dipped at {i} for splits ({shadow_split}, {midtone_split}, {highlight_split})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tone_curve_luts_none_is_three_identity_ramps() {
+        let luts = tone_curve_luts(None);
+        for (ch, row) in luts.iter().enumerate() {
+            for (i, &v) in row.iter().enumerate() {
+                assert!(
+                    (v - i as f32 / 255.0).abs() < 1e-4,
+                    "channel {ch} entry {i} must be identity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn master_only_curve_equals_legacy_lut_on_all_channels() {
+        use crate::op::{CurveMode, ToneCurve};
+        // A master-only edit must bake the SAME curve onto R, G and B (regression
+        // guard: existing single-LUT goldens must stay valid).
+        let pts = vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)];
+        let tc = ToneCurve {
+            points: pts.clone(),
+            mode: CurveMode::Linear,
+            ..Default::default()
+        };
+        let master = curve_lut(&pts, CurveMode::Linear);
+        let luts = tone_curve_luts(Some(&tc));
+        for (ch, row) in luts.iter().enumerate() {
+            for (i, (&v, &m)) in row.iter().zip(master.iter()).enumerate() {
+                assert!(
+                    (v - m).abs() < 1e-4,
+                    "channel {ch} entry {i}: {v} vs master {m}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn red_only_curve_changes_red_row_leaves_green_blue_identity() {
+        use crate::op::{CurveMode, PointCurve, ToneCurve};
+        let tc = ToneCurve {
+            red: PointCurve {
+                points: vec![(0.0, 0.0), (0.5, 0.2), (1.0, 1.0)],
+                mode: CurveMode::Linear,
+            },
+            ..Default::default()
+        };
+        let luts = tone_curve_luts(Some(&tc));
+        // Red midtone pulled below the diagonal.
+        assert!(luts[0][128] < 128.0 / 255.0 - 0.02, "red midtones darkened");
+        // Green and Blue remain the identity ramp.
+        for ch in [1usize, 2usize] {
+            for (i, &v) in luts[ch].iter().enumerate() {
+                assert!(
+                    (v - i as f32 / 255.0).abs() < 1e-4,
+                    "channel {ch} entry {i} must stay identity"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compose_order_is_channel_of_master_of_parametric() {
+        use crate::op::{CurveMode, ParametricCurve, PointCurve, ToneCurve};
+        // Parametric lifts shadows; master is identity; red darkens midtones.
+        // The red row must equal red_curve( parametric(x) ) since master is identity.
+        let param = ParametricCurve {
+            shadows: 0.5,
+            ..Default::default()
+        };
+        let red = PointCurve {
+            points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
+            mode: CurveMode::Linear,
+        };
+        let tc = ToneCurve {
+            parametric: param,
+            red: red.clone(),
+            ..Default::default()
+        };
+        let luts = tone_curve_luts(Some(&tc));
+        // Hand-compose the expected red row.
+        let p_lut = parametric_curve_lut(&param);
+        let r_lut = curve_lut(&red.points, red.mode);
+        for i in 0..256 {
+            let expected = sample_lut(&r_lut, p_lut[i]); // master identity is a no-op
+            assert!(
+                (luts[0][i] - expected).abs() < 2e-3,
+                "red row entry {i}: {} vs expected {}",
+                luts[0][i],
+                expected
+            );
+        }
     }
 }

@@ -3,8 +3,8 @@ mod common;
 use ferrolite_gpu::GpuContext;
 use ferrolite_pipeline::{
     blit_to_rgba8, upload_source, Aspect, Contrast, CropRect, CurveMode, EditPipeline, Exposure,
-    Geometry, GpuPyramidSource, Hsl, HslBand, Op, OpStack, Sharpen, TileEditPipeline, ToneCurve,
-    WhiteBalance,
+    Geometry, GpuPyramidSource, Hsl, HslBand, Op, OpStack, ParametricCurve, PointCurve, Sharpen,
+    TileEditPipeline, ToneCurve, WhiteBalance,
 };
 use std::sync::Arc;
 
@@ -156,6 +156,7 @@ fn tone_curve_darken_midtones_matches_golden() {
     let stack = OpStack::default().set_op(Op::ToneCurve(ToneCurve {
         points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
         mode: CurveMode::Linear,
+        ..Default::default()
     }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
@@ -171,10 +172,41 @@ fn tone_curve_smooth_matches_golden() {
     let stack = OpStack::default().set_op(Op::ToneCurve(ToneCurve {
         points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
         mode: CurveMode::Smooth,
+        ..Default::default()
     }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     common::assert_golden(&pixels, W, H, "tone_curve_smooth.png");
+}
+
+#[test]
+fn tone_curve_per_channel_and_parametric_matches_golden() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    // Master smooth + a red channel curve + a parametric shadows lift.
+    let stack = OpStack::default().set_op(Op::ToneCurve(ToneCurve {
+        points: vec![(0.0, 0.0), (0.5, 0.55), (1.0, 1.0)],
+        mode: CurveMode::Smooth,
+        red: PointCurve {
+            points: vec![(0.0, 0.0), (0.5, 0.35), (1.0, 1.0)],
+            mode: CurveMode::Linear,
+        },
+        green: PointCurve::default(),
+        blue: PointCurve {
+            points: vec![(0.0, 0.05), (1.0, 0.95)],
+            mode: CurveMode::Linear,
+        },
+        parametric: ParametricCurve {
+            shadows: 0.4,
+            highlights: -0.2,
+            ..Default::default()
+        },
+    }));
+    let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
+    let pixels = pipe.render_to_image();
+    common::assert_golden(&pixels, W, H, "tone_curve_p3.png");
 }
 
 #[test]
@@ -249,6 +281,7 @@ fn full_seven_op_stack_matches_golden() {
         .set_op(Op::ToneCurve(ToneCurve {
             points: vec![(0.0, 0.0), (0.5, 0.4), (1.0, 1.0)],
             mode: CurveMode::Linear,
+            ..Default::default()
         }))
         .set_op(Op::Hsl(Hsl {
             bands: [HslBand {

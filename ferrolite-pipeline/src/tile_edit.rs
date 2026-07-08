@@ -42,9 +42,9 @@ use crate::nodes::{
 };
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
-    color_matrix_uniform, contrast_uniform, curve_lut, exposure_uniform, hsl_uniform, lens_halo_px,
-    sharpen_halo, sharpen_uniform, ColorMatrixUniform, ContrastUniform, ExposureUniform,
-    HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
+    color_matrix_uniform, contrast_uniform, exposure_uniform, hsl_uniform, lens_halo_px,
+    sharpen_halo, sharpen_uniform, tone_curve_luts, ColorMatrixUniform, ContrastUniform,
+    ExposureUniform, HslUniform, LensUniform, SharpenUniform, VignetteUniform, WbUniform,
 };
 use ferrolite_lens::{VignetteMap, WarpGrid};
 
@@ -67,7 +67,7 @@ pub struct TileEditPipeline {
     exposure: Rc<Cell<ExposureUniform>>,
     wb: Rc<Cell<WbUniform>>,
     contrast: Rc<Cell<ContrastUniform>>,
-    tone_curve: Rc<Cell<[f32; 256]>>,
+    tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl: Rc<Cell<HslUniform>>,
     local_adjust_id: NodeId,
     local_layers: Rc<RefCell<LocalAdjustments>>,
@@ -176,13 +176,7 @@ impl TileEditPipeline {
             )),
             vec![wb_id],
         );
-        let tone_curve = Rc::new(Cell::new(curve_lut(
-            &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
-            stack
-                .tone_curve()
-                .map(|t| t.mode)
-                .unwrap_or(crate::op::CurveMode::Linear),
-        )));
+        let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_id = graph.add_node(
             Box::new(CurveNode::new(ctx.clone(), tone_curve.clone())),
             vec![contrast_id],
@@ -287,13 +281,8 @@ impl TileEditPipeline {
         self.wb
             .set(crate::uniforms::wb_uniform(stack.white_balance()));
         self.contrast.set(contrast_uniform(stack.contrast()));
-        self.tone_curve.set(curve_lut(
-            &stack.tone_curve().map(|t| t.points).unwrap_or_default(),
-            stack
-                .tone_curve()
-                .map(|t| t.mode)
-                .unwrap_or(crate::op::CurveMode::Linear),
-        ));
+        self.tone_curve
+            .set(tone_curve_luts(stack.tone_curve().as_ref()));
         self.hsl.set(hsl_uniform(stack.hsl()));
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {

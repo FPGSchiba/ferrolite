@@ -460,8 +460,30 @@ fn dehaze_tiled_matches_whole_image() {
     };
     let ctx = Arc::new(ctx);
     // A multi-tile image: 300x200 -> 2x1 tiles at LOD 0 (seam at x = 256).
+    //
+    // NOTE: this is a LOCAL fixture, not `common::gradient` — the shared gradient
+    // (R = x/w, G = y/h, B = 0.25) is insensitive to this test's purpose. The
+    // dehaze dark channel is `min(R,G,B)`; with the shared gradient, B (a flat
+    // 0.25) or G (which varies only with y) dominates that min near the x=256
+    // seam, so the dark channel — and therefore the halo min-filter's cross-tile
+    // fetch — never varies across x there. That let this test pass (max diff 0)
+    // whether or not the dehaze halo fold-in (`tile_edit.rs`'s
+    // `.max(dehaze_halo(...))`) was even present, i.e. it asserted nothing about
+    // the feature it's meant to guard. This fixture instead puts a high-frequency
+    // sawtooth ripple in R across x (period 16px) and pins G/B to a high constant
+    // so R stays the min everywhere — the dark channel then varies sharply right
+    // at the seam, so the patch min-filter genuinely needs cross-tile neighbours.
     let (iw, ih) = (300u32, 200u32);
-    let src = common::gradient(iw, ih);
+    let src = {
+        let mut px = Vec::with_capacity((iw * ih * 4) as usize);
+        for _y in 0..ih {
+            for x in 0..iw {
+                let r = (x % 16) as f32 / 16.0 * 0.8; // sawtooth ripple in [0, 0.8)
+                px.extend_from_slice(&[r, 0.9, 0.9, 1.0]);
+            }
+        }
+        LinearRgbaF32::new(iw, ih, px).expect("dehaze seam fixture length")
+    };
     let stack = OpStack::default().set_op(Op::Dehaze(Dehaze {
         amount: 0.8,
         radius: DEHAZE_DEFAULT_RADIUS,

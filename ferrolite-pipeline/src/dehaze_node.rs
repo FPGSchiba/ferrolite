@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
 
-use crate::dehaze::{guided_radius, DEHAZE_GUIDED_EPS, DEHAZE_OMEGA, DEHAZE_T0};
+use crate::dehaze::{guided_radius, DEHAZE_ATMOS_MIN, DEHAZE_GUIDED_EPS, DEHAZE_OMEGA, DEHAZE_T0};
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::op::Dehaze;
 use crate::MAX_DEHAZE_RADIUS;
@@ -80,8 +80,14 @@ const _: () = assert!(std::mem::size_of::<PassUniform>().is_multiple_of(16));
 /// block-min patch radius (`Dehaze::radius`, UNCLAMPED — the node defensively
 /// clamps to `MAX_DEHAZE_RADIUS` before use, since a prior review noted the
 /// pure `transmission_map`/its loops don't self-clamp). `atmos` is `[r,g,b,pad]`
-/// (already floored to `DEHAZE_ATMOS_MIN` by the caller, mirroring
-/// `dehaze_uniform`). `omega`/`eps` mirror `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`.
+/// (floored to `DEHAZE_ATMOS_MIN` by `from_op`, mirroring `dehaze_uniform`).
+/// `omega`/`eps` mirror `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`. `active` is 1 when a
+/// `Dehaze` op with non-zero `amount` is present, else 0 — see `from_op` and
+/// `DehazeTransmissionNode::evaluate`'s early-return gate. CRITICAL: `active`
+/// deliberately does NOT carry the `amount` magnitude — it only flips on the
+/// zero<->nonzero transition, so an amount-only drag (0.5 -> 0.9) leaves this
+/// whole struct unchanged and `EditPipeline::set_stack` does not dirty this
+/// node (see `amount_change_does_not_recompute_transmission`).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct TransmissionParams {
@@ -89,20 +95,37 @@ pub(crate) struct TransmissionParams {
     pub atmos: [f32; 4],
     pub omega: f32,
     pub eps: f32,
+    pub active: u32,
 }
 
+// `TransmissionParams` isn't itself uploaded as GPU bytes (its fields feed
+// `PassUniform`, built fresh per-pass in `evaluate`), but it derives Pod +
+// Zeroable like the GPU-facing structs in this file, so keep it 16-byte
+// aligned/sized for consistency and to catch accidental field-size drift.
+const _: () = assert!(std::mem::size_of::<TransmissionParams>() == 32);
+const _: () = assert!(std::mem::size_of::<TransmissionParams>().is_multiple_of(16));
+
 impl TransmissionParams {
-    /// Seed from the op's `radius` and the whole-image atmospheric light
-    /// (QS-Task 4). Independent of `amount` — `EditPipeline::set_stack` only
-    /// rebuilds these (and dirties `DehazeTransmissionNode`) when `radius` or
-    /// `atmos` actually changes, so an amount-only drag never re-seeds this.
+    /// Seed from the op's `radius`/`amount` and the whole-image atmospheric
+    /// light (QS-Task 4). `radius`/`atmos` are independent of `amount` —
+    /// `EditPipeline::set_stack` only rebuilds these (and dirties
+    /// `DehazeTransmissionNode`) when `radius`, `atmos`, or the active
+    /// zero<->nonzero transition actually changes, so an amount-magnitude-only
+    /// drag never re-seeds (and never dirties) this node.
     pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
         let radius = op.map(|d| d.radius).unwrap_or(0) as i32;
+        let active = u32::from(op.is_some_and(|d| d.amount != 0.0));
         Self {
             radius,
-            atmos: [atmos[0], atmos[1], atmos[2], 0.0],
+            atmos: [
+                atmos[0].max(DEHAZE_ATMOS_MIN),
+                atmos[1].max(DEHAZE_ATMOS_MIN),
+                atmos[2].max(DEHAZE_ATMOS_MIN),
+                0.0,
+            ],
             omega: DEHAZE_OMEGA,
             eps: DEHAZE_GUIDED_EPS,
+            active,
         }
     }
 }
@@ -137,7 +160,12 @@ impl RecoveryParams {
             t0: DEHAZE_T0,
             pad0: 0.0,
             pad1: 0.0,
-            atmos: [atmos[0], atmos[1], atmos[2], 0.0],
+            atmos: [
+                atmos[0].max(DEHAZE_ATMOS_MIN),
+                atmos[1].max(DEHAZE_ATMOS_MIN),
+                atmos[2].max(DEHAZE_ATMOS_MIN),
+                0.0,
+            ],
         }
     }
 }
@@ -629,12 +657,26 @@ impl DehazeTransmissionNode {
 impl Node<PipelineImage> for DehazeTransmissionNode {
     fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
         let src = inputs[0];
+        let raw = self.params.get();
+
+        // Dehaze is off (no `Dehaze` op, or `amount == 0`): `DehazeRecoveryNode`
+        // ignores this node's output entirely in that case (passthrough), so
+        // running the ~8-pass guided filter here would be pure waste. This is
+        // the QS-Task-4 regression fix — `amount`'s magnitude is deliberately
+        // NOT part of `TransmissionParams` (see its doc), so this gate only
+        // flips on the zero<->nonzero transition, preserving the amount-drag
+        // cache proven by `amount_change_does_not_recompute_transmission`.
+        // Cloning `PipelineImage` is an `Arc` clone (cheap); no compute passes
+        // run and the rebuild-count test hook is NOT bumped.
+        if raw.active == 0 {
+            return src.clone();
+        }
+
         let (w, h) = (src.width, src.height);
         self.ensure_intermediates(w, h);
         let out = self.ensure_out(w, h);
         self.rebuilds.set(self.rebuilds.get() + 1);
 
-        let raw = self.params.get();
         let radius = (raw.radius.max(0) as u32).min(MAX_DEHAZE_RADIUS) as i32;
         let gr = guided_radius(radius as u32).min(MAX_DEHAZE_RADIUS.saturating_mul(3)) as i32;
 
@@ -1254,6 +1296,7 @@ mod tests {
             atmos: [a[0], a[1], a[2], 0.0],
             omega: DEHAZE_OMEGA,
             eps: DEHAZE_GUIDED_EPS,
+            active: 1,
         }));
         let node = DehazeTransmissionNode::new(ctx.clone(), params);
         let out = node.evaluate(&[&src]);

@@ -26,7 +26,10 @@ pub(crate) const DEHAZE_T0: f32 = 0.1;
 /// ever a placeholder for the no-op case.
 pub const DEHAZE_ATMOS_NEUTRAL: [f32; 3] = [1.0, 1.0, 1.0];
 /// Floor each `A` channel to this to keep the `I/A` and `/max(t,t0)` divisions finite.
-const DEHAZE_ATMOS_MIN: f32 = 1e-3;
+/// `pub(crate)` (not just module-private): `DehazeTransmissionNode`/`DehazeRecoveryNode`'s
+/// `TransmissionParams`/`RecoveryParams` (QS-Task 4) floor the same way, mirroring
+/// `dehaze_uniform` below.
+pub(crate) const DEHAZE_ATMOS_MIN: f32 = 1e-3;
 /// Cap on pixels scanned by `estimate_atmospheric_light` (it subsamples above
 /// this). Bounds the CPU cost to sub-millisecond regardless of image size so it
 /// is safe to run at pipeline construction (CLAUDE.md rule 1 — no multi-ms UI work).

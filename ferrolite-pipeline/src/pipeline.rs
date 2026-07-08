@@ -703,4 +703,61 @@ mod edit_pipeline_tests {
             "a radius change must recompute the transmission map"
         );
     }
+
+    /// Regression for the dehaze two-node-split perf bug: with NO `Dehaze` op in
+    /// the stack, `DehazeTransmissionNode` must never run its expensive
+    /// multi-pass guided filter, even as unrelated upstream ops (exposure,
+    /// contrast) keep changing on every `set_stack`. Before this fix,
+    /// `TransmissionParams` had no way to know dehaze was off, so ANY upstream
+    /// change (which reaches this node only via the graph's dirty-propagation,
+    /// but `set_stack` also re-seeds `TransmissionParams` from `stack.dehaze()`
+    /// every call) looked identical to "dehaze just got enabled" and re-ran the
+    /// full guided filter for nothing.
+    #[test]
+    fn no_dehaze_op_skips_transmission_passes() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = LinearRgbaF32::new(16, 16, vec![0.6; 16 * 16 * 4]).unwrap();
+
+        let stack = OpStack::default().set_op(Op::Exposure(crate::op::Exposure { ev: 0.3 }));
+        let mut ep = EditPipeline::new(ctx, &src, stack, IDENTITY);
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            0,
+            "no dehaze op in the stack: transmission must not run at all"
+        );
+
+        // Unrelated upstream edit (contrast); still no dehaze op anywhere.
+        let stack = OpStack::default()
+            .set_op(Op::Exposure(crate::op::Exposure { ev: 0.3 }))
+            .set_op(Op::Contrast(crate::op::Contrast { amount: 0.4 }));
+        ep.set_stack(stack);
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            0,
+            "an upstream (non-dehaze) edit must NOT trigger the guided filter \
+             when dehaze is off"
+        );
+
+        // Now enable dehaze: the transmission map must compute exactly once.
+        let stack = OpStack::default()
+            .set_op(Op::Exposure(crate::op::Exposure { ev: 0.3 }))
+            .set_op(Op::Contrast(crate::op::Contrast { amount: 0.4 }))
+            .set_op(Op::Dehaze(crate::op::Dehaze {
+                amount: 0.5,
+                radius: 8,
+            }));
+        ep.set_stack(stack);
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            1,
+            "turning dehaze on must compute the transmission map"
+        );
+    }
 }

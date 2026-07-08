@@ -122,6 +122,8 @@ pub fn spawn_export(
             options: &options,
             dest: &dest,
             source_path: &source_path,
+            // TODO(dehaze): replaced with the real estimate in the app A-wiring task
+            atmospheric_light: ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
         };
         let (ok, message) = match run_export(req, cancel, &mut progress) {
             Ok(outcome) => {

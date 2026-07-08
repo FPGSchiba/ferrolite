@@ -110,6 +110,7 @@ pub fn render_tiled(
     output_space: WorkingSpace,
     lens_db: Option<&Arc<LensfunDb>>,
     depth: BitDepth,
+    atmospheric_light: [f32; 3],
     cancel: &CancelToken,
     progress: &mut dyn FnMut(u32, u32),
 ) -> Result<RenderedImage, ExportError> {
@@ -149,6 +150,11 @@ pub fn render_tiled(
         warp.as_ref(),
         vignette.as_ref(),
     );
+
+    // Dehaze's atmospheric light is a whole-image constant (design §5.3): set it
+    // on the tiled producer before rendering any tile. With a no-dehaze stack this
+    // is a harmless no-op (amount 0 → identity regardless of A).
+    pipeline.set_dehaze_atmos(atmospheric_light);
 
     let m = working_to_output(working_space, output_space); // ferrolite_color::Mat3
 

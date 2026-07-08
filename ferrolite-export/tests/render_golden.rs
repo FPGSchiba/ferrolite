@@ -55,6 +55,7 @@ fn tiled_render_matches_whole_image_reference() {
         WorkingSpace::Srgb,
         None,
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
         &cancel,
         &mut |d, t| seen = (d, t),
     )
@@ -100,6 +101,7 @@ fn cancellation_stops_render() {
         WorkingSpace::Srgb,
         None,
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
         &cancel,
         &mut |_, _| {},
     );
@@ -173,6 +175,7 @@ fn export_renders_lens_corrections() {
         WorkingSpace::Srgb,
         Some(&db),
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
         &cancel,
         &mut |_, _| {},
     )
@@ -190,6 +193,7 @@ fn export_renders_lens_corrections() {
         WorkingSpace::Srgb,
         None,
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
         &cancel,
         &mut |_, _| {},
     )

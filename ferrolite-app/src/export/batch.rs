@@ -171,6 +171,8 @@ fn run_one(
         options,
         dest: &item.dest,
         source_path: &item.path,
+        // TODO(dehaze): replaced with the real estimate in the app A-wiring task
+        atmospheric_light: ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
     };
     match run_export(req, cancel, progress) {
         Ok(outcome) => {

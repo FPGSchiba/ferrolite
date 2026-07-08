@@ -36,6 +36,11 @@ pub struct ExportRequest<'a> {
     pub dest: &'a Path,
     /// Source image path for EXIF copy.
     pub source_path: &'a Path,
+    /// Whole-image dehaze atmospheric light `A`, computed by the caller from the
+    /// decoded source (design §5.3 — `A` is a whole-image constant, not per-tile).
+    /// Use `ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL` when the caller has no
+    /// dehaze (or hasn't computed `A` yet).
+    pub atmospheric_light: [f32; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +69,7 @@ pub fn run_export(
         opts.output_space,
         req.lens_db,
         depth,
+        req.atmospheric_light,
         cancel,
         progress,
     )?;

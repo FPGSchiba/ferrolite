@@ -12,6 +12,7 @@ use wgpu::util::DeviceExt;
 
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 
+#[derive(Debug)]
 pub struct GpuPyramidSource {
     levels: Vec<PipelineImage>, // index = lod
 }

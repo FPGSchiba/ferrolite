@@ -948,17 +948,14 @@ impl FerroliteApp {
             None
         };
 
-        let __prof_ptsrc = std::time::Instant::now();
-        let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
-            std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
-        eprintln!(
-            "[open-profile] PyramidTileSource::new (CPU pyramid + full-res clone): {} ms",
-            __prof_ptsrc.elapsed().as_millis()
-        );
-        // Fetch the pre-warmed pipelines, build the sparse full VT (and, for RAW,
-        // the rung-1 preview VT wrapping the reveal render) while borrowing them,
-        // then release the read lock before the write scope that installs them.
-        let (preview_vt, full) = {
+        // Build ONLY the rung-1 reveal preview VT here (cheap). The sparse full VT
+        // (and the GPU edit pyramid) are built off the UI thread — both are CPU
+        // box-downsample heavy (~1.2 s combined) and were the open freeze
+        // (CLAUDE.md rule 1). They arrive later via `AppEvent::PyramidReady`, which
+        // `apply_pyramid_ready` installs into the holder (see the Background job
+        // submitted below). Until then the holder carries `full: None` and the
+        // color-correct reveal is shown.
+        let preview_vt = {
             let renderer = rs.renderer.read();
             let vp = renderer
                 .callback_resources
@@ -967,31 +964,24 @@ impl FerroliteApp {
             // Route through the current display state so an active monitor LUT
             // stays applied across image opens instead of reverting to sRGB.
             self.apply_display_tail(&gpu, vp);
-            let full = ferrolite_vt::VirtualTexture::sparse(
-                &gpu,
-                source,
-                std::sync::Arc::clone(&self.state.jobs),
-                VIEWER_TILE_BUDGET,
-                &vp.pipelines,
-            );
-            let preview_vt = raw_preview.as_ref().map(|(tex, dims)| {
+            raw_preview.as_ref().map(|(tex, dims)| {
                 ferrolite_vt::VirtualTexture::single_from_texture(
                     &gpu,
                     std::sync::Arc::clone(tex),
                     *dims,
                     &vp.pipelines,
                 )
-            });
-            (preview_vt, full)
+            })
         };
 
-        // Install the full VT. For RAW the rung-1 preview IS the reveal render, so
-        // install a fresh holder (there is no JPEG holder — `apply_preview_ready`
-        // kept the spinner up). Replaces any stale holder from a superseded image.
-        // Only flip `full_ready` / start the crossfade if the holder is for THIS
-        // image — otherwise (stale) the viewer would permanently idle with no full
-        // VT to swap to.
-        let mut full_installed = false;
+        // Install the reveal-preview holder with `full: None`. For RAW the rung-1
+        // preview IS the reveal render, so install a fresh holder (there is no JPEG
+        // holder — `apply_preview_ready` kept the spinner up). Replaces any stale
+        // holder from a superseded image. The sparse full VT is installed later by
+        // `apply_pyramid_ready` when the off-thread pyramid job completes; the full
+        // VT MUST NOT produce raw-camera-native tiles until the edit producer
+        // exists, so `set_producing(true)` is deferred to that handler.
+        let mut preview_installed = false;
         {
             let mut renderer = rs.renderer.write();
             if let Some(preview) = preview_vt {
@@ -1009,50 +999,41 @@ impl FerroliteApp {
                 renderer.callback_resources.insert(viewer::ViewerGpu {
                     ctx: holder_gpu,
                     preview,
-                    full: Some(full),
+                    full: None,
                     preview_before: None,
                     image_id,
                     present,
                     present_alpha,
                     blit_bind_front: None,
                 });
-                full_installed = true;
+                preview_installed = true;
             } else if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                // Non-RAW defensive path (Standard never submits a tier-2 decode).
+                // Non-RAW defensive path (Standard never submits a tier-2 decode);
+                // reuse an existing matching holder. The pyramid job still runs and
+                // `apply_pyramid_ready` installs the full VT into it.
                 if g.image_id == image_id {
-                    g.full = Some(full);
-                    full_installed = true;
+                    preview_installed = true;
                 }
             }
         }
 
-        if full_installed {
+        if preview_installed {
             if let Some(v) = self.state.viewer.as_mut() {
                 if v.image_id == image_id {
                     // Step 3 reveal: the rung-1 raw render is now on screen, so
                     // drop the spinner. (For RAW `loaded` was held false in
                     // `apply_preview_ready` until this color-correct reveal.)
                     v.loaded = true;
-                    v.full_ready = true;
-                    // Task 15: do NOT start the crossfade here. `full_ready` alone
-                    // does not make `present_source` show anything but `Preview`
-                    // (it also requires `front_valid` — the composed `front` keyed
-                    // to the current `(opstack_version, view)`, gated on the sparse
-                    // pool being fully resident — see `viewer::present::present_source`),
-                    // and the sparse pool is essentially never resident this early (the
-                    // tiles have not been produced yet). A ramp started here would
-                    // complete (150 ms) while fully invisible, so by the time
-                    // `drive_viewer`'s convergence swap fires — often much later —
-                    // the visible crossfade needs a FRESH ramp anyway. That fresh
-                    // ramp is started at the swap in `drive_viewer` (when
-                    // `v.present_key` is set to the freshly-composed state), which is
-                    // the only crossfade trigger that actually drives a visible
-                    // preview→front fade.
+                    // NOTE: `full_ready` stays FALSE here. The sparse full VT and
+                    // its edit producer are built off the UI thread and installed
+                    // by `apply_pyramid_ready` on `AppEvent::PyramidReady`; only
+                    // then is the full tier ready. Until the swap the color-correct
+                    // reveal (installed above) is what the viewer shows.
+                    //
                     // The full tier's dimensions (uprighted; full-res GPU RCD for
                     // RGGB, else QuadBin half-res) are the reveal render's dims too.
-                    // Fit to them; fall back to
-                    // the image's own size if the canvas has not painted yet (the
-                    // user has not interacted at open time).
+                    // Fit to them; fall back to the image's own size if the canvas
+                    // has not painted yet (the user has not interacted at open time).
                     let full_dims = (image.width, image.height);
                     v.image_dims = Some(full_dims);
                     let viewport = if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
@@ -1061,61 +1042,59 @@ impl FerroliteApp {
                         (full_dims.0 as f32, full_dims.1 as f32)
                     };
                     v.view = ferrolite_vt::ViewTransform::fit(full_dims, viewport);
-                    // Build the GPU-resident pyramid UNCONDITIONALLY so the
-                    // full-res edit producer can be created on the first edit even
-                    // for an image that opened unedited (identity stack).
-                    let __prof_gpupyr = std::time::Instant::now();
-                    let pyramid =
-                        std::sync::Arc::new(ferrolite_pipeline::GpuPyramidSource::new(&gpu, image));
-                    eprintln!(
-                        "[open-profile] GpuPyramidSource::new (CPU pyramid + GPU upload): {} ms",
-                        __prof_gpupyr.elapsed().as_millis()
-                    );
-                    v.pyramid = Some(std::sync::Arc::clone(&pyramid));
-                    // Always attach the full-res producer so the sparse VT tiles
-                    // pass through camera→working (the raw camera-native CPU path
-                    // must never reach the working→display tail). Identity stack =
-                    // unedited-but-color-managed.
-                    let ctx_arc =
-                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    // Thread the current lens bake (if any) into the fresh producer
-                    // (U7): `None` until a bake completes, which is byte-identical
-                    // to no lens correction (identity warp/vignette defaults).
-                    // Mode-aware vignette pair (MV2) so a persisted manual-vignette
-                    // op (lens_id=None → no bake) applies on open.
-                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
-                        v.op_stack.lens_correction().as_ref(),
-                        v.lens_vignette.is_some(),
-                    );
-                    let __prof_tep = std::time::Instant::now();
-                    let tep = ferrolite_pipeline::TileEditPipeline::new(
-                        ctx_arc,
-                        pyramid,
-                        v.op_stack.clone(),
-                        cam,
-                        v.lens_warp.as_ref(),
-                        v.lens_vignette.as_ref(),
-                    );
-                    eprintln!(
-                        "[open-profile] TileEditPipeline::new: {} ms",
-                        __prof_tep.elapsed().as_millis()
-                    );
-                    let mut producer = viewer::EditTileProducer::new(tep);
-                    producer.set_vig_amount(vig_amount);
-                    producer.set_vig_manual(vig_manual);
-                    v.edit_producer = Some(producer);
-                    let version = v.opstack_version.max(1);
-                    let mut renderer = rs.renderer.write();
-                    if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                        if g.image_id == image_id {
-                            if let Some(full) = g.full.as_mut() {
-                                full.set_producing(true);
-                                full.set_opstack_version(&g.ctx, version);
-                            }
-                        }
-                    }
                 }
             }
+
+            // Both full-res pyramids (the sparse-VT CPU tile source and the
+            // GPU-resident edit pyramid) are CPU box-downsample heavy (~1.2 s
+            // combined) — build them on a `ferrolite-jobs` Background worker rather
+            // than the UI thread (CLAUDE.md rule 1; this was the open freeze). They
+            // need the FULL-res `image` (NOT Task 2's downsampled `reveal_src`), so
+            // clone it into an `Arc` for the job. `GpuContext` is `Send + Sync`
+            // (Arc device/queue handles), as are `PyramidTileSource` and
+            // `GpuPyramidSource`, so both build off-thread and are delivered over
+            // the channel; `apply_pyramid_ready` installs them + starts producing.
+            let image_full: std::sync::Arc<ferrolite_image::LinearRgbaF32> =
+                std::sync::Arc::new(image.clone());
+            let gpu_job = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+            let tx = self.state.tx.clone();
+            let repaint = ctx.clone();
+            self.state
+                .jobs
+                .submit(ferrolite_jobs::Priority::Background, move |cancel| {
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let __prof_ptsrc = std::time::Instant::now();
+                    let tile_source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
+                        std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(
+                            (*image_full).clone(),
+                        ));
+                    eprintln!(
+                        "[open-profile] PyramidTileSource::new (off-thread CPU pyramid): {} ms",
+                        __prof_ptsrc.elapsed().as_millis()
+                    );
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let __prof_gpupyr = std::time::Instant::now();
+                    let gpu_pyramid = std::sync::Arc::new(
+                        ferrolite_pipeline::GpuPyramidSource::new(&gpu_job, &image_full),
+                    );
+                    eprintln!(
+                        "[open-profile] GpuPyramidSource::new (off-thread CPU pyramid + GPU upload): {} ms",
+                        __prof_gpupyr.elapsed().as_millis()
+                    );
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let _ = tx.send(crate::events::AppEvent::PyramidReady {
+                        image_id,
+                        tile_source,
+                        gpu_pyramid,
+                    });
+                    repaint.request_repaint();
+                });
         }
 
         // Preview-cache write-back (Task 5): on a qualifying RAW open, cache the
@@ -1137,7 +1116,7 @@ impl FerroliteApp {
         // all run inside the Background job. The only UI-thread work here is the
         // `should_write_back` guard plus cheap refcount bumps (the reveal render
         // `Arc` is reused — no second full-buffer clone) (CLAUDE.md rule 1).
-        if full_installed {
+        if preview_installed {
             // Snapshot the viewer inputs, then release the borrow before the
             // job submit (which borrows other `self.state` fields).
             let write_back = self.state.viewer.as_ref().and_then(|v| {
@@ -1186,6 +1165,113 @@ impl FerroliteApp {
         }
 
         self.mark_histogram_dirty();
+    }
+
+    /// Both full-res pyramids finished building off the UI thread (delivered by
+    /// the Background job submitted in `apply_full_decoded`): the sparse-VT CPU
+    /// tile source and the GPU-resident edit pyramid. This is the UI-thread tail
+    /// that the freeze fix moved off-thread. It builds the sparse full
+    /// `VirtualTexture` (needs the render state) plus the `Rc`-based
+    /// `TileEditPipeline` and `EditTileProducer` (both `!Send`, so UI-thread only),
+    /// installs the full VT into the existing holder, and only NOW starts producing
+    /// (the full VT must not emit raw camera-native tiles before the producer
+    /// exists). A stale result (user navigated away while the pyramids built) is
+    /// dropped.
+    fn apply_pyramid_ready(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        tile_source: &std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync>,
+        gpu_pyramid: &std::sync::Arc<ferrolite_pipeline::GpuPyramidSource>,
+    ) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        // Stale guard: viewer closed or a different image is now open.
+        if self.state.viewer.as_ref().map(|v| v.image_id) != Some(image_id) {
+            return;
+        }
+        // Compute camera→working BEFORE any exclusive `viewer` borrow below:
+        // `camera_to_working` itself borrows `self.state.viewer` immutably.
+        let cam = self.camera_to_working(self.current_wb_temp());
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+
+        // Build the sparse full VT from the off-thread tile source (needs the
+        // pre-warmed `ViewerPipelines`; the read lock is released before the write
+        // install below).
+        let full = {
+            let renderer = rs.renderer.read();
+            let vp = renderer
+                .callback_resources
+                .get::<viewer::ViewerPipelines>()
+                .expect("ViewerPipelines pre-warmed at startup");
+            // Keep an active monitor LUT applied across the install.
+            self.apply_display_tail(&gpu, vp);
+            ferrolite_vt::VirtualTexture::sparse(
+                &gpu,
+                std::sync::Arc::clone(tile_source),
+                std::sync::Arc::clone(&self.state.jobs),
+                VIEWER_TILE_BUDGET,
+                &vp.pipelines,
+            )
+        };
+
+        // Build the full-res edit producer from the off-thread GPU pyramid and
+        // flip `full_ready`. The full VT tiles ALWAYS pass through camera→working
+        // (the raw camera-native CPU path must never reach the working→display
+        // tail), so the producer is attached unconditionally — identity stack =
+        // unedited-but-color-managed.
+        let version;
+        {
+            let Some(v) = self.state.viewer.as_mut() else {
+                return;
+            };
+            if v.image_id != image_id {
+                return;
+            }
+            v.pyramid = Some(std::sync::Arc::clone(gpu_pyramid));
+            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+            // Mode-aware vignette pair (MV2) so a persisted manual-vignette op
+            // (lens_id=None → no bake) applies on open; the current lens bake (if
+            // any) is threaded in — `None` is byte-identical to no correction.
+            let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
+                v.op_stack.lens_correction().as_ref(),
+                v.lens_vignette.is_some(),
+            );
+            let __prof_tep = std::time::Instant::now();
+            let tep = ferrolite_pipeline::TileEditPipeline::new(
+                ctx_arc,
+                std::sync::Arc::clone(gpu_pyramid),
+                v.op_stack.clone(),
+                cam,
+                v.lens_warp.as_ref(),
+                v.lens_vignette.as_ref(),
+            );
+            eprintln!(
+                "[open-profile] TileEditPipeline::new (on PyramidReady): {} ms",
+                __prof_tep.elapsed().as_millis()
+            );
+            let mut producer = viewer::EditTileProducer::new(tep);
+            producer.set_vig_amount(vig_amount);
+            producer.set_vig_manual(vig_manual);
+            v.edit_producer = Some(producer);
+            v.full_ready = true;
+            version = v.opstack_version.max(1);
+        }
+
+        // Install the full VT into the existing holder + start producing. Guard on
+        // `image_id` again: the holder could have been replaced by a newer open
+        // between the reads above and this write lock.
+        let mut renderer = rs.renderer.write();
+        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+            if g.image_id == image_id {
+                g.full = Some(full);
+                if let Some(full) = g.full.as_mut() {
+                    full.set_producing(true);
+                    full.set_opstack_version(&g.ctx, version);
+                }
+            }
+        }
     }
 
     /// A preview-cache READ resolved to a HIT (Task 6): the cached JPEG for
@@ -2816,6 +2902,15 @@ impl eframe::App for FerroliteApp {
                     color_profile,
                 } => {
                     self.apply_full_decoded(frame, ctx, *image_id, image, color_profile);
+                    self.state.dirty = true;
+                    continue;
+                }
+                crate::events::AppEvent::PyramidReady {
+                    image_id,
+                    tile_source,
+                    gpu_pyramid,
+                } => {
+                    self.apply_pyramid_ready(frame, *image_id, tile_source, gpu_pyramid);
                     self.state.dirty = true;
                     continue;
                 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 /// The internal pipeline texture format (display-linear, f16).
 pub const PIPELINE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PipelineImage {
     pub texture: Arc<wgpu::Texture>,
     pub width: u32,

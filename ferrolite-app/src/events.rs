@@ -4,7 +4,6 @@
 
 use crate::state::AppState;
 
-#[derive(Debug)]
 pub enum AppEvent {
     /// `added` stat-only placeholder rows were inserted by the instant index pass
     /// (grid shows the filenames immediately; metadata/thumbnails stream in after).
@@ -49,6 +48,16 @@ pub enum AppEvent {
         image_id: i64,
         image: ferrolite_image::LinearRgbaF32,
         color_profile: ferrolite_decode::ColorProfile,
+    },
+    /// Both full-res pyramids finished building off-thread (tier-2 open path):
+    /// the sparse-VT CPU tile source and the GPU-resident edit pyramid. Installed
+    /// on the UI thread (needs render state + the `Rc`-based tile pipeline).
+    /// Emitted by the Background job submitted from `apply_full_decoded`, handled
+    /// in `app.rs` (`apply_pyramid_ready`); not folded by `apply`.
+    PyramidReady {
+        image_id: i64,
+        tile_source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync>,
+        gpu_pyramid: std::sync::Arc<ferrolite_pipeline::GpuPyramidSource>,
     },
     /// The tier-2 full decode failed; the viewer keeps showing the preview and
     /// goes idle. Folded by `apply` (no GPU work) but matched in `app.rs`.
@@ -159,6 +168,138 @@ pub enum AppEvent {
     },
 }
 
+// Manual `Debug`: `AppEvent::PyramidReady` carries an `Arc<dyn TileSource + Send +
+// Sync>` and an `Arc<GpuPyramidSource>`. `TileSource` is an engine-tier trait
+// (`ferrolite-vt`) with no `Debug` supertrait, so it cannot be `#[derive(Debug)]`d
+// as a trait object; adding `Debug` as a supertrait there would touch every
+// implementor across the engine (large blast radius). Instead we hand-write
+// `Debug` here and format the pyramid/source fields opaquely, keeping the change
+// confined to this crate.
+impl std::fmt::Debug for AppEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AppEvent::Scanned { added } => f.debug_struct("Scanned").field("added", added).finish(),
+            AppEvent::Indexed { added } => f.debug_struct("Indexed").field("added", added).finish(),
+            AppEvent::ThumbReady { image_id, w, h, .. } => f
+                .debug_struct("ThumbReady")
+                .field("image_id", image_id)
+                .field("w", w)
+                .field("h", h)
+                .finish_non_exhaustive(),
+            AppEvent::ThumbFailed { image_id } => f
+                .debug_struct("ThumbFailed")
+                .field("image_id", image_id)
+                .finish(),
+            AppEvent::ThumbMissing { image_id } => f
+                .debug_struct("ThumbMissing")
+                .field("image_id", image_id)
+                .finish(),
+            AppEvent::IngestPlanned { total } => f
+                .debug_struct("IngestPlanned")
+                .field("total", total)
+                .finish(),
+            AppEvent::IngestDone => f.write_str("IngestDone"),
+            AppEvent::PreviewReady { image_id, .. } => f
+                .debug_struct("PreviewReady")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
+            AppEvent::FullDecoded { image_id, .. } => f
+                .debug_struct("FullDecoded")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
+            AppEvent::PyramidReady { image_id, .. } => f
+                .debug_struct("PyramidReady")
+                .field("image_id", image_id)
+                .field("tile_source", &"<tile_source>")
+                .field("gpu_pyramid", &"<gpu_pyramid>")
+                .finish(),
+            AppEvent::FullFailed { image_id } => f
+                .debug_struct("FullFailed")
+                .field("image_id", image_id)
+                .finish(),
+            AppEvent::MetadataResult { ok, warning } => f
+                .debug_struct("MetadataResult")
+                .field("ok", ok)
+                .field("warning", warning)
+                .finish(),
+            AppEvent::OpsLoaded { image_id, .. } => f
+                .debug_struct("OpsLoaded")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
+            AppEvent::OpsSaved { ok, warning } => f
+                .debug_struct("OpsSaved")
+                .field("ok", ok)
+                .field("warning", warning)
+                .finish(),
+            AppEvent::HistogramReady { image_id, .. } => f
+                .debug_struct("HistogramReady")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
+            AppEvent::PreviewCacheWritten { image_id } => f
+                .debug_struct("PreviewCacheWritten")
+                .field("image_id", image_id)
+                .finish(),
+            AppEvent::PreviewCacheHit { image_id, .. } => f
+                .debug_struct("PreviewCacheHit")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
+            AppEvent::PreviewCacheMiss { image_id } => f
+                .debug_struct("PreviewCacheMiss")
+                .field("image_id", image_id)
+                .finish(),
+            AppEvent::ExportProgress {
+                image_id,
+                done,
+                total,
+            } => f
+                .debug_struct("ExportProgress")
+                .field("image_id", image_id)
+                .field("done", done)
+                .field("total", total)
+                .finish(),
+            AppEvent::ExportItemStarted { name } => f
+                .debug_struct("ExportItemStarted")
+                .field("name", name)
+                .finish(),
+            AppEvent::ExportFinished {
+                image_id,
+                ok,
+                message,
+            } => f
+                .debug_struct("ExportFinished")
+                .field("image_id", image_id)
+                .field("ok", ok)
+                .field("message", message)
+                .finish(),
+            AppEvent::BatchItemFinished {
+                image_id,
+                ok,
+                message,
+            } => f
+                .debug_struct("BatchItemFinished")
+                .field("image_id", image_id)
+                .field("ok", ok)
+                .field("message", message)
+                .finish(),
+            AppEvent::DisplayProfileResolved {
+                name, generation, ..
+            } => f
+                .debug_struct("DisplayProfileResolved")
+                .field("name", name)
+                .field("generation", generation)
+                .finish_non_exhaustive(),
+            AppEvent::LensBaked { image_id, .. } => f
+                .debug_struct("LensBaked")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
+            AppEvent::MetaLoaded { image_id, .. } => f
+                .debug_struct("MetaLoaded")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 impl AppState {
     /// Fold a non-texture event into counters. Returns the decoded RGBA8 pixels
     /// (+ dimensions) for a `ThumbReady` so the caller (which holds egui
@@ -223,6 +364,8 @@ impl AppState {
             // Handled in `app.rs` (needs GPU state) before reaching `apply`.
             AppEvent::PreviewReady { .. } => None,
             AppEvent::FullDecoded { .. } => None,
+            // Handled in `app.rs` (needs GPU state); nothing to fold here.
+            AppEvent::PyramidReady { .. } => None,
             // Terminal-state handling happens in `app.rs`; nothing to fold here.
             AppEvent::FullFailed { .. } => None,
             AppEvent::MetadataResult { ok, warning } => {

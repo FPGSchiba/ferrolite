@@ -100,11 +100,15 @@ fn preview_info_reports_dims_and_gated_timings() {
 }
 
 #[test]
-fn decode_full_matches_metadata_dimensions_and_buffer() {
+fn decode_full_crops_within_metadata_dimensions_and_buffer() {
     let meta = ferrolite_decode::read_metadata(&fixture(), FileKind::Raw).expect("metadata");
     let full = ferrolite_decode::decode_full(&fixture()).expect("full decode");
-    assert_eq!(full.width, meta.width);
-    assert_eq!(full.height, meta.height);
+    // `decode_full` crops to the camera's recommended image rectangle
+    // (`crop_area`/`active_area`), dropping the masked/optically-black sensor
+    // border, so its dims are <= the full-sensor dims `read_metadata` reports.
+    // (They were equal before the active-area crop was applied.)
+    assert!(full.width > 0 && full.width <= meta.width);
+    assert!(full.height > 0 && full.height <= meta.height);
     assert!(full.cpp >= 1);
     assert_eq!(
         full.pixels.len(),

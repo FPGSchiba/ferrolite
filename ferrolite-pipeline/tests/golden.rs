@@ -3,10 +3,10 @@ mod common;
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_pipeline::{
-    blit_to_rgba8, upload_source, Aspect, ColorGrade, Contrast, CropRect, CurveMode, Dehaze,
-    EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, Op, OpStack,
-    ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve, WhiteBalance,
-    DEHAZE_DEFAULT_RADIUS,
+    blit_to_rgba8, estimate_atmospheric_light, upload_source, Aspect, ColorGrade, Contrast,
+    CropRect, CurveMode, Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel,
+    Hsl, HslBand, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve,
+    WhiteBalance, DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -449,5 +449,68 @@ fn sharpen_tiles_match_whole_image_at_seam() {
     assert!(
         max_diff <= SEAM_TOL,
         "per-tile sharpen diverged from whole-image (diff {max_diff}) — halo broken?"
+    );
+}
+
+#[test]
+fn dehaze_tiled_matches_whole_image() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // A multi-tile image: 300x200 -> 2x1 tiles at LOD 0 (seam at x = 256).
+    let (iw, ih) = (300u32, 200u32);
+    let src = common::gradient(iw, ih);
+    let stack = OpStack::default().set_op(Op::Dehaze(Dehaze {
+        amount: 0.8,
+        radius: DEHAZE_DEFAULT_RADIUS,
+    }));
+    // Estimated ONCE from the CPU source and handed to both tiers: `EditPipeline`
+    // estimates `A` internally from the same `src`, so the two agree exactly.
+    let atmos = estimate_atmospheric_light(&src);
+
+    // Whole-image reference: render the edited image to display-linear f32 by
+    // evaluating the EditPipeline and reading its output back.
+    let mut whole = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+
+    // Per-tile producer over the GPU-resident source pyramid. `TileEditPipeline`
+    // has no CPU source to estimate `A` from — it starts NEUTRAL and the caller
+    // hands it the same estimate via `set_dehaze_atmos`.
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    tep.set_dehaze_atmos(atmos);
+
+    // Produce both tiles, read interiors, and compare the valid region against
+    // the whole-image reference — focusing on the seam column.
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let mut max_diff = 0.0f32;
+    for tx in 0..2u32 {
+        let tile = tep.produce_tile(TileCoord {
+            lod: 0,
+            x: tx,
+            y: 0,
+        });
+        let tile_lin = common::read_tile_linear(&ctx, &tile);
+        for ly in 0..TILE_SIZE {
+            for lx in 0..TILE_SIZE {
+                let gx = tx * TILE_SIZE + lx;
+                let gy = ly;
+                if gx >= iw || gy >= ih {
+                    continue; // out-of-image tile padding
+                }
+                let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
+                let wi = ((gy * iw + gx) * 4) as usize;
+                for c in 0..3 {
+                    max_diff = max_diff.max((tile_lin[ti + c] - whole_lin[wi + c]).abs());
+                }
+            }
+        }
+    }
+    eprintln!("dehaze tile-seam max linear diff = {max_diff}");
+    assert!(
+        max_diff <= SEAM_TOL,
+        "per-tile dehaze diverged from whole-image (diff {max_diff}) — halo broken?"
     );
 }

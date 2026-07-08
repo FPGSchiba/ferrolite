@@ -1,7 +1,7 @@
 //! `TileEditPipeline` — the per-tile, full-res GPU edit producer. For each
 //! requested tile it runs geometry-at-the-head (resampling the GPU-resident
 //! source for the haloed output tile) then the color chain (exposure→WB→contrast
-//! →tone-curve→HSL→LocalAdjustments→sharpen) over the haloed buffer, and returns
+//! →dehaze→tone-curve→HSL→LocalAdjustments→sharpen) over the haloed buffer, and returns
 //! the interior `TILE_SIZE`² as an `Rgba16Float` `COPY_SRC` texture for the VT to
 //! copy into a pool slot. No CPU readback (spec §5.2).
 //!
@@ -32,6 +32,7 @@ use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::{haloed_tile_origin, level_size, TileCoord, TILE_SIZE};
 use ferrolite_mask::TileTransform;
 
+use crate::dehaze::{dehaze_halo, dehaze_uniform, DehazeUniform, DEHAZE_ATMOS_NEUTRAL};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
@@ -68,6 +69,9 @@ pub struct TileEditPipeline {
     exposure: Rc<Cell<ExposureUniform>>,
     wb: Rc<Cell<WbUniform>>,
     contrast: Rc<Cell<ContrastUniform>>,
+    dehaze_id: NodeId,
+    dehaze: Rc<Cell<DehazeUniform>>,
+    dehaze_atmos: [f32; 3],
     tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl: Rc<Cell<HslUniform>>,
     color_grade: Rc<Cell<ColorGradeUniform>>,
@@ -97,7 +101,9 @@ impl TileEditPipeline {
     ) -> Self {
         let (src_w, src_h) = source.level_size(0);
         let lc: Option<LensCorrection> = stack.lens_correction();
-        let halo = sharpen_halo(stack.sharpen()).max(lens_halo_px(lc.as_ref(), warp_grid));
+        let halo = sharpen_halo(stack.sharpen())
+            .max(lens_halo_px(lc.as_ref(), warp_grid))
+            .max(dehaze_halo(stack.dehaze()));
         let geometry = stack.geometry().unwrap_or(Geometry {
             crop: CropRect::full(),
             angle_deg: 0.0,
@@ -178,10 +184,21 @@ impl TileEditPipeline {
             )),
             vec![wb_id],
         );
+        let dehaze_atmos = DEHAZE_ATMOS_NEUTRAL;
+        let dehaze = Rc::new(Cell::new(dehaze_uniform(stack.dehaze(), dehaze_atmos)));
+        let dehaze_id = graph.add_node(
+            Box::new(PointOpNode::new(
+                ctx.clone(),
+                include_str!("shaders/dehaze.wgsl"),
+                "dehaze",
+                dehaze.clone(),
+            )),
+            vec![contrast_id],
+        );
         let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_id = graph.add_node(
             Box::new(CurveNode::new(ctx.clone(), tone_curve.clone())),
-            vec![contrast_id],
+            vec![dehaze_id],
         );
         let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
         let hsl_id = graph.add_node(
@@ -257,6 +274,9 @@ impl TileEditPipeline {
             exposure,
             wb,
             contrast,
+            dehaze_id,
+            dehaze,
+            dehaze_atmos,
             tone_curve,
             hsl,
             color_grade,
@@ -294,6 +314,8 @@ impl TileEditPipeline {
         self.wb
             .set(crate::uniforms::wb_uniform(stack.white_balance()));
         self.contrast.set(contrast_uniform(stack.contrast()));
+        self.dehaze
+            .set(dehaze_uniform(stack.dehaze(), self.dehaze_atmos));
         self.tone_curve
             .set(tone_curve_luts(stack.tone_curve().as_ref()));
         self.hsl.set(hsl_uniform(stack.hsl()));
@@ -366,6 +388,29 @@ impl TileEditPipeline {
         if u != self.vignette.get() {
             self.vignette.set(u);
             self.graph.mark_dirty(self.vignette_id);
+        }
+    }
+
+    /// Set the whole-image atmospheric light `A` for the dehaze pass (design
+    /// §5.3). Computed ONCE by the caller from the preview-resolution image and
+    /// handed to every tile as a uniform — never estimated per tile. Buffer write
+    /// only (no rebuild); re-derives the dehaze uniform from the current stack's
+    /// amount + this `A`. Call right after construction (like `set_vig_amount`).
+    pub fn set_dehaze_atmos(&mut self, atmos: [f32; 3]) {
+        if atmos != self.dehaze_atmos {
+            self.dehaze_atmos = atmos;
+            // Re-derive with the amount + radius currently baked into the uniform.
+            let cur = self.dehaze.get();
+            let op = if cur.amount != 0.0 {
+                Some(crate::op::Dehaze {
+                    amount: cur.amount,
+                    radius: cur.radius.max(0) as u32,
+                })
+            } else {
+                None
+            };
+            self.dehaze.set(dehaze_uniform(op, atmos));
+            self.graph.mark_dirty(self.dehaze_id);
         }
     }
 

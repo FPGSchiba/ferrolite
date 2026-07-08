@@ -9,6 +9,7 @@ pub mod crop_overlay;
 pub mod curve_math;
 pub mod curve_widget;
 pub mod curve_widget_parametric;
+pub mod grade_widget;
 pub mod histogram_widget;
 pub mod history;
 pub mod hsl_widget;

@@ -156,6 +156,20 @@ impl PanelTab for ColorTab {
     }
 }
 
+pub struct GradeTab;
+impl PanelTab for GradeTab {
+    fn id(&self) -> TabId {
+        TabId("grade")
+    }
+    fn label(&self) -> &str {
+        "Grade"
+    }
+    fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
+        let stack = state.viewer.as_ref()?.op_stack.clone();
+        crate::develop::grade_widget::show(ui, &stack)
+    }
+}
+
 pub struct CurveTab;
 impl PanelTab for CurveTab {
     fn id(&self) -> TabId {
@@ -735,6 +749,7 @@ pub fn base_tabs() -> Vec<Box<dyn PanelTab>> {
     vec![
         Box::new(LightTab),
         Box::new(ColorTab),
+        Box::new(GradeTab),
         Box::new(CurveTab),
         Box::new(DetailTab),
         Box::new(OpticsTab),

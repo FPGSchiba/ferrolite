@@ -18,6 +18,7 @@ pub const LINEAR_GRADIENT: &str = p::GRADIENT;
 pub const RADIAL_GRADIENT: &str = p::CIRCLE;
 pub const LUMA: &str = p::CIRCLE_HALF;
 pub const COLOR: &str = p::PALETTE;
+pub const GRADE: &str = p::CIRCLES_THREE;
 // The following aliases have no consumer yet in the bin (the lib copy is `pub`, so
 // dead_code doesn't fire there) — each is reserved for a later, not-yet-landed UI
 // task. Scoped `#[allow(dead_code)]` per item (not a blanket module allow) so new
@@ -66,6 +67,7 @@ mod tests {
             ("RADIAL_GRADIENT", RADIAL_GRADIENT),
             ("LUMA", LUMA),
             ("COLOR", COLOR),
+            ("GRADE", GRADE),
             ("EYEDROPPER", EYEDROPPER),
             ("UNDO", UNDO),
             ("REDO", REDO),

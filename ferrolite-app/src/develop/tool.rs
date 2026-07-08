@@ -184,7 +184,11 @@ mod tests {
             ids,
             vec![ToolId::Adjust, ToolId::Crop, ToolId::Mask, ToolId::Heal]
         );
-        assert_eq!(reg.base_tabs().len(), 5, "Light/Color/Curve/Detail/Optics");
+        assert_eq!(
+            reg.base_tabs().len(),
+            6,
+            "Light/Color/Grade/Curve/Detail/Optics"
+        );
         // Heal is the only always-disabled tool; assert via its (empty) tabs rather
         // than `enabled()` to avoid constructing a full `AppState` here.
         assert!(

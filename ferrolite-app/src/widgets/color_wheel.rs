@@ -13,7 +13,6 @@ const SEGMENTS: usize = 48;
 const RESET_R: f32 = 4.5;
 
 /// A change emitted by `color_wheel`. `commit` false = live drag preview.
-#[allow(dead_code)] // fields read by the Grade tab caller wired in Task 7 — remove then
 pub struct WheelEdit {
     pub hue: f32,
     pub sat: f32,
@@ -60,7 +59,6 @@ fn hsv_color(h_deg: f32, s: f32, v: f32) -> Color32 {
     )
 }
 
-#[allow(dead_code)] // wired into the Grade tab in Task 7 — remove then
 pub fn color_wheel(
     ui: &mut egui::Ui,
     id_source: impl std::hash::Hash,

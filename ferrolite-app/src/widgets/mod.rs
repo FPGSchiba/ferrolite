@@ -2,7 +2,6 @@ pub mod color_wheel;
 pub mod curve;
 pub mod slider;
 pub mod tool_button;
-#[allow(unused_imports)] // wired into the Grade tab in Task 7 — remove then
 pub use color_wheel::{color_wheel, WheelEdit};
 pub use slider::EguiSlider;
 pub(crate) use tool_button::tool_button;

@@ -396,10 +396,18 @@ impl FerroliteApp {
             if g.image_id != image_id {
                 return;
             }
-            let (Some(tex), Some(dims)) = (g.preview.single_texture_arc(), g.preview.single_dims())
-            else {
+            let Some(tex) = g.preview.single_texture_arc() else {
                 return;
             };
+            // Histogram over the ACTUAL backing-texture texels, NOT the VT's
+            // logical `single_dims()`. The rung-1 reveal is a low-res proxy for a
+            // full-res image: `single_dims()` reports the full-res extent so the
+            // display quad fills the fit view (see `full_res_reveal_dims`), but the
+            // histogram compute must iterate the real texture size — using the
+            // (larger) logical dims makes it read out-of-bounds zeros over the
+            // unbacked region → an empty/black histogram. Box-downsample preserves
+            // the tonal distribution, so the low-res texture is a faithful source.
+            let dims = (tex.width(), tex.height());
             let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
                 return;
             };

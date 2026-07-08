@@ -1,130 +1,121 @@
-# Full-Res Pyramid Build Off the UI Thread — Design
+# Fast Image Open — Off-Thread Pyramids, Startup Pipeline Prewarm, Preview-Res Reveal — Design
 
-> **Status:** Approved design (2026-07-08). A focused performance fix, not a phase.
+> **Status:** Approved design (2026-07-08, revised after profiling). A focused performance fix.
 > **Next step:** `superpowers:writing-plans` → implementation plan → subagent execution.
 
-## 1. Problem
+## 1. Problem (measured)
 
-Opening an image freezes the UI for ~1 second. Root cause (traced, confirmed):
+Opening an image freezes the UI: ~4.9 s on the first open, ~1.8 s on every subsequent open.
+Timing instrumentation in `apply_full_decoded` (UI thread) measured (cold / warm ms):
 
-The tier-2 `FullDecoded` handler builds the full-resolution GPU pyramid **inline on the
-UI thread** ([`ferrolite-app/src/app.rs:1010`](../../../ferrolite-app/src/app.rs)):
+| Phase | Cold | Warm | What it is |
+|---|---|---|---|
+| reveal `EditPipeline::new` + `evaluate` | 3056 | 674 | full-res rung-1 color-correct render |
+| `GpuPyramidSource::new` | 1387 | 913 | CPU box-downsample pyramid + GPU upload (edit producer) |
+| `PyramidTileSource::new` | 422 | 244 | CPU box-downsample pyramid + full-res clone (sparse VT source) |
+| `TileEditPipeline::new` | 3 | 1 | construction only (cheap) |
 
-```rust
-let pyramid = Arc::new(ferrolite_pipeline::GpuPyramidSource::new(&gpu, image));
-```
+Three independent causes, all on the UI thread inside `update()` (CLAUDE.md rule 1 violation):
 
-`GpuPyramidSource::new` ([`ferrolite-pipeline/src/gpu_pyramid.rs:20`](../../../ferrolite-pipeline/src/gpu_pyramid.rs))
-CPU box-downsamples the full-res image across every mip level, then uploads each as a
-texture. For a multi-megapixel RAW this is hundreds of ms to ~1 s of synchronous CPU work
-running inside `update()` on the UI thread — a direct violation of CLAUDE.md responsiveness
-rule 1 ("never block the UI/update thread; multi-millisecond CPU work MUST be submitted to
-`ferrolite-jobs`").
-
-The color-correct rung-1 preview is **already revealed** at that point, so this work has no
-reason to block interactivity.
-
-**Pre-existing, not a regression** from the P3 color-grading work: the handler and
-`GpuPyramidSource::new` are unchanged by it. The **export path already does the right
-thing** — [`ferrolite-app/src/export/mod.rs:100`](../../../ferrolite-app/src/export/mod.rs)
-runs the *same* `GpuPyramidSource::new` on a `ferrolite-jobs` worker ("never the UI
-thread"). The interactive open path simply never adopted that pattern.
+1. **First-use driver pipeline compilation (~2.4 s, first open only).** `prewarm_shaders` compiles
+   shader *modules* but never *evaluates* a pipeline, so the driver compiles each edit pipeline on
+   its first dispatch — during the first real open's reveal `evaluate()`. `TileEditPipeline::new`
+   at 1 ms warm proves construction is cheap; the cold→warm gaps are compilation.
+2. **Two CPU pyramid builds (~1.2 s, every open).** `GpuPyramidSource::new` (913) +
+   `PyramidTileSource::new` (244) both box-downsample the full-res image across mip levels.
+3. **Full-res reveal render (~674 ms, every open).** `EditPipeline::evaluate()` does not block on a
+   GPU readback; the cost is allocating ~11 full-res intermediate textures + bind groups + submits
+   for the whole op chain at full resolution, for a transient rung-1 reveal.
 
 ## 2. Goal / non-goals
 
-- **Goal:** the UI stays interactive on image open; the full-res pyramid builds on a worker
-  thread and installs when ready. No freeze.
-- **Non-goal:** changing decode, the VT, the pipeline/shaders, `ferrolite-gpu`, or the export
-  path. No new dependencies. Not addressing any other open-time cost beyond the pyramid build.
+- **Goal:** image open stays interactive — first open and every open drop to well under ~200 ms of
+  UI-thread work; full-res sharpness streams in a moment later.
+- **Non-goals:** changing decode, shaders, the `ferrolite-gpu` executor, or the export path. No new
+  dependencies. Not deduping the two pyramids' box-downsample (a possible later optimization; both
+  move off-thread here, which already removes the freeze).
 
-## 3. Hard constraint that shapes the design
+## 3. Hard constraints
 
-- `GpuPyramidSource` is **`Send`** — its levels are `Arc<Texture>` (wgpu textures are
-  `Send + Sync`). It can be built on a worker and moved to the UI thread.
-- `TileEditPipeline` is **`!Send`** — it uses `Rc` internally (interior-mutable uniform/LUT
-  cells and shared nodes, 29 sites). It **must** be built on the UI thread.
+- `GpuPyramidSource` (levels are `Arc<Texture>`) and the VT tile source (`Arc<dyn TileSource + Send
+  + Sync>`, CPU levels) are both **`Send`** → build on a worker, deliver over the channel.
+- `EditPipeline` and `TileEditPipeline` use `Rc` internally → **`!Send`** → must be built on the UI
+  thread. (So the reveal render and the tile pipeline stay UI-thread; only the pyramids move.)
+- `VirtualTexture::sparse` and pipeline builds need the eframe render state (`ViewerPipelines`,
+  `GpuContext::from_render_state`) → UI thread.
+- Driver pipeline compilation is triggered by first *dispatch* (evaluate/produce), not by
+  `create_compute_pipeline` → prewarming must **evaluate** a dummy pipeline, not just build it.
 
-Therefore: move **only** the pyramid build off-thread. The tile-pipeline + producer build
-stays on the UI thread (it is cheap once shader modules are pre-warmed at startup — it only
-creates compute-pipeline objects, not shader compiles).
+## 4. Design — three coordinated changes (A + B + C)
 
-## 4. Design
+### A. Prewarm pipeline objects at startup (kills cause #1)
 
-### 4.1 New app event
+Add `ferrolite_pipeline::prewarm_pipelines(ctx: Arc<GpuContext>)`: build a dummy `EditPipeline` on a
+tiny (e.g. 64×64) `LinearRgbaF32` with `OpStack::default()` + identity matrix and call `evaluate()`
+once (warms every point-op / HSL / color-grade / geometry / vignette / color-matrix pipeline); then
+build a dummy `TileEditPipeline` (from a tiny `GpuPyramidSource`) and `produce_tile` one tile (warms
+the geometry-head + tiled pipelines). Call it once at startup in `FerroliteApp::new`, right after
+`prewarm_shaders`. Startup-only, on the UI thread (startup already builds `DisplayPipelines`); the
+dummy pipelines are dropped immediately — only the driver's compiled-shader cache persists.
 
-Add one variant to `AppEvent` ([`ferrolite-app/src/events.rs`](../../../ferrolite-app/src/events.rs)):
+### B. Build both pyramids off the UI thread (kills cause #2)
 
-```rust
-/// A full-res GPU pyramid finished building off-thread (tier-2 open path).
-/// Carries the ready pyramid for install on the UI thread. Handled in `app.rs`
-/// (needs GPU render state + the `Rc`-based tile pipeline), not folded by `apply`.
-PyramidReady {
-    image_id: i64,
-    pyramid: std::sync::Arc<ferrolite_pipeline::GpuPyramidSource>,
-},
-```
+- **New event:** `AppEvent::PyramidReady { image_id: i64, tile_source: Arc<dyn ferrolite_vt::TileSource + Send + Sync>, gpu_pyramid: Arc<ferrolite_pipeline::GpuPyramidSource> }`.
+- **`apply_full_decoded` (UI thread):** reveal + install the preview holder **as today but with no
+  full VT yet** (`full: None`); do NOT build `PyramidTileSource`, `GpuPyramidSource`,
+  `VirtualTexture::sparse`, `TileEditPipeline`, or the producer here, and do NOT `set_producing`.
+  Instead submit ONE Background job carrying an `Arc<GpuContext>` (from the render state) + the
+  shared full-res image `Arc` (reuse the existing `raw_preview_source` clone — no extra copy).
+- **Job (worker):** build `PyramidTileSource` (CPU) and `GpuPyramidSource` (CPU + GPU upload), send
+  `AppEvent::PyramidReady { image_id, tile_source, gpu_pyramid }`, `request_repaint`. Cancel-aware.
+- **`apply_pyramid_ready` (UI thread):** staleness guard (`image_id == current`); build the sparse
+  full `VirtualTexture` from `tile_source` (needs `ViewerPipelines` + `GpuContext`), build
+  `TileEditPipeline` from `gpu_pyramid` + the `EditTileProducer`, install `full` into the existing
+  `ViewerGpu` holder, set `v.pyramid`/`v.edit_producer`, and `set_producing(true)` +
+  `set_opstack_version`. This is the block moved out of `apply_full_decoded`, plus the sparse-VT
+  construction (also moved here since it needs the off-thread `tile_source`).
 
-### 4.2 `FullDecoded` handler (UI thread) — submit instead of build
+Splitting the full-VT install to `PyramidReady` aligns with the existing preview-shown-until-full-ready
+state machine (`full_ready`): during the ~1.2 s worker window the color-correct reveal (C) is shown;
+the full VT swaps in when it lands. Stale results (rapid navigation) are dropped by the guard + cancel.
 
-Keep everything the handler does today **except** the inline pyramid build. In its place:
+### C. Render the reveal at viewport resolution (kills cause #3)
 
-- Create the `Arc<GpuContext>` on the UI thread (`GpuContext::from_render_state(rs)` — cheap)
-  and share the full-res image as `Arc<LinearRgbaF32>` (no full-buffer copy).
-- Submit a **Background** `ferrolite-jobs` job (with cancel token) that runs
-  `GpuPyramidSource::new(&gpu, &image)` and sends `AppEvent::PyramidReady { image_id, pyramid }`
-  then `request_repaint()`.
-- Leave the sparse full VT **not producing** (do NOT call `set_producing(true)` here). During
-  the gap only the already-revealed color-correct preview shows — this preserves the existing
-  invariant that the full VT must pass through the edit producer (camera→working), never the
-  raw camera-native path reaching the working→display tail.
+The rung-1 reveal is a transient stopgap the sparse full VT replaces within a moment; at fit-zoom a
+viewport-res reveal is pixel-identical to a full-res one (extra resolution is only visible zoomed, by
+which point the VT has produced). In `apply_full_decoded`, before building the reveal `EditPipeline`,
+box-downsample the full-res `image` **once** to fit the current viewport (fall back to a modest cap,
+e.g. ≤ ~2 MP, when the viewport isn't known yet), and build/evaluate the reveal on that small source.
+The op chain then allocates viewport-res intermediates instead of ~11 full-res textures, cutting the
+reveal from ~674 ms to a small fraction. The full-res `image` `Arc` still goes to the pyramid job (B)
+unchanged.
 
-The reveal (`v.loaded = true`, `v.full_ready = true`, fit-to-dims, VT install) is unchanged —
-it happens on `FullDecoded` as today.
+## 5. Projected result
 
-### 4.3 `PyramidReady` handler (UI thread) — install + build producer
+First open ~4.9 s → **≲ ~150 ms** UI-thread; every subsequent open ~1.8 s → **≲ ~150 ms**. Full-res
+sharpness streams in ~1.2 s later off-thread (was blocking; now non-blocking).
 
-New match arm in the `app.rs` event loop:
+## 6. Testing
 
-- **Staleness guard:** if `image_id != v.image_id`, drop it (the user navigated away). The job
-  also carries a cancel token so a superseded open stops early.
-- Install `v.pyramid = Some(pyramid.clone())`.
-- Build `GpuContext::from_render_state(rs)`, `TileEditPipeline::new(...)` (threading the
-  current lens bake / mode-aware vignette pair exactly as the current handler does),
-  `EditTileProducer::new(tep)`, set vignette amount/manual, and `v.edit_producer = Some(...)`.
-- Then set the VT producing + opstack version (the `set_producing(true)` / `set_opstack_version`
-  block currently at the tail of `FullDecoded`).
+Threading/GPU/eframe glue — not meaningfully unit-testable (needs the live render state + a real
+decode; `GpuPyramidSource`/pipelines need a GPU). Automated coverage: `prewarm_pipelines` gets a
+GPU-gated integration test that it runs without panicking on a headless context; everything else is
+verified by build + clippy + the existing suite staying green. The temporary `[open-profile]`
+instrumentation is kept through implementation to re-measure, then removed. The **real gate is the
+author's visual test**: open a large RAW and confirm (a) no freeze on first open or subsequent opens,
+(b) the color-correct image shows immediately, (c) full-res resolves a beat later, (d) rapid
+navigation shows the right image at full-res (no stale pyramid install), (e) editing after open still
+updates the full-res view.
 
-This is a near-verbatim move of ~15 lines from `FullDecoded` into `PyramidReady`; the only new
-logic is the staleness guard and reading the pyramid from the event instead of building it.
+## 7. Scope summary
 
-### 4.4 Cancellation / correctness
-
-- Background priority + cancel token: navigation cancels the superseded pyramid job (same
-  convention as every other viewer job).
-- `PyramidReady` is idempotent-safe via the `image_id` guard; a late result for a
-  now-closed/other image is ignored.
-- An image opened **with** persisted edits behaves identically: its edited rung-1 *preview*
-  (built by the separate preview `EditPipeline`, unaffected) shows during the gap; full-res
-  edited tiles stream in when the pyramid lands.
-
-## 5. Testing
-
-This is eframe/GPU threading glue: it needs the live render state and a real decode, so it is
-not meaningfully unit-testable. Automated coverage is limited to what is pure — e.g. the new
-`AppEvent::PyramidReady` variant compiles into the enum and the staleness-guard predicate — but
-the **real gate is a hands-on visual test** (CLAUDE.md): open a large RAW and confirm (a) the UI
-does not freeze on open, (b) the app is immediately interactive with the color-correct preview
-shown, and (c) full-res sharpness resolves a beat later; plus edited-on-open and
-rapid-navigation (open A then immediately B — no stale pyramid installs) cases.
-
-## 6. Scope summary
-
-| Change | File |
+| Change | File(s) |
 |---|---|
-| `PyramidReady` event variant | `ferrolite-app/src/events.rs` |
-| `FullDecoded`: submit pyramid job instead of inline build; leave VT not-producing | `ferrolite-app/src/app.rs` |
-| `PyramidReady` handler: install pyramid + build tile pipeline/producer + set producing | `ferrolite-app/src/app.rs` |
-| (job body) `GpuPyramidSource::new` on a worker | `ferrolite-app/src/app.rs` (or a small `viewer` helper) |
+| A: `prewarm_pipelines` + startup call | `ferrolite-pipeline/src/lib.rs` (or `pipeline.rs`), `ferrolite-app/src/app.rs` (startup) |
+| B: `PyramidReady` event + Debug derives | `ferrolite-app/src/events.rs`, `ferrolite-pipeline/src/{gpu_pyramid,image}.rs` |
+| B: submit job; preview-only holder | `ferrolite-app/src/app.rs` (`apply_full_decoded`) |
+| B: install full VT + producer on ready | `ferrolite-app/src/app.rs` (`apply_pyramid_ready` + loop arm) |
+| C: viewport-res reveal downsample | `ferrolite-app/src/app.rs` (`apply_full_decoded`) |
+| remove temporary profiling instrumentation | `ferrolite-app/src/app.rs` |
 
-No changes to `ferrolite-pipeline`, `ferrolite-gpu`, `ferrolite-vt`, decode, shaders, or the
-export path. No new dependencies.
+No changes to decode, shaders, `ferrolite-gpu` executor, or the export path. No new dependencies.

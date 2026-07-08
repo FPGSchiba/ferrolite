@@ -37,13 +37,15 @@ pub use rcd_gpu::{demosaic_rcd_gpu, CfaInput};
 pub use serialize::{deserialize, serialize};
 pub use tile_edit::TileEditPipeline;
 // The uniform structs are exported as the documented GPU memory layout the
-// edit passes consume; the param→uniform helper fns + math are crate-internal
-// (used by `pipeline`/`uniforms`), so they are not part of the public surface.
-// Exception: `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
+// edit passes consume. Most param→uniform helpers are crate-internal; the pure
+// LUT-baking fns (`curve_lut`, `parametric_curve_lut`, `tone_curve_luts`) are
+// public per design §2.5 so the future per-mask path reuses them with no rework.
+// `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
 pub use uniforms::{
-    curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform, sharpen_halo, vignette_amount,
-    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
-    SharpenUniform, VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform, parametric_curve_lut,
+    sharpen_halo, vignette_amount, ContrastUniform, ExposureUniform, GeometryUniform, HslUniform,
+    LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform, WbUniform,
+    MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

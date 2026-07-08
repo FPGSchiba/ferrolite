@@ -71,6 +71,67 @@ pub fn curve_lut(points: &[(f32, f32)], mode: crate::op::CurveMode) -> [f32; 256
     lut
 }
 
+/// Maximum tonal shift (in display-linear `[0,1]`) applied by a single region at
+/// its extreme (region value ±1). Pragmatic constant (image science secondary,
+/// same spirit as `wb_multipliers`); a region of +1 lifts its band by ~0.25.
+pub const MAX_PARAMETRIC_SHIFT: f32 = 0.25;
+
+/// Partition-of-unity weights for the four parametric regions
+/// [shadows, darks, lights, highlights] at sample `x`, given the four region
+/// centers (strictly ascending). Weights sum to 1 everywhere and transition
+/// smoothly (smoothstep) between adjacent centers; flat past the end centers.
+fn region_weights(x: f32, centers: [f32; 4]) -> [f32; 4] {
+    let mut w = [0.0f32; 4];
+    if x <= centers[0] {
+        w[0] = 1.0;
+        return w;
+    }
+    if x >= centers[3] {
+        w[3] = 1.0;
+        return w;
+    }
+    for k in 0..3 {
+        if x >= centers[k] && x <= centers[k + 1] {
+            // smoothstep guards a degenerate (equal) center pair by clamping to 0/1.
+            let t = smoothstep(centers[k], centers[k + 1], x);
+            w[k] = 1.0 - t;
+            w[k + 1] = t;
+            return w;
+        }
+    }
+    w[3] = 1.0; // numerical fallthrough (shouldn't hit)
+    w
+}
+
+/// Bake a parametric region curve into a 256-entry display-linear LUT. Each
+/// sample is offset by the weighted sum of the four region shifts, then the
+/// result is clamped to `[0,1]` and forced monotone non-decreasing (mirroring
+/// `curve_lut`). All-zero regions → the identity ramp. Pure — no GPU.
+pub fn parametric_curve_lut(p: &crate::op::ParametricCurve) -> [f32; 256] {
+    // Sanitize splits into ascending order in [0,1] so a user-dragged
+    // out-of-order set can't produce non-ascending centers.
+    let s1 = p.shadow_split.clamp(0.0, 1.0);
+    let s2 = p.midtone_split.clamp(0.0, 1.0).max(s1);
+    let s3 = p.highlight_split.clamp(0.0, 1.0).max(s2);
+    let centers = [s1 * 0.5, (s1 + s2) * 0.5, (s2 + s3) * 0.5, (s3 + 1.0) * 0.5];
+    let region = [p.shadows, p.darks, p.lights, p.highlights];
+
+    let mut lut = [0.0f32; 256];
+    for (i, slot) in lut.iter_mut().enumerate() {
+        let x = i as f32 / 255.0;
+        let w = region_weights(x, centers);
+        let shift = MAX_PARAMETRIC_SHIFT
+            * (region[0] * w[0] + region[1] * w[1] + region[2] * w[2] + region[3] * w[3]);
+        *slot = (x + shift).clamp(0.0, 1.0);
+    }
+    for i in 1..256 {
+        if lut[i] < lut[i - 1] {
+            lut[i] = lut[i - 1];
+        }
+    }
+    lut
+}
+
 /// Piecewise-linear sample of sorted control points; flat (clamped) outside.
 fn curve_interp_linear(pts: &[(f32, f32)], x: f32) -> f32 {
     if x <= pts[0].0 {
@@ -1051,5 +1112,99 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(light_color_apply([0.3, 0.4, 0.5], &a), [0.3, 0.4, 0.5]);
+    }
+
+    #[test]
+    fn parametric_identity_is_a_linear_ramp() {
+        use crate::op::ParametricCurve;
+        let lut = parametric_curve_lut(&ParametricCurve::default());
+        for i in 0..256 {
+            assert!(
+                (lut[i] - i as f32 / 255.0).abs() < 1e-4,
+                "identity parametric must be the identity ramp at {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn parametric_is_monotone_non_decreasing() {
+        use crate::op::ParametricCurve;
+        // Opposing extreme regions — still must not dip.
+        let p = ParametricCurve {
+            shadows: 1.0,
+            darks: -1.0,
+            lights: 1.0,
+            highlights: -1.0,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        for i in 1..256 {
+            assert!(lut[i] >= lut[i - 1] - 1e-6, "dipped at {i}");
+            assert!(
+                (0.0..=1.0).contains(&lut[i]),
+                "out of range at {i}: {}",
+                lut[i]
+            );
+        }
+    }
+
+    #[test]
+    fn raising_shadows_lifts_low_end_only() {
+        use crate::op::ParametricCurve;
+        let p = ParametricCurve {
+            shadows: 1.0,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        // Low quarter is lifted above the identity ramp.
+        let x_lo = 32usize;
+        assert!(
+            lut[x_lo] > x_lo as f32 / 255.0 + 0.01,
+            "shadows lifted low end"
+        );
+        // The far highlight end is essentially untouched.
+        let x_hi = 240usize;
+        assert!(
+            (lut[x_hi] - x_hi as f32 / 255.0).abs() < 0.02,
+            "highlights end unchanged by a shadows lift"
+        );
+    }
+
+    #[test]
+    fn raising_highlights_lifts_high_end_only() {
+        use crate::op::ParametricCurve;
+        let p = ParametricCurve {
+            highlights: 1.0,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        let x_hi = 224usize;
+        assert!(
+            lut[x_hi] > x_hi as f32 / 255.0 + 0.01,
+            "highlights lifted high end"
+        );
+        let x_lo = 16usize;
+        assert!(
+            (lut[x_lo] - x_lo as f32 / 255.0).abs() < 0.02,
+            "shadows end unchanged by a highlights lift"
+        );
+    }
+
+    #[test]
+    fn out_of_order_splits_do_not_panic_and_stay_monotone() {
+        use crate::op::ParametricCurve;
+        // User dragged splits into a degenerate/reversed order.
+        let p = ParametricCurve {
+            shadows: 0.5,
+            highlights: 0.5,
+            shadow_split: 0.9,
+            midtone_split: 0.1,
+            highlight_split: 0.5,
+            ..Default::default()
+        };
+        let lut = parametric_curve_lut(&p);
+        for i in 1..256 {
+            assert!(lut[i] >= lut[i - 1] - 1e-6, "dipped at {i}");
+        }
     }
 }

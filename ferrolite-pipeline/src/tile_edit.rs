@@ -35,7 +35,10 @@ use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::{haloed_tile_origin, level_size, TileCoord, TILE_SIZE};
 use ferrolite_mask::TileTransform;
 
-use crate::dehaze::{dehaze_halo, dehaze_uniform, DehazeUniform, DEHAZE_ATMOS_NEUTRAL};
+use crate::dehaze::{dehaze_halo, DEHAZE_ATMOS_MIN, DEHAZE_ATMOS_NEUTRAL};
+use crate::dehaze_node::{
+    DehazeRecoveryNode, DehazeTransmissionNode, RecoveryParams, TransmissionParams,
+};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
@@ -72,8 +75,19 @@ pub struct TileEditPipeline {
     exposure: Rc<Cell<ExposureUniform>>,
     wb: Rc<Cell<WbUniform>>,
     contrast: Rc<Cell<ContrastUniform>>,
-    dehaze_id: NodeId,
-    dehaze: Rc<Cell<DehazeUniform>>,
+    // Halo-free dehaze (mirrors `EditPipeline`, QS-Task 5): the refined
+    // transmission map (guided filter, expensive multi-pass) and the
+    // amount/atmos recovery+blend (cheap single pass) are separate graph
+    // nodes so an amount-only edit dirties only the recovery node.
+    dehaze_transmission_id: NodeId,
+    transmission_params: Rc<Cell<TransmissionParams>>,
+    dehaze_recovery_id: NodeId,
+    recovery_params: Rc<Cell<RecoveryParams>>,
+    /// Whole-image atmospheric light (design §5.3). Unlike `EditPipeline`,
+    /// `TileEditPipeline` has no CPU source to estimate this from directly — it
+    /// starts at `DEHAZE_ATMOS_NEUTRAL` and the app hands it the real estimate
+    /// (computed once from the preview-resolution image) via `set_dehaze_atmos`
+    /// right after construction.
     dehaze_atmos: [f32; 3],
     tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl: Rc<Cell<HslUniform>>,
@@ -104,6 +118,18 @@ impl TileEditPipeline {
     ) -> Self {
         let (src_w, src_h) = source.level_size(0);
         let lc: Option<LensCorrection> = stack.lens_correction();
+        // `dehaze_halo` is now `r + 2*guided_radius(r) = 7r` (QS-Task 1, to cover
+        // the guided-filter's box-blur neighbourhood, not just the block-min
+        // patch). Haloed tile extent is `TILE_SIZE + 2*halo` (256 + 2*halo):
+        //   - Effects tab Radius slider maxes at 24 -> halo 168 -> extent 592px.
+        //   - `MAX_DEHAZE_RADIUS` (64, the hard safety cap, not UI-reachable
+        //     today) -> halo 448 -> extent 1152px.
+        // Both stay far under `device.limits().max_texture_dimension_2d`
+        // (typically >= 8192 on desktop/discrete GPUs), so no additional radius
+        // clamp is needed here. Do NOT cap the halo below the filter's true
+        // neighbourhood — that would reintroduce cross-tile seams (the guided
+        // filter's box windows would read stale/clamped edge pixels instead of
+        // the neighbour tile's real data).
         let halo = sharpen_halo(stack.sharpen())
             .max(lens_halo_px(lc.as_ref(), warp_grid))
             .max(dehaze_halo(stack.dehaze()));
@@ -188,20 +214,33 @@ impl TileEditPipeline {
             vec![wb_id],
         );
         let dehaze_atmos = DEHAZE_ATMOS_NEUTRAL;
-        let dehaze = Rc::new(Cell::new(dehaze_uniform(stack.dehaze(), dehaze_atmos)));
-        let dehaze_id = graph.add_node(
-            Box::new(PointOpNode::new(
-                ctx.clone(),
-                include_str!("shaders/dehaze.wgsl"),
-                "dehaze",
-                dehaze.clone(),
-            )),
+        let transmission_params = Rc::new(Cell::new(TransmissionParams::from_op(
+            stack.dehaze(),
+            dehaze_atmos,
+        )));
+        let dehaze_transmission_node = Rc::new(DehazeTransmissionNode::new(
+            ctx.clone(),
+            transmission_params.clone(),
+        ));
+        let dehaze_transmission_id = graph.add_node(
+            Box::new(dehaze_transmission_node.clone()),
             vec![contrast_id],
         );
+
+        let recovery_params = Rc::new(Cell::new(RecoveryParams::from_op(
+            stack.dehaze(),
+            dehaze_atmos,
+        )));
+        let dehaze_recovery_node = DehazeRecoveryNode::new(ctx.clone(), recovery_params.clone());
+        let dehaze_recovery_id = graph.add_node(
+            Box::new(dehaze_recovery_node),
+            vec![contrast_id, dehaze_transmission_id],
+        );
+
         let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_id = graph.add_node(
             Box::new(CurveNode::new(ctx.clone(), tone_curve.clone())),
-            vec![dehaze_id],
+            vec![dehaze_recovery_id],
         );
         let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
         let hsl_id = graph.add_node(
@@ -277,8 +316,10 @@ impl TileEditPipeline {
             exposure,
             wb,
             contrast,
-            dehaze_id,
-            dehaze,
+            dehaze_transmission_id,
+            transmission_params,
+            dehaze_recovery_id,
+            recovery_params,
             dehaze_atmos,
             tone_curve,
             hsl,
@@ -317,8 +358,21 @@ impl TileEditPipeline {
         self.wb
             .set(crate::uniforms::wb_uniform(stack.white_balance()));
         self.contrast.set(contrast_uniform(stack.contrast()));
-        self.dehaze
-            .set(dehaze_uniform(stack.dehaze(), self.dehaze_atmos));
+        // Route `radius`/`atmos`/active to the transmission node (dirtying it
+        // only when one of those actually changed) and `amount`/`atmos` to the
+        // recovery node, independently — mirrors `EditPipeline::set_stack`
+        // (QS-Task 4/5): an amount-only change must NOT dirty (recompute) the
+        // expensive transmission node.
+        let t = TransmissionParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        if t != self.transmission_params.get() {
+            self.transmission_params.set(t);
+            self.graph.mark_dirty(self.dehaze_transmission_id);
+        }
+        let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        if r != self.recovery_params.get() {
+            self.recovery_params.set(r);
+            self.graph.mark_dirty(self.dehaze_recovery_id);
+        }
         self.tone_curve
             .set(tone_curve_luts(stack.tone_curve().as_ref()));
         self.hsl.set(hsl_uniform(stack.hsl()));
@@ -402,18 +456,29 @@ impl TileEditPipeline {
     pub fn set_dehaze_atmos(&mut self, atmos: [f32; 3]) {
         if atmos != self.dehaze_atmos {
             self.dehaze_atmos = atmos;
-            // Re-derive with the amount + radius currently baked into the uniform.
-            let cur = self.dehaze.get();
-            let op = if cur.amount != 0.0 {
-                Some(crate::op::Dehaze {
-                    amount: cur.amount,
-                    radius: cur.radius.max(0) as u32,
-                })
-            } else {
-                None
+            let floored = [
+                atmos[0].max(DEHAZE_ATMOS_MIN),
+                atmos[1].max(DEHAZE_ATMOS_MIN),
+                atmos[2].max(DEHAZE_ATMOS_MIN),
+                0.0,
+            ];
+            // Update `atmos` in BOTH params, preserving the radius/active/amount
+            // currently baked into each: the recovery pass also needs `A` for its
+            // `(I-A)/t + A` recovery, not just the transmission pass's normalized
+            // dark channel.
+            let t = TransmissionParams {
+                atmos: floored,
+                ..self.transmission_params.get()
             };
-            self.dehaze.set(dehaze_uniform(op, atmos));
-            self.graph.mark_dirty(self.dehaze_id);
+            self.transmission_params.set(t);
+            self.graph.mark_dirty(self.dehaze_transmission_id);
+
+            let r = RecoveryParams {
+                atmos: floored,
+                ..self.recovery_params.get()
+            };
+            self.recovery_params.set(r);
+            self.graph.mark_dirty(self.dehaze_recovery_id);
         }
     }
 

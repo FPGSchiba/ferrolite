@@ -1,8 +1,9 @@
-//! Pure Dark Channel Prior (He et al.) dehaze math — no GPU. The GPU pass
-//! (`shaders/dehaze.wgsl`) mirrors `dehaze_recover` exactly; the atmospheric
-//! light `A` is a whole-image estimate computed once (design §5.3) and handed to
-//! every tile as a uniform. `dehaze_recover` is the reusable transform the future
-//! per-mask path (design §7) will call unchanged (design §2.5).
+//! Pure Dark Channel Prior (He et al.) dehaze math — no GPU. The GPU passes
+//! (`dehaze_node.rs`'s `DehazeTransmissionNode` + `DehazeRecoveryNode`) mirror
+//! `transmission_map`/`dehaze_recover` exactly; the atmospheric light `A` is a
+//! whole-image estimate computed once (design §5.3) and handed to every tile as
+//! a uniform. `dehaze_recover` is the reusable transform the future per-mask
+//! path (design §7) will call unchanged (design §2.5).
 
 use crate::op::Dehaze;
 use ferrolite_image::LinearRgbaF32;
@@ -18,7 +19,7 @@ pub const MAX_DEHAZE_RADIUS: u32 = 64;
 pub(crate) const DEHAZE_OMEGA: f32 = 0.95;
 /// Transmission floor t₀ (design §5.2, step 4): avoids divide-by-~0 noise blow-up.
 /// `pub(crate)` (not just module-private): `DehazeRecoveryNode`'s `RecoveryParams`
-/// (QS-Task 4) seeds this same constant, mirroring `dehaze_uniform` below.
+/// (QS-Task 4) seeds this same constant.
 pub(crate) const DEHAZE_T0: f32 = 0.1;
 /// The identity-safe atmospheric light used before a real estimate is available
 /// (e.g. `TileEditPipeline` before `set_dehaze_atmos`, or a no-dehaze export).
@@ -27,8 +28,7 @@ pub(crate) const DEHAZE_T0: f32 = 0.1;
 pub const DEHAZE_ATMOS_NEUTRAL: [f32; 3] = [1.0, 1.0, 1.0];
 /// Floor each `A` channel to this to keep the `I/A` and `/max(t,t0)` divisions finite.
 /// `pub(crate)` (not just module-private): `DehazeTransmissionNode`/`DehazeRecoveryNode`'s
-/// `TransmissionParams`/`RecoveryParams` (QS-Task 4) floor the same way, mirroring
-/// `dehaze_uniform` below.
+/// `TransmissionParams`/`RecoveryParams` (QS-Task 4) floor the same way.
 pub(crate) const DEHAZE_ATMOS_MIN: f32 = 1e-3;
 /// Cap on pixels scanned by `estimate_atmospheric_light` (it subsamples above
 /// this). Bounds the CPU cost to sub-millisecond regardless of image size so it
@@ -251,43 +251,6 @@ pub fn dehaze_halo(op: Option<Dehaze>) -> u32 {
     }
 }
 
-/// GPU uniform for `dehaze.wgsl`. `#[repr(C)]`, 16-byte aligned; field order +
-/// padding MIRROR the WGSL `struct P` exactly. `atmos` is `[r, g, b, pad]`.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct DehazeUniform {
-    pub amount: f32,
-    pub radius: i32,
-    pub omega: f32,
-    pub t0: f32,
-    pub atmos: [f32; 4],
-}
-
-/// Build the dehaze uniform from the op + the whole-image atmospheric light.
-/// Absent/identity op → `amount 0`, `radius 0` (the shader takes its passthrough
-/// branch). `atmos` is floored so the shader's `I/A` division is finite.
-pub(crate) fn dehaze_uniform(op: Option<Dehaze>, atmos: [f32; 3]) -> DehazeUniform {
-    let (amount, r) = op.map(|d| (d.amount, d.radius)).unwrap_or((0.0, 0));
-    // A no-op amount contributes no radius (shader passthrough); otherwise clamp.
-    let radius = if amount != 0.0 {
-        r.min(MAX_DEHAZE_RADIUS) as i32
-    } else {
-        0
-    };
-    DehazeUniform {
-        amount,
-        radius,
-        omega: DEHAZE_OMEGA,
-        t0: DEHAZE_T0,
-        atmos: [
-            atmos[0].max(DEHAZE_ATMOS_MIN),
-            atmos[1].max(DEHAZE_ATMOS_MIN),
-            atmos[2].max(DEHAZE_ATMOS_MIN),
-            0.0,
-        ],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,35 +380,6 @@ mod tests {
             })),
             MAX_DEHAZE_RADIUS + 2 * guided_radius(MAX_DEHAZE_RADIUS)
         );
-    }
-
-    #[test]
-    fn dehaze_uniform_identity_and_layout() {
-        let u = dehaze_uniform(None, DEHAZE_ATMOS_NEUTRAL);
-        assert_eq!(u.amount, 0.0);
-        assert_eq!(u.radius, 0);
-        // 32 bytes, 16-aligned (mirrors the WGSL `struct P`).
-        assert_eq!(std::mem::size_of::<DehazeUniform>(), 32);
-        assert_eq!(std::mem::size_of::<DehazeUniform>() % 16, 0);
-        // Present op carries its OWN radius (clamped) + floored atmosphere.
-        let u2 = dehaze_uniform(
-            Some(Dehaze {
-                amount: 0.5,
-                radius: 12,
-            }),
-            [0.0, 0.5, 1.0],
-        );
-        assert_eq!(u2.radius, 12);
-        assert!(u2.atmos[0] >= DEHAZE_ATMOS_MIN);
-        assert_eq!(u2.atmos[1], 0.5);
-        let u3 = dehaze_uniform(
-            Some(Dehaze {
-                amount: 0.5,
-                radius: u32::MAX,
-            }),
-            DEHAZE_ATMOS_NEUTRAL,
-        );
-        assert_eq!(u3.radius, MAX_DEHAZE_RADIUS as i32);
     }
 
     #[test]

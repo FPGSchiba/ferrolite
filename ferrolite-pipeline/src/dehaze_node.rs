@@ -29,9 +29,9 @@
 //! wgpu's automatic resource tracking inserts the necessary barriers between
 //! passes that read a plane a previous pass wrote (or reused as scratch).
 //!
-//! Wired into `EditPipeline` (QS-Task 4; whole-image preview tier) between
-//! `contrast` and `tone_curve`. `TileEditPipeline` (QS-Task 5) still uses the
-//! old single-pass `dehaze.wgsl` `PointOpNode` for now.
+//! Wired into `EditPipeline` (QS-Task 4; whole-image preview tier) AND
+//! `TileEditPipeline` (QS-Task 5; tiled full-res tier), both between `contrast`
+//! and `tone_curve` — the old single-pass `dehaze.wgsl` `PointOpNode` is gone.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

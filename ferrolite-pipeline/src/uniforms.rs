@@ -806,6 +806,42 @@ pub fn color_grade_px(rgb: [f32; 3], cg: &crate::op::ColorGrade) -> [f32; 3] {
     out
 }
 
+/// GPU uniform for `color_grade.wgsl`. `#[repr(C)]`, 16-byte aligned; field order
+/// MIRRORS the WGSL `struct P`. Each wheel row is `[tint_r, tint_g, tint_b, lum]`
+/// with tint pre-scaled by `GRADE_TINT_STRENGTH` and lum by `GRADE_LUM_STRENGTH`,
+/// so the shader adds them directly (no magic constants in WGSL). `params` =
+/// `[blending, balance, 0, 0]`.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ColorGradeUniform {
+    pub shadows: [f32; 4],
+    pub midtones: [f32; 4],
+    pub highlights: [f32; 4],
+    pub global: [f32; 4],
+    pub params: [f32; 4],
+}
+
+#[allow(dead_code)]
+pub fn color_grade_uniform(op: Option<crate::op::ColorGrade>) -> ColorGradeUniform {
+    let cg = op.unwrap_or_default();
+    let pack = |w: &crate::op::GradeWheel| {
+        let t = grade_tint(w.hue, w.sat);
+        [
+            t[0] * GRADE_TINT_STRENGTH,
+            t[1] * GRADE_TINT_STRENGTH,
+            t[2] * GRADE_TINT_STRENGTH,
+            w.lum * GRADE_LUM_STRENGTH,
+        ]
+    };
+    ColorGradeUniform {
+        shadows: pack(&cg.shadows),
+        midtones: pack(&cg.midtones),
+        highlights: pack(&cg.highlights),
+        global: pack(&cg.global),
+        params: [cg.blending, cg.balance, 0.0, 0.0],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1539,5 +1575,35 @@ mod tests {
         let c = color_grade_px([0.4, 0.4, 0.4], &cg);
         assert!(c[0] > 0.4 && (c[0] - c[1]).abs() < 1e-6 && (c[1] - c[2]).abs() < 1e-6,
             "uniform brighten, no tint: {c:?}");
+    }
+
+    #[test]
+    fn color_grade_uniform_identity_is_all_zero_tints() {
+        let u = color_grade_uniform(None);
+        assert_eq!(u.shadows, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.midtones, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.highlights, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.global, [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(u.params, [0.5, 0.0, 0.0, 0.0]); // default blending/balance
+        assert_eq!(std::mem::size_of::<ColorGradeUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn color_grade_uniform_prescales_tint_and_lum() {
+        use crate::op::{ColorGrade, GradeWheel};
+        let cg = ColorGrade {
+            shadows: GradeWheel { hue: 240.0, sat: 1.0, lum: 0.4 },
+            blending: 0.7,
+            balance: -0.2,
+            ..Default::default()
+        };
+        let u = color_grade_uniform(Some(cg));
+        // Tint row = grade_tint(...) * GRADE_TINT_STRENGTH; lum = 0.4 * GRADE_LUM_STRENGTH.
+        let t = grade_tint(240.0, 1.0);
+        assert!((u.shadows[0] - t[0] * GRADE_TINT_STRENGTH).abs() < 1e-6);
+        assert!((u.shadows[1] - t[1] * GRADE_TINT_STRENGTH).abs() < 1e-6);
+        assert!((u.shadows[2] - t[2] * GRADE_TINT_STRENGTH).abs() < 1e-6);
+        assert!((u.shadows[3] - 0.4 * GRADE_LUM_STRENGTH).abs() < 1e-6);
+        assert_eq!(u.params, [0.7, -0.2, 0.0, 0.0]);
     }
 }

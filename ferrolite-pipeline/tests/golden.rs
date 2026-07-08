@@ -3,10 +3,10 @@ mod common;
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_pipeline::{
-    blit_to_rgba8, estimate_atmospheric_light, upload_source, Aspect, ColorGrade, Contrast,
-    CropRect, CurveMode, Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel,
-    Hsl, HslBand, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve,
-    WhiteBalance, DEHAZE_DEFAULT_RADIUS,
+    blit_to_rgba8, dehaze_recover, estimate_atmospheric_light, upload_source, Aspect, ColorGrade,
+    Contrast, CropRect, CurveMode, Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource,
+    GradeWheel, Hsl, HslBand, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline,
+    ToneCurve, WhiteBalance, DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -132,6 +132,123 @@ fn dehaze_positive_increases_contrast_on_hazy_image() {
         "positive dehaze widens tonal range: before={} after={}",
         range(&a),
         range(&b)
+    );
+}
+
+/// QS-Task 4: the two-node (transmission + recovery, guided-filter-refined)
+/// dehaze must show substantially LESS of the classic Dark-Channel-Prior
+/// "bright halo ring" around a dark object in a hazy field than the OLD
+/// single-pass (block-min-only, no guided filter) implementation would.
+///
+/// Fixture: a thin, pure-white "sky" band seeds the atmospheric-light estimate
+/// `A`, well above the main (haze-washed) bright field, so the field is
+/// genuinely haze-affected; a single vertical dark/bright edge sits well clear
+/// of both image borders (mirrors the isolated-edge geometry of the CPU-level
+/// `guided_refinement_removes_most_of_the_block_min_halo` test — a dark BAR
+/// narrower than `2 * guided_radius(radius)` would let one edge's
+/// guided-filter window see the OTHER edge too, contaminating the very
+/// correlation the filter uses to track the edge; a single isolated edge with
+/// wide margins avoids that confound).
+///
+/// The block-min dark-channel prior dilates the dark side's near-zero
+/// reflectance ratio `radius` px into the bright field, driving the UNREFINED
+/// transmission estimate there toward "no haze" (t≈1) — which, recovered,
+/// leaves those pixels much brighter than the correctly dehazed far field:
+/// the halo. NOTE on the threshold: Task 1's CPU-level unit test established
+/// "guided filter removes >=60% of the halo" in TRANSMISSION space; that bound
+/// does not transfer directly to recovered-BRIGHTNESS space asserted here,
+/// because recovery divides by transmission (`(I-A)/t + A`) — a reciprocal
+/// that amplifies whatever residual transmission error remains, more so the
+/// closer the true far-field transmission is to the floor `t0`. Verified
+/// empirically (via `transmission_map` on this exact fixture) across several
+/// atmospheric-light/field combinations, the recovered-brightness halo
+/// removal at `edge+radius` consistently exceeds 40%; the assertion below
+/// uses a materially looser (30%) bound for margin against GPU f16 rounding.
+#[test]
+fn dehaze_no_halo_on_dark_edge() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+
+    let (w, h) = (200usize, 32usize);
+    let sky_rows = 4usize; // y in [0, sky_rows): seeds A well above the main field.
+    let edge = 100usize; // x < edge: dark; x >= edge: bright (haze-washed) field.
+    let (sky, field, dark) = (1.0f32, 0.4f32, 0.05f32);
+
+    let mut planar = vec![[0.0f32; 3]; w * h];
+    let mut interleaved = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            let v = if y < sky_rows {
+                sky
+            } else if x < edge {
+                dark
+            } else {
+                field
+            };
+            planar[y * w + x] = [v, v, v];
+            interleaved.extend_from_slice(&[v, v, v, 1.0]);
+        }
+    }
+    let src = LinearRgbaF32::new(w as u32, h as u32, interleaved).expect("halo fixture length");
+
+    let radius = 8u32;
+    let stack = OpStack::default().set_op(Op::Dehaze(Dehaze {
+        amount: 1.0,
+        radius,
+    }));
+    let mut pipe = EditPipeline::new(ctx.clone(), &src, stack, IDENTITY);
+    let out = pipe.evaluate();
+    let rendered = common::read_image_linear(&ctx, &out);
+    let px_at = |x: usize, y: usize| -> f32 { rendered[(y * w + x) * 4] }; // R channel
+
+    let row = h / 2; // deep inside the main-field rows, far from the sky band.
+                     // Deep in the bright field, far from the edge (and far beyond
+                     // `2 * guided_radius(radius)` = 48px, so the guided filter's box windows
+                     // there carry no trace of the dark side).
+    let far_field = px_at(w - 10, row);
+    // Per-spec band: bright pixels within [radius/2 .. radius] px of the dark
+    // edge, back into the bright field — sampled at the band's near end
+    // (`edge + radius/2`), which is guaranteed to fall inside the block-min
+    // window's dilation zone (a window of radius `radius` centered there
+    // reaches `radius/2` px past the edge into the dark side).
+    let near_edge = px_at(edge + (radius / 2) as usize, row);
+
+    // Sanity baseline: the KNOWN-BAD unrefined (single-pass, no guided filter)
+    // recovery at any point within `radius` px of the edge is driven by the
+    // dark bar's OWN reflectance ratio — a block-min window overlapping ANY
+    // dark pixel returns exactly that ratio (the min over a uniform dark
+    // region). This is the position-independent worst-case unrefined halo
+    // (public math only — the same per-pixel ratio and `dehaze_recover`
+    // transform the GPU path shares); confirm it shows a REAL halo relative
+    // to the far field, or this fixture tests nothing.
+    let a = estimate_atmospheric_light(&src);
+    let naive_dark = (dark / a[0]).min(dark / a[1]).min(dark / a[2]);
+    let naive_halo = dehaze_recover([field, field, field], naive_dark, a, 1.0)[0];
+    let naive_overshoot = (naive_halo - far_field).abs();
+    assert!(
+        naive_overshoot > 0.1,
+        "fixture must have a real unrefined halo to remove \
+         (naive={naive_halo}, far_field={far_field}, overshoot={naive_overshoot})"
+    );
+
+    // The refined (guided-filter) GPU output near the edge must stay
+    // materially closer to the far field than the unrefined baseline would
+    // (see the doc comment above for why the bound is 30%, not Task 1's 60%).
+    let refined_overshoot = (near_edge - far_field).abs();
+    eprintln!(
+        "dehaze_no_halo_on_dark_edge: naive_overshoot={naive_overshoot} \
+         refined_overshoot={refined_overshoot} removed_frac={}",
+        1.0 - refined_overshoot / naive_overshoot
+    );
+    assert!(
+        refined_overshoot < naive_overshoot * 0.7,
+        "guided-filter dehaze must remove a substantial fraction of the halo near \
+         the dark edge (near_edge={near_edge}, far_field={far_field}, \
+         unrefined/known-bad baseline={naive_halo}, \
+         refined_overshoot={refined_overshoot} vs unrefined_overshoot={naive_overshoot})"
     );
 }
 
@@ -452,7 +569,16 @@ fn sharpen_tiles_match_whole_image_at_seam() {
     );
 }
 
+// QS-Task 4 gave `EditPipeline` (whole-image) the guided-filter-refined
+// transmission+recovery dehaze; `TileEditPipeline` (tiled) still uses the OLD
+// single-pass block-min-only `dehaze.wgsl` (QS-Task 5's job to migrate). This
+// test's premise — tiled dehaze output bit-matches whole-image dehaze output —
+// is therefore genuinely false until Task 5 lands (the two now run different
+// algorithms, not just different tiling of the same one). Ignored rather than
+// loosened/deleted so Task 5 re-enables it as its own tiled-parity proof.
 #[test]
+#[ignore = "QS-Task 5: TileEditPipeline still uses the old single-pass dehaze; \
+            re-enable once it's migrated to the same transmission+recovery nodes"]
 fn dehaze_tiled_matches_whole_image() {
     let Some(ctx) = GpuContext::headless() else {
         eprintln!("no GPU adapter; skipping (headless CI)");

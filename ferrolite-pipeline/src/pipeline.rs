@@ -8,7 +8,10 @@ use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::LinearRgbaF32;
 use wgpu::util::DeviceExt;
 
-use crate::dehaze::{dehaze_uniform, estimate_atmospheric_light, DehazeUniform};
+use crate::dehaze::estimate_atmospheric_light;
+use crate::dehaze_node::{
+    DehazeRecoveryNode, DehazeTransmissionNode, RecoveryParams, TransmissionParams,
+};
 use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::LocalAdjustments;
@@ -40,8 +43,16 @@ pub struct EditPipeline {
     wb: Rc<Cell<WbUniform>>,
     contrast_id: NodeId,
     contrast: Rc<Cell<ContrastUniform>>,
-    dehaze_id: NodeId,
-    dehaze: Rc<Cell<DehazeUniform>>,
+    dehaze_transmission_id: NodeId,
+    transmission_params: Rc<Cell<TransmissionParams>>,
+    // Handle to the transmission node, retained only for the
+    // `transmission_rebuild_count` test hook (QS-Task 4's amount-drag-caches-
+    // transmission proof) — the graph owns its own `Rc` clone for evaluation.
+    // Mirrors `local_node`'s retention rationale.
+    #[cfg_attr(not(test), allow(dead_code))]
+    dehaze_transmission_node: Rc<DehazeTransmissionNode>,
+    dehaze_recovery_id: NodeId,
+    recovery_params: Rc<Cell<RecoveryParams>>,
     /// Whole-image atmospheric light, estimated once from the CPU source at
     /// construction (design §5.3) and reused by every `set_stack` (it is an image
     /// property, independent of the edit stack).
@@ -127,19 +138,39 @@ impl EditPipeline {
         );
         let contrast_id = graph.add_node(Box::new(contrast_node), vec![wb_id]);
 
+        // Halo-free dehaze (QS-Task 4): the refined transmission map (guided
+        // filter, expensive multi-pass) and the amount/atmos recovery+blend
+        // (cheap single pass) are separate graph nodes so an amount-only drag
+        // dirties only the recovery node — the transmission node's dirty-cache
+        // means it is NOT recomputed (see `transmission_rebuild_count`/
+        // `amount_change_does_not_recompute_transmission`).
         let dehaze_atmos = estimate_atmospheric_light(source);
-        let dehaze = Rc::new(Cell::new(dehaze_uniform(stack.dehaze(), dehaze_atmos)));
-        let dehaze_node = PointOpNode::new(
+        let transmission_params = Rc::new(Cell::new(TransmissionParams::from_op(
+            stack.dehaze(),
+            dehaze_atmos,
+        )));
+        let dehaze_transmission_node = Rc::new(DehazeTransmissionNode::new(
             ctx.clone(),
-            include_str!("shaders/dehaze.wgsl"),
-            "dehaze",
-            dehaze.clone(),
+            transmission_params.clone(),
+        ));
+        let dehaze_transmission_id = graph.add_node(
+            Box::new(dehaze_transmission_node.clone()),
+            vec![contrast_id],
         );
-        let dehaze_id = graph.add_node(Box::new(dehaze_node), vec![contrast_id]);
+
+        let recovery_params = Rc::new(Cell::new(RecoveryParams::from_op(
+            stack.dehaze(),
+            dehaze_atmos,
+        )));
+        let dehaze_recovery_node = DehazeRecoveryNode::new(ctx.clone(), recovery_params.clone());
+        let dehaze_recovery_id = graph.add_node(
+            Box::new(dehaze_recovery_node),
+            vec![contrast_id, dehaze_transmission_id],
+        );
 
         let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
-        let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![dehaze_id]);
+        let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![dehaze_recovery_id]);
 
         let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
         let hsl_node = PointOpNode::new(
@@ -192,8 +223,11 @@ impl EditPipeline {
             wb,
             contrast_id,
             contrast,
-            dehaze_id,
-            dehaze,
+            dehaze_transmission_id,
+            transmission_params,
+            dehaze_transmission_node,
+            dehaze_recovery_id,
+            recovery_params,
             dehaze_atmos,
             tone_curve_id,
             tone_curve,
@@ -211,7 +245,7 @@ impl EditPipeline {
             geometry_node,
             src_w,
             src_h,
-            node_count: 13,
+            node_count: 14,
             stack,
         }
     }
@@ -292,10 +326,20 @@ impl EditPipeline {
             self.contrast.set(c);
             self.graph.mark_dirty(self.contrast_id);
         }
-        let d = dehaze_uniform(stack.dehaze(), self.dehaze_atmos);
-        if d != self.dehaze.get() {
-            self.dehaze.set(d);
-            self.graph.mark_dirty(self.dehaze_id);
+        // Route `radius`/`atmos` to the transmission node (dirtying it only when
+        // one of those actually changed) and `amount`/`atmos` to the recovery
+        // node, independently — an amount-only change leaves `t` unchanged, so
+        // the (expensive) transmission node is NOT dirtied; the graph still
+        // re-runs recovery (its downstream consumer) because `r` changed.
+        let t = TransmissionParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        if t != self.transmission_params.get() {
+            self.transmission_params.set(t);
+            self.graph.mark_dirty(self.dehaze_transmission_id);
+        }
+        let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        if r != self.recovery_params.get() {
+            self.recovery_params.set(r);
+            self.graph.mark_dirty(self.dehaze_recovery_id);
         }
         let luts = tone_curve_luts(stack.tone_curve().as_ref());
         if luts != self.tone_curve.get() {
@@ -364,6 +408,15 @@ impl EditPipeline {
     #[cfg(test)]
     pub(crate) fn local_rebuild_count(&self) -> u32 {
         self.local_node.rebuild_count()
+    }
+
+    /// Number of times `DehazeTransmissionNode` has run its full multi-pass
+    /// guided-filter evaluate (test hook; QS-Task 4): guards that an
+    /// amount-only `set_stack` reuses the cached transmission map instead of
+    /// recomputing it (only the cheap recovery node re-runs).
+    #[cfg(test)]
+    pub(crate) fn transmission_rebuild_count(&self) -> u32 {
+        self.dehaze_transmission_node.transmission_rebuild_count()
     }
 
     /// Evaluate and read back to an sRGB Rgba8 buffer (golden tests).
@@ -602,6 +655,52 @@ mod edit_pipeline_tests {
             ep.local_rebuild_count(),
             2,
             "a mask-def change recomposites"
+        );
+    }
+
+    /// QS-Task 4: an `amount`-only dehaze edit must reuse the cached refined
+    /// transmission map (the expensive multi-pass guided filter) and re-run
+    /// only the cheap recovery/blend node; a `radius` change must recompute the
+    /// transmission map. This is the "amount drag skips transmission" proof
+    /// that motivated splitting the old single-pass dehaze `PointOpNode` into
+    /// `DehazeTransmissionNode` + `DehazeRecoveryNode`.
+    #[test]
+    fn amount_change_does_not_recompute_transmission() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = LinearRgbaF32::new(16, 16, vec![0.6; 16 * 16 * 4]).unwrap();
+
+        let dehaze_stack = |amount: f32, radius: u32| {
+            OpStack::default().set_op(Op::Dehaze(crate::op::Dehaze { amount, radius }))
+        };
+
+        let mut ep = EditPipeline::new(ctx, &src, dehaze_stack(0.5, 8), IDENTITY);
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            1,
+            "first evaluate computes the transmission map once"
+        );
+
+        // Amount-only change (same radius): transmission must be REUSED.
+        ep.set_stack(dehaze_stack(0.9, 8));
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            1,
+            "amount-only change must NOT recompute the transmission map"
+        );
+
+        // Radius change: transmission must recompute.
+        ep.set_stack(dehaze_stack(0.9, 12));
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            2,
+            "a radius change must recompute the transmission map"
         );
     }
 }

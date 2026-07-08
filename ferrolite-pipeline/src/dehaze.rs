@@ -17,7 +17,9 @@ pub const MAX_DEHAZE_RADIUS: u32 = 64;
 /// Haze-retention factor ω (design §5.2, step 3): keep a little haze for realism.
 pub(crate) const DEHAZE_OMEGA: f32 = 0.95;
 /// Transmission floor t₀ (design §5.2, step 4): avoids divide-by-~0 noise blow-up.
-const DEHAZE_T0: f32 = 0.1;
+/// `pub(crate)` (not just module-private): `DehazeRecoveryNode`'s `RecoveryParams`
+/// (QS-Task 4) seeds this same constant, mirroring `dehaze_uniform` below.
+pub(crate) const DEHAZE_T0: f32 = 0.1;
 /// The identity-safe atmospheric light used before a real estimate is available
 /// (e.g. `TileEditPipeline` before `set_dehaze_atmos`, or a no-dehaze export).
 /// With `amount == 0` the recovery is identity regardless of `A`, so this is only

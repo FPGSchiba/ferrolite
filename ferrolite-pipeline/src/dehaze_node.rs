@@ -29,10 +29,9 @@
 //! wgpu's automatic resource tracking inserts the necessary barriers between
 //! passes that read a plane a previous pass wrote (or reused as scratch).
 //!
-//! Not yet wired into `EditPipeline`/`TileEditPipeline` (a later task in the
-//! dehaze quality/speed plan does that) — only this file's own golden test
-//! constructs `DehazeTransmissionNode` for now.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Wired into `EditPipeline` (QS-Task 4; whole-image preview tier) between
+//! `contrast` and `tone_curve`. `TileEditPipeline` (QS-Task 5) still uses the
+//! old single-pass `dehaze.wgsl` `PointOpNode` for now.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -40,8 +39,9 @@ use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
 
-use crate::dehaze::guided_radius;
+use crate::dehaze::{guided_radius, DEHAZE_GUIDED_EPS, DEHAZE_OMEGA, DEHAZE_T0};
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
+use crate::op::Dehaze;
 use crate::MAX_DEHAZE_RADIUS;
 
 /// Single-channel intermediate plane format used by every transmission pass.
@@ -83,12 +83,28 @@ const _: () = assert!(std::mem::size_of::<PassUniform>().is_multiple_of(16));
 /// (already floored to `DEHAZE_ATMOS_MIN` by the caller, mirroring
 /// `dehaze_uniform`). `omega`/`eps` mirror `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct TransmissionParams {
     pub radius: i32,
     pub atmos: [f32; 4],
     pub omega: f32,
     pub eps: f32,
+}
+
+impl TransmissionParams {
+    /// Seed from the op's `radius` and the whole-image atmospheric light
+    /// (QS-Task 4). Independent of `amount` — `EditPipeline::set_stack` only
+    /// rebuilds these (and dirties `DehazeTransmissionNode`) when `radius` or
+    /// `atmos` actually changes, so an amount-only drag never re-seeds this.
+    pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
+        let radius = op.map(|d| d.radius).unwrap_or(0) as i32;
+        Self {
+            radius,
+            atmos: [atmos[0], atmos[1], atmos[2], 0.0],
+            omega: DEHAZE_OMEGA,
+            eps: DEHAZE_GUIDED_EPS,
+        }
+    }
 }
 
 /// Public params for `DehazeRecoveryNode` (QS-Task 3), read from a shared `Cell`
@@ -97,7 +113,7 @@ pub(crate) struct TransmissionParams {
 /// floor (DEHAZE_T0), `atmos` is `[r,g,b,pad]`. Field order MIRRORS the WGSL
 /// `struct P` in `dehaze_recovery.wgsl` exactly (both must be 16-byte aligned).
 #[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct RecoveryParams {
     pub amount: f32,
     pub t0: f32,
@@ -108,6 +124,23 @@ pub(crate) struct RecoveryParams {
 
 const _: () = assert!(std::mem::size_of::<RecoveryParams>() == 32);
 const _: () = assert!(std::mem::size_of::<RecoveryParams>().is_multiple_of(16));
+
+impl RecoveryParams {
+    /// Seed from the op's `amount` and the whole-image atmospheric light
+    /// (QS-Task 4). Independent of `radius` — an amount-only drag re-seeds
+    /// only these params (and dirties `DehazeRecoveryNode`), leaving the
+    /// cached `DehazeTransmissionNode` output untouched.
+    pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
+        let amount = op.map(|d| d.amount).unwrap_or(0.0);
+        Self {
+            amount,
+            t0: DEHAZE_T0,
+            pad0: 0.0,
+            pad1: 0.0,
+            atmos: [atmos[0], atmos[1], atmos[2], 0.0],
+        }
+    }
+}
 
 /// All fifteen `R32Float` intermediate planes, keyed on `(w, h)` and
 /// reallocated together when the input dims change (mirrors

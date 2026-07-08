@@ -2,6 +2,7 @@
 //! and a retained GPU pipeline built on `ferrolite-gpu`'s generic executor; WGSL
 //! compute passes implement the edits. Photo tier (GPL-OK).
 mod coord;
+mod dehaze;
 mod gpu_pyramid;
 mod image;
 mod lens_bake;
@@ -18,6 +19,10 @@ mod tile_edit;
 mod uniforms;
 
 pub use coord::{display_to_source, source_to_display};
+pub use dehaze::{
+    dehaze_halo, dehaze_recover, estimate_atmospheric_light, DehazeUniform, DEHAZE_ATMOS_NEUTRAL,
+    DEHAZE_DEFAULT_RADIUS, MAX_DEHAZE_RADIUS,
+};
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
 pub use lens_bake::bake_products;

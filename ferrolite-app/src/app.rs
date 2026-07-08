@@ -853,6 +853,7 @@ impl FerroliteApp {
                     v.raw_preview_source = Some(std::sync::Arc::clone(src));
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let __prof_reveal = std::time::Instant::now();
                     let mut ep = ferrolite_pipeline::EditPipeline::new(
                         ctx_arc.clone(),
                         src,
@@ -884,6 +885,10 @@ impl FerroliteApp {
                     ep.set_vig_amount(vig_amount);
                     ep.set_vig_manual(vig_manual);
                     let out = ep.evaluate();
+                    eprintln!(
+                        "[open-profile] reveal EditPipeline::new + evaluate: {} ms",
+                        __prof_reveal.elapsed().as_millis()
+                    );
                     let tex = out.texture.clone();
                     let dims = (out.width, out.height);
                     v.preview_edit = Some(ep);
@@ -895,8 +900,13 @@ impl FerroliteApp {
             None
         };
 
+        let __prof_ptsrc = std::time::Instant::now();
         let source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
             std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(image.clone()));
+        eprintln!(
+            "[open-profile] PyramidTileSource::new (CPU pyramid + full-res clone): {} ms",
+            __prof_ptsrc.elapsed().as_millis()
+        );
         // Fetch the pre-warmed pipelines, build the sparse full VT (and, for RAW,
         // the rung-1 preview VT wrapping the reveal render) while borrowing them,
         // then release the read lock before the write scope that installs them.
@@ -1006,8 +1016,13 @@ impl FerroliteApp {
                     // Build the GPU-resident pyramid UNCONDITIONALLY so the
                     // full-res edit producer can be created on the first edit even
                     // for an image that opened unedited (identity stack).
+                    let __prof_gpupyr = std::time::Instant::now();
                     let pyramid =
                         std::sync::Arc::new(ferrolite_pipeline::GpuPyramidSource::new(&gpu, image));
+                    eprintln!(
+                        "[open-profile] GpuPyramidSource::new (CPU pyramid + GPU upload): {} ms",
+                        __prof_gpupyr.elapsed().as_millis()
+                    );
                     v.pyramid = Some(std::sync::Arc::clone(&pyramid));
                     // Always attach the full-res producer so the sparse VT tiles
                     // pass through camera→working (the raw camera-native CPU path
@@ -1024,6 +1039,7 @@ impl FerroliteApp {
                         v.op_stack.lens_correction().as_ref(),
                         v.lens_vignette.is_some(),
                     );
+                    let __prof_tep = std::time::Instant::now();
                     let tep = ferrolite_pipeline::TileEditPipeline::new(
                         ctx_arc,
                         pyramid,
@@ -1031,6 +1047,10 @@ impl FerroliteApp {
                         cam,
                         v.lens_warp.as_ref(),
                         v.lens_vignette.as_ref(),
+                    );
+                    eprintln!(
+                        "[open-profile] TileEditPipeline::new: {} ms",
+                        __prof_tep.elapsed().as_millis()
                     );
                     let mut producer = viewer::EditTileProducer::new(tep);
                     producer.set_vig_amount(vig_amount);

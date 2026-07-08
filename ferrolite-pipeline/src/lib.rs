@@ -3,6 +3,7 @@
 //! compute passes implement the edits. Photo tier (GPL-OK).
 mod coord;
 mod dehaze;
+mod dehaze_node;
 mod gpu_pyramid;
 mod image;
 mod lens_bake;
@@ -68,6 +69,26 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         ("white-balance", include_str!("shaders/white_balance.wgsl")),
         ("contrast", include_str!("shaders/contrast.wgsl")),
         ("dehaze", include_str!("shaders/dehaze.wgsl")),
+        (
+            "dehaze-dark-channel",
+            include_str!("shaders/dehaze_dark_channel.wgsl"),
+        ),
+        ("dehaze-min-h", include_str!("shaders/dehaze_min_h.wgsl")),
+        ("dehaze-min-v", include_str!("shaders/dehaze_min_v.wgsl")),
+        (
+            "dehaze-products",
+            include_str!("shaders/dehaze_products.wgsl"),
+        ),
+        ("dehaze-box-h", include_str!("shaders/dehaze_box_h.wgsl")),
+        ("dehaze-box-v", include_str!("shaders/dehaze_box_v.wgsl")),
+        (
+            "dehaze-guided-ab",
+            include_str!("shaders/dehaze_guided_ab.wgsl"),
+        ),
+        (
+            "dehaze-guided-q",
+            include_str!("shaders/dehaze_guided_q.wgsl"),
+        ),
         ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
         ("hsl", include_str!("shaders/hsl.wgsl")),
         ("color-grade", include_str!("shaders/color_grade.wgsl")),

@@ -15,7 +15,7 @@ pub const DEHAZE_DEFAULT_RADIUS: u32 = 8;
 /// prevents a u32→i32 wrap to negative (mirrors `MAX_SHARPEN_RADIUS`).
 pub const MAX_DEHAZE_RADIUS: u32 = 64;
 /// Haze-retention factor ω (design §5.2, step 3): keep a little haze for realism.
-const DEHAZE_OMEGA: f32 = 0.95;
+pub(crate) const DEHAZE_OMEGA: f32 = 0.95;
 /// Transmission floor t₀ (design §5.2, step 4): avoids divide-by-~0 noise blow-up.
 const DEHAZE_T0: f32 = 0.1;
 /// The identity-safe atmospheric light used before a real estimate is available

@@ -101,8 +101,9 @@ Threading/GPU/eframe glue — not meaningfully unit-testable (needs the live ren
 decode; `GpuPyramidSource`/pipelines need a GPU). Automated coverage: `prewarm_pipelines` gets a
 GPU-gated integration test that it runs without panicking on a headless context; everything else is
 verified by build + clippy + the existing suite staying green. The temporary `[open-profile]`
-instrumentation is kept through implementation to re-measure, then removed. The **real gate is the
-author's visual test**: open a large RAW and confirm (a) no freeze on first open or subsequent opens,
+instrumentation is **retained through the author's visual confirmation** (removed only in a separate
+follow-up once the fix is confirmed) so the same profiling data is available to re-root-cause if the
+freeze is not fully fixed. The **real gate is the author's visual test**: open a large RAW and confirm (a) no freeze on first open or subsequent opens,
 (b) the color-correct image shows immediately, (c) full-res resolves a beat later, (d) rapid
 navigation shows the right image at full-res (no stale pyramid install), (e) editing after open still
 updates the full-res view.

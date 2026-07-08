@@ -361,27 +361,30 @@ git commit -m "perf(app): build both full-res pyramids off the UI thread; instal
 
 ---
 
-### Task 4: Remove instrumentation, green gate, self-review
+### Task 4: Green gate + self-review (KEEP the profiling instrumentation)
 
-**Files:** `ferrolite-app/src/app.rs` (remove the 5 `[open-profile]` timing blocks from commit `9ca300e`); verification.
+**Files:** verification only.
 
-- [ ] **Step 1: Remove the temporary profiling instrumentation.** Delete the `let __prof* = std::time::Instant::now();` lines and their `eprintln!("[open-profile] …")` blocks added for profiling. Grep to confirm none remain: `git grep "open-profile"` → no matches.
-- [ ] **Step 2: Format** — `cargo fmt --all` then `cargo fmt --all --check` (no diff).
-- [ ] **Step 3: Clippy** — `cargo clippy --workspace --all-targets -- -D warnings` (clean).
-- [ ] **Step 4: Tests** — `cargo test --workspace`. Expected PASS.
+> **Do NOT remove the `[open-profile]` timing instrumentation (from commit `9ca300e`) in this task.** The author wants it retained through their hands-on visual test so the same profiling data is available to re-root-cause if the freeze is not fully fixed. It is deliberately kept for now — the `eprintln!("[open-profile] …")` lines still measure `apply_full_decoded`'s reveal + (post-fix) whatever remains on the UI thread. A SEPARATE follow-up commit removes it only after the author confirms the fix (see "After visual confirmation" below). Leaving temporary instrumentation in a shipped branch is intentional here and NOT a defect to flag.
+
+- [ ] **Step 1: Format** — `cargo fmt --all` then `cargo fmt --all --check` (no diff).
+- [ ] **Step 2: Clippy** — `cargo clippy --workspace --all-targets -- -D warnings` (clean). The retained `[open-profile]` instrumentation must stay clippy-clean (it already is).
+- [ ] **Step 3: Tests** — `cargo test --workspace`. Expected PASS.
   > Known pre-existing/environmental failures NOT from this branch (do not chase): the `ferrolite-app state::tests::cancel_pending_jobs_drains_thumb_handles` timing flake (passes isolated), and `ferrolite-decode` tests failing on local uncommitted `.ARW` fixtures. Re-run any failure in isolation to confirm it is one of these.
-- [ ] **Step 5: Self-review vs the spec.** Confirm: (A) `prewarm_pipelines` called once at startup; (B) both pyramids build in the Background job, the VT+producer install in `apply_pyramid_ready` with the `image_id` staleness guard, the holder installs `full: None` in `apply_full_decoded` and stays not-producing until ready; (C) the reveal renders from the viewport-res downsample while the full-res `image` still feeds the pyramid job. No `[open-profile]` left.
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Self-review vs the spec.** Confirm: (A) `prewarm_pipelines` called once at startup; (B) both pyramids build in the Background job, the VT+producer install in `apply_pyramid_ready` with the `image_id` staleness guard, the holder installs `full: None` in `apply_full_decoded` and stays not-producing until ready; (C) the reveal renders from the viewport-res downsample while the full-res `image` still feeds the pyramid job. The `[open-profile]` instrumentation is still present (intentional — retained for the visual test).
+- [ ] **Step 5: Commit**
 ```bash
 git add -A
-git commit -m "chore(fast-open): remove profiling instrumentation; workspace gate green"
+git commit -m "chore(fast-open): workspace gate green (profiling instrumentation retained for visual test)"
 ```
+
+**After visual confirmation (a separate follow-up, NOT part of the subagent run):** once the author confirms the freeze is fixed, remove the `[open-profile]` timing blocks (`let __prof* = std::time::Instant::now();` + their `eprintln!("[open-profile] …")`), verify `git grep "open-profile"` returns nothing, re-run fmt/clippy, and commit `chore(fast-open): remove profiling instrumentation`. If the freeze is NOT fixed, keep the instrumentation and use its numbers to re-root-cause before removing.
 
 ---
 
 ## Visual test plan (hand to the author after the gate is green — per CLAUDE.md)
 
-Run `cargo run --release -p ferrolite-app` and open a large RAW.
+Run `cargo run --release -p ferrolite-app` and open a large RAW. The `[open-profile]` timing lines are still printed to the terminal — **watch them**: after the fix, `reveal …` should be small and the pyramid lines should no longer block (they now run off-thread, so they won't appear inside `apply_full_decoded`'s critical path). If the freeze persists, copy those numbers back so we can re-root-cause before removing the instrumentation.
 
 1. **No freeze — first open.** Immediately after the image appears the UI is interactive (pan/zoom/slider responds at once); no ~2.4 s first-open stall (fix A). *Fail:* first open still hangs seconds.
 2. **No freeze — subsequent opens.** Open several images; each stays interactive on open, no ~1.8 s stall (fixes B+C). *Fail:* recurring per-open freeze.

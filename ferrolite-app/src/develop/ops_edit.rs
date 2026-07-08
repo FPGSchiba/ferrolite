@@ -354,6 +354,54 @@ mod tests {
     }
 
     #[test]
+    fn set_tone_curve_split_only_edit_is_kept() {
+        // Regression: a parametric SPLIT moved off default (zero regions) must
+        // keep the op so the split slider persists instead of snapping back.
+        use ferrolite_pipeline::{ParametricCurve, ToneCurve};
+        let tc = ToneCurve {
+            parametric: ParametricCurve {
+                midtone_split: 0.65,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let s = set_tone_curve(&OpStack::default(), tc);
+        assert!(
+            s.tone_curve().is_some(),
+            "a split-only parametric edit must not be elided"
+        );
+    }
+
+    #[test]
+    fn set_color_grade_blending_or_balance_only_edit_is_kept() {
+        // Regression: Blending/Balance moved off default (neutral wheels) must
+        // keep the op so those sliders persist instead of snapping back.
+        use ferrolite_pipeline::ColorGrade;
+        let s = set_color_grade(
+            &OpStack::default(),
+            ColorGrade {
+                blending: 0.8,
+                ..Default::default()
+            },
+        );
+        assert!(
+            s.color_grade().is_some(),
+            "a blending-only grade edit must not be elided"
+        );
+        let s2 = set_color_grade(
+            &OpStack::default(),
+            ColorGrade {
+                balance: -0.4,
+                ..Default::default()
+            },
+        );
+        assert!(
+            s2.color_grade().is_some(),
+            "a balance-only grade edit must not be elided"
+        );
+    }
+
+    #[test]
     fn set_color_grade_identity_removes_the_op() {
         use ferrolite_pipeline::ColorGrade;
         let s = set_color_grade(&OpStack::default(), ColorGrade::default());

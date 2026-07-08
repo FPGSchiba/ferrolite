@@ -88,9 +88,14 @@ impl Default for ParametricCurve {
 }
 
 impl ParametricCurve {
-    /// True when no region is shifted (splits alone have no effect).
+    /// True when the curve is at its DEFAULT configuration — zero region shifts
+    /// AND splits at their defaults. A splits-only edit has no render effect on
+    /// its own (splits only shape non-zero regions), but it is a real user
+    /// configuration to preserve, so it is NOT elided: dropping the op on a
+    /// splits-only edit would leave the split sliders nothing to persist on and
+    /// they would snap back to their defaults.
     pub fn is_identity(&self) -> bool {
-        self.highlights == 0.0 && self.lights == 0.0 && self.darks == 0.0 && self.shadows == 0.0
+        *self == ParametricCurve::default()
     }
 }
 
@@ -273,13 +278,14 @@ impl Default for ColorGrade {
 }
 
 impl ColorGrade {
-    /// True when every wheel is neutral (no tint, no lum). Blending/balance are
-    /// no-ops when nothing is tinted, so they do not affect identity.
+    /// True when the grade is at its DEFAULT configuration — every wheel neutral
+    /// AND blending/balance at their defaults. A blending/balance-only edit has
+    /// no render effect on its own (they only shape non-neutral wheels), but it
+    /// is a real user configuration to preserve, so it is NOT elided: dropping
+    /// the op on a blending/balance-only edit would leave those sliders nothing
+    /// to persist on and they would snap back to their defaults.
     pub fn is_identity(&self) -> bool {
-        self.shadows.is_neutral()
-            && self.midtones.is_neutral()
-            && self.highlights.is_neutral()
-            && self.global.is_neutral()
+        *self == ColorGrade::default()
     }
 }
 
@@ -706,7 +712,7 @@ mod tests {
         assert!(cg.shadows.is_neutral() && cg.global.is_neutral());
         assert!(
             cg.is_identity(),
-            "all-neutral wheels = identity regardless of blending/balance"
+            "the default grade (neutral wheels, default blending/balance) is identity"
         );
     }
 
@@ -731,13 +737,22 @@ mod tests {
             ..Default::default()
         };
         assert!(!cg2.is_identity());
-        // Blending/balance alone (no tint, no lum) stay identity.
+        // Blending/balance moved off their defaults is a real, persist-worthy
+        // configuration even with neutral wheels (no render effect on its own),
+        // so it must NOT be elided — otherwise those sliders snap back.
         let cg3 = ColorGrade {
             blending: 0.9,
             balance: -0.5,
             ..Default::default()
         };
-        assert!(cg3.is_identity());
+        assert!(!cg3.is_identity());
+        // Blending/balance still AT their defaults with neutral wheels = identity.
+        let cg4 = ColorGrade {
+            blending: 0.5,
+            balance: 0.0,
+            ..Default::default()
+        };
+        assert!(cg4.is_identity());
     }
 
     #[test]
@@ -831,8 +846,29 @@ mod tests {
         );
         assert!(
             p.is_identity(),
-            "zero regions = identity regardless of splits"
+            "the default parametric curve (zero regions, default splits) is identity"
         );
+    }
+
+    #[test]
+    fn parametric_moved_split_alone_is_not_identity() {
+        // A split moved off its default (with zero regions) has no render effect
+        // on its own, but is a real user configuration to persist — it must NOT
+        // be elided, or the split sliders would snap back to their defaults.
+        let p = ParametricCurve {
+            midtone_split: 0.65,
+            ..Default::default()
+        };
+        assert!(!p.is_identity());
+    }
+
+    #[test]
+    fn color_grade_moved_blending_alone_is_not_identity() {
+        let cg = ColorGrade {
+            blending: 0.8,
+            ..Default::default()
+        };
+        assert!(!cg.is_identity());
     }
 
     #[test]

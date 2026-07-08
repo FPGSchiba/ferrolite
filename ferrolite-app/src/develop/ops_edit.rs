@@ -38,7 +38,6 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
     }
 }
 
-#[allow(dead_code)]
 pub fn set_dehaze(s: &OpStack, amount: f32, radius: u32) -> OpStack {
     if amount == 0.0 {
         s.reset(ferrolite_pipeline::OpKind::Dehaze)

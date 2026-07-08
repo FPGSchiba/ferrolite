@@ -559,7 +559,7 @@ impl FerroliteApp {
         // since `camera_to_working()` itself immutably borrows `self`.
         let camera_to_working = self.camera_to_working(self.current_wb_temp());
 
-        let Some(v) = self.state.viewer.as_ref() else {
+        let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
         // Pick the full-res source: RAW uses its tier-2 GPU pyramid; a Standard
@@ -580,16 +580,16 @@ impl FerroliteApp {
             self.state.warning = Some("Image still loading; cannot export yet.".to_string());
             return;
         };
-        // Whole-image dehaze atmospheric light (design §5.3), estimated once here
-        // from the decoded CPU preview source — regardless of which `source`
-        // variant above was chosen, so a RAW export (which only carries a GPU
-        // `Pyramid`, no CPU buffer, into `spawn_export`) still gets the real
-        // estimate rather than the neutral fallback.
+        // Whole-image dehaze atmospheric light (design §5.3), via the same
+        // per-image cache the producer rebuilds use (`ViewerState::dehaze_atmos`)
+        // — regardless of which `source` variant above was chosen, so a RAW
+        // export (which only carries a GPU `Pyramid`, no CPU buffer, into
+        // `spawn_export`) still gets the real estimate rather than the neutral
+        // fallback. Falls back to neutral only if no preview source has decoded
+        // yet, which can't happen here since `source` above already required one
+        // (Pyramid or FullResCpu).
         let atmospheric_light = v
-            .raw_preview_source
-            .as_ref()
-            .or(v.preview_source.as_ref())
-            .map(|src| ferrolite_pipeline::estimate_atmospheric_light(src))
+            .dehaze_atmos()
             .unwrap_or(ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL);
         let source_path = v.path.clone();
         let image_id = v.image_id;
@@ -1232,12 +1232,22 @@ impl FerroliteApp {
             let mut producer = viewer::EditTileProducer::new(tep);
             producer.set_vig_amount(vig_amount);
             producer.set_vig_manual(vig_manual);
-            // Whole-image atmospheric light for dehaze (design §5.3): estimate once
-            // from the decoded preview source and hand it to the tiled producer.
-            // Same fn + same source the preview EditPipeline uses internally, so
-            // the two tiers agree. Cheap + bounded (subsampled) — safe here.
-            if let Some(src) = v.raw_preview_source.as_ref().or(v.preview_source.as_ref()) {
-                producer.set_dehaze_atmos(ferrolite_pipeline::estimate_atmospheric_light(src));
+            // Whole-image atmospheric light for dehaze (design §5.3): cached and
+            // estimated at most once per image (`ViewerState::dehaze_atmos`), not
+            // re-estimated on every producer rebuild — this rebuild also fires on
+            // radius/geometry/lens drags, and `A` is image-invariant, so redoing
+            // the O(n log n) sort here would be UI-thread work per drag tick
+            // (CLAUDE.md responsiveness rule 1). Same fn + same source the preview
+            // EditPipeline uses internally, so the two tiers agree.
+            //
+            // `if let` rather than `.unwrap_or(NEUTRAL)`: a decoded source is
+            // guaranteed present here (this branch only runs once the full-res
+            // pyramid + preview source exist), so `None` is a can't-happen guard,
+            // not a silent-wrong fallback — leaving `producer` on its constructor
+            // default (`DEHAZE_ATMOS_NEUTRAL`) would silently diverge from the
+            // preview tier if it were ever hit.
+            if let Some(a) = v.dehaze_atmos() {
+                producer.set_dehaze_atmos(a);
             }
             v.edit_producer = Some(producer);
             v.full_ready = true;
@@ -1407,12 +1417,14 @@ impl FerroliteApp {
             let mut producer = viewer::EditTileProducer::new(tep);
             producer.set_vig_amount(vig_amount);
             producer.set_vig_manual(vig_manual);
-            // Whole-image atmospheric light for dehaze (design §5.3): estimate once
-            // from the decoded preview source and hand it to the tiled producer.
-            // Same fn + same source the preview EditPipeline uses internally, so
-            // the two tiers agree. Cheap + bounded (subsampled) — safe here.
-            if let Some(src) = v.raw_preview_source.as_ref().or(v.preview_source.as_ref()) {
-                producer.set_dehaze_atmos(ferrolite_pipeline::estimate_atmospheric_light(src));
+            // Whole-image atmospheric light for dehaze (design §5.3): cached and
+            // estimated at most once per image (`ViewerState::dehaze_atmos`) — see
+            // the full rationale at the first `set_dehaze_atmos` call site in
+            // `apply_pyramid_ready`. `if let` (not `.unwrap_or(NEUTRAL)`): a
+            // decoded source is guaranteed present on this rebuild path, so
+            // `None` is a can't-happen guard, not a silent-wrong fallback.
+            if let Some(a) = v.dehaze_atmos() {
+                producer.set_dehaze_atmos(a);
             }
             v.edit_producer = Some(producer);
             v.opstack_version = v.opstack_version.wrapping_add(1);
@@ -1586,13 +1598,17 @@ impl FerroliteApp {
                     let mut producer = viewer::EditTileProducer::new(tep);
                     producer.set_vig_amount(vig_amount);
                     producer.set_vig_manual(vig_manual);
-                    // Whole-image atmospheric light for dehaze (design §5.3): estimate
-                    // once from the decoded preview source and hand it to the tiled
-                    // producer. Same fn + same source the preview EditPipeline uses
-                    // internally, so the two tiers agree. Cheap + bounded (subsampled).
-                    if let Some(src) = v.raw_preview_source.as_ref().or(v.preview_source.as_ref()) {
-                        producer
-                            .set_dehaze_atmos(ferrolite_pipeline::estimate_atmospheric_light(src));
+                    // Whole-image atmospheric light for dehaze (design §5.3): cached
+                    // and estimated at most once per image
+                    // (`ViewerState::dehaze_atmos`) — see the full rationale at the
+                    // first `set_dehaze_atmos` call site in `apply_pyramid_ready`.
+                    // This rebuild is exactly the radius/geometry/lens-drag path
+                    // `needs_full_rebuild` fires on, so this is the call site the
+                    // caching matters most for. `if let` (not `.unwrap_or(NEUTRAL)`):
+                    // a decoded source is guaranteed present once `full_ready`, so
+                    // `None` is a can't-happen guard, not a silent-wrong fallback.
+                    if let Some(a) = v.dehaze_atmos() {
+                        producer.set_dehaze_atmos(a);
                     }
                     v.edit_producer = Some(producer);
                 }

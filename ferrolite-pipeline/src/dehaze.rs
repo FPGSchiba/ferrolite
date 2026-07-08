@@ -56,9 +56,15 @@ pub fn estimate_atmospheric_light(img: &LinearRgbaF32) -> [f32; 3] {
         samples.push((dark_channel(rgb), rgb));
         i += stride;
     }
-    // Brightest 0.1% by dark channel (at least one).
+    // Brightest 0.1% by dark channel (at least one). `select_nth_unstable_by`
+    // partitions the top `keep` elements to the front in O(n) rather than a
+    // full O(n log n) sort — the RESULT is identical (same top-k set; the mean
+    // taken below is order-independent), just cheaper, matching the cap
+    // comment above ("bounds the CPU cost ... regardless of image size").
     let keep = (samples.len() / 1000).max(1);
-    samples.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    samples.select_nth_unstable_by(keep - 1, |a, b| {
+        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+    });
     let mut acc = [0.0f32; 3];
     for (_, rgb) in samples.iter().take(keep) {
         for c in 0..3 {

@@ -177,6 +177,14 @@ pub struct ViewerState {
     /// sharpness-only ramp with no color/tone shift. `None` for Standard images
     /// and for RAW before the full decode arrives.
     pub raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+    /// Whole-image dehaze atmospheric light `A` (design §5.3), estimated once
+    /// per image and cached here. `A` is an image-invariant statistic, so it
+    /// must NOT be re-estimated on every full-res producer rebuild (those also
+    /// fire on radius/geometry/lens drags, on the UI thread) — see
+    /// `dehaze_atmos()`. `None` until first requested; always `None` on a
+    /// fresh `open()` (a new `ViewerState` is constructed per image, never
+    /// reused in place, so no explicit invalidation on image switch is needed).
+    dehaze_atmos: Option<[f32; 3]>,
     /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
     /// `edit_producer`). Rebuilt when geometry / halo radius changes.
     pub preview_edit: Option<EditPipeline>,
@@ -327,6 +335,7 @@ impl ViewerState {
             cache_write_back: true,
             preview_source: None,
             raw_preview_source: None,
+            dehaze_atmos: None,
             preview_edit: None,
             pyramid: None,
             color_profile: ferrolite_decode::ColorProfile::srgb_fallback(),
@@ -409,6 +418,22 @@ impl ViewerState {
             FileKind::Raw => (self.raw_preview_source.clone(), cam),
             FileKind::Standard => (self.preview_source.clone(), pw),
         }
+    }
+
+    /// Whole-image dehaze atmospheric light (design §5.3), estimated once from
+    /// the decoded preview source and cached — it is image-invariant, so
+    /// producer rebuilds (radius/geometry/lens drags) must NOT re-estimate it
+    /// on the UI thread (CLAUDE.md responsiveness rule 1). Returns `None` only
+    /// before any preview source has decoded yet.
+    pub fn dehaze_atmos(&mut self) -> Option<[f32; 3]> {
+        if self.dehaze_atmos.is_none() {
+            let src = self
+                .raw_preview_source
+                .as_ref()
+                .or(self.preview_source.as_ref())?;
+            self.dehaze_atmos = Some(ferrolite_pipeline::estimate_atmospheric_light(src));
+        }
+        self.dehaze_atmos
     }
 
     /// Cancel the in-flight decode jobs for this viewer. The sparse tile jobs

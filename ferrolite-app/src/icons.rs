@@ -19,12 +19,12 @@ pub const RADIAL_GRADIENT: &str = p::CIRCLE;
 pub const LUMA: &str = p::CIRCLE_HALF;
 pub const COLOR: &str = p::PALETTE;
 pub const GRADE: &str = p::CIRCLES_THREE;
+// The following aliases have no consumer yet in the bin (the lib copy is `pub`, so
+// dead_code doesn't fire there) — each is reserved for a later, not-yet-landed UI
+// task. Scoped `#[allow(dead_code)]` per item (not a blanket module allow) so new
+// aliases stay covered by the lint by default; remove the annotation once wired up.
 #[allow(dead_code)]
 pub const EFFECTS: &str = p::SPARKLE; // Generic "effects" mark for enhancement tabs
-                                      // The following aliases have no consumer yet in the bin (the lib copy is `pub`, so
-                                      // dead_code doesn't fire there) — each is reserved for a later, not-yet-landed UI
-                                      // task. Scoped `#[allow(dead_code)]` per item (not a blanket module allow) so new
-                                      // aliases stay covered by the lint by default; remove the annotation once wired up.
 pub const EYEDROPPER: &str = p::EYEDROPPER;
 pub const UNDO: &str = p::ARROW_COUNTER_CLOCKWISE;
 pub const REDO: &str = p::ARROW_CLOCKWISE;

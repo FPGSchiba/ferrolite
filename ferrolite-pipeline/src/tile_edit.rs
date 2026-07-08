@@ -9,7 +9,10 @@
 //! a 1:1 haloed copy, so the result is identical to the whole-image Plan-2 chain
 //! and to a whole-image render — this is what the tile-seam golden asserts. For
 //! non-identity geometry, Sharpen operates in output space rather than source
-//! space, an accepted pragmatic difference (architecture map §2).
+//! space, an accepted pragmatic difference (architecture map §2). Dehaze is the
+//! same neighbourhood-op class (a patch-radius dark-channel min-filter, like
+//! Sharpen's convolution) and inherits this same accepted output-space
+//! difference under non-identity geometry.
 //!
 //! **LocalAdjustments — per-tile mask, output space:** because geometry runs at
 //! the head, the entire color chain (including `LocalAdjustments`) operates in

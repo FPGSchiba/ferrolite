@@ -846,18 +846,59 @@ impl FerroliteApp {
         // `EditPipeline` ONCE here and retain it (`v.preview_edit`) for reuse by
         // `set_preview_and_full` — never compiled per edit (CLAUDE.md rule 2).
         // Standard images never reach `apply_full_decoded`.
-        // Build the camera-native reveal source ONCE for RAW. This same `Arc` is
-        // reused both as `v.raw_preview_source` (the rung-1 reveal render input)
-        // AND as the preview-cache write-back payload below — the demosaiced
-        // buffer is never memcpy'd a second time onto the UI thread.
+        // Build the camera-native reveal source ONCE for RAW. The full-res `Arc`
+        // (`raw_preview_source`) is retained as `v.raw_preview_source` (consumed
+        // by the split-compare "before" rebuild and the preview-cache
+        // write-back below, which persists a NOT-viewport-bounded 2048px JPEG
+        // to disk and must not be quality-degraded by the current window size)
+        // AND reused as the write-back payload — the demosaiced buffer is never
+        // memcpy'd a second time onto the UI thread for that purpose.
+        //
+        // The reveal render itself, however, is a transient rung-1 stopgap the
+        // sparse full VT replaces within a moment; at fit-zoom a viewport-res
+        // reveal is pixel-identical to a full-res one. So the (GPU) reveal
+        // `EditPipeline` below is built from a SEPARATE one-shot downsample to
+        // viewport size (`reveal_src`) instead of running the FULL-res image
+        // through the op chain (~11 full-res intermediate textures, ~674 ms
+        // measured). The full-res `image` itself is untouched — it still feeds
+        // the pyramid (`PyramidTileSource::new(image.clone())`) below.
+        const REVEAL_MAX_DIM: u32 = 2048; // ≈ a 4K-ish viewport; cap when unknown
+        let (fw, fh) = (image.width, image.height);
+        let vp = self
+            .state
+            .viewer
+            .as_ref()
+            .map(|v| v.viewport)
+            .filter(|(w, h)| *w > 0.0 && *h > 0.0);
+        let target_long = vp
+            .map(|(w, h)| w.max(h).ceil() as u32)
+            .unwrap_or(REVEAL_MAX_DIM)
+            .clamp(256, REVEAL_MAX_DIM);
+        let scale = (target_long as f32 / fw.max(fh) as f32).min(1.0);
+        let (rw, rh) = (
+            ((fw as f32 * scale) as u32).max(1),
+            ((fh as f32 * scale) as u32).max(1),
+        );
         let raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
             is_raw.then(|| std::sync::Arc::new(image.clone()));
+        let reveal_src: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
+            raw_preview_source.as_ref().map(|full| {
+                if scale < 1.0 {
+                    std::sync::Arc::new(ferrolite_vt::box_downsample_to(image, rw, rh))
+                } else {
+                    std::sync::Arc::clone(full)
+                }
+            });
         let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if let Some(src) =
-            raw_preview_source.as_ref()
+            reveal_src.as_ref()
         {
             match self.state.viewer.as_mut() {
                 Some(v) if v.image_id == image_id => {
-                    v.raw_preview_source = Some(std::sync::Arc::clone(src));
+                    // `v.raw_preview_source` retains the FULL-res buffer (read by
+                    // `ensure_before_view`'s split-compare rebuild and reused as the
+                    // write-back payload below) — NOT the viewport-res `src` fed to
+                    // the reveal `EditPipeline` here.
+                    v.raw_preview_source = raw_preview_source.clone();
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
                     let __prof_reveal = std::time::Instant::now();

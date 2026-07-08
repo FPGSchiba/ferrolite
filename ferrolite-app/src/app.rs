@@ -1059,7 +1059,8 @@ impl FerroliteApp {
             let gpu_job = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
             let tx = self.state.tx.clone();
             let repaint = ctx.clone();
-            self.state
+            let pyramid_handle = self
+                .state
                 .jobs
                 .submit(ferrolite_jobs::Priority::Background, move |cancel| {
                     if cancel.is_cancelled() {
@@ -1095,6 +1096,14 @@ impl FerroliteApp {
                     });
                     repaint.request_repaint();
                 });
+            // Store the handle so a later navigation (`cancel_loads`) can cancel
+            // this Background pyramid build. Guard on `image_id` matching in case
+            // a newer image already superseded this one between submit and now.
+            if let Some(v) = self.state.viewer.as_mut() {
+                if v.image_id == image_id {
+                    v.pyramid_handle = Some(pyramid_handle);
+                }
+            }
         }
 
         // Preview-cache write-back (Task 5): on a qualifying RAW open, cache the

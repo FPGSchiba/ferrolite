@@ -64,15 +64,6 @@ impl TileSource for PyramidTileSource {
     }
 }
 
-/// Public entry point for a one-shot box downsample to an arbitrary target
-/// size (as opposed to the pyramid's fixed half-size steps). Used by callers
-/// that need a single small copy of a full-res image — e.g. rendering a
-/// transient reveal at viewport resolution instead of full-res (cross-cutting
-/// contract: never do O(full-res) work for a display-only stopgap).
-pub fn box_downsample_to(src: &LinearRgbaF32, dst_w: u32, dst_h: u32) -> LinearRgbaF32 {
-    box_downsample(src, dst_w, dst_h)
-}
-
 /// Simple 2×2-average downsample to `(dst_w, dst_h)`. Box filter is adequate for
 /// the display pyramid; a higher-quality resize can be wired in here if needed.
 fn box_downsample(src: &LinearRgbaF32, dst_w: u32, dst_h: u32) -> LinearRgbaF32 {
@@ -154,22 +145,6 @@ mod tests {
         let t = src.tile_with_halo(TileCoord { lod: 0, x: 0, y: 0 }, 4);
         let ext = ferrolite_image::haloed_tile_extent(4);
         assert_eq!((t.width, t.height), (ext, ext));
-    }
-
-    #[test]
-    fn box_downsample_to_produces_requested_dims() {
-        let src = solid(1024, 512, [0.5, 0.25, 0.75]);
-        let out = box_downsample_to(&src, 200, 100);
-        assert_eq!((out.width, out.height), (200, 100));
-    }
-
-    #[test]
-    fn box_downsample_to_keeps_flat_image_flat() {
-        let src = solid(64, 64, [0.2, 0.4, 0.6]);
-        let out = box_downsample_to(&src, 16, 16);
-        for px in out.pixels.chunks_exact(4) {
-            assert_eq!(px, &[0.2, 0.4, 0.6, 1.0]);
-        }
     }
 
     #[test]

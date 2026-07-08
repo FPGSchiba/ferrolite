@@ -396,18 +396,10 @@ impl FerroliteApp {
             if g.image_id != image_id {
                 return;
             }
-            let Some(tex) = g.preview.single_texture_arc() else {
+            let (Some(tex), Some(dims)) = (g.preview.single_texture_arc(), g.preview.single_dims())
+            else {
                 return;
             };
-            // Histogram over the ACTUAL backing-texture texels, NOT the VT's
-            // logical `single_dims()`. The rung-1 reveal is a low-res proxy for a
-            // full-res image: `single_dims()` reports the full-res extent so the
-            // display quad fills the fit view (see `full_res_reveal_dims`), but the
-            // histogram compute must iterate the real texture size — using the
-            // (larger) logical dims makes it read out-of-bounds zeros over the
-            // unbacked region → an empty/black histogram. Box-downsample preserves
-            // the tonal distribution, so the low-res texture is a faithful source.
-            let dims = (tex.width(), tex.height());
             let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
                 return;
             };
@@ -862,50 +854,26 @@ impl FerroliteApp {
         // AND reused as the write-back payload — the demosaiced buffer is never
         // memcpy'd a second time onto the UI thread for that purpose.
         //
-        // The reveal render itself, however, is a transient rung-1 stopgap the
-        // sparse full VT replaces within a moment; at fit-zoom a viewport-res
-        // reveal is pixel-identical to a full-res one. So the (GPU) reveal
-        // `EditPipeline` below is built from a SEPARATE one-shot downsample to
-        // viewport size (`reveal_src`) instead of running the FULL-res image
-        // through the op chain (~11 full-res intermediate textures, ~674 ms
-        // measured). The full-res `image` itself is untouched — it still feeds
-        // the pyramid (`PyramidTileSource::new(image.clone())`) below.
-        const REVEAL_MAX_DIM: u32 = 2048; // ≈ a 4K-ish viewport; cap when unknown
-        let (fw, fh) = (image.width, image.height);
-        let vp = self
-            .state
-            .viewer
-            .as_ref()
-            .map(|v| v.viewport)
-            .filter(|(w, h)| *w > 0.0 && *h > 0.0);
-        let target_long = vp
-            .map(|(w, h)| w.max(h).ceil() as u32)
-            .unwrap_or(REVEAL_MAX_DIM)
-            .clamp(256, REVEAL_MAX_DIM);
-        let scale = (target_long as f32 / fw.max(fh) as f32).min(1.0);
-        let (rw, rh) = (
-            ((fw as f32 * scale) as u32).max(1),
-            ((fh as f32 * scale) as u32).max(1),
-        );
+        // Full-res reveal: the reveal `EditPipeline` runs the FULL-resolution
+        // demosaiced image through the op chain, so the rung-1 preview is
+        // dims-consistent with the full VT and with every preview-tier consumer
+        // (display transform, GPU histogram, the before/after split compare, and
+        // the retained `preview_edit` reused for live edits). A prior attempt to
+        // render this at viewport resolution saved ~674 ms but made the preview
+        // tier a low-res proxy whose logical size ≠ its texture size, which broke
+        // the zoom/LOD transform, the split compare, the histogram, and edited-
+        // preview sharpness — so it was reverted.
         let raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
             is_raw.then(|| std::sync::Arc::new(image.clone()));
-        let reveal_src: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
-            raw_preview_source.as_ref().map(|full| {
-                if scale < 1.0 {
-                    std::sync::Arc::new(ferrolite_vt::box_downsample_to(image, rw, rh))
-                } else {
-                    std::sync::Arc::clone(full)
-                }
-            });
         let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if let Some(src) =
-            reveal_src.as_ref()
+            raw_preview_source.as_ref()
         {
             match self.state.viewer.as_mut() {
                 Some(v) if v.image_id == image_id => {
-                    // `v.raw_preview_source` retains the FULL-res buffer (read by
-                    // `ensure_before_view`'s split-compare rebuild and reused as the
-                    // write-back payload below) — NOT the viewport-res `src` fed to
-                    // the reveal `EditPipeline` here.
+                    // The full-res reveal source is retained as `v.raw_preview_source`
+                    // (read by `ensure_before_view`'s split-compare rebuild and reused
+                    // as the preview-cache write-back payload below) AND fed to the
+                    // reveal `EditPipeline` here — one full-res buffer, no second copy.
                     v.raw_preview_source = raw_preview_source.clone();
                     let ctx_arc =
                         std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
@@ -946,12 +914,7 @@ impl FerroliteApp {
                         __prof_reveal.elapsed().as_millis()
                     );
                     let tex = out.texture.clone();
-                    // Report the FULL-res-equivalent extent, not the downsampled
-                    // reveal output: the present transform scales the quad by
-                    // image_dims × view.zoom, and view.zoom is fit to the full
-                    // image, so a downsampled dims here renders the reveal zoomed
-                    // out by `scale` (large-image regression; see fn docs).
-                    let dims = full_res_reveal_dims((out.width, out.height), scale);
+                    let dims = (out.width, out.height);
                     v.preview_edit = Some(ep);
                     Some((tex, dims))
                 }
@@ -1062,8 +1025,8 @@ impl FerroliteApp {
             // GPU-resident edit pyramid) are CPU box-downsample heavy (~1.2 s
             // combined) — build them on a `ferrolite-jobs` Background worker rather
             // than the UI thread (CLAUDE.md rule 1; this was the open freeze). They
-            // need the FULL-res `image` (NOT Task 2's downsampled `reveal_src`), so
-            // clone it into an `Arc` for the job. `GpuContext` is `Send + Sync`
+            // need the FULL-res `image`, so clone it into an `Arc` for the job.
+            // `GpuContext` is `Send + Sync`
             // (Arc device/queue handles), as are `PyramidTileSource` and
             // `GpuPyramidSource`, so both build off-thread and are delivered over
             // the channel; `apply_pyramid_ready` installs them + starts producing.
@@ -4466,51 +4429,5 @@ impl eframe::App for FerroliteApp {
                 before, joined, timeout_ms, on_exit_ms,
             ));
         }
-    }
-}
-
-/// The FULL-image extent that a downsampled rung-1 reveal texture represents.
-///
-/// The reveal is rendered from a source downsampled by `scale` (≤ 1.0) for speed
-/// (see `apply_full_decoded`), but the single-texture present transform sizes the
-/// on-screen quad as `image_dims × view.zoom`, and `view.zoom` is fit to the FULL
-/// image. So the reveal preview VT must report the full-res-equivalent extent
-/// (`out / scale`) — NOT the downsampled output dims — or the reveal renders
-/// zoomed out by exactly `scale` (only visible on large images, where `scale < 1`).
-/// `scale == 1.0` (small images, no downsample) is the identity case.
-fn full_res_reveal_dims(out: (u32, u32), scale: f32) -> (u32, u32) {
-    if scale >= 1.0 || scale <= 0.0 {
-        return out;
-    }
-    (
-        ((out.0 as f32 / scale).round() as u32).max(1),
-        ((out.1 as f32 / scale).round() as u32).max(1),
-    )
-}
-
-#[cfg(test)]
-mod reveal_dims_tests {
-    use super::full_res_reveal_dims;
-
-    #[test]
-    fn unit_scale_is_identity() {
-        assert_eq!(full_res_reveal_dims((6000, 4000), 1.0), (6000, 4000));
-    }
-
-    #[test]
-    fn downsampled_reports_full_extent() {
-        // 6000×4000 downsampled to fit a ~2048 long edge (scale ≈ 0.3413): the
-        // reveal output ≈ (2048, 1365), but the VT must report ≈ the full extent
-        // so the present quad (image_dims × full-fit zoom) fills the viewport.
-        let scale = 2048.0f32 / 6000.0;
-        let out = ((6000.0 * scale) as u32, (4000.0 * scale) as u32);
-        let (w, h) = full_res_reveal_dims(out, scale);
-        assert!((w as i32 - 6000).abs() <= 2, "w ≈ 6000, got {w}");
-        assert!((h as i32 - 4000).abs() <= 2, "h ≈ 4000, got {h}");
-    }
-
-    #[test]
-    fn degenerate_scale_returns_out() {
-        assert_eq!(full_res_reveal_dims((100, 50), 0.0), (100, 50));
     }
 }

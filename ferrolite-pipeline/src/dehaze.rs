@@ -237,6 +237,22 @@ pub fn transmission_map(
         .collect()
 }
 
+/// Cap on the dehaze transmission working resolution (max dimension, px). The
+/// transmission map is low-frequency, so it is computed at up to this size and
+/// bilinearly upsampled in recovery — bounding the 15 intermediate planes' VRAM
+/// (~100MB) regardless of the full image size. Chosen so 15 R32Float planes stay
+/// well under budget on a 6-8GB GPU alongside the full-res color chain.
+pub const DEHAZE_MAX_TRANSMISSION_DIM: u32 = 1536;
+
+/// Working (downsampled) transmission dims + integer downscale factor for an
+/// input of `(w,h)`. Scale = ceil(max(w,h)/cap) (>=1); working = (w/scale, h/scale)
+/// (>=1). For inputs already within the cap, scale==1 and dims are unchanged, so
+/// small images (all goldens, tiled tiles) behave exactly as before.
+pub fn transmission_working_dims(w: u32, h: u32) -> (u32, u32, u32) {
+    let scale = (w.max(h)).div_ceil(DEHAZE_MAX_TRANSMISSION_DIM).max(1);
+    ((w / scale).max(1), (h / scale).max(1), scale)
+}
+
 /// Halo (px) a tiled full-res dehaze pass must over-fetch: the op's patch radius
 /// plus the guided filter window (clamped) when active, else 0 (mirrors `sharpen_halo`).
 /// Consumed by the tile producer; a radius change therefore triggers `needs_full_rebuild`,
@@ -469,6 +485,34 @@ mod tests {
             "guided filter must remove >=60% of the halo at its location \
              (removed {:.0}%, raw={raw_halo}, refined={refined_halo}, clean={clean})",
             removed * 100.0
+        );
+    }
+
+    #[test]
+    fn transmission_working_dims_unchanged_for_small_input() {
+        // Well within the cap: scale 1, dims unchanged (all goldens/tiles hit this).
+        let (ww, wh, scale) = transmission_working_dims(300, 200);
+        assert_eq!((ww, wh, scale), (300, 200, 1));
+    }
+
+    #[test]
+    fn transmission_working_dims_capped_for_large_input() {
+        // 6000x4000 -> ceil(6000/1536) = 4; working = 1500x1000, max dim <= cap.
+        let (ww, wh, scale) = transmission_working_dims(6000, 4000);
+        assert_eq!(scale, 4);
+        assert_eq!((ww, wh), (1500, 1000));
+        assert!(ww.max(wh) <= DEHAZE_MAX_TRANSMISSION_DIM);
+    }
+
+    #[test]
+    fn transmission_working_dims_boundary_at_cap_is_scale_one() {
+        // Exactly at the cap: scale must stay 1 (div_ceil(cap/cap) == 1), dims unchanged.
+        let (ww, wh, scale) =
+            transmission_working_dims(DEHAZE_MAX_TRANSMISSION_DIM, DEHAZE_MAX_TRANSMISSION_DIM / 2);
+        assert_eq!(scale, 1);
+        assert_eq!(
+            (ww, wh),
+            (DEHAZE_MAX_TRANSMISSION_DIM, DEHAZE_MAX_TRANSMISSION_DIM / 2)
         );
     }
 

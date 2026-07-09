@@ -22,7 +22,8 @@ mod uniforms;
 pub use coord::{display_to_source, source_to_display};
 pub use dehaze::{
     dehaze_halo, dehaze_recover, estimate_atmospheric_light, guided_radius, transmission_map,
-    DEHAZE_ATMOS_NEUTRAL, DEHAZE_DEFAULT_RADIUS, DEHAZE_GUIDED_EPS, MAX_DEHAZE_RADIUS,
+    transmission_working_dims, DEHAZE_ATMOS_NEUTRAL, DEHAZE_DEFAULT_RADIUS, DEHAZE_GUIDED_EPS,
+    DEHAZE_MAX_TRANSMISSION_DIM, MAX_DEHAZE_RADIUS,
 };
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;

@@ -39,7 +39,10 @@ use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
 
-use crate::dehaze::{guided_radius, DEHAZE_ATMOS_MIN, DEHAZE_GUIDED_EPS, DEHAZE_OMEGA, DEHAZE_T0};
+use crate::dehaze::{
+    guided_radius, transmission_working_dims, DEHAZE_ATMOS_MIN, DEHAZE_GUIDED_EPS, DEHAZE_OMEGA,
+    DEHAZE_T0,
+};
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::op::Dehaze;
 use crate::MAX_DEHAZE_RADIUS;
@@ -311,6 +314,33 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// Filtering-sampler bind-group-layout entry, for passes that bilinearly
+/// upsample/downsample a plane rather than `textureLoad` it 1:1 (the dehaze
+/// dark-channel downsample and recovery's transmission upsample).
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
+}
+
+/// Linear, clamp-to-edge sampler shared by the passes that bilinearly sample a
+/// texture at a normalized UV (built once in each node's `new`, never per-evaluate).
+fn linear_clamp_sampler(ctx: &GpuContext) -> wgpu::Sampler {
+    ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("dehaze-linear-clamp-sampler"),
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    })
+}
+
 fn compute_pipeline(
     ctx: &GpuContext,
     bgl: &wgpu::BindGroupLayout,
@@ -374,6 +404,10 @@ pub(crate) struct DehazeTransmissionNode {
     // ones issued after it.
     uniform_min: wgpu::Buffer,
     uniform_box: wgpu::Buffer,
+    // Linear, clamp-to-edge sampler for the dark-channel pass's downsample of
+    // `src` (full res) into the working-res `dc0`/`guide` planes. Built once
+    // here, never per-evaluate (CLAUDE.md GPU rule).
+    sampler: wgpu::Sampler,
 
     dark_bgl: wgpu::BindGroupLayout,
     dark_pipeline: wgpu::ComputePipeline,
@@ -416,14 +450,16 @@ impl DehazeTransmissionNode {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let sampler = linear_clamp_sampler(&ctx);
 
         let dark_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("dehaze-dark-bgl"),
             entries: &[
-                texture_entry(0, true),             // src rgba16float
-                storage_out_entry(1, PLANE_FORMAT), // dc0
-                storage_out_entry(2, PLANE_FORMAT), // guide
+                texture_entry(0, true),             // src rgba16float (sampled, filterable)
+                storage_out_entry(1, PLANE_FORMAT), // dc0 (working res)
+                storage_out_entry(2, PLANE_FORMAT), // guide (working res)
                 uniform_entry(3),
+                sampler_entry(4), // linear, clamp-to-edge: downsamples src -> working res
             ],
         });
         let dark_pipeline = compute_pipeline(
@@ -515,6 +551,7 @@ impl DehazeTransmissionNode {
             params,
             uniform_min,
             uniform_box,
+            sampler,
             dark_bgl,
             dark_pipeline,
             plane_bgl: plane_bgl_layout,
@@ -672,13 +709,27 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             return src.clone();
         }
 
+        // Compute the transmission at a capped WORKING resolution (not the
+        // input dims) — the transmission map is low-frequency, so this bounds
+        // the fifteen `R32Float` intermediate planes' VRAM regardless of the
+        // full input size (the QS-Task fix for the full-res preview-tier OOM).
+        // `DehazeRecoveryNode` upsamples this smaller `out` back to the image
+        // resolution via a bilinear sample (see `dehaze_recovery.wgsl`).
         let (w, h) = (src.width, src.height);
-        self.ensure_intermediates(w, h);
-        let out = self.ensure_out(w, h);
+        let (ww, wh, scale) = transmission_working_dims(w, h);
+        self.ensure_intermediates(ww, wh);
+        let out = self.ensure_out(ww, wh);
         self.rebuilds.set(self.rebuilds.get() + 1);
 
-        let radius = (raw.radius.max(0) as u32).min(MAX_DEHAZE_RADIUS) as i32;
-        let gr = guided_radius(radius as u32).min(MAX_DEHAZE_RADIUS.saturating_mul(3)) as i32;
+        // Radii are defined in FULL-RES pixels (`Dehaze::radius`); scale them
+        // down to working-res pixels so the patch covers the same image
+        // fraction there as it would at 1:1 (clamped to >=1 px). At scale==1
+        // this is `radius`/`gr` unchanged.
+        let radius_full = (raw.radius.max(0) as u32).min(MAX_DEHAZE_RADIUS);
+        let gr_full = guided_radius(radius_full).min(MAX_DEHAZE_RADIUS.saturating_mul(3));
+        let scale_down = |r: u32| -> i32 { ((r as f32 / scale as f32).round() as i32).max(1) };
+        let radius = scale_down(radius_full);
+        let gr = scale_down(gr_full);
 
         let min_uniform = PassUniform {
             radius,
@@ -757,6 +808,10 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
                         binding: 3,
                         resource: self.uniform_min.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
                 ],
             });
         dispatch(
@@ -764,8 +819,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             "dehaze-dark-channel",
             &self.dark_pipeline,
             &dark_bind,
-            w,
-            h,
+            ww,
+            wh,
         );
 
         // 2. separable block-min (H then V, folding in the praw transform).
@@ -780,8 +835,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             "dehaze-min-h",
             &self.min_h_pipeline,
             &min_h_bind,
-            w,
-            h,
+            ww,
+            wh,
         );
         let min_v_bind = self.plane_bind(
             &dc_h_view,
@@ -794,8 +849,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             "dehaze-min-v",
             &self.min_v_pipeline,
             &min_v_bind,
-            w,
-            h,
+            ww,
+            wh,
         );
 
         // 3. products gg = guide^2, gp = guide*praw.
@@ -829,8 +884,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             "dehaze-products",
             &self.products_pipeline,
             &products_bind,
-            w,
-            h,
+            ww,
+            wh,
         );
 
         // 4. guided-filter box means/correlations (reusing box_h/box_v).
@@ -840,8 +895,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             &guide_view,
             &box_scratch_view,
             &mean_g_view,
-            w,
-            h,
+            ww,
+            wh,
         );
         self.box_filter(
             &mut enc,
@@ -849,8 +904,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             &praw_view,
             &box_scratch_view,
             &mean_p_view,
-            w,
-            h,
+            ww,
+            wh,
         );
         self.box_filter(
             &mut enc,
@@ -858,8 +913,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             &gg_view,
             &box_scratch_view,
             &corr_g_view,
-            w,
-            h,
+            ww,
+            wh,
         );
         self.box_filter(
             &mut enc,
@@ -867,8 +922,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             &gp_view,
             &box_scratch_view,
             &corr_gp_view,
-            w,
-            h,
+            ww,
+            wh,
         );
 
         // 5. guided-filter linear coefficients a, b.
@@ -914,8 +969,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             "dehaze-guided-ab",
             &self.guided_ab_pipeline,
             &guided_ab_bind,
-            w,
-            h,
+            ww,
+            wh,
         );
 
         // 6. box filter a, b -> mean_a, mean_b (reusing box_h/box_v again).
@@ -925,8 +980,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             &a_view,
             &box_scratch_view,
             &mean_a_view,
-            w,
-            h,
+            ww,
+            wh,
         );
         self.box_filter(
             &mut enc,
@@ -934,8 +989,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             &b_view,
             &box_scratch_view,
             &mean_b_view,
-            w,
-            h,
+            ww,
+            wh,
         );
 
         // 7. combine into the final refined transmission q.
@@ -969,8 +1024,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             "dehaze-guided-q",
             &self.guided_q_pipeline,
             &guided_q_bind,
-            w,
-            h,
+            ww,
+            wh,
         );
 
         self.ctx.queue.submit([enc.finish()]);
@@ -999,6 +1054,10 @@ pub(crate) struct DehazeRecoveryNode {
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
+    // Linear, clamp-to-edge sampler upsampling `trans` (possibly smaller than
+    // `img` — see `DehazeTransmissionNode`) to the image resolution. Built
+    // once here, never per-evaluate (CLAUDE.md GPU rule).
+    sampler: wgpu::Sampler,
     out: RefCell<Option<PipelineImage>>,
 }
 
@@ -1013,7 +1072,9 @@ impl DehazeRecoveryNode {
             mapped_at_creation: false,
         });
 
-        // Two-input variant: 0 = img texture, 1 = trans texture, 2 = dst storage, 3 = uniform
+        // Two-input variant: 0 = img texture (loaded 1:1), 1 = trans texture
+        // (SAMPLED — may be smaller than img, see `DehazeTransmissionNode`),
+        // 2 = dst storage, 3 = uniform, 4 = filtering sampler for `trans`.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("dehaze-recovery-bgl"),
             entries: &[
@@ -1031,7 +1092,7 @@ impl DehazeRecoveryNode {
                     binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -1057,6 +1118,7 @@ impl DehazeRecoveryNode {
                     },
                     count: None,
                 },
+                sampler_entry(4),
             ],
         });
 
@@ -1078,12 +1140,15 @@ impl DehazeRecoveryNode {
             cache: None,
         });
 
+        let sampler = linear_clamp_sampler(&ctx);
+
         Self {
             ctx,
             params,
             pipeline,
             bgl,
             uniform_buf,
+            sampler,
             out: RefCell::new(None),
         }
     }
@@ -1161,6 +1226,10 @@ impl Node<PipelineImage> for DehazeRecoveryNode {
                         binding: 3,
                         resource: self.uniform_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
                 ],
             });
 
@@ -1199,7 +1268,7 @@ mod tests {
     use crate::dehaze::DEHAZE_OMEGA;
     use crate::nodes::upload_source;
     use crate::transmission_map;
-    use crate::DEHAZE_GUIDED_EPS;
+    use crate::{DEHAZE_DEFAULT_RADIUS, DEHAZE_GUIDED_EPS, DEHAZE_MAX_TRANSMISSION_DIM};
     use ferrolite_image::LinearRgbaF32;
 
     /// Read an `Rgba16Float` `PipelineImage`'s `.r` channel back to f32 on the
@@ -1319,6 +1388,49 @@ mod tests {
         assert!(
             max_d < 2e-2,
             "GPU transmission drifted from CPU reference: max abs diff {max_d}"
+        );
+    }
+
+    /// Regression guard for the full-res preview-tier OOM (QS-Task fix): a
+    /// moderately large input (big enough to force `scale >= 2`, cheap enough
+    /// to allocate in a test) must NOT allocate the fifteen intermediate planes
+    /// (nor the output `q`) at the input's full resolution. Before the fix,
+    /// `DehazeTransmissionNode` allocated all fifteen `R32Float` planes at
+    /// (3200, 2400) — this asserts the node's actual output dims are capped at
+    /// `DEHAZE_MAX_TRANSMISSION_DIM` instead.
+    #[test]
+    fn large_input_transmission_is_capped() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let (w, h) = (3200u32, 2400u32);
+        // Flat mid-grey image: only the dims matter for this test, so a flat
+        // fill avoids building/uploading a structured fixture at this size.
+        let pixels = vec![0.5f32; (w * h * 4) as usize];
+        let img = LinearRgbaF32::new(w, h, pixels).expect("flat fixture");
+        let src = upload_source(&ctx, &img);
+
+        let params = Rc::new(Cell::new(TransmissionParams {
+            radius: DEHAZE_DEFAULT_RADIUS as i32,
+            atmos: [0.9, 0.9, 0.9, 0.0],
+            omega: DEHAZE_OMEGA,
+            eps: DEHAZE_GUIDED_EPS,
+            active: 1,
+        }));
+        let node = DehazeTransmissionNode::new(ctx.clone(), params);
+        let out = node.evaluate(&[&src]);
+
+        assert!(
+            out.width <= DEHAZE_MAX_TRANSMISSION_DIM && out.height <= DEHAZE_MAX_TRANSMISSION_DIM,
+            "transmission output must be capped at {DEHAZE_MAX_TRANSMISSION_DIM}px, got {}x{}",
+            out.width,
+            out.height
+        );
+        assert!(
+            out.width < w && out.height < h,
+            "a {w}x{h} input must actually be downsampled, not just clamped to itself"
         );
     }
 

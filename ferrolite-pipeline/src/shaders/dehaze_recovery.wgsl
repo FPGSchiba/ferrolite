@@ -2,6 +2,12 @@
 // image I and the refined transmission map q, producing the recovered/blended image.
 // Mirrors the pure CPU reference `dehaze_recover` exactly, but consumes q directly
 // (while the CPU reference takes dark derived as (1-q)/DEHAZE_OMEGA).
+//
+// `trans` may be SMALLER than `img` (the transmission is computed at a capped
+// working resolution — see `transmission_working_dims` — and upsampled here via
+// a bilinear sample at normalized UV). At scale==1 (`trans` same size as `img`)
+// this is value-identical to the old `textureLoad`: a linear tap at a texel
+// center returns that texel.
 
 @group(0) @binding(0) var img: texture_2d<f32>;
 @group(0) @binding(1) var trans: texture_2d<f32>;
@@ -16,6 +22,7 @@ struct P {
 };
 
 @group(0) @binding(3) var<uniform> p: P;
+@group(0) @binding(4) var samp: sampler;
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -30,7 +37,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let a = p.atmos.rgb;
-    let t = clamp(textureLoad(trans, xy, 0).r, 0.0, 1.0);
+    let uv = (vec2<f32>(xy) + 0.5) / vec2<f32>(dims);
+    let t = clamp(textureSampleLevel(trans, samp, uv, 0.0).r, 0.0, 1.0);
     let te = max(t, p.t0);
     let j = (c.rgb - a) / te + a;
     let hazed = a + (c.rgb - a) * t;

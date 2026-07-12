@@ -163,6 +163,8 @@ pub struct AppState {
     pub collections: Vec<CollectionRecord>,
     /// Per-image tag associations cached for the currently visible grid cells.
     pub visible_tags: HashMap<i64, Vec<TagId>>,
+    /// Per-image collection membership cached for the currently visible grid cells.
+    pub visible_collections: HashMap<i64, Vec<i64>>,
     /// Selected image ids (multi-selection for batch ops).
     pub selection: HashSet<i64>,
     /// The anchor image id for shift-click range selection.
@@ -300,6 +302,7 @@ impl AppState {
             tags: Vec::new(),
             collections: Vec::new(),
             visible_tags: HashMap::new(),
+            visible_collections: HashMap::new(),
             selection: HashSet::new(),
             selection_anchor: None,
             warning: None,
@@ -534,6 +537,26 @@ impl AppState {
         }
     }
 
+    /// Fetch collection membership for any visible image ids not yet cached
+    /// (virtualised). Mirrors `ensure_tags_for`'s off-thread read-pool path so
+    /// the UI thread never blocks on the catalog.
+    pub fn ensure_collections_for(&mut self, ids: &HashSet<i64>) {
+        let missing: Vec<i64> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.visible_collections.contains_key(id))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        if let Ok(map) = self.reads.collections_for_images(&missing) {
+            for id in missing {
+                self.visible_collections
+                    .insert(id, map.get(&id).cloned().unwrap_or_default());
+            }
+        }
+    }
+
     /// Reload the visible set of images from the read pool (called after ingest
     /// progress / folder switch / filter change). Cheap: indexed query, no
     /// filesystem walk.
@@ -546,6 +569,7 @@ impl AppState {
         // the new set, and invalidate the per-cell tag cache so it re-fetches.
         self.images_rev = self.images_rev.wrapping_add(1);
         self.visible_tags.clear();
+        self.visible_collections.clear();
     }
 
     /// Open `rec` in the viewer, cancelling any currently-open viewer first.
@@ -868,6 +892,7 @@ impl AppState {
             tags: Vec::new(),
             collections: Vec::new(),
             visible_tags: HashMap::new(),
+            visible_collections: HashMap::new(),
             selection: HashSet::new(),
             selection_anchor: None,
             warning: None,
@@ -937,6 +962,14 @@ impl AppState {
                 let _ = w.add_image_to_collection(coll_id, *id);
             }
         }
+        // Optimistic cache update: a just-added collection immediately drops
+        // out of the "Add" submenu and appears in the "Remove" submenu.
+        for id in ids {
+            let entry = self.visible_collections.entry(*id).or_default();
+            if !entry.contains(&coll_id) {
+                entry.push(coll_id);
+            }
+        }
         if matches!(self.source, ViewSource::Collection(id) if id == coll_id) {
             self.dirty = true;
         }
@@ -945,6 +978,45 @@ impl AppState {
     /// Add a single explicit image to a collection (used by Develop/viewer).
     pub fn add_image_to_collection_now(&mut self, image_id: i64, coll_id: i64) {
         self.add_images_to_collection(&[image_id], coll_id);
+    }
+
+    /// Remove all selected images (or the single `selected` fallback) from a collection.
+    #[allow(dead_code)] // wired into the context-menu "Remove" submenu in a follow-up task
+    pub fn remove_selection_from_collection(&mut self, coll_id: i64) {
+        let mut targets: Vec<i64> = self.selection.iter().copied().collect();
+        if targets.is_empty() {
+            if let Some(id) = self.selected {
+                targets.push(id);
+            }
+        }
+        self.remove_images_from_collection(&targets, coll_id);
+    }
+
+    /// Shared core: remove every id from the collection; refresh if viewing it.
+    pub fn remove_images_from_collection(&mut self, ids: &[i64], coll_id: i64) {
+        if ids.is_empty() {
+            return;
+        }
+        {
+            let w = self.writer.lock().expect("writer");
+            for id in ids {
+                let _ = w.remove_image_from_collection(coll_id, *id);
+            }
+        }
+        for id in ids {
+            if let Some(v) = self.visible_collections.get_mut(id) {
+                v.retain(|c| *c != coll_id);
+            }
+        }
+        if matches!(self.source, ViewSource::Collection(id) if id == coll_id) {
+            self.dirty = true;
+        }
+    }
+
+    /// Remove a single explicit image from a collection (used by Develop/viewer).
+    #[allow(dead_code)] // wired into the Develop/viewer "Remove" UI in a follow-up task
+    pub fn remove_image_from_collection_now(&mut self, image_id: i64, coll_id: i64) {
+        self.remove_images_from_collection(&[image_id], coll_id);
     }
 }
 
@@ -1645,6 +1717,83 @@ mod tests {
         s.dirty = false;
         s.source = ViewSource::Collection(coll_id);
         s.add_selection_to_collection(coll_id);
+        assert!(
+            s.dirty,
+            "dirty set when currently viewing the target collection"
+        );
+    }
+
+    /// `remove_selection_from_collection` removes each selected image from the
+    /// collection and sets `dirty` only when the current source is that collection.
+    #[test]
+    fn remove_selection_from_collection_removes_images_and_sets_dirty_when_viewing() {
+        use ferrolite_catalog::{FileKind, NewImage};
+        let mut s = AppState::for_test();
+
+        // Create a folder, two images, and a collection; add both images to it.
+        let (coll_id, img_a, img_b) = {
+            let w = s.writer.lock().unwrap();
+            let folder = w.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            let a = w
+                .upsert_image(&NewImage::failed(
+                    folder,
+                    "a.jpg".into(),
+                    1,
+                    1,
+                    FileKind::Standard,
+                    0,
+                ))
+                .unwrap();
+            let b = w
+                .upsert_image(&NewImage::failed(
+                    folder,
+                    "b.jpg".into(),
+                    1,
+                    1,
+                    FileKind::Standard,
+                    0,
+                ))
+                .unwrap();
+            let c = w
+                .create_collection("test-col", ferrolite_image::Color::default())
+                .unwrap();
+            w.add_image_to_collection(c, a).unwrap();
+            w.add_image_to_collection(c, b).unwrap();
+            (c, a, b)
+        };
+
+        // Select both images.
+        s.selection = [img_a, img_b].into_iter().collect();
+        s.dirty = false;
+        // Not currently viewing the collection — dirty must stay false.
+        s.source = ViewSource::All;
+        s.remove_selection_from_collection(coll_id);
+        assert!(
+            !s.dirty,
+            "dirty stays false when not viewing the collection"
+        );
+
+        // Verify images are no longer in the collection via the read pool.
+        s.reload_vocab();
+        s.source = ViewSource::Collection(coll_id);
+        s.refresh_images();
+        assert_eq!(
+            s.images.len(),
+            0,
+            "both images should have been removed from the collection"
+        );
+
+        // Re-add both, then remove again while viewing the collection: dirty must be set.
+        {
+            let w = s.writer.lock().unwrap();
+            w.add_image_to_collection(coll_id, img_a).unwrap();
+            w.add_image_to_collection(coll_id, img_b).unwrap();
+        }
+        s.refresh_images();
+        s.selection = [img_a, img_b].into_iter().collect();
+        s.dirty = false;
+        s.source = ViewSource::Collection(coll_id);
+        s.remove_selection_from_collection(coll_id);
         assert!(
             s.dirty,
             "dirty set when currently viewing the target collection"

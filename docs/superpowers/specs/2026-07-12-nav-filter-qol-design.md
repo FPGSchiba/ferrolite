@@ -191,7 +191,9 @@ Fit/1:1 math already exists — the double-click handler toggles between
 ### Design
 Add two rebindable actions to the keymap (`settings/keymap.rs`):
 - `ZoomFit` — proposed default **F**
-- `ZoomActual` — proposed default **1** (1:1 / 100 %)
+- `ZoomActual` — proposed default **Z** (1:1 / 100 %). Note: `1` cannot be used
+  because `Num1` is already bound to `Rating1`; plain `Z` is free (Undo is
+  `Ctrl+Z`).
 
 Wire each per the load-bearing CLAUDE keybind rules:
 1. Add to the `Action` enum, `Action::ALL`, and `label()`.

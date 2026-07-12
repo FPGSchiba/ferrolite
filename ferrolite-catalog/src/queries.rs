@@ -185,6 +185,30 @@ pub(crate) fn tags_for_images(
     Ok(map)
 }
 
+/// Batch-fetch collection ids for a slice of image ids. image_id -> collection_ids.
+pub(crate) fn collections_for_images(
+    conn: &Connection,
+    image_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<i64>>, CatalogError> {
+    let mut map: std::collections::HashMap<i64, Vec<i64>> = std::collections::HashMap::new();
+    if image_ids.is_empty() {
+        return Ok(map);
+    }
+    let placeholders = vec!["?"; image_ids.len()].join(",");
+    let sql = format!(
+        "SELECT image_id, collection_id FROM collection_images WHERE image_id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(image_ids.iter()), |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for r in rows {
+        let (img, coll) = r?;
+        map.entry(img).or_default().push(coll);
+    }
+    Ok(map)
+}
+
 pub(crate) fn list_collections(
     conn: &Connection,
 ) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {

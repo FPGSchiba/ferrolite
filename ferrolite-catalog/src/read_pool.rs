@@ -93,6 +93,12 @@ impl ReadPool {
     pub fn list_collections(&self) -> Result<Vec<crate::CollectionRecord>, CatalogError> {
         self.with_conn(crate::queries::list_collections)
     }
+    pub fn collections_for_images(
+        &self,
+        ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<i64>>, CatalogError> {
+        self.with_conn(|c| crate::queries::collections_for_images(c, ids))
+    }
 
     /// Execute a `LibraryQuery` and return matching image records.
     pub fn query_images(&self, q: &crate::LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {

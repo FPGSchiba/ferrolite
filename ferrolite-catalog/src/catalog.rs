@@ -543,6 +543,15 @@ impl Catalog {
         crate::queries::list_collections(self.conn())
     }
 
+    /// Batch-fetch collection ids for a slice of image ids. Used to show
+    /// per-image collection membership without one query per image.
+    pub fn collections_for_images(
+        &self,
+        ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<i64>>, CatalogError> {
+        crate::queries::collections_for_images(self.conn(), ids)
+    }
+
     /// Execute a `LibraryQuery` and return matching image records.
     pub fn query_images(&self, q: &crate::LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {
         crate::query::run(self.conn(), q)
@@ -653,6 +662,29 @@ mod collection_tests {
         assert_eq!(cat.list_collections().unwrap().len(), 1);
         cat.delete_collection(c).unwrap();
         assert!(cat.list_collections().unwrap().is_empty());
+    }
+
+    #[test]
+    fn collections_for_images_maps_membership() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let a = cat
+            .upsert_image(&NewImage::failed(f, "a.raf".into(), 1, 1, FileKind::Raw, 0))
+            .unwrap();
+        let b = cat
+            .upsert_image(&NewImage::failed(f, "b.raf".into(), 1, 1, FileKind::Raw, 0))
+            .unwrap();
+        let c1 = cat.create_collection("One", Color::default()).unwrap();
+        let c2 = cat.create_collection("Two", Color::default()).unwrap();
+        cat.add_image_to_collection(c1, a).unwrap();
+        cat.add_image_to_collection(c2, a).unwrap();
+        cat.add_image_to_collection(c1, b).unwrap();
+
+        let map = cat.collections_for_images(&[a, b]).unwrap();
+        let mut a_colls = map.get(&a).cloned().unwrap_or_default();
+        a_colls.sort_unstable();
+        assert_eq!(a_colls, vec![c1, c2]);
+        assert_eq!(map.get(&b).cloned().unwrap_or_default(), vec![c1]);
     }
 }
 

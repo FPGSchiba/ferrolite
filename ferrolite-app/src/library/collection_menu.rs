@@ -4,7 +4,6 @@
 use ferrolite_catalog::CollectionRecord;
 use std::collections::HashMap;
 
-#[allow(dead_code)] // wired into the context-menu submenus in a follow-up task
 fn is_member(membership: &HashMap<i64, Vec<i64>>, image_id: i64, coll_id: i64) -> bool {
     membership
         .get(&image_id)
@@ -12,7 +11,6 @@ fn is_member(membership: &HashMap<i64, Vec<i64>>, image_id: i64, coll_id: i64) -
 }
 
 /// Collections offered for "Add": at least one target is NOT already a member.
-#[allow(dead_code)] // wired into the context-menu submenus in a follow-up task
 pub fn addable_collections(
     all: &[CollectionRecord],
     target_ids: &[i64],
@@ -29,7 +27,6 @@ pub fn addable_collections(
 }
 
 /// Collections offered for "Remove": at least one target IS a member.
-#[allow(dead_code)] // wired into the context-menu submenus in a follow-up task
 pub fn removable_collections(
     all: &[CollectionRecord],
     target_ids: &[i64],

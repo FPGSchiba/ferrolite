@@ -981,7 +981,6 @@ impl AppState {
     }
 
     /// Remove all selected images (or the single `selected` fallback) from a collection.
-    #[allow(dead_code)] // wired into the context-menu "Remove" submenu in a follow-up task
     pub fn remove_selection_from_collection(&mut self, coll_id: i64) {
         let mut targets: Vec<i64> = self.selection.iter().copied().collect();
         if targets.is_empty() {
@@ -1014,7 +1013,6 @@ impl AppState {
     }
 
     /// Remove a single explicit image from a collection (used by Develop/viewer).
-    #[allow(dead_code)] // wired into the Develop/viewer "Remove" UI in a follow-up task
     pub fn remove_image_from_collection_now(&mut self, image_id: i64, coll_id: i64) {
         self.remove_images_from_collection(&[image_id], coll_id);
     }

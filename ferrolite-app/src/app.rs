@@ -2923,9 +2923,11 @@ impl eframe::App for FerroliteApp {
                 }
                 crate::events::AppEvent::OpsLoaded { image_id, stack } => {
                     let mut rebake: Option<ferrolite_pipeline::LensCorrection> = None;
+                    let mut just_loaded = false;
                     if let Some(v) = self.state.viewer.as_mut() {
                         if v.image_id == *image_id && !v.ops_loaded {
                             v.ops_loaded = true;
+                            just_loaded = true;
                             if !stack.is_identity() {
                                 v.history =
                                     crate::develop::history::History::new(stack.clone(), 100);
@@ -2944,6 +2946,14 @@ impl eframe::App for FerroliteApp {
                                 }
                             }
                         }
+                    }
+                    if just_loaded {
+                        // Session-wide tool/tab selection (Task 3) survives image
+                        // switches, but a tab valid for the previous image may not
+                        // exist for this one (e.g. its temp tab belonged to a tool
+                        // disabled for the new image) — re-validate now that the new
+                        // image's ops/registry context is current.
+                        self.state.tool_state.ensure_valid_tab(&self.tool_registry);
                     }
                     if let Some(lc) = rebake {
                         if let Some(db) = self.state.lens_db.clone() {
@@ -3683,8 +3693,10 @@ impl eframe::App for FerroliteApp {
                             t.enabled(&crate::develop::tool::DevelopCtx { state: &self.state })
                         })
                         .unwrap_or(false);
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        v.tool_state.select_tool(id, enabled, &self.tool_registry);
+                    if self.state.viewer.is_some() {
+                        self.state
+                            .tool_state
+                            .select_tool(id, enabled, &self.tool_registry);
                     }
                 }
 
@@ -3913,8 +3925,8 @@ impl eframe::App for FerroliteApp {
         }
 
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
+            let active = self.state.tool_state.active;
             if let Some(v) = self.state.viewer.as_mut() {
-                let active = v.tool_state.active;
                 v.crop_active = active == crate::develop::tool::ToolId::Crop;
                 let mask_active = active == crate::develop::tool::ToolId::Mask;
                 if v.mask.active && !mask_active {
@@ -4112,12 +4124,7 @@ impl eframe::App for FerroliteApp {
                             self.draw_histogram_overlay(ui);
                         }
                         if self.state.settings.show_tool_palette && self.state.viewer.is_some() {
-                            let ts = self
-                                .state
-                                .viewer
-                                .as_ref()
-                                .map(|v| v.tool_state)
-                                .unwrap_or_default();
+                            let ts = self.state.tool_state;
                             let can_undo = self
                                 .state
                                 .viewer
@@ -4151,8 +4158,12 @@ impl eframe::App for FerroliteApp {
                                             t.enabled(&c)
                                         })
                                         .unwrap_or(false);
-                                    if let Some(v) = self.state.viewer.as_mut() {
-                                        v.tool_state.select_tool(id, enabled, &self.tool_registry);
+                                    if self.state.viewer.is_some() {
+                                        self.state.tool_state.select_tool(
+                                            id,
+                                            enabled,
+                                            &self.tool_registry,
+                                        );
                                     }
                                 }
                                 Some(crate::develop::tool_palette::PaletteAction::Undo) => {
@@ -4170,7 +4181,11 @@ impl eframe::App for FerroliteApp {
                         // Keep the mask overlay's bounded rebuild glue (needs &mut self)
                         // here, before dispatch, so `state.mask_overlay_native` is
                         // current when `MaskTool::canvas` reads it.
-                        let active_tool = self.state.viewer.as_ref().map(|v| v.tool_state.active);
+                        let active_tool = self
+                            .state
+                            .viewer
+                            .is_some()
+                            .then_some(self.state.tool_state.active);
                         if active_tool == Some(crate::develop::tool::ToolId::Mask) {
                             self.rebuild_mask_overlay_if_needed(frame);
                         }
@@ -4200,11 +4215,13 @@ impl eframe::App for FerroliteApp {
                         // input (e.g. it stole clicks from the mask color-eyedropper).
                         // Only register it in the Adjust tool, where no canvas tool
                         // owns the pointer.
+                        let is_adjust_active =
+                            self.state.tool_state.active == crate::develop::tool::ToolId::Adjust;
                         let ctx_menu_id = self
                             .state
                             .viewer
                             .as_ref()
-                            .filter(|v| v.tool_state.active == crate::develop::tool::ToolId::Adjust)
+                            .filter(|_| is_adjust_active)
                             .map(|v| v.image_id);
                         if let Some(image_id) = ctx_menu_id {
                             let rect = ui.min_rect();

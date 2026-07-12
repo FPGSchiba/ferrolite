@@ -206,4 +206,18 @@ mod tests {
             "stale tab clamps to first base tab"
         );
     }
+
+    #[test]
+    fn selecting_a_tab_survives_ensure_valid_when_still_present() {
+        let reg = reg();
+        let mut ts = ToolState::default();
+        ts.select_tab(TabId("color"), &reg);
+        assert_eq!(ts.active_tab, TabId("color"));
+        ts.ensure_valid_tab(&reg); // simulates re-validation on image switch
+        assert_eq!(
+            ts.active_tab,
+            TabId("color"),
+            "valid tab kept across switch"
+        );
+    }
 }

@@ -127,6 +127,12 @@ pub struct AppState {
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
 
+    /// Develop tool/tab selection state (design §5). Session-wide (unlike the
+    /// per-image fields on `ViewerState`) so switching images keeps the same
+    /// tool/tab active; `ensure_valid_tab` re-validates it against the new
+    /// image's registry after each load.
+    pub tool_state: crate::develop::tool_state::ToolState,
+
     /// The single-file export dialog, `Some` while the format+options popup is
     /// open (spec §8.3).
     pub export_dialog: Option<crate::export::ExportDialogState>,
@@ -281,6 +287,7 @@ impl AppState {
             mask_overlay_highlight_native: None,
             mask_overlay_highlight_gpu: None,
             viewer: None,
+            tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,
             export_queue: Vec::new(),
@@ -848,6 +855,7 @@ impl AppState {
             mask_overlay_highlight_native: None,
             mask_overlay_highlight_gpu: None,
             viewer: None,
+            tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,
             export_queue: Vec::new(),

@@ -3724,6 +3724,42 @@ impl eframe::App for FerroliteApp {
                         );
                     }
                 }
+
+                // Zoom-to-fit (default `F`) and Zoom 1:1 (default `Z`): rebuild the
+                // same transforms the canvas's double-click toggle already builds
+                // (`viewer/mod.rs`'s `paint`), just from a keybind instead of a
+                // double-click gesture.
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::ZoomFit)
+                {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if let Some(dims) = v.image_dims {
+                            v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
+                            v.idle = false;
+                            ctx.request_repaint();
+                        }
+                    }
+                }
+                if self
+                    .state
+                    .settings
+                    .keymap
+                    .pressed(ctx, crate::settings::keymap::Action::ZoomActual)
+                {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_dims.is_some() {
+                            v.view = ferrolite_vt::ViewTransform {
+                                zoom: 1.0,
+                                pan: (0.0, 0.0),
+                            };
+                            v.idle = false;
+                            ctx.request_repaint();
+                        }
+                    }
+                }
             }
         }
 

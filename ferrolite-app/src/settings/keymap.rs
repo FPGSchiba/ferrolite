@@ -32,11 +32,13 @@ pub enum Action {
     SwitchToolMask,
     ToggleMaskOverlay,
     NewBrushLayer,
+    ZoomFit,
+    ZoomActual,
 }
 
 impl Action {
     /// All variants, for exhaustive iteration (defaults coverage + UI listing).
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 27] = [
         Action::CloseViewer,
         Action::OpenImage,
         Action::SelectAll,
@@ -62,6 +64,8 @@ impl Action {
         Action::SwitchToolMask,
         Action::ToggleMaskOverlay,
         Action::NewBrushLayer,
+        Action::ZoomFit,
+        Action::ZoomActual,
     ];
 
     pub fn label(self) -> &'static str {
@@ -91,6 +95,8 @@ impl Action {
             Action::SwitchToolMask => "Tool: Mask",
             Action::ToggleMaskOverlay => "Toggle mask overlay",
             Action::NewBrushLayer => "New brush layer",
+            Action::ZoomFit => "Zoom to fit",
+            Action::ZoomActual => "Zoom 1:1 (100%)",
         }
     }
 }
@@ -563,6 +569,8 @@ impl Keymap {
         m.insert(ToggleMaskOverlay, plain(Key::T));
         // `B` ("brush") is free — not used by any other default above.
         m.insert(NewBrushLayer, plain(Key::B));
+        m.insert(ZoomFit, plain(Key::F));
+        m.insert(ZoomActual, plain(Key::Z));
         // Fill any missing action (forward-compat) with a harmless default.
         for a in Action::ALL {
             m.entry(a).or_insert(plain(Key::F1));
@@ -838,6 +846,13 @@ mod tests {
         assert_eq!(km.hint(Action::Undo), "Ctrl+Z");
         assert_eq!(km.hint(Action::Redo), "Ctrl+Shift+Z");
         assert_eq!(km.hint(Action::ToggleMaskOverlay), "T");
+    }
+
+    #[test]
+    fn zoom_actions_have_default_binds() {
+        let km = Keymap::defaults();
+        assert_eq!(km.chord(Action::ZoomFit).key, Key::F);
+        assert_eq!(km.chord(Action::ZoomActual).key, Key::Z);
     }
 
     #[test]

@@ -186,8 +186,8 @@ mod tests {
         );
         assert_eq!(
             reg.base_tabs().len(),
-            6,
-            "Light/Color/Grade/Curve/Detail/Optics"
+            7,
+            "Light/Color/Grade/Curve/Detail/Optics/Info"
         );
         // Heal is the only always-disabled tool; assert via its (empty) tabs rather
         // than `enabled()` to avoid constructing a full `AppState` here.

@@ -1,10 +1,5 @@
 //! Pure, egui-free formatting of image EXIF + live viewer zoom into display
 //! strings. Shared by the info overlay and the Info tab.
-//!
-//! `ImageFacts` is not yet wired into the UI — the info overlay and Info tab
-//! consumers land in later tasks — so its public surface is allowed dead code
-//! until then.
-#![allow(dead_code)]
 
 use ferrolite_decode::Metadata;
 

@@ -14,6 +14,7 @@ pub mod histogram_widget;
 pub mod history;
 pub mod hsl_widget;
 pub mod info;
+pub mod info_overlay;
 pub mod lens_bake;
 pub mod lens_caps_ui;
 pub mod lens_match;

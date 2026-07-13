@@ -39,6 +39,7 @@ pub const CARET_UP: &str = p::CARET_UP;
 pub const OVERLAY_ON: &str = p::EYE;
 pub const OVERLAY_OFF: &str = p::EYE_SLASH;
 pub const WARNING: &str = p::WARNING;
+pub const INFO: &str = p::INFO;
 
 /// The regular icon font. `add_to_fonts(Regular)` put Phosphor Regular into the
 /// `Proportional` family's fallback chain, so its PUA codepoints resolve here.
@@ -84,6 +85,7 @@ mod tests {
             ("OVERLAY_ON", OVERLAY_ON),
             ("OVERLAY_OFF", OVERLAY_OFF),
             ("WARNING", WARNING),
+            ("INFO", INFO),
         ] {
             assert!(!s.is_empty(), "icon alias {name} is empty");
         }

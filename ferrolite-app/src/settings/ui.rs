@@ -181,6 +181,12 @@ fn draw_general_tab(ui: &mut egui::Ui, settings: &mut Settings, display_name: &s
         changed = true;
     }
     if ui
+        .checkbox(&mut settings.show_info_overlay, "Show info overlay")
+        .changed()
+    {
+        changed = true;
+    }
+    if ui
         .checkbox(&mut settings.show_tool_palette, "Show tool palette")
         .changed()
     {

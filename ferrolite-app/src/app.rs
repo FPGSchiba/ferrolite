@@ -3178,6 +3178,7 @@ impl eframe::App for FerroliteApp {
                     can_undo,
                     can_redo,
                     self.state.settings.show_histogram,
+                    self.state.settings.show_info_overlay,
                     self.state.settings.show_tool_palette,
                 );
                 if self.module != module_before {
@@ -3251,6 +3252,11 @@ impl eframe::App for FerroliteApp {
                     }
                     Some(crate::chrome::MenuAction::ToggleHistogram) => {
                         self.state.settings.show_histogram = !self.state.settings.show_histogram;
+                        self.mark_settings_dirty();
+                    }
+                    Some(crate::chrome::MenuAction::ToggleInfoOverlay) => {
+                        self.state.settings.show_info_overlay =
+                            !self.state.settings.show_info_overlay;
                         self.mark_settings_dirty();
                     }
                     Some(crate::chrome::MenuAction::ToggleToolPalette) => {
@@ -4122,6 +4128,21 @@ impl eframe::App for FerroliteApp {
                         self.drive_viewer(ui, frame);
                         if self.state.settings.show_histogram {
                             self.draw_histogram_overlay(ui);
+                        }
+                        if self.state.settings.show_info_overlay {
+                            if let Some(v) = self.state.viewer.as_ref() {
+                                if let (Some(meta), Some(dims)) = (v.meta.as_ref(), v.image_dims) {
+                                    let fit =
+                                        ferrolite_vt::ViewTransform::fit(dims, v.viewport).zoom;
+                                    let facts = crate::develop::info::ImageFacts::build(
+                                        meta,
+                                        v.view.zoom,
+                                        fit,
+                                        dims,
+                                    );
+                                    crate::develop::info_overlay::draw(ctx, &facts);
+                                }
+                            }
                         }
                         if self.state.settings.show_tool_palette && self.state.viewer.is_some() {
                             let ts = self.state.tool_state;

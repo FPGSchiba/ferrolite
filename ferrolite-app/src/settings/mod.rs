@@ -22,6 +22,7 @@ pub struct Settings {
     pub grid_size: f32,
     pub confirm_remove: bool,
     pub show_histogram: bool,
+    pub show_info_overlay: bool,
     pub show_tool_palette: bool,
     pub restore_session: bool,
     pub last_module: dto::PersistedModule,
@@ -39,6 +40,7 @@ impl Default for Settings {
             grid_size: 46.0,
             confirm_remove: true,
             show_histogram: true,
+            show_info_overlay: false,
             show_tool_palette: true,
             restore_session: false,
             last_module: dto::PersistedModule::default(),
@@ -54,5 +56,10 @@ mod tests {
     #[test]
     fn tool_palette_defaults_on() {
         assert!(Settings::default().show_tool_palette);
+    }
+
+    #[test]
+    fn info_overlay_defaults_off() {
+        assert!(!Settings::default().show_info_overlay);
     }
 }

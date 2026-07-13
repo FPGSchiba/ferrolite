@@ -1,6 +1,7 @@
 //! Pure, egui-free Develop tool/tab selection state (design §5). `Copy` so the app can
-//! read it out of `ViewerState`, mutate a local while rendering, and write it back —
-//! avoiding a multi-field borrow against `&mut AppState`.
+//! read it out of `AppState`, mutate a local while rendering, and write it back —
+//! avoiding a multi-field borrow against `&mut AppState`. Owned by `AppState` (not
+//! `ViewerState`) so the active tool/tab persists across image switches within a session.
 
 use crate::develop::tool::{DevelopToolRegistry, TabId, ToolId};
 

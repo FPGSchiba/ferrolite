@@ -393,4 +393,15 @@ mod tests {
         assert!(!sql.contains("LIMIT"), "folder scope must not be limited");
         assert_eq!(params, vec![Value::Integer(7)]);
     }
+
+    #[test]
+    fn not_seen_flag_compiles_to_flag_in_zero() {
+        let q = LibraryQuery {
+            flags: vec![Flag::None],
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("flag IN (?)"), "sql: {sql}");
+        assert_eq!(params, vec![Value::Integer(0)]);
+    }
 }

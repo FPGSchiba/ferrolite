@@ -55,31 +55,44 @@ fn orientation_of(e: &exif::Exif) -> Orientation {
 pub fn read_metadata_standard(path: &Path) -> Result<Metadata, DecodeError> {
     let (width, height) = image::image_dimensions(path)?;
     let exif = read_exif(path);
-    let (make, model, orientation, iso, aperture, shutter, focal_length, capture_time, lens) =
-        match exif.as_ref() {
-            Some(e) => (
-                ascii(e, exif::Tag::Make).unwrap_or_default(),
-                ascii(e, exif::Tag::Model).unwrap_or_default(),
-                orientation_of(e),
-                uint(e, exif::Tag::PhotographicSensitivity),
-                rational_f32(e, exif::Tag::FNumber),
-                rational_f32(e, exif::Tag::ExposureTime),
-                rational_f32(e, exif::Tag::FocalLength),
-                ascii(e, exif::Tag::DateTimeOriginal),
-                ascii(e, exif::Tag::LensModel),
-            ),
-            None => (
-                String::new(),
-                String::new(),
-                Orientation::Normal,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
-        };
+    let (
+        make,
+        model,
+        orientation,
+        iso,
+        aperture,
+        shutter,
+        focal_length,
+        focal_length_35mm,
+        capture_time,
+        lens,
+    ) = match exif.as_ref() {
+        Some(e) => (
+            ascii(e, exif::Tag::Make).unwrap_or_default(),
+            ascii(e, exif::Tag::Model).unwrap_or_default(),
+            orientation_of(e),
+            uint(e, exif::Tag::PhotographicSensitivity),
+            rational_f32(e, exif::Tag::FNumber),
+            rational_f32(e, exif::Tag::ExposureTime),
+            rational_f32(e, exif::Tag::FocalLength),
+            // Integer SHORT tag (like ISO) — read via `uint`, NOT `rational_f32`.
+            uint(e, exif::Tag::FocalLengthIn35mmFilm),
+            ascii(e, exif::Tag::DateTimeOriginal),
+            ascii(e, exif::Tag::LensModel),
+        ),
+        None => (
+            String::new(),
+            String::new(),
+            Orientation::Normal,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+    };
     Ok(Metadata {
         make,
         model,
@@ -90,6 +103,7 @@ pub fn read_metadata_standard(path: &Path) -> Result<Metadata, DecodeError> {
         aperture,
         shutter,
         focal_length,
+        focal_length_35mm,
         capture_time,
         lens,
     })

@@ -1,6 +1,7 @@
 //! The Library module: virtualized grid, folder panel, toolbar.
 
 pub mod cell_state;
+pub mod collection_menu;
 pub mod develop_filter_bar;
 pub mod develop_metadata_bar;
 pub mod drag;

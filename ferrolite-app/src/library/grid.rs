@@ -81,6 +81,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         }
         // Fetch tag associations for the visible window (only missing ids queried).
         state.ensure_tags_for(&now_visible);
+        // Fetch collection membership for the same visible window, so the
+        // "Add/Remove to collection" submenus can decide addable/removable
+        // without a synchronous DB call.
+        state.ensure_collections_for(&now_visible);
         // Cancel any lazy-load thumbnail fetches for cells scrolled out of view
         // this frame, so a big scroll doesn't leave a stale backlog blocking the
         // now-visible cells (Round 4 fix).

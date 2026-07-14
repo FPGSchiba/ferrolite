@@ -204,8 +204,6 @@ pub struct ViewerState {
     pub hsl_band: usize,
     /// Masking-tool UI state (design §9). Per-image, like `hsl_band`/`crop_active`.
     pub mask: crate::develop::mask_ui::MaskUiState,
-    /// Develop tool/tab selection state (design §5). Per-image, like `mask`/`hsl_band`.
-    pub tool_state: crate::develop::tool_state::ToolState,
     /// Overlay compositor for the canvas mask fill (Task 9), built once lazily on
     /// first overlay use and reused thereafter (CLAUDE.md §2: build GPU pipelines
     /// once, never per frame).
@@ -338,7 +336,6 @@ impl ViewerState {
             crop_active: false,
             hsl_band: 0,
             mask: crate::develop::mask_ui::MaskUiState::default(),
-            tool_state: crate::develop::tool_state::ToolState::default(),
             mask_overlay: None,
             mask_overlay_input: None,
             mask_overlay_input_gen: 0,

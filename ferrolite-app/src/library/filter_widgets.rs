@@ -110,10 +110,20 @@ pub fn rating_threshold(
     changed
 }
 
-/// Flag-filter toggles (Pick green, Reject red); filled when active.
+/// Add `f` to `flags` if absent, else remove it. Shared by every flag toggle.
+pub fn toggle_flag(flags: &mut Vec<Flag>, f: Flag) {
+    if let Some(p) = flags.iter().position(|x| *x == f) {
+        flags.remove(p);
+    } else {
+        flags.push(f);
+    }
+}
+
+/// Flag-filter toggles (Pick green, Reject red, None gray); filled when active.
 pub fn flag_filters(ui: &mut egui::Ui, flags: &mut Vec<Flag>) -> bool {
     let mut changed = false;
     for (f, color) in [
+        (Flag::None, crate::theme::TEXT_FAINT),
         (Flag::Pick, crate::theme::SEMANTIC_GREEN),
         (Flag::Reject, crate::theme::SEMANTIC_RED),
     ] {
@@ -132,12 +142,13 @@ pub fn flag_filters(ui: &mut egui::Ui, flags: &mut Vec<Flag>) -> bool {
             false,
             f == Flag::Reject,
         );
-        if resp.clicked() {
-            if let Some(p) = flags.iter().position(|x| *x == f) {
-                flags.remove(p);
-            } else {
-                flags.push(f);
-            }
+        let tooltip = match f {
+            Flag::None => "Not seen (no flag)",
+            Flag::Pick => "Pick",
+            Flag::Reject => "Reject",
+        };
+        if resp.on_hover_text(tooltip).clicked() {
+            toggle_flag(flags, f);
             changed = true;
         }
     }
@@ -228,5 +239,15 @@ mod tests {
         assert_eq!(star_value_clicked(3, 3), 0); // clicking active clears
         assert_eq!(star_value_clicked(2, 5), 5); // change
         assert_eq!(star_value_clicked(5, 1), 1); // lower
+    }
+
+    #[test]
+    fn toggle_flag_adds_then_removes() {
+        let mut flags = vec![Flag::Pick];
+        toggle_flag(&mut flags, Flag::None);
+        assert!(flags.contains(&Flag::None));
+        toggle_flag(&mut flags, Flag::None);
+        assert!(!flags.contains(&Flag::None));
+        assert_eq!(flags, vec![Flag::Pick]);
     }
 }

@@ -19,13 +19,15 @@ pub fn show(
     ui.separator();
 
     // 2) Copy ToolState out (it is Copy) so the tab-bar mutation doesn't fight the
-    //    &mut AppState borrow used by the active tab's show().
-    let Some(mut ts) = state.viewer.as_ref().map(|v| v.tool_state) else {
+    //    &mut AppState borrow used by the active tab's show(). Session-wide (on
+    //    AppState, not ViewerState) so it survives image switches.
+    if state.viewer.is_none() {
         return PanelOutcome {
             edit: None,
             working_space: ws_change,
         };
-    };
+    }
+    let mut ts = state.tool_state;
     ts.ensure_valid_tab(reg);
     let bar = ts.tab_bar(reg);
     let base_len = reg.base_tabs().len();
@@ -82,9 +84,7 @@ pub fn show(
     }
 
     // Write ToolState back.
-    if let Some(v) = state.viewer.as_mut() {
-        v.tool_state = ts;
-    }
+    state.tool_state = ts;
     PanelOutcome {
         edit: out,
         working_space: ws_change,

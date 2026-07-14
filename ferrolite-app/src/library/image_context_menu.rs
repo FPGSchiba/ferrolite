@@ -1,6 +1,7 @@
 //! Reusable right-click metadata menu for a single image (Rating / Flag / Tags /
 //! Add-to-collection). Shared by the grid, the Develop filmstrip, and the loupe.
 
+use crate::library::filter::ViewSource;
 use crate::metadata::MetaEdit;
 use crate::state::AppState;
 use ferrolite_image::{Flag, Rating};
@@ -90,18 +91,65 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image
         });
     }
     if !collections.is_empty() {
-        ui.menu_button("Add to collection", |ui| {
-            for c in &collections {
-                if ui.button(&c.name).clicked() {
-                    if use_selection {
-                        state.add_selection_to_collection(c.id);
-                    } else {
-                        state.add_image_to_collection_now(image_id, c.id);
+        let target_ids: Vec<i64> = if use_selection {
+            let mut v: Vec<i64> = state.selection.iter().copied().collect();
+            v.sort_unstable();
+            v
+        } else {
+            vec![image_id]
+        };
+        let membership = state.visible_collections.clone();
+        let addable = crate::library::collection_menu::addable_collections(
+            &collections,
+            &target_ids,
+            &membership,
+        );
+        let removable = crate::library::collection_menu::removable_collections(
+            &collections,
+            &target_ids,
+            &membership,
+        );
+
+        if !addable.is_empty() {
+            ui.menu_button("Add to collection", |ui| {
+                for c in collections.iter().filter(|c| addable.contains(&c.id)) {
+                    if ui.button(&c.name).clicked() {
+                        if use_selection {
+                            state.add_selection_to_collection(c.id);
+                        } else {
+                            state.add_image_to_collection_now(image_id, c.id);
+                        }
+                        ui.close_menu();
                     }
-                    ui.close_menu();
                 }
+            });
+        }
+
+        if !removable.is_empty() {
+            ui.menu_button("Remove from collection", |ui| {
+                for c in collections.iter().filter(|c| removable.contains(&c.id)) {
+                    if ui.button(&c.name).clicked() {
+                        if use_selection {
+                            state.remove_selection_from_collection(c.id);
+                        } else {
+                            state.remove_image_from_collection_now(image_id, c.id);
+                        }
+                        ui.close_menu();
+                    }
+                }
+            });
+        }
+    }
+
+    if let ViewSource::Collection(coll_id) = state.source {
+        if ui.button("Remove from this collection").clicked() {
+            if use_selection {
+                state.remove_selection_from_collection(coll_id);
+            } else {
+                state.remove_image_from_collection_now(image_id, coll_id);
             }
-        });
+            ui.close_menu();
+        }
     }
 
     ui.separator();

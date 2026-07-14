@@ -34,6 +34,17 @@ fn read_metadata_returns_camera_and_dimensions() {
 }
 
 #[test]
+fn focal_length_35mm_defaults_none_when_absent() {
+    // The RAW route (rawler-derived) does not expose FocalLengthIn35mmFilm, so
+    // it must always report `None` — never a fabricated value.
+    let meta = ferrolite_decode::read_metadata(&fixture(), FileKind::Raw).expect("metadata");
+    assert!(
+        meta.focal_length_35mm.is_none(),
+        "RAW route does not populate focal_length_35mm"
+    );
+}
+
+#[test]
 fn decode_preview_returns_nonempty_rgb8() {
     use ferrolite_image::PixelFormat;
     let buf = ferrolite_decode::decode_preview(&fixture(), FileKind::Raw).expect("preview");

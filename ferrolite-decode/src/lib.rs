@@ -196,6 +196,9 @@ fn build_metadata_from_raw(meta: &RawMetadata, dims: &RawImage) -> Result<Metada
         aperture: e.fnumber.as_ref().and_then(|r| rat(r.n, r.d)),
         shutter: e.exposure_time.as_ref().and_then(|r| rat(r.n, r.d)),
         focal_length: e.focal_length.as_ref().and_then(|r| rat(r.n, r.d)),
+        // rawler does not expose FocalLengthIn35mmFilm; only the standard/EXIF
+        // route populates this (see `read_metadata_standard`).
+        focal_length_35mm: None,
         capture_time: e.date_time_original.clone(),
         lens: e.lens_model.clone(),
     })

@@ -4,6 +4,7 @@
 //! widget). `base_tabs()` is registered once as the registry's base.
 
 use crate::develop::adjustment_panel::EditOutcome;
+use crate::develop::info_tab::InfoTab;
 use crate::develop::tool::{PanelTab, TabId};
 use crate::develop::{
     curve_widget, hsl_widget, lens_caps_ui, lens_picker, ops_edit, vignette_mode,
@@ -753,5 +754,6 @@ pub fn base_tabs() -> Vec<Box<dyn PanelTab>> {
         Box::new(CurveTab),
         Box::new(DetailTab),
         Box::new(OpticsTab),
+        Box::new(InfoTab),
     ]
 }

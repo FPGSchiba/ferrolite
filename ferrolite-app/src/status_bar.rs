@@ -115,8 +115,7 @@ fn selected_exif(state: &AppState) -> String {
                 (Some(w), Some(h)) => format!("{w}×{h}"),
                 _ => "—".to_string(),
             };
-            let iso = img.iso.map(|v| format!("ISO {v}")).unwrap_or_default();
-            format!("{} · {} · {}", img.filename, dims, iso)
+            format!("{} · {}", img.filename, dims)
         }
         None => "No selection".to_string(),
     }

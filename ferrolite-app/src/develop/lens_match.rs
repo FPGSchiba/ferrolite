@@ -66,6 +66,7 @@ mod tests {
             aperture: ap,
             shutter: Some(0.01),
             focal_length: focal,
+            focal_length_35mm: None,
             capture_time: None,
             lens: lens.map(String::from),
         }

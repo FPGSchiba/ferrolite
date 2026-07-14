@@ -1,10 +1,11 @@
 //! Read-only Develop tab listing all `ImageFacts` (design §7): camera, lens, focal
 //! (+35mm-equiv), aperture, shutter, ISO, capture time, dimensions, and live zoom.
-//! Never produces an edit. Activating this tab closes the info overlay (they show
-//! the same facts; showing both at once is redundant) — enforced here rather than
-//! at the tab-bar click site because `PanelTab::show` is only invoked for the
-//! active tab, so setting the flag on entry is sufficient and can't drift out of
-//! sync with tab selection.
+//! Never produces an edit. While this tab is active the info overlay is suppressed
+//! (they show the same facts; showing both at once is redundant), but the user's
+//! overlay preference is preserved — the overlay reappears when they switch to
+//! another tab. That suppression is applied at the overlay's draw site (gated on
+//! `tool_state.active_tab != "info"`), NOT by mutating `show_info_overlay` here, so
+//! toggling the tab is non-destructive to the setting.
 
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::tool::{PanelTab, TabId};
@@ -22,12 +23,9 @@ impl PanelTab for InfoTab {
     }
 
     fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
-        // This tab and the info overlay show the same facts; while this tab is
-        // active the overlay would be redundant screen clutter, so close it. Set
-        // before borrowing `state.viewer` so there is no overlapping borrow with
-        // the `state.settings` mutation below.
-        state.settings.show_info_overlay = false;
-
+        // The overlay is suppressed while this tab is active by the overlay's own
+        // draw guard (see `app.rs`, gated on the active tab) — non-destructive, so
+        // the overlay returns when the user leaves this tab. Nothing to do here.
         if let Some(v) = state.viewer.as_ref() {
             if let (Some(meta), Some(dims)) = (v.meta.as_ref(), v.image_dims) {
                 let fit = ferrolite_vt::ViewTransform::fit(dims, v.viewport).zoom;

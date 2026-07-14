@@ -4129,7 +4129,14 @@ impl eframe::App for FerroliteApp {
                         if self.state.settings.show_histogram {
                             self.draw_histogram_overlay(ui);
                         }
-                        if self.state.settings.show_info_overlay {
+                        // Overlay is suppressed while the Info tab is active (it shows
+                        // the same facts) — a non-destructive gate, so the overlay
+                        // returns when the user leaves that tab without touching the
+                        // persisted `show_info_overlay` preference.
+                        if self.state.settings.show_info_overlay
+                            && self.state.tool_state.active_tab
+                                != crate::develop::tool::TabId("info")
+                        {
                             if let Some(v) = self.state.viewer.as_ref() {
                                 if let (Some(meta), Some(dims)) = (v.meta.as_ref(), v.image_dims) {
                                     let fit =
@@ -4140,7 +4147,7 @@ impl eframe::App for FerroliteApp {
                                         fit,
                                         dims,
                                     );
-                                    crate::develop::info_overlay::draw(ctx, &facts);
+                                    crate::develop::info_overlay::draw(ui, &facts);
                                 }
                             }
                         }

@@ -215,11 +215,11 @@ pub fn title_bar(
                     action = Some(MenuAction::ToggleSplit);
                     ui.close_menu();
                 }
-                if ui.add_enabled(viewer_open, Button::new("Fit")).clicked() {
+                if menu_button(ui, keymap, "Fit", Action::ZoomFit, viewer_open).clicked() {
                     action = Some(MenuAction::ZoomFit);
                     ui.close_menu();
                 }
-                if ui.add_enabled(viewer_open, Button::new("1:1")).clicked() {
+                if menu_button(ui, keymap, "1:1", Action::ZoomActual, viewer_open).clicked() {
                     action = Some(MenuAction::ZoomActual);
                     ui.close_menu();
                 }

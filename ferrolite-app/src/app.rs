@@ -3757,6 +3757,13 @@ impl eframe::App for FerroliteApp {
                         if let Some(dims) = v.image_dims {
                             v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
                             v.idle = false;
+                            // Snap cleanly to fit: drop any pending/residual scroll so
+                            // trackpad momentum can't keep zooming past the fit this
+                            // frame (drive_viewer reads these deltas later this frame).
+                            ctx.input_mut(|i| {
+                                i.raw_scroll_delta = egui::Vec2::ZERO;
+                                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                            });
                             ctx.request_repaint();
                         }
                     }
@@ -3774,6 +3781,12 @@ impl eframe::App for FerroliteApp {
                                 pan: (0.0, 0.0),
                             };
                             v.idle = false;
+                            // Same as fit: kill residual scroll velocity so the 1:1
+                            // snap isn't immediately dragged off by trackpad momentum.
+                            ctx.input_mut(|i| {
+                                i.raw_scroll_delta = egui::Vec2::ZERO;
+                                i.smooth_scroll_delta = egui::Vec2::ZERO;
+                            });
                             ctx.request_repaint();
                         }
                     }

@@ -75,7 +75,7 @@ pub fn show(ui: &mut egui::Ui, bins: Option<&[u32]>) {
     painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.0, crate::theme::BORDER_STRONG),
+        egui::Stroke::new(1.0_f32, crate::theme::BORDER_STRONG),
     );
 }
 

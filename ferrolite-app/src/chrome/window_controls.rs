@@ -67,7 +67,7 @@ fn paint_icon(
     is_maximized: bool,
     color: Color32,
 ) {
-    let s = Stroke::new(1.2, color);
+    let s = Stroke::new(1.2_f32, color);
     let r = 5.0; // half-extent → ~10px icon box
     let square = |min: Pos2| Rect::from_min_size(min, Vec2::splat(2.0 * r - 2.0));
     match action {

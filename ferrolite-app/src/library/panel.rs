@@ -138,7 +138,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                 } else {
                     theme::TEXT_DIM
                 };
-                let stroke = egui::Stroke::new(1.2, color);
+                let stroke = egui::Stroke::new(1.2_f32, color);
                 let p = ui.painter();
                 p.line_segment([r.left_top(), r.right_bottom()], stroke);
                 p.line_segment([r.left_bottom(), r.right_top()], stroke);
@@ -244,7 +244,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                         } else {
                             theme::TEXT_DIM
                         };
-                        let stroke = egui::Stroke::new(1.2, color);
+                        let stroke = egui::Stroke::new(1.2_f32, color);
                         let p = ui.painter();
                         p.line_segment([r.left_top(), r.right_bottom()], stroke);
                         p.line_segment([r.left_bottom(), r.right_top()], stroke);
@@ -362,7 +362,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                         } else {
                             theme::TEXT_DIM
                         };
-                        let stroke = egui::Stroke::new(1.2, color);
+                        let stroke = egui::Stroke::new(1.2_f32, color);
                         let p = ui.painter();
                         p.line_segment([r.left_top(), r.right_bottom()], stroke);
                         p.line_segment([r.left_bottom(), r.right_top()], stroke);

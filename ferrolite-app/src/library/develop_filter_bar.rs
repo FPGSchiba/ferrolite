@@ -38,7 +38,7 @@ fn split_compare_button(
             ui.painter()
                 .rect_filled(rect, 3.0, crate::theme::ACCENT_BG_SEL);
             ui.painter()
-                .rect_stroke(rect, 3.0, egui::Stroke::new(1.0, crate::theme::ACCENT));
+                .rect_stroke(rect, 3.0, egui::Stroke::new(1.0_f32, crate::theme::ACCENT));
         } else if hovered {
             ui.painter()
                 .rect_filled(rect, 3.0, ui.visuals().faint_bg_color);

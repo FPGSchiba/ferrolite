@@ -96,7 +96,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context, image_
         ui.painter().rect_stroke(
             rect,
             4.0,
-            egui::Stroke::new(1.0, crate::theme::BORDER_STRONG),
+            egui::Stroke::new(1.0_f32, crate::theme::BORDER_STRONG),
         );
         icons::export_tray(ui.painter(), rect.center(), 14.0, icon_color);
         let queue_hover = format!(

@@ -181,7 +181,7 @@ fn draw_overlay(ui: &mut egui::Ui, p: &ParametricCurve) {
             egui::pos2(rect.left(), rect.bottom()),
             egui::pos2(rect.right(), rect.top()),
         ],
-        egui::Stroke::new(1.0, theme::BORDER_STRONG),
+        egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
     );
     // Baked parametric curve.
     let lut = parametric_curve_lut(p);
@@ -197,7 +197,7 @@ fn draw_overlay(ui: &mut egui::Ui, p: &ParametricCurve) {
         .collect();
     painter.add(egui::Shape::line(
         poly,
-        egui::Stroke::new(1.5, theme::ACCENT),
+        egui::Stroke::new(1.5_f32, theme::ACCENT),
     ));
 }
 

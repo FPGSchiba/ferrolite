@@ -447,12 +447,12 @@ fn paint_cell(
         painter.rect_stroke(
             path,
             SEL_ROUND,
-            egui::Stroke::new(4.0, egui::Color32::from_black_alpha(200)),
+            egui::Stroke::new(4.0_f32, egui::Color32::from_black_alpha(200)),
         );
         painter.rect_stroke(
             path,
             SEL_ROUND,
-            egui::Stroke::new(2.0, theme::ACCENT_BRIGHT),
+            egui::Stroke::new(2.0_f32, theme::ACCENT_BRIGHT),
         );
     }
 

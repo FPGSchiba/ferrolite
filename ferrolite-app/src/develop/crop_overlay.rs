@@ -40,7 +40,7 @@ pub fn show(
         to_screen(crop.x + crop.w, crop.y + crop.h),
     );
     let painter = ui.painter();
-    painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5, theme::ACCENT_BRIGHT));
+    painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT));
     for i in 1..3 {
         let f = i as f32 / 3.0;
         painter.line_segment(
@@ -48,14 +48,14 @@ pub fn show(
                 egui::pos2(r.left() + f * r.width(), r.top()),
                 egui::pos2(r.left() + f * r.width(), r.bottom()),
             ],
-            egui::Stroke::new(1.0, theme::ACCENT),
+            egui::Stroke::new(1.0_f32, theme::ACCENT),
         );
         painter.line_segment(
             [
                 egui::pos2(r.left(), r.top() + f * r.height()),
                 egui::pos2(r.right(), r.top() + f * r.height()),
             ],
-            egui::Stroke::new(1.0, theme::ACCENT),
+            egui::Stroke::new(1.0_f32, theme::ACCENT),
         );
     }
     // All 8 handles (spec §8.4): 4 corners + 4 edge midpoints. `hit_test`
@@ -76,7 +76,7 @@ pub fn show(
             to_screen(nx, ny),
             4.0,
             theme::ACCENT_BRIGHT,
-            egui::Stroke::new(1.0, theme::BG_BASE),
+            egui::Stroke::new(1.0_f32, theme::BG_BASE),
         );
     }
 

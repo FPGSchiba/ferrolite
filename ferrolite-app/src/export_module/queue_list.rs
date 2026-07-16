@@ -171,7 +171,7 @@ fn draw_drop_indicator_and_handle_release(
     };
     ui.painter().line_segment(
         [egui::pos2(x, y_top), egui::pos2(x, y_bottom)],
-        egui::Stroke::new(2.0, theme::ACCENT),
+        egui::Stroke::new(2.0_f32, theme::ACCENT),
     );
 
     let released = ui.input(|i| i.pointer.any_released());

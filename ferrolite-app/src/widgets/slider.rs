@@ -184,7 +184,7 @@ impl<'a> Widget for EguiSlider<'a> {
             // base track line
             painter.line_segment(
                 [pos2(track_left, mid_y), pos2(track_right, mid_y)],
-                Stroke::new(2.0, TRACK),
+                Stroke::new(2.0_f32, TRACK),
             );
             // fill
             let fill_color = if active { theme::ACCENT } else { FILL_IDLE };
@@ -193,7 +193,7 @@ impl<'a> Widget for EguiSlider<'a> {
                     pos2(track_left + fill_left * track_w, mid_y),
                     pos2(track_left + (fill_left + fill_w) * track_w, mid_y),
                 ],
-                Stroke::new(2.0, fill_color),
+                Stroke::new(2.0_f32, fill_color),
             );
             // handle
             let hx = track_left + frac * track_w;
@@ -206,7 +206,7 @@ impl<'a> Widget for EguiSlider<'a> {
                 pos2(hx, mid_y),
                 5.5,
                 handle_color,
-                Stroke::new(1.0, HANDLE_BORDER),
+                Stroke::new(1.0_f32, HANDLE_BORDER),
             );
             // reset icon: small circular-arrow, dim when already at default
             let reset_color = if modified {

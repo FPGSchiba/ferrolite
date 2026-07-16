@@ -36,7 +36,7 @@ ferrolite-previews = { workspace = true }
 ferrolite-vt = { workspace = true }
 bytemuck = { workspace = true }
 half = { workspace = true }
-image = { workspace = true, features = ["jpeg", "png", "tiff", "webp"] }
+image = { workspace = true, features = ["jpeg", "png", "tiff", "webp", "ico"] }
 rayon = { workspace = true }
 raw-window-handle = "0.6"
 rfd = { workspace = true }

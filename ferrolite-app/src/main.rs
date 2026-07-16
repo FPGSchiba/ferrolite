@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod camera_matrix;
 mod canvas;
@@ -23,6 +25,16 @@ mod viewer;
 mod widgets;
 
 fn main() -> eframe::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--export-icons") {
+        let dir = args
+            .get(pos + 1)
+            .cloned()
+            .unwrap_or_else(|| "packaging/icons".to_string());
+        export_icons(std::path::Path::new(&dir)).expect("icon export failed");
+        return Ok(());
+    }
+
     diag::init();
     let icon = egui::IconData {
         rgba: chrome::icon::icon_rgba(256),
@@ -44,4 +56,52 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| Ok(Box::new(app::FerroliteApp::new(cc)))),
     )
+}
+
+fn export_icons(dir: &std::path::Path) -> std::io::Result<()> {
+    use image::{ImageBuffer, Rgba};
+    let iconset = dir.join("AppIcon.iconset");
+    std::fs::create_dir_all(&iconset)?;
+
+    let render = |px: u32| -> ImageBuffer<Rgba<u8>, Vec<u8>> {
+        let rgba = chrome::icon::icon_rgba(px);
+        ImageBuffer::from_raw(px, px, rgba).expect("icon_rgba size mismatch")
+    };
+
+    // Main PNG.
+    render(512)
+        .save(dir.join("icon.png"))
+        .map_err(std::io::Error::other)?;
+
+    // ICO: image 0.25's IcoEncoder writes a single-image ICO; encode a 256px master
+    // (the ICO format max) which Windows/NSIS accept and downscale for smaller slots.
+    {
+        use image::codecs::ico::IcoEncoder;
+        use image::{ExtendedColorType, ImageEncoder};
+        let master = render(256);
+        let mut ico = std::fs::File::create(dir.join("icon.ico"))?;
+        IcoEncoder::new(&mut ico)
+            .write_image(master.as_raw(), 256, 256, ExtendedColorType::Rgba8)
+            .map_err(std::io::Error::other)?;
+    }
+
+    // Apple .iconset PNGs.
+    let apple: [(u32, &str); 10] = [
+        (16, "icon_16x16.png"),
+        (32, "icon_16x16@2x.png"),
+        (32, "icon_32x32.png"),
+        (64, "icon_32x32@2x.png"),
+        (128, "icon_128x128.png"),
+        (256, "icon_128x128@2x.png"),
+        (256, "icon_256x256.png"),
+        (512, "icon_256x256@2x.png"),
+        (512, "icon_512x512.png"),
+        (1024, "icon_512x512@2x.png"),
+    ];
+    for (px, name) in apple {
+        render(px)
+            .save(iconset.join(name))
+            .map_err(std::io::Error::other)?;
+    }
+    Ok(())
 }

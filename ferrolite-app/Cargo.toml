@@ -61,3 +61,17 @@ foreign-types-shared = "0.3"
 
 [dev-dependencies]
 image = { workspace = true, features = ["png"] }
+
+[package.metadata.packager]
+product-name = "FerroLite"
+identifier = "dev.ferrolite.app"
+category = "Photography"
+icons = ["packaging/icons/icon.icns", "packaging/icons/icon.ico", "packaging/icons/icon.png"]
+before-packaging-command = "cargo build --release --bin ferrolite-app"
+binaries = [{ path = "ferrolite-app", main = true }]
+
+[package.metadata.packager.macos]
+minimum-system-version = "11.0"
+
+[package.metadata.packager.nsis]
+# NSIS installer defaults (per-user install, Start-menu shortcut); auto-downloaded by cargo-packager.

@@ -136,21 +136,14 @@ fn export_icons(dir: &std::path::Path) -> std::io::Result<()> {
     // Main PNG.
     render(512).save(dir.join("icon.png")).map_err(std::io::Error::other)?;
 
-    // ICO (multi-size).
-    let ico_sizes = [16u32, 32, 48, 64, 128, 256];
-    let mut ico = std::fs::File::create(dir.join("icon.ico"))?;
+    // ICO: image 0.25's IcoEncoder writes a single-image ICO; encode a 256px master
+    // (the ICO format max) which Windows/NSIS accept and downscale for smaller slots.
     {
         use image::codecs::ico::IcoEncoder;
-        let frames: Vec<image::DynamicImage> =
-            ico_sizes.iter().map(|&p| image::DynamicImage::ImageRgba8(render(p))).collect();
-        // IcoEncoder encodes one image with up to 256px; encode the largest and let
-        // Windows downscale, plus the discrete small sizes via an .ico with multiple entries.
-        // image 0.25 supports multi-frame ICO via `encode` per frame is not exposed; write
-        // the 256px master which Windows/NSIS accept.
+        let mut ico = std::fs::File::create(dir.join("icon.ico"))?;
         IcoEncoder::new(&mut ico)
             .encode_image(&image::DynamicImage::ImageRgba8(render(256)))
             .map_err(std::io::Error::other)?;
-        let _ = frames; // discrete sizes are provided via the .iconset for macOS
     }
 
     // Apple .iconset PNGs.

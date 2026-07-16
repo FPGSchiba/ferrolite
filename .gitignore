@@ -21,5 +21,10 @@ debug
 
 /target
 
+# cargo-packager output (installers/bundles); default out-dir is under /target,
+# but keep this in case a config ever points it elsewhere.
+/dist
+**/dist/
+
 # Superpowers scratch (brainstorm screens, SDD ledgers/briefs/reports)
 .superpowers/

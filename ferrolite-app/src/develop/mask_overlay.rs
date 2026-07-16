@@ -412,13 +412,13 @@ pub fn show(
             if let Some((_, start, end)) = existing {
                 let p0 = src_to_screen(start);
                 let p1 = src_to_screen(end);
-                painter.line_segment([p0, p1], egui::Stroke::new(1.5, theme::ACCENT_BRIGHT));
+                painter.line_segment([p0, p1], egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT));
                 for p in [p0, p1] {
                     painter.circle(
                         p,
                         4.0,
                         theme::ACCENT_BRIGHT,
-                        egui::Stroke::new(1.0, theme::BG_BASE),
+                        egui::Stroke::new(1.0_f32, theme::BG_BASE),
                     );
                 }
             }
@@ -436,13 +436,13 @@ pub fn show(
                     .collect();
                 painter.add(egui::Shape::line(
                     pts,
-                    egui::Stroke::new(1.5, theme::ACCENT_BRIGHT),
+                    egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT),
                 ));
                 painter.circle(
                     src_to_screen(center),
                     4.0,
                     theme::ACCENT_BRIGHT,
-                    egui::Stroke::new(1.0, theme::BG_BASE),
+                    egui::Stroke::new(1.0_f32, theme::BG_BASE),
                 );
                 // Resize handles at the RadiusX/RadiusY axis endpoints — without
                 // these there was nothing to grab even though `radial_hit_test`
@@ -455,7 +455,7 @@ pub fn show(
                         p,
                         4.0,
                         theme::ACCENT_BRIGHT,
-                        egui::Stroke::new(1.0, theme::BG_BASE),
+                        egui::Stroke::new(1.0_f32, theme::BG_BASE),
                     );
                 }
             }
@@ -507,12 +507,15 @@ fn route_brush(
     // ring scaled by hardness (harder = the falloff starts closer to the edge).
     if let Some(p) = resp.hover_pos().or_else(|| resp.interact_pointer_pos()) {
         let screen_r = mask.brush_radius * image_rect.width();
-        ui.painter()
-            .circle_stroke(p, screen_r, egui::Stroke::new(1.5, theme::ACCENT_BRIGHT));
+        ui.painter().circle_stroke(
+            p,
+            screen_r,
+            egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT),
+        );
         ui.painter().circle_stroke(
             p,
             screen_r * mask.brush_hardness,
-            egui::Stroke::new(1.0, theme::TEXT_FAINT),
+            egui::Stroke::new(1.0_f32, theme::TEXT_FAINT),
         );
     }
 
@@ -674,19 +677,19 @@ fn route_color_eyedropper(
         painter.circle_stroke(
             center,
             LOUPE_R,
-            egui::Stroke::new(1.5, theme::ACCENT_BRIGHT),
+            egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT),
         );
         // Crosshair on the exact sampled (center) pixel.
         painter.line_segment(
             [center - egui::vec2(6.0, 0.0), center + egui::vec2(6.0, 0.0)],
-            egui::Stroke::new(1.0, theme::BG_BASE),
+            egui::Stroke::new(1.0_f32, theme::BG_BASE),
         );
         painter.line_segment(
             [center - egui::vec2(0.0, 6.0), center + egui::vec2(0.0, 6.0)],
-            egui::Stroke::new(1.0, theme::BG_BASE),
+            egui::Stroke::new(1.0_f32, theme::BG_BASE),
         );
         // Picker dot at the pointer itself.
-        painter.circle_stroke(p, 3.0, egui::Stroke::new(1.5, theme::ACCENT_BRIGHT));
+        painter.circle_stroke(p, 3.0, egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT));
     }
 
     // Small swatches for the collected samples, stacked along the top-left of
@@ -708,7 +711,7 @@ fn route_color_eyedropper(
             center,
             SWATCH_R,
             color,
-            egui::Stroke::new(1.0, theme::BG_BASE),
+            egui::Stroke::new(1.0_f32, theme::BG_BASE),
         );
     }
 }

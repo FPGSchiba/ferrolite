@@ -22,6 +22,18 @@ freezes on image open — eager per-frame thumbnail decode in the Develop filmst
 caching pipelines in `ferrolite_vt::DisplayPipelines` and pre-warming at startup).
 Keep them honored.
 
+## Toolchain — run the gate on the latest stable rustc (load-bearing)
+
+CI (`.github/workflows/ci.yml`) uses `dtolnay/rust-toolchain@stable`, which resolves to
+the **newest stable rustc at run time**. Newer stable releases promote future-compat lints
+to hard errors (e.g. the `f32: From<f64>` float-literal fallback that once reddened `main`
+across ~44 egui call sites). A local build on an older stable will pass while CI still
+fails on the same code. Therefore, **before running the workspace gate, run
+`rustup update stable`** so your local toolchain matches the runner. The gate is only
+meaningful when run on the same (latest) stable CI uses. Keep the fix forward-compatible
+(fix the code — e.g. suffix literals `_f32`); do NOT pin the toolchain to dodge a newer
+lint.
+
 ## Finishing a branch — wait for the author's visual test (load-bearing)
 
 Automated checks (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D

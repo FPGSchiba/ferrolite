@@ -174,7 +174,7 @@ pub fn caret(painter: &Painter, center: Pos2, half_w: f32, color: Color32, down:
 /// Draw a small "✕" (remove/close) icon as two crossing diagonal strokes
 /// centred at `center` with half-extent `r`.
 pub fn cross(painter: &Painter, center: Pos2, r: f32, color: Color32) {
-    let stroke = Stroke::new(1.4, color);
+    let stroke = Stroke::new(1.4_f32, color);
     painter.line_segment(
         [
             Pos2::new(center.x - r, center.y - r),
@@ -194,7 +194,7 @@ pub fn cross(painter: &Painter, center: Pos2, r: f32, color: Color32) {
 /// Draw a checkmark ("✓", done) centred at `center` with half-extent `r`, as a
 /// short down-stroke into a longer up-stroke. No font glyph.
 pub fn check(painter: &Painter, center: Pos2, r: f32, color: Color32) {
-    let stroke = Stroke::new(1.6, color);
+    let stroke = Stroke::new(1.6_f32, color);
     // elbow low-left, tip up-right — a conventional tick.
     let left = Pos2::new(center.x - r, center.y);
     let elbow = Pos2::new(center.x - r * 0.25, center.y + r * 0.7);
@@ -208,7 +208,7 @@ pub fn check(painter: &Painter, center: Pos2, r: f32, color: Color32) {
 ///
 /// Reads universally as "send/add to queue" without relying on font glyphs.
 pub fn export_tray(painter: &Painter, center: Pos2, size: f32, color: Color32) {
-    let stroke = Stroke::new(1.3, color);
+    let stroke = Stroke::new(1.3_f32, color);
     let half = size * 0.5;
 
     // Downward arrow shaft, from just below the top to mid-height.
@@ -282,7 +282,7 @@ pub fn split_compare(painter: &Painter, center: Pos2, size: f32, color: Color32)
     );
 
     // Outline.
-    painter.rect_stroke(rect, rounding, Stroke::new(1.3, color));
+    painter.rect_stroke(rect, rounding, Stroke::new(1.3_f32, color));
 
     // Center divider.
     painter.line_segment(
@@ -290,7 +290,7 @@ pub fn split_compare(painter: &Painter, center: Pos2, size: f32, color: Color32)
             Pos2::new(center.x, rect.min.y),
             Pos2::new(center.x, rect.max.y),
         ],
-        Stroke::new(1.3, color),
+        Stroke::new(1.3_f32, color),
     );
 }
 

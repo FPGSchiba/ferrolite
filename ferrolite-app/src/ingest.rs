@@ -257,7 +257,7 @@ fn flush_batch(
         p.record_upsert(t.elapsed().as_micros() as u64);
     }
 
-    for (id, decoded) in ids.into_iter().zip(decoded_thumbs.into_iter()) {
+    for (id, decoded) in ids.into_iter().zip(decoded_thumbs) {
         if force {
             kept.insert(id);
         }

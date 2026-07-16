@@ -147,6 +147,16 @@ impl JobSystem {
     /// Signal all workers to stop pulling new jobs. Idempotent. In-flight jobs
     /// keep running until they return (or observe cancellation cooperatively).
     pub fn request_shutdown(&self) {
+        // Flip the flag and notify while holding the queue mutex. A worker
+        // checks `shutdown` and parks in `cvar.wait` under this same lock, so
+        // taking it here closes the lost-wakeup window: without the lock, a
+        // `notify_all` landing between a worker's `!shutdown` check and its
+        // `wait` call is missed, the worker parks forever, and `Drop`'s join
+        // deadlocks (a rare, timing-dependent hang). Holding the lock forces us
+        // to serialize with the worker: it either hasn't parked yet (and will
+        // see the flag on its next check) or is already parked (and the
+        // notify reaches it).
+        let _guard = self.shared.queue.lock().expect("queue mutex");
         self.shared.shutdown.store(true, Ordering::SeqCst);
         self.shared.cvar.notify_all();
     }
@@ -392,5 +402,29 @@ mod tests {
         assert_eq!(s.cancel_removed, 1, "first cancel dropped a queued job");
         assert_eq!(s.cancel_absent, 1, "second cancel found nothing");
         let _ = gate_tx.send(());
+    }
+
+    /// Regression: shutdown must never lose a wakeup. Creating and immediately
+    /// dropping many pools races `request_shutdown` (via `Drop`) against workers
+    /// parking in `cvar.wait` right after startup — the exact window a
+    /// lost-wakeup would strand a worker, hanging `Drop`'s join forever. The
+    /// whole loop runs on a side thread joined with a timeout, so a regression
+    /// FAILS the test at the deadline instead of hanging the suite.
+    #[test]
+    fn shutdown_never_loses_wakeup_under_stress() {
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for _ in 0..1000 {
+                // `Drop` runs `request_shutdown` + joins all workers.
+                drop(JobSystem::new(4));
+            }
+            let _ = tx.send(());
+        });
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(30)),
+            Ok(()),
+            "JobSystem shutdown deadlocked (lost wakeup in request_shutdown)"
+        );
+        worker.join().expect("stress thread joins cleanly");
     }
 }

@@ -71,14 +71,14 @@ pub fn curve_editor(
                 egui::pos2(rect.left() + f * SIZE, rect.top()),
                 egui::pos2(rect.left() + f * SIZE, rect.bottom()),
             ],
-            egui::Stroke::new(1.0, theme::BORDER_STRONG),
+            egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
         );
         painter.line_segment(
             [
                 egui::pos2(rect.left(), rect.top() + f * SIZE),
                 egui::pos2(rect.right(), rect.top() + f * SIZE),
             ],
-            egui::Stroke::new(1.0, theme::BORDER_STRONG),
+            egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
         );
     }
 
@@ -99,7 +99,7 @@ pub fn curve_editor(
         .collect();
     painter.add(egui::Shape::line(
         poly,
-        egui::Stroke::new(1.5, style.curve_color),
+        egui::Stroke::new(1.5_f32, style.curve_color),
     ));
 
     // Hover highlight: the point the cursor is currently within HIT_R of.
@@ -115,7 +115,7 @@ pub fn curve_editor(
             to_screen(p),
             radius,
             style.point_color,
-            egui::Stroke::new(1.0, theme::BG_BASE),
+            egui::Stroke::new(1.0_f32, theme::BG_BASE),
         );
         if is_selected {
             // Accent ring around the selected point so selection reads clearly
@@ -123,7 +123,7 @@ pub fn curve_editor(
             painter.circle_stroke(
                 to_screen(p),
                 radius + 3.0,
-                egui::Stroke::new(1.5, style.curve_color),
+                egui::Stroke::new(1.5_f32, style.curve_color),
             );
         }
     }

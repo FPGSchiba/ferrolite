@@ -80,7 +80,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                             ui.painter().rect_stroke(
                                 rect,
                                 2.0,
-                                egui::Stroke::new(2.0, theme::ACCENT),
+                                egui::Stroke::new(2.0_f32, theme::ACCENT),
                             );
                         }
                         if rating > 0 {

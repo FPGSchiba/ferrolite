@@ -87,11 +87,16 @@ pub fn color_wheel(
     }
     let painter = ui.painter();
     painter.add(Shape::mesh(mesh));
-    painter.circle_stroke(center, RADIUS, Stroke::new(1.0, theme::BORDER_STRONG));
+    painter.circle_stroke(center, RADIUS, Stroke::new(1.0_f32, theme::BORDER_STRONG));
 
     // Thumb at the current (hue, sat).
     let thumb = wheel_pos(center, RADIUS, hue, sat);
-    painter.circle(thumb, 5.0, Color32::WHITE, Stroke::new(1.5, Color32::BLACK));
+    painter.circle(
+        thumb,
+        5.0,
+        Color32::WHITE,
+        Stroke::new(1.5_f32, Color32::BLACK),
+    );
 
     // Interaction: drag/click sets hue+sat; release commits.
     let mut result: Option<WheelEdit> = None;

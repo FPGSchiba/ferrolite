@@ -2457,14 +2457,14 @@ impl FerroliteApp {
             painter.vline(
                 div_x,
                 canvas_rect.y_range(),
-                egui::Stroke::new(1.5, egui::Color32::WHITE),
+                egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
             );
             let handle_center = egui::pos2(div_x, canvas_rect.center().y);
             painter.circle(
                 handle_center,
                 7.0,
                 egui::Color32::from_black_alpha(120),
-                egui::Stroke::new(1.5, egui::Color32::WHITE),
+                egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
             );
             // Side labels: which half is the unedited original vs. the current
             // edit. Bottom corners keep them clear of the top-right histogram
@@ -4401,7 +4401,7 @@ impl eframe::App for FerroliteApp {
         .rect_stroke(
             ctx.screen_rect().shrink(0.5),
             0.0,
-            egui::Stroke::new(1.0, theme::BORDER_STRONG),
+            egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
         );
 
         window_resize(ctx);

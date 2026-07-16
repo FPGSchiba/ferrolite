@@ -35,7 +35,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<Edit
                 ui.painter().rect_stroke(
                     rect,
                     2.0,
-                    egui::Stroke::new(2.0, crate::theme::ACCENT_BRIGHT),
+                    egui::Stroke::new(2.0_f32, crate::theme::ACCENT_BRIGHT),
                 );
             }
             if resp.clicked() {

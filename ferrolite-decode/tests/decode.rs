@@ -12,11 +12,15 @@ fn fixture() -> PathBuf {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .find(|p| {
+            // Require a real file extension that isn't a known sidecar/export
+            // type. Extensionless files (e.g. `.gitignore`, which lives in this
+            // dir) must be skipped: `read_dir` order is unspecified, and on
+            // Windows `.gitignore` sorted first and got fed to the decoder,
+            // failing the whole suite with "No decoder found".
             p.is_file()
-                && !p
-                    .extension()
+                && p.extension()
                     .and_then(|e| e.to_str())
-                    .map(|e| NON_RAW.contains(&e.to_ascii_lowercase().as_str()))
+                    .map(|e| !NON_RAW.contains(&e.to_ascii_lowercase().as_str()))
                     .unwrap_or(false)
         })
         .expect("a RAW fixture in fixtures/raw")

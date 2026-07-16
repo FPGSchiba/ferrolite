@@ -270,9 +270,39 @@ git commit -m "feat(release): app icons + cargo-packager metadata (dmg/nsis)"
   (`*_x64-setup.exe`, `*_aarch64.dmg`, `*_x64.dmg`); on `workflow_dispatch` → the same
   files as downloadable workflow artifacts.
 
-- [ ] **Step 1: Write the workflow**
+**CRITICAL target/path alignment:** Task 3's `before-packaging-command` is
+`cargo build --release --bin ferrolite-app`, which builds to the HOST release dir
+(`target/release/`). But each CI job packages a specific `--target <triple>`, and
+cargo-packager then looks for the binary (and writes its output) under
+`target/<triple>/release/`. If the two disagree, packaging fails ("binary not found") — this
+bites the mac-x64-on-arm64 cross job hardest. The fix: set `CARGO_BUILD_TARGET: <triple>` in
+the **Package step's env only** (NOT globally — a global value would make the earlier
+`cargo install cargo-packager`/`cargo-edit` steps try to build those tools for the wrong
+target). With `CARGO_BUILD_TARGET` set, the baked-in `before-packaging-command` builds into
+`target/<triple>/release/`, matching where cargo-packager `--target` looks and writes. So
+Task 3's local smoke test (no `--target`) landed the dmg in `target/release/`; the CI jobs
+(with `--target`) land it in `target/<triple>/release/` — that is where the collect step must
+glob.
 
-Create `.github/workflows/release.yml`:
+- [ ] **Step 1: Locally validate the cross-target mechanism (do this FIRST)**
+
+This arm64 Mac can reproduce the exact mac-x64 CI job. Run:
+```bash
+rustup target add x86_64-apple-darwin
+cd ferrolite-app
+CARGO_BUILD_TARGET=x86_64-apple-darwin cargo packager --release --formats dmg --target x86_64-apple-darwin --verbose
+ls -la ../target/x86_64-apple-darwin/release/*.dmg
+cd ..
+```
+Expected: a `FerroLite_0.0.1_x64.dmg` (or similar `*_x64.dmg`) appears in
+`target/x86_64-apple-darwin/release/`. This confirms BOTH that the `CARGO_BUILD_TARGET`
+mechanism produces the binary where cargo-packager expects it AND the exact output directory
+the workflow must collect from. Note the confirmed path and the exact dmg filename for Step 2.
+(This is a heavy first cross release build — use the max timeout; cargo resumes incrementally.)
+
+- [ ] **Step 2: Write the workflow**
+
+Create `.github/workflows/release.yml` (the collect step globs the path confirmed in Step 1):
 ```yaml
 name: release
 on:
@@ -318,14 +348,18 @@ jobs:
         run: cargo install cargo-packager --locked
       - name: Package
         working-directory: ferrolite-app
-        run: cargo packager --release --target ${{ matrix.target }} --formats ${{ matrix.formats }} --verbose
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+        run: cargo packager --release --formats ${{ matrix.formats }} --target ${{ matrix.target }} --verbose
       - name: Collect artifacts
-        id: collect
         shell: bash
         run: |
-          mkdir -p ../out
-          find . target -maxdepth 4 \( -name '*.dmg' -o -name '*setup.exe' \) -exec cp {} ../out/ \; 2>/dev/null || true
-          ls -la ../out
+          mkdir -p out
+          find "target/${{ matrix.target }}/release" -maxdepth 1 \( -name '*.dmg' -o -name '*setup.exe' \) -exec cp {} out/ \; 2>/dev/null || true
+          # Fallback: default release dir, in case CARGO_BUILD_TARGET routing differs.
+          find "target/release" -maxdepth 1 \( -name '*.dmg' -o -name '*setup.exe' \) -exec cp {} out/ \; 2>/dev/null || true
+          ls -la out
+          test -n "$(ls -A out 2>/dev/null)" || { echo "no artifacts collected"; exit 1; }
       - name: Upload workflow artifacts (dispatch)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
@@ -338,27 +372,33 @@ jobs:
         with:
           files: out/*
 ```
+Note: the collect step runs from the repo root (no `working-directory`), so `target/...` is
+the workspace target dir where cargo-packager wrote (confirmed in Step 1). It fails the job if
+nothing was collected, so a path regression surfaces loudly instead of publishing an empty
+release.
 
-- [ ] **Step 2: Validate the workflow syntax**
+- [ ] **Step 3: Validate the workflow syntax**
 
 Run (if `actionlint` is available): `actionlint .github/workflows/release.yml`
 Expected: no errors. If `actionlint` is not installed, validate YAML instead:
 `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/release.yml')); print('ok')"`
 Expected: `ok`.
 
-- [ ] **Step 3: Commit and push the branch (so dispatch can be triggered from GitHub)**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add .github/workflows/release.yml
 git commit -m "ci(release): tag/dispatch workflow building win nsis + mac dmgs"
 ```
 
-- [ ] **Step 4: Note the artifact-collection caveat for review**
+- [ ] **Step 5: Note the remaining runtime-only risk for review**
 
-The `Collect artifacts` glob (`*.dmg` / `*setup.exe`) is the one runtime-fragile part — the
-exact output path/name is set by cargo-packager. During the first `workflow_dispatch` run,
-confirm `out/` is non-empty in the logs; if empty, adjust the `find` paths to cargo-packager's
-actual output dir (surfaced by `--verbose`). This is expected verification, not a defect.
+The Windows NSIS job cannot be validated locally on this Mac — its target/path mechanism is
+identical to the mac jobs (validated in Step 1), but the actual NSIS `setup.exe` output name
+is only confirmable on the first `windows-latest` run. During the first `workflow_dispatch`
+run, check the Windows job's `Collect artifacts` log: if it fails with "no artifacts
+collected", read the `--verbose` packaging output for the real output path/name and adjust the
+`find`. This is expected first-run verification, not a defect.
 
 ---
 

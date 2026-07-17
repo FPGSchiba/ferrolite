@@ -1347,10 +1347,14 @@ mod tests {
     fn retain_visible_thumbnail_jobs_cancels_offscreen_only() {
         let mut s = AppState::for_test();
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
-        // Occupy the single worker so subsequently submitted jobs stay queued
-        // (so `pending_count` reflects the cancellation below).
+        // Occupy the single worker with a strictly-highest-priority blocking job
+        // so the `Visible` lazy-load jobs below stay queued (and `pending_count`
+        // reflects the cancellation). The gate MUST outrank those jobs: the queue
+        // is priority-then-FIFO, so a lower-priority gate would let the worker run
+        // the higher-priority `Visible` no-ops first, draining them before
+        // `before_pending` is captured — a load-sensitive flake.
         s.jobs
-            .submit(ferrolite_jobs::Priority::Background, move |_| {
+            .submit(ferrolite_jobs::Priority::Interactive, move |_| {
                 let _ = gate_rx.recv();
             });
 
@@ -1401,8 +1405,14 @@ mod tests {
     fn cancel_pending_jobs_drains_thumb_handles() {
         let mut s = AppState::for_test();
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        // Occupy the single worker with a strictly-highest-priority blocking job
+        // so the `Visible` lazy-load jobs below stay queued. The gate MUST outrank
+        // those jobs: the queue is priority-then-FIFO, so a lower-priority gate
+        // would let the worker run the higher-priority `Visible` no-ops first,
+        // draining them before `before_pending` is captured — a load-sensitive
+        // flake.
         s.jobs
-            .submit(ferrolite_jobs::Priority::Background, move |_| {
+            .submit(ferrolite_jobs::Priority::Interactive, move |_| {
                 let _ = gate_rx.recv();
             });
 

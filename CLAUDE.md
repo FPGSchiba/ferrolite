@@ -1,5 +1,36 @@
 # ferrolite — repo conventions for Claude
 
+## Repository map
+
+FerroLite is a Rust workspace: a photo catalog + RAW "develop" editor. `ferrolite-app` is the
+egui/eframe + wgpu desktop binary; every other crate is a photo-agnostic engine piece it wires
+together (several are marked "engine-transferable" so they can be reused outside the app).
+
+| Crate | Responsibility |
+|-------|----------------|
+| `ferrolite-app` | The desktop binary (egui/eframe + wgpu): all UI, app state, wiring. ~31k LOC — see module layout below. |
+| `ferrolite-image` | Core pixel/orientation vocabulary shared across all crates. |
+| `ferrolite-decode` | Unified decode entry: routes RAW (rawler) vs. standard-image preview + metadata requests. |
+| `ferrolite-catalog` | SQLite DAM catalog — schema, ingest, thumbnails, queries. `Catalog` (writer) + `ReadPool` (read conns). |
+| `ferrolite-jobs` | Photo-agnostic priority threadpool (`JobSystem`) with cancellation. ALL off-UI-thread work goes here. |
+| `ferrolite-pipeline` | The photo edit DAG — ordered `OpStack` document model; the edit engine. |
+| `ferrolite-mask` | Engine-transferable mask machinery (brush / gradient / range / composite). |
+| `ferrolite-color` | Pure, `unsafe`-free color math (moxcms-backed). |
+| `ferrolite-lens` | Lens-correction adapter over the pure-Rust `lensfun` crate. |
+| `ferrolite-export` | Photo-tier encode core: renders full-res edited output; encodes jpeg/png/tiff/webp/avif/jxl. |
+| `ferrolite-gpu` | wgpu context + a generic retained-DAG GPU scaffold. |
+| `ferrolite-vt` | Source-agnostic sparse virtual texture; `DisplayPipelines` (cached render pipelines). |
+| `ferrolite-previews` | On-disk cache of downscaled, color-managed RAW previews. |
+
+**`ferrolite-app/src/` layout:** `main.rs` (entry), `state.rs` (`AppState` — the central model),
+`app.rs` (eframe `App` impl + frame loop), `events.rs` (job→UI event channel), `library/`
+(grid/filmstrip/catalog browse), `develop/` (RAW develop module: crop, curves, masks, HSL, info
+overlay), `viewer/`, `chrome/` (custom window chrome + generated app icon), `widgets/` (shared
+widgets incl. the per-control reset affordance), `export/` + `export_module/`, `ingest.rs`,
+`settings.rs`, `theme.rs` (fonts/phosphor install), `icons.rs` (Phosphor aliases),
+`monitor_profile.rs`. The load-bearing conventions below (threading, icons, per-control reset,
+keybind discoverability) constrain work in these modules.
+
 ## Responsiveness & threading (load-bearing)
 
 1. **Never block the UI/update thread.** RAW/image decode, file & DB I/O, ingest
@@ -28,25 +59,72 @@ CI (`.github/workflows/ci.yml`) uses `dtolnay/rust-toolchain@stable`, which reso
 the **newest stable rustc at run time**. Newer stable releases promote future-compat lints
 to hard errors (e.g. the `f32: From<f64>` float-literal fallback that once reddened `main`
 across ~44 egui call sites). A local build on an older stable will pass while CI still
-fails on the same code. Therefore, **before running the workspace gate, run
-`rustup update stable`** so your local toolchain matches the runner. The gate is only
+fails on the same code. Therefore, **before running the repo gate (see "Gate tiers"), run
+`rustup update stable`** so your local toolchain matches the runner. The repo gate is only
 meaningful when run on the same (latest) stable CI uses. Keep the fix forward-compatible
 (fix the code — e.g. suffix literals `_f32`); do NOT pin the toolchain to dodge a newer
-lint.
+lint. (The fast per-task **scoped gate** is a quick local check and need not chase the
+latest stable — the end-of-branch repo gate and CI cover toolchain-specific lints.)
+
+## Gate tiers — repo gate vs. scoped gate (load-bearing)
+
+**First, work out which actor you are** (agents often don't realize they're agents):
+
+- **You are a dispatched SDD subagent** if your task/prompt hands you a brief file under
+  `.superpowers/sdd/` (e.g. `.superpowers/sdd/task-3-brief.md`), or you were dispatched to
+  implement / review / fix ONE task of a plan. This is true even when nothing explicitly calls
+  you an "agent." → Run the **scoped gate** for your task's crate(s) only. Do NOT run the repo
+  gate unless your brief explicitly tells you to.
+- **You are the coordinator / main session** if you are talking directly with the author and no
+  sdd brief was handed to you. → You own the **repo gate**: run it once before finishing a
+  branch, and dispatch subagents with instructions to run their scoped gate.
+
+Two named gates, run by different actors. Do not conflate them.
+
+**Repo gate (full, authoritative).** The whole-workspace checks, run on the latest stable
+(see the Toolchain rule — `rustup update stable` first):
+
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo build --all-targets
+    cargo test --workspace
+
+This is what CI enforces and the only gate that proves the whole tree is green. It MUST be
+run: by the coordinator ONCE before finishing a branch (at the whole-branch review stage),
+and by any fresh session that needs to establish the tree is clean.
+
+**Scoped gate (per-task, fast).** For a change confined to crate(s) `X`, run the same four
+checks limited to `X` plus any crate that consumes the code you changed:
+
+    cargo fmt -p X -- --check
+    cargo clippy -p X --all-targets -- -D warnings
+    cargo test -p X            # add `-p <dependent>` for each crate that uses X's changed API
+
+It skips the expensive whole-workspace clippy/build/test (wgpu, rav1e, golden-image suites)
+that dominate the repo gate's wall-clock.
+
+**Who runs which.** A subagent dispatched for a scoped SDD task (implementer, reviewer, or
+fix) runs the SCOPED gate for its crate(s) — NOT the repo gate — unless its dispatch prompt
+explicitly says "run the repo gate." Such dispatch prompts SHOULD name the crate(s) and say
+"scoped gate on `X` only." The coordinator then runs the repo gate ONCE at the end
+(whole-branch), which is the safety net for the cross-crate breakage a scoped gate can miss;
+CI is the final authority. Rationale: running the full repo gate inside every per-task
+subagent is redundant and slow — the end-of-branch repo gate plus CI already cover the whole
+tree, so paying for it 5–10× per branch buys nothing.
 
 ## Finishing a branch — wait for the author's visual test (load-bearing)
 
 Automated checks (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
 warnings`, `cargo test --workspace`) being green is **necessary but not sufficient** to
 finish a development branch. Much of this app is egui UI whose correctness can only be
-confirmed by running the real app and looking at it. Therefore: after the workspace gate
+confirmed by running the real app and looking at it. Therefore: after the repo gate
 is green, **STOP and wait for the author (Jann) to visually test the running app and give
 explicit feedback** before merging, pushing/PR-ing, or otherwise finishing the branch.
 Do not present finish options as the final step — present them, then hold for the
 author's hands-on test results, and address any issues found before completing.
 
 **Always hand the author a concrete visual test plan (or an explicit "nothing to test").**
-When the workspace gate goes green, do not just say "please visually test" — produce a
+When the repo gate goes green, do not just say "please visually test" — produce a
 short, specific checklist so the author knows exactly whether hands-on testing is needed
 and what to look at. The plan MUST state one of:
 

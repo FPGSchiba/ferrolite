@@ -124,6 +124,12 @@ impl MemBreakdown {
     }
 }
 
+/// Bytes of a `LinearRgbaF32` of the given dimensions (RGBA f32 = 16 B/px).
+#[allow(dead_code)] // called by app.rs's gather_mem_breakdown (later task), not wired in yet
+pub fn linear_bytes(width: u32, height: u32) -> u64 {
+    width as u64 * height as u64 * 16
+}
+
 /// Adaptive RAM-cache budget = clamp(15% of total RAM, 512 MiB, 4 GiB).
 #[allow(dead_code)] // gathered by app.rs (later task), not wired in yet
 pub fn adaptive_budget(total_ram: u64) -> u64 {
@@ -328,6 +334,12 @@ mod tests {
         // Mid RAM -> 15% of it.
         let mid = 16u64 * 1024 * 1024 * 1024;
         assert_eq!(adaptive_budget(mid), mid / 100 * 15);
+    }
+
+    #[test]
+    fn linear_bytes_is_16_per_pixel() {
+        assert_eq!(linear_bytes(1000, 1000), 16_000_000);
+        assert_eq!(linear_bytes(0, 0), 0);
     }
 
     #[test]

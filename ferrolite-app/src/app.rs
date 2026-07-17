@@ -2695,6 +2695,57 @@ impl FerroliteApp {
             );
         }
     }
+
+    /// Build a point-in-time memory attribution from live app state. Impure
+    /// (reads `ViewerState`, caches, in-flight gauges, and the OS RSS). Only call
+    /// behind `diag::enabled()`. GPU/VRAM figures are documented estimates.
+    #[allow(dead_code)] // called behind diag::enabled() by a later task, not wired in yet
+    fn gather_mem_breakdown(&self) -> crate::diag_mem::MemBreakdown {
+        use crate::diag_mem::{linear_bytes, MemBreakdown, MemCategory};
+        let mut b = MemBreakdown::empty();
+        b.rss = crate::mem_probe::process_rss_bytes();
+        b.budget = crate::diag_mem::adaptive_budget(crate::mem_probe::total_ram_bytes());
+
+        if let Some(v) = self.state.viewer.as_ref() {
+            let preview_src = [v.preview_source.as_ref(), v.raw_preview_source.as_ref()]
+                .into_iter()
+                .flatten()
+                .map(|a| linear_bytes(a.width, a.height))
+                .sum::<u64>();
+            b.set(MemCategory::ViewerPreviewSrc, preview_src);
+
+            // GPU pyramid VRAM estimate: full-res f32 + mip tail (~4/3). Present only
+            // once the pyramid has been installed.
+            if v.pyramid.is_some() {
+                if let Some((w, h)) = v.image_dims {
+                    b.set(MemCategory::GpuPyramid, linear_bytes(w, h) * 4 / 3);
+                }
+            }
+        }
+
+        // In-flight buffers (decode + pyramid jobs holding large Arcs).
+        b.set(
+            MemCategory::InflightDecode,
+            crate::diag_mem::inflight_decode_bytes(),
+        );
+        b.set(
+            MemCategory::InflightPyramid,
+            crate::diag_mem::inflight_pyramid_bytes(),
+        );
+
+        // Thumb pixel cache (real bytes) and texture cache (VRAM estimate: entries ×
+        // 256×256 RGBA8).
+        b.set(
+            MemCategory::ThumbPix,
+            self.state.thumb_pixels.resident_bytes(),
+        );
+        b.set(
+            MemCategory::ThumbTex,
+            self.state.textures.len() as u64 * 256 * 256 * 4,
+        );
+
+        b
+    }
 }
 
 /// Title-bar height; resize edges start below it so they never fight the bar.

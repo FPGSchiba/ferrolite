@@ -7,12 +7,21 @@
 use std::time::{Duration, Instant};
 
 /// Longest a non-error toast stays before `prune` drops it.
+// Read only via `Level::ttl`, which is itself unreached in the bin until
+// `notifications::show` is wired in (Task 3) — the lib copy is `pub`-reachable
+// so dead_code doesn't fire there. Remove once Task 3 lands.
+#[allow(dead_code)]
 const INFO_TTL: Duration = Duration::from_secs(4);
+#[allow(dead_code)]
 const WARNING_TTL: Duration = Duration::from_secs(6);
 
 /// Hard cap on simultaneously-held toasts; pushing beyond drops the oldest.
 pub const MAX_VISIBLE: usize = 5;
 
+// No bin call site constructs a `Level` yet — that starts with `AppState::notify`
+// callers (Task 4) and job-thread `AppEvent::Notify` sends (Task 5). Remove once
+// either lands.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
     Info,
@@ -22,6 +31,9 @@ pub enum Level {
 
 impl Level {
     /// Auto-dismiss lifetime, or `None` for `Error` (sticky until dismissed).
+    // Unreached in the bin until `notifications::show` calls `prune`/`next_expiry`
+    // (Task 3). Remove once Task 3 lands.
+    #[allow(dead_code)]
     fn ttl(self) -> Option<Duration> {
         match self {
             Level::Info => Some(INFO_TTL),
@@ -32,6 +44,9 @@ impl Level {
 }
 
 pub struct Notification {
+    // Unread in the bin until `notifications::show` calls `id()` (Task 3).
+    // Remove once Task 3 lands.
+    #[allow(dead_code)]
     id: u64,
     level: Level,
     message: String,
@@ -39,16 +54,23 @@ pub struct Notification {
     born: Instant,
 }
 
+// These accessors are unreached in the bin until `notifications::show` calls
+// them (Task 3) — the lib copy is `pub`-reachable so dead_code doesn't fire
+// there. Remove the annotations once Task 3 lands.
 impl Notification {
+    #[allow(dead_code)]
     pub fn id(&self) -> u64 {
         self.id
     }
+    #[allow(dead_code)]
     pub fn level(&self) -> Level {
         self.level
     }
+    #[allow(dead_code)]
     pub fn message(&self) -> &str {
         &self.message
     }
+    #[allow(dead_code)]
     pub fn count(&self) -> u32 {
         self.count
     }
@@ -90,6 +112,9 @@ impl Notifications {
     }
 
     /// Drop auto-dismiss toasts whose TTL has elapsed. Errors are never pruned.
+    // Unreached in the bin until `notifications::show` calls it (Task 3).
+    // Remove once Task 3 lands.
+    #[allow(dead_code)]
     pub fn prune(&mut self, now: Instant) {
         self.items.retain(|n| match n.level.ttl() {
             Some(ttl) => now.duration_since(n.born) < ttl,
@@ -98,21 +123,25 @@ impl Notifications {
     }
 
     /// Remove the toast with `id` (manual close), if present.
+    #[allow(dead_code)]
     pub fn dismiss(&mut self, id: u64) {
         self.items.retain(|n| n.id != id);
     }
 
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
     /// Newest-first (render order: newest on top).
+    #[allow(dead_code)]
     pub fn iter_newest_first(&self) -> impl Iterator<Item = &Notification> {
         self.items.iter().rev()
     }
 
     /// Shortest remaining TTL across auto-dismiss toasts, for scheduling a
     /// repaint so expiry fires on time. `None` when only errors remain.
+    #[allow(dead_code)]
     pub fn next_expiry(&self, now: Instant) -> Option<Duration> {
         self.items
             .iter()
@@ -126,6 +155,9 @@ impl Notifications {
 }
 
 /// The `×N` badge string, shown only when a toast has coalesced (`count > 1`).
+// Unreached in the bin until `notifications::show` calls it (Task 3). Remove
+// once Task 3 lands.
+#[allow(dead_code)]
 pub fn count_badge(count: u32) -> Option<String> {
     (count > 1).then(|| format!("×{count}"))
 }

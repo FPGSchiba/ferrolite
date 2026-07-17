@@ -166,6 +166,13 @@ pub enum AppEvent {
         image_id: i64,
         meta: Option<ferrolite_decode::Metadata>,
     },
+    /// A general-purpose user notification (toast). Raised from job threads over
+    /// the event channel; folded by `apply` into `AppState.notifications`.
+    #[allow(dead_code)] // constructed by job threads once wired (Task 5); folded here
+    Notify {
+        level: crate::notifications::Level,
+        message: String,
+    },
 }
 
 // Manual `Debug`: `AppEvent::PyramidReady` carries an `Arc<dyn TileSource + Send +
@@ -296,6 +303,11 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("MetaLoaded")
                 .field("image_id", image_id)
                 .finish_non_exhaustive(),
+            AppEvent::Notify { level, message } => f
+                .debug_struct("Notify")
+                .field("level", level)
+                .field("message", message)
+                .finish(),
         }
     }
 }
@@ -423,6 +435,11 @@ impl AppState {
             // Handled in `app.rs` (drives the auto-match against `state.lens_db`
             // and seeds the panel); nothing to fold here.
             AppEvent::MetaLoaded { .. } => None,
+            AppEvent::Notify { level, message } => {
+                self.notifications
+                    .push(level, message, std::time::Instant::now());
+                None
+            }
         }
     }
 }
@@ -674,5 +691,27 @@ mod tests {
         assert_eq!(a.failed, 1);
         assert!(a.is_done());
         assert_eq!(a.warnings, vec!["disk full".to_string()]);
+    }
+
+    #[test]
+    fn notify_event_pushes_into_store() {
+        use crate::notifications::Level;
+        let mut s = AppState::for_test();
+        s.apply(AppEvent::Notify {
+            level: Level::Error,
+            message: "SD card removed".into(),
+        });
+        assert_eq!(s.notifications.iter_newest_first().count(), 1);
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert_eq!(n.level(), Level::Error);
+        assert_eq!(n.message(), "SD card removed");
+    }
+
+    #[test]
+    fn notify_helper_pushes_into_store() {
+        use crate::notifications::Level;
+        let mut s = AppState::for_test();
+        s.notify(Level::Info, "12 photos indexed");
+        assert_eq!(s.notifications.iter_newest_first().count(), 1);
     }
 }

@@ -105,15 +105,19 @@ pub(crate) fn submit_ingest(
 pub fn spawn_ingest(state: &mut AppState, ctx: &egui::Context, folder: PathBuf) {
     state.reset_for_new_folder();
 
-    let folder_id = match state
+    let upsert_result = state
         .writer
         .lock()
         .expect("writer")
-        .upsert_folder(&folder, None)
-    {
+        .upsert_folder(&folder, None);
+    let folder_id = match upsert_result {
         Ok(id) => id,
         Err(e) => {
             eprintln!("ferrolite: upsert_folder failed: {e}");
+            state.notify(
+                crate::notifications::Level::Error,
+                format!("Import failed (check the card/drive is connected): {e}"),
+            );
             return;
         }
     };
@@ -250,6 +254,10 @@ fn flush_batch(
                 "ferrolite: batched ingest write failed ({} rows): {e}",
                 batch_input.len()
             );
+            let _ = tx.send(AppEvent::Notify {
+                level: crate::notifications::Level::Error,
+                message: format!("Import failed (check the card/drive is connected): {e}"),
+            });
             return;
         }
     };
@@ -331,7 +339,13 @@ fn ingest_job(
             Ok(id) => {
                 dir_ids.insert(dir, id);
             }
-            Err(e) => eprintln!("ferrolite: upsert_folder failed: {e}"),
+            Err(e) => {
+                eprintln!("ferrolite: upsert_folder failed: {e}");
+                let _ = tx.send(AppEvent::Notify {
+                    level: crate::notifications::Level::Error,
+                    message: format!("Import failed (check the card/drive is connected): {e}"),
+                });
+            }
         }
     }
     let root_folder_id = dir_ids.get(&folder).copied();

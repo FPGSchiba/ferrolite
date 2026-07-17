@@ -709,8 +709,13 @@ impl AppState {
             self.reset_for_new_folder();
             self.current_folder = None;
         }
-        if let Err(e) = self.writer.lock().expect("writer").remove_folder(folder_id) {
+        let remove_result = self.writer.lock().expect("writer").remove_folder(folder_id);
+        if let Err(e) = remove_result {
             eprintln!("ferrolite: remove_folder failed: {e}");
+            self.notify(
+                crate::notifications::Level::Error,
+                format!("Could not remove folder: {e}"),
+            );
             return;
         }
         self.expanded_folders.retain(|id| !removed_set.contains(id));

@@ -168,7 +168,6 @@ pub enum AppEvent {
     },
     /// A general-purpose user notification (toast). Raised from job threads over
     /// the event channel; folded by `apply` into `AppState.notifications`.
-    #[allow(dead_code)] // constructed by job threads once wired (Task 5); folded here
     Notify {
         level: crate::notifications::Level,
         message: String,

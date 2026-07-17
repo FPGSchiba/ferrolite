@@ -13,6 +13,7 @@ mod help;
 mod icons;
 mod ingest;
 mod library;
+mod mem_probe;
 mod metadata;
 mod module;
 mod monitor_profile;

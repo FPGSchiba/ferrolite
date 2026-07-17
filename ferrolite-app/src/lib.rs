@@ -10,6 +10,7 @@ pub mod export;
 pub mod icons;
 pub mod ingest;
 pub mod library;
+pub mod mem_probe;
 pub mod metadata;
 pub mod module;
 pub mod monitor_profile;

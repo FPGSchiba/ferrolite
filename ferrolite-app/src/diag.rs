@@ -656,6 +656,10 @@ pub struct DiagState {
     /// Wired to a toggle keybinding + the overlay panel.
     pub overlay_visible: bool,
     last_snapshot: Option<Snapshot>,
+    /// Wired to F10; the dedicated memory overlay (separate from the text one).
+    pub mem_overlay_visible: bool,
+    /// Growth-graph ring buffer for the memory overlay (~5 min at 1/sec).
+    pub mem_history: crate::diag_mem::MemHistory,
 }
 
 impl DiagState {
@@ -667,12 +671,19 @@ impl DiagState {
             max_frame_ms: 0.0,
             overlay_visible: overlay_enabled(),
             last_snapshot: None,
+            mem_overlay_visible: false,
+            mem_history: crate::diag_mem::MemHistory::new(300),
         }
     }
 
     /// Wired to a toggle keybinding (F9 in `update`).
     pub fn toggle_overlay(&mut self) {
         self.overlay_visible = !self.overlay_visible;
+    }
+
+    /// Wired to a toggle keybinding (F10 in `update`).
+    pub fn toggle_mem_overlay(&mut self) {
+        self.mem_overlay_visible = !self.mem_overlay_visible;
     }
 
     /// Read by the overlay panel.

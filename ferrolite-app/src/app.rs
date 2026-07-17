@@ -2707,7 +2707,6 @@ impl FerroliteApp {
     /// Build a point-in-time memory attribution from live app state. Impure
     /// (reads `ViewerState`, caches, in-flight gauges, and the OS RSS). Only call
     /// behind `diag::enabled()`. GPU/VRAM figures are documented estimates.
-    #[allow(dead_code)] // called behind diag::enabled() by a later task, not wired in yet
     fn gather_mem_breakdown(&self) -> crate::diag_mem::MemBreakdown {
         use crate::diag_mem::{linear_bytes, MemBreakdown, MemCategory};
         let mut b = MemBreakdown::empty();
@@ -2888,6 +2887,16 @@ impl eframe::App for FerroliteApp {
 
         if crate::diag::enabled() && ctx.input(|i| i.key_pressed(egui::Key::F9)) {
             self.diag.toggle_overlay();
+        }
+
+        if crate::diag::enabled() && ctx.input(|i| i.key_pressed(egui::Key::F10)) {
+            if ctx.input(|i| i.modifiers.shift) {
+                // Shift+F10: dump a full categorized snapshot to the diag log.
+                let b = self.gather_mem_breakdown();
+                crate::diag::write_log(&crate::diag_mem::format_mem_dump(&b));
+            } else {
+                self.diag.toggle_mem_overlay();
+            }
         }
 
         // Deferred from a previous Develop→Library switch: clearing thumbnail
@@ -4536,6 +4545,18 @@ impl eframe::App for FerroliteApp {
             ) {
                 if crate::diag::log_enabled() {
                     crate::diag::write_log(&crate::diag::format_log(&snap));
+                }
+                // Memory: gather once per diag tick, push to the growth ring,
+                // and log the structured line.
+                let mem = self.gather_mem_breakdown();
+                self.diag.mem_history.push(crate::diag_mem::MemSample {
+                    t_secs: snap.dt as f32,
+                    rss: mem.rss,
+                    cpu_known: mem.known_cpu_sum(),
+                    cache: mem.get(crate::diag_mem::MemCategory::RamCache),
+                });
+                if crate::diag::log_enabled() {
+                    crate::diag::write_log(&crate::diag_mem::format_mem_log_line(snap.dt, &mem));
                 }
             }
             if crate::diag::overlay_enabled() && self.diag.overlay_visible {

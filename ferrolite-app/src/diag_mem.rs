@@ -293,6 +293,24 @@ pub fn format_mem_event_line(label: &str, prev: &MemBreakdown, cur: &MemBreakdow
     )
 }
 
+/// Full categorized snapshot for the Shift+F10 dump: one line per category.
+pub fn format_mem_dump(b: &MemBreakdown) -> String {
+    let mut out = String::from("[mem-dump]\n");
+    for c in MemCategory::ALL {
+        out.push_str(&format!("  {:<18} {}\n", c.label(), fmt_bytes(b.get(c))));
+    }
+    out.push_str(&format!(
+        "  {:<18} {}\n  {:<18} {}\n  {:<18} {}\n",
+        "rss",
+        fmt_bytes(b.rss),
+        "unattributed",
+        fmt_bytes(b.unattributed()),
+        "budget",
+        fmt_bytes(b.budget),
+    ));
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,5 +450,16 @@ mod tests {
             "growth shown with +, got: {line}"
         );
         assert!(line.contains("rss="), "got: {line}");
+    }
+
+    #[test]
+    fn mem_dump_lists_every_category_and_totals() {
+        let b = sample_breakdown();
+        let d = format_mem_dump(&b);
+        for c in MemCategory::ALL {
+            assert!(d.contains(c.label()), "missing {} in dump", c.label());
+        }
+        assert!(d.contains("unattributed"));
+        assert!(d.contains("budget"));
     }
 }

@@ -63,6 +63,14 @@ impl ThumbPixelCache {
             crate::diag::pix_evict(1);
         }
     }
+
+    /// Total bytes of decoded RGBA held (sum of entry pixel buffers). Diagnostics.
+    /// Not yet called from production paths (a later task wires this into the memory
+    /// overlay); kept public and exercised by the unit tests below.
+    #[allow(dead_code)]
+    pub fn resident_bytes(&self) -> u64 {
+        self.map.values().map(|e| e.rgba.len() as u64).sum()
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +108,14 @@ mod tests {
         c.insert(6, vec![0; 4], 1, 1);
         assert!(c.contains(5));
         assert!(c.contains(6));
+    }
+
+    #[test]
+    fn resident_bytes_sums_entry_pixels() {
+        let mut c = ThumbPixelCache::new(4);
+        assert_eq!(c.resident_bytes(), 0);
+        c.insert(1, vec![0u8; 100], 5, 5);
+        c.insert(2, vec![0u8; 200], 10, 5);
+        assert_eq!(c.resident_bytes(), 300);
     }
 }

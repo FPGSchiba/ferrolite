@@ -3196,7 +3196,7 @@ impl eframe::App for FerroliteApp {
                     ctx,
                     ui,
                     &mut self.module,
-                    "v0.0.1",
+                    concat!("v", env!("CARGO_PKG_VERSION")),
                     export_enabled,
                     viewer_open,
                     &self.state.settings.keymap,

@@ -240,6 +240,53 @@ impl MemHistory {
     }
 }
 
+/// Signed byte delta as a human string, e.g. `+384.0M` / `-12.0K` / `+0B`.
+fn fmt_delta(prev: u64, cur: u64) -> String {
+    if cur >= prev {
+        format!("+{}", fmt_bytes(cur - prev))
+    } else {
+        format!("-{}", fmt_bytes(prev - cur))
+    }
+}
+
+/// ~1/sec structured memory line for the diag log sink.
+#[allow(dead_code)] // wired into the diag log sink by a later task, not wired in yet
+pub fn format_mem_log_line(t_secs: f64, b: &MemBreakdown) -> String {
+    format!(
+        "[mem] t+{t:.1}s rss={rss} live={live} inflight={inf} gpu={gpu} cache={cache} unattrib={un} budget={bud}",
+        t = t_secs,
+        rss = fmt_bytes(b.rss),
+        live = fmt_bytes(b.get(MemCategory::ViewerFullLinear) + b.get(MemCategory::ViewerPreviewSrc)),
+        inf = fmt_bytes(b.get(MemCategory::InflightDecode) + b.get(MemCategory::InflightPyramid)),
+        gpu = fmt_bytes(b.get(MemCategory::GpuPyramid)),
+        cache = fmt_bytes(b.get(MemCategory::RamCache)),
+        un = fmt_bytes(b.unattributed()),
+        bud = fmt_bytes(b.budget),
+    )
+}
+
+/// Event-anchored line (open/close/nav): every changed category as a signed
+/// delta, plus the new RSS. Categories with no change are omitted to keep it
+/// scannable.
+#[allow(dead_code)] // wired into open/close/nav sites by a later task, not wired in yet
+pub fn format_mem_event_line(label: &str, prev: &MemBreakdown, cur: &MemBreakdown) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for c in MemCategory::ALL {
+        let (p, q) = (prev.get(c), cur.get(c));
+        if p != q {
+            parts.push(format!("{} {}", c.label(), fmt_delta(p, q)));
+        }
+    }
+    if parts.is_empty() {
+        parts.push("no category change".to_string());
+    }
+    format!(
+        "[mem] {label}: {} rss={}",
+        parts.join(" "),
+        fmt_bytes(cur.rss)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +386,39 @@ mod tests {
     #[test]
     fn history_max_of_empty_is_zero() {
         assert_eq!(MemHistory::new(8).max_rss(), 0);
+    }
+
+    fn sample_breakdown() -> MemBreakdown {
+        let mut b = MemBreakdown::empty();
+        b.rss = 2_100 * 1024 * 1024;
+        b.budget = 3_400 * 1024 * 1024;
+        b.set(MemCategory::ViewerFullLinear, 380 * 1024 * 1024);
+        b.set(MemCategory::InflightDecode, 760 * 1024 * 1024);
+        b.set(MemCategory::GpuPyramid, 512 * 1024 * 1024);
+        b
+    }
+
+    #[test]
+    fn log_line_has_rss_unattrib_and_budget() {
+        let line = format_mem_log_line(12.0, &sample_breakdown());
+        assert!(line.starts_with("[mem] t+12.0s"), "got: {line}");
+        assert!(line.contains("rss="), "got: {line}");
+        assert!(line.contains("unattrib="), "got: {line}");
+        assert!(line.contains("budget="), "got: {line}");
+    }
+
+    #[test]
+    fn event_line_shows_signed_deltas() {
+        let mut prev = MemBreakdown::empty();
+        prev.rss = 1_000 * 1024 * 1024;
+        prev.set(MemCategory::ViewerFullLinear, 0);
+        let cur = sample_breakdown();
+        let line = format_mem_event_line("open #123 RAW", &prev, &cur);
+        assert!(line.starts_with("[mem] open #123 RAW:"), "got: {line}");
+        assert!(
+            line.contains("viewer_full_linear +"),
+            "growth shown with +, got: {line}"
+        );
+        assert!(line.contains("rss="), "got: {line}");
     }
 }

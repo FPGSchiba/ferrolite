@@ -18,6 +18,8 @@ pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xa9, 0xc7, 0xdd);
 pub const ACCENT_BG_SEL: Color32 = Color32::from_rgb(0x21, 0x2a, 0x30);
 pub const SEMANTIC_RED: Color32 = Color32::from_rgb(0xc7, 0x54, 0x50);
 pub const SEMANTIC_GREEN: Color32 = Color32::from_rgb(0x4c, 0xaf, 0x71);
+pub const SEMANTIC_AMBER: Color32 = Color32::from_rgb(0xd6, 0xa8, 0x4c); // warning toasts
+pub const SEMANTIC_BLUE: Color32 = Color32::from_rgb(0x5a, 0x9d, 0xd6); // info toasts
 /// Rating-star fill — a bright gold so stars stay legible on light images.
 pub const STAR: Color32 = Color32::from_rgb(0xf2, 0xc0, 0x4d);
 

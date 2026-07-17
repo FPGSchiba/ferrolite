@@ -3372,6 +3372,8 @@ impl eframe::App for FerroliteApp {
                 crate::status_bar::show(ui, &self.state);
             });
 
+        crate::notifications::show(ctx, &mut self.state.notifications);
+
         if self.module == crate::module::Module::Develop {
             if let Some(image_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
                 egui::TopBottomPanel::bottom("develop_meta")

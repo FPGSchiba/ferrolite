@@ -7,12 +7,7 @@
 use std::time::{Duration, Instant};
 
 /// Longest a non-error toast stays before `prune` drops it.
-// Read only via `Level::ttl`, which is itself unreached in the bin until
-// `notifications::show` is wired in (Task 3) — the lib copy is `pub`-reachable
-// so dead_code doesn't fire there. Remove once Task 3 lands.
-#[allow(dead_code)]
 const INFO_TTL: Duration = Duration::from_secs(4);
-#[allow(dead_code)]
 const WARNING_TTL: Duration = Duration::from_secs(6);
 
 /// Hard cap on simultaneously-held toasts; pushing beyond drops the oldest.
@@ -31,9 +26,6 @@ pub enum Level {
 
 impl Level {
     /// Auto-dismiss lifetime, or `None` for `Error` (sticky until dismissed).
-    // Unreached in the bin until `notifications::show` calls `prune`/`next_expiry`
-    // (Task 3). Remove once Task 3 lands.
-    #[allow(dead_code)]
     fn ttl(self) -> Option<Duration> {
         match self {
             Level::Info => Some(INFO_TTL),
@@ -44,9 +36,6 @@ impl Level {
 }
 
 pub struct Notification {
-    // Unread in the bin until `notifications::show` calls `id()` (Task 3).
-    // Remove once Task 3 lands.
-    #[allow(dead_code)]
     id: u64,
     level: Level,
     message: String,
@@ -54,23 +43,16 @@ pub struct Notification {
     born: Instant,
 }
 
-// These accessors are unreached in the bin until `notifications::show` calls
-// them (Task 3) — the lib copy is `pub`-reachable so dead_code doesn't fire
-// there. Remove the annotations once Task 3 lands.
 impl Notification {
-    #[allow(dead_code)]
     pub fn id(&self) -> u64 {
         self.id
     }
-    #[allow(dead_code)]
     pub fn level(&self) -> Level {
         self.level
     }
-    #[allow(dead_code)]
     pub fn message(&self) -> &str {
         &self.message
     }
-    #[allow(dead_code)]
     pub fn count(&self) -> u32 {
         self.count
     }
@@ -112,9 +94,6 @@ impl Notifications {
     }
 
     /// Drop auto-dismiss toasts whose TTL has elapsed. Errors are never pruned.
-    // Unreached in the bin until `notifications::show` calls it (Task 3).
-    // Remove once Task 3 lands.
-    #[allow(dead_code)]
     pub fn prune(&mut self, now: Instant) {
         self.items.retain(|n| match n.level.ttl() {
             Some(ttl) => now.duration_since(n.born) < ttl,
@@ -123,25 +102,21 @@ impl Notifications {
     }
 
     /// Remove the toast with `id` (manual close), if present.
-    #[allow(dead_code)]
     pub fn dismiss(&mut self, id: u64) {
         self.items.retain(|n| n.id != id);
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
     /// Newest-first (render order: newest on top).
-    #[allow(dead_code)]
     pub fn iter_newest_first(&self) -> impl Iterator<Item = &Notification> {
         self.items.iter().rev()
     }
 
     /// Shortest remaining TTL across auto-dismiss toasts, for scheduling a
     /// repaint so expiry fires on time. `None` when only errors remain.
-    #[allow(dead_code)]
     pub fn next_expiry(&self, now: Instant) -> Option<Duration> {
         self.items
             .iter()
@@ -155,11 +130,102 @@ impl Notifications {
 }
 
 /// The `×N` badge string, shown only when a toast has coalesced (`count > 1`).
-// Unreached in the bin until `notifications::show` calls it (Task 3). Remove
-// once Task 3 lands.
-#[allow(dead_code)]
 pub fn count_badge(count: u32) -> Option<String> {
     (count > 1).then(|| format!("×{count}"))
+}
+
+/// Accent color for a level's toast (border/icon). Reuses the theme palette.
+pub fn level_color(level: Level) -> egui::Color32 {
+    match level {
+        Level::Info => crate::theme::SEMANTIC_BLUE,
+        Level::Warning => crate::theme::SEMANTIC_AMBER,
+        Level::Error => crate::theme::SEMANTIC_RED,
+    }
+}
+
+/// Phosphor glyph (from `icons`) for a level.
+pub fn level_icon(level: Level) -> &'static str {
+    match level {
+        Level::Info => crate::icons::INFO,
+        Level::Warning => crate::icons::WARNING,
+        Level::Error => crate::icons::NOTIFY_ERROR,
+    }
+}
+
+/// Draw the toast stack top-right, below the title bar. Prunes expired toasts,
+/// renders newest-on-top, and schedules a repaint so auto-dismiss fires on time.
+/// A close button dismisses a toast; the click is applied after the layout pass.
+pub fn show(ctx: &egui::Context, n: &mut Notifications) {
+    let now = std::time::Instant::now();
+    n.prune(now);
+    if n.is_empty() {
+        return;
+    }
+
+    let mut to_dismiss: Option<u64> = None;
+    egui::Area::new(egui::Id::new("toast_stack"))
+        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 40.0))
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.set_max_width(300.0);
+            for toast in n.iter_newest_first() {
+                let color = level_color(toast.level());
+                egui::Frame::none()
+                    .fill(crate::theme::BG_TOOLBAR)
+                    .stroke(egui::Stroke::new(1.0, color))
+                    .rounding(6.0)
+                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                    .outer_margin(egui::Margin {
+                        bottom: 8.0,
+                        ..Default::default()
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(level_icon(toast.level()))
+                                    .color(color)
+                                    .font(crate::icons::font(16.0)),
+                            );
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(toast.message()).size(12.0))
+                                    .wrap(),
+                            );
+                            if let Some(badge) = count_badge(toast.count()) {
+                                ui.label(
+                                    egui::RichText::new(badge)
+                                        .color(crate::theme::TEXT_DIM)
+                                        .size(11.0),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let close = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(crate::icons::CLOSE)
+                                                .color(crate::theme::TEXT_DIM)
+                                                .font(crate::icons::font(13.0)),
+                                        )
+                                        .sense(egui::Sense::click()),
+                                    );
+                                    if close.on_hover_text("Dismiss").clicked() {
+                                        to_dismiss = Some(toast.id());
+                                    }
+                                },
+                            );
+                        });
+                    });
+            }
+        });
+
+    if let Some(id) = to_dismiss {
+        n.dismiss(id);
+    }
+
+    // Keep the frame clock ticking so TTL expiry fires without user input.
+    if let Some(remaining) = n.next_expiry(std::time::Instant::now()) {
+        ctx.request_repaint_after(remaining);
+    }
 }
 
 #[cfg(test)]
@@ -274,6 +340,20 @@ mod tests {
     fn count_badge_only_when_greater_than_one() {
         assert_eq!(count_badge(1), None);
         assert_eq!(count_badge(3), Some("×3".to_string()));
+    }
+
+    #[test]
+    fn level_color_maps_each_level() {
+        assert_eq!(level_color(Level::Info), crate::theme::SEMANTIC_BLUE);
+        assert_eq!(level_color(Level::Warning), crate::theme::SEMANTIC_AMBER);
+        assert_eq!(level_color(Level::Error), crate::theme::SEMANTIC_RED);
+    }
+
+    #[test]
+    fn level_icon_maps_each_level() {
+        assert_eq!(level_icon(Level::Info), crate::icons::INFO);
+        assert_eq!(level_icon(Level::Warning), crate::icons::WARNING);
+        assert_eq!(level_icon(Level::Error), crate::icons::NOTIFY_ERROR);
     }
 
     #[test]

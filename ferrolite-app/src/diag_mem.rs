@@ -3,6 +3,7 @@
 //! and byte formatting. Pure and unit-tested; the impure gather (reading live
 //! `AppState`) lives in `app.rs`, the egui shell in `draw_mem_overlay`.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// One attributable slice of memory. CPU-resident categories count toward RSS
@@ -197,6 +198,48 @@ pub fn track_inflight_pyramid(bytes: u64) -> InflightGuard {
     }
 }
 
+/// One time-series sample for the growth graph.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)] // constructed/read by draw_mem_overlay (later task), not wired in yet
+pub struct MemSample {
+    pub t_secs: f32,
+    pub rss: u64,
+    pub cpu_known: u64,
+    pub cache: u64,
+}
+
+/// Bounded ring buffer of memory samples for the overlay's growth graph.
+#[allow(dead_code)] // owned/updated by app.rs + draw_mem_overlay (later task), not wired in yet
+pub struct MemHistory {
+    cap: usize,
+    samples: VecDeque<MemSample>,
+}
+
+#[allow(dead_code)] // owned/updated by app.rs + draw_mem_overlay (later task), not wired in yet
+impl MemHistory {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            cap: cap.max(1),
+            samples: VecDeque::with_capacity(cap.max(1)),
+        }
+    }
+
+    pub fn push(&mut self, s: MemSample) {
+        if self.samples.len() == self.cap {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(s);
+    }
+
+    pub fn samples(&self) -> &VecDeque<MemSample> {
+        &self.samples
+    }
+
+    pub fn max_rss(&self) -> u64 {
+        self.samples.iter().map(|s| s.rss).max().unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +316,28 @@ mod tests {
         let _g = track_inflight_pyramid(2048);
         assert_eq!(inflight_pyramid_bytes(), p0 + 2048);
         assert_eq!(inflight_decode_bytes(), d0, "pyramid gauge is separate");
+    }
+
+    #[test]
+    fn history_is_bounded_and_tracks_max() {
+        let mut h = MemHistory::new(3);
+        for i in 0..5u64 {
+            h.push(MemSample {
+                t_secs: i as f32,
+                rss: i * 100,
+                cpu_known: i * 10,
+                cache: 0,
+            });
+        }
+        assert_eq!(h.samples().len(), 3, "ring buffer caps at capacity");
+        // Oldest two (rss 0, 100) evicted; newest three are 200,300,400.
+        assert_eq!(h.samples().front().unwrap().rss, 200);
+        assert_eq!(h.samples().back().unwrap().rss, 400);
+        assert_eq!(h.max_rss(), 400);
+    }
+
+    #[test]
+    fn history_max_of_empty_is_zero() {
+        assert_eq!(MemHistory::new(8).max_rss(), 0);
     }
 }

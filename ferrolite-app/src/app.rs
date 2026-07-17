@@ -1055,6 +1055,14 @@ impl FerroliteApp {
                         if cancel.is_cancelled() {
                             return;
                         }
+                        // Attribute this job's large in-flight buffer (full-res linear f32) to
+                        // the memory overlay for its lifetime. Gated: zero cost when off.
+                        let _inflight = crate::diag::enabled().then(|| {
+                            crate::diag_mem::track_inflight_pyramid(crate::diag_mem::linear_bytes(
+                                image_full.width,
+                                image_full.height,
+                            ))
+                        });
                         let tile_source: std::sync::Arc<
                             dyn ferrolite_vt::TileSource + Send + Sync,
                         > = std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(

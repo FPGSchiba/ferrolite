@@ -52,16 +52,42 @@ jobs:
           find "target/${{ matrix.target }}/release" -maxdepth 1 \( -name '*.dmg' -o -name '*setup.exe' \) -exec cp {} out/ \; 2>/dev/null || true
           # Fallback: default release dir, in case CARGO_BUILD_TARGET routing differs.
           find "target/release" -maxdepth 1 \( -name '*.dmg' -o -name '*setup.exe' \) -exec cp {} out/ \; 2>/dev/null || true
+          # cargo-packager names the NSIS installer from the *binary* name
+          # (`ferrolite-app`) while the DMG uses the product name (`FerroLite`).
+          # Normalize the installer so all assets share the FerroLite_ prefix
+          # (and match what the README advertises).
+          for f in out/ferrolite-app_*-setup.exe; do
+            [ -e "$f" ] || continue
+            mv "$f" "out/FerroLite_$(basename "$f" | sed 's/^ferrolite-app_//')"
+          done
           ls -la out
           test -n "$(ls -A out 2>/dev/null)" || { echo "no artifacts collected"; exit 1; }
-      - name: Upload workflow artifacts (dispatch)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ferrolite-${{ matrix.target }}
           path: out/*
-      - name: Attach to release (tag)
-        if: startsWith(github.ref, 'refs/tags/v')
+          if-no-files-found: error
+
+  # Single publish step so the three matrix jobs never race to create the same
+  # release object (softprops/action-gh-release fired in parallel can 422 or drop
+  # an asset). Tag builds only; workflow_dispatch stops after `package` and its
+  # per-target artifacts are downloadable from the run.
+  publish:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ferrolite-*
+          path: dist
+          merge-multiple: true
+      - name: List assets
+        run: ls -la dist
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: out/*
+          files: dist/*
+          fail_on_unmatched_files: true

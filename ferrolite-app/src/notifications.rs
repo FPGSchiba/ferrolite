@@ -13,10 +13,6 @@ const WARNING_TTL: Duration = Duration::from_secs(6);
 /// Hard cap on simultaneously-held toasts; pushing beyond drops the oldest.
 pub const MAX_VISIBLE: usize = 5;
 
-// No bin call site constructs a `Level` yet — that starts with `AppState::notify`
-// callers (Task 4) and job-thread `AppEvent::Notify` sends (Task 5). Remove once
-// either lands.
-#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Level {
     Info,

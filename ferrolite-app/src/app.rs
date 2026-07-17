@@ -571,13 +571,18 @@ impl FerroliteApp {
             match v.preview_source.clone() {
                 Some(src) => crate::export::ExportSource::FullResCpu(src),
                 None => {
-                    self.state.warning =
-                        Some("Image still loading; cannot export yet.".to_string());
+                    self.state.notify(
+                        crate::notifications::Level::Warning,
+                        "Image still loading; cannot export yet.",
+                    );
                     return;
                 }
             }
         } else {
-            self.state.warning = Some("Image still loading; cannot export yet.".to_string());
+            self.state.notify(
+                crate::notifications::Level::Warning,
+                "Image still loading; cannot export yet.",
+            );
             return;
         };
         let source_path = v.path.clone();
@@ -602,7 +607,10 @@ impl FerroliteApp {
 
         // Build the shared GpuContext from eframe's render state.
         let Some(rs) = frame.wgpu_render_state() else {
-            self.state.warning = Some("No GPU render state; cannot export.".to_string());
+            self.state.notify(
+                crate::notifications::Level::Warning,
+                "No GPU render state; cannot export.",
+            );
             return;
         };
         let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
@@ -633,7 +641,10 @@ impl FerroliteApp {
     /// the UI thread so {seq} is deterministic and disk collisions are avoided.
     fn start_batch(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let Some(dest_dir) = self.state.export_dest.clone() else {
-            self.state.warning = Some("Choose a destination folder first.".to_string());
+            self.state.notify(
+                crate::notifications::Level::Warning,
+                "Choose a destination folder first.",
+            );
             return;
         };
         let ids = self.state.export_queue.clone();
@@ -690,18 +701,22 @@ impl FerroliteApp {
         }
 
         if items.is_empty() {
-            self.state.warning = if skipped > 0 {
-                Some(format!(
-                    "No images could be resolved for export ({skipped} skipped)."
-                ))
-            } else {
-                Some("No queued images could be resolved to a file on disk.".to_string())
-            };
+            self.state.notify(
+                crate::notifications::Level::Info,
+                if skipped > 0 {
+                    format!("No images could be resolved for export ({skipped} skipped).")
+                } else {
+                    "No queued images could be resolved to a file on disk.".to_string()
+                },
+            );
             return;
         }
 
         let Some(rs) = frame.wgpu_render_state() else {
-            self.state.warning = Some("No GPU render state; cannot export.".to_string());
+            self.state.notify(
+                crate::notifications::Level::Warning,
+                "No GPU render state; cannot export.",
+            );
             return;
         };
         let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
@@ -715,11 +730,14 @@ impl FerroliteApp {
         let mut activity = crate::export::ExportActivity::new_batch(total);
         activity.handles = handles;
         self.state.export_activity = Some(activity);
-        self.state.warning = Some(if skipped > 0 {
-            format!("Exporting {total} image(s)… (skipped {skipped} with unresolved paths)")
-        } else {
-            format!("Exporting {total} image(s)…")
-        });
+        self.state.notify(
+            crate::notifications::Level::Info,
+            if skipped > 0 {
+                format!("Exporting {total} image(s)… (skipped {skipped} with unresolved paths)")
+            } else {
+                format!("Exporting {total} image(s)…")
+            },
+        );
     }
 
     /// sRGB→working for the preview tier: the embedded preview and Standard images
@@ -3028,7 +3046,14 @@ impl eframe::App for FerroliteApp {
                             a.item_finished(*ok, message.clone());
                         }
                     }
-                    self.state.warning = Some(message.clone());
+                    self.state.notify(
+                        if *ok {
+                            crate::notifications::Level::Info
+                        } else {
+                            crate::notifications::Level::Error
+                        },
+                        message.clone(),
+                    );
                     ctx.request_repaint();
                     continue;
                 }
@@ -3191,7 +3216,10 @@ impl eframe::App for FerroliteApp {
                     Some(crate::chrome::MenuAction::AddToQueue) => {
                         if let Some(id) = self.state.viewer.as_ref().map(|v| v.image_id) {
                             self.state.queue_add(id);
-                            self.state.warning = Some("Added to export queue.".to_string());
+                            self.state.notify(
+                                crate::notifications::Level::Info,
+                                "Added to export queue.",
+                            );
                         }
                     }
                     Some(crate::chrome::MenuAction::PurgePreviews) => {
@@ -3207,7 +3235,8 @@ impl eframe::App for FerroliteApp {
                                 }
                             },
                         );
-                        self.state.warning = Some("Preview cache purged.".to_string());
+                        self.state
+                            .notify(crate::notifications::Level::Info, "Preview cache purged.");
                     }
                     Some(crate::chrome::MenuAction::Exit) => {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -3595,11 +3624,14 @@ impl eframe::App for FerroliteApp {
                     if let Some(target_id) = target_id {
                         let was_queued = self.state.queue_contains(target_id);
                         self.state.queue_toggle(target_id);
-                        self.state.warning = Some(if was_queued {
-                            "Removed from export queue.".to_string()
-                        } else {
-                            "Added to export queue.".to_string()
-                        });
+                        self.state.notify(
+                            crate::notifications::Level::Info,
+                            if was_queued {
+                                "Removed from export queue."
+                            } else {
+                                "Added to export queue."
+                            },
+                        );
                     }
                 }
             }

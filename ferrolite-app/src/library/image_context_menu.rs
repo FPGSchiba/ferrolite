@@ -158,10 +158,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image
             let ids: Vec<i64> = state.selection.iter().copied().collect();
             let n = ids.len();
             state.queue_add_many(&ids);
-            state.warning = Some(format!("Added {n} to export queue."));
+            state.notify(
+                crate::notifications::Level::Info,
+                format!("Added {n} to export queue."),
+            );
         } else {
             state.queue_add(image_id);
-            state.warning = Some("Added to export queue.".to_string());
+            state.notify(crate::notifications::Level::Info, "Added to export queue.");
         }
         ui.close_menu();
     }
@@ -170,11 +173,14 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image
         let ids = regen_target_ids(single_image, image_id, &state.selection);
         let n = ids.len();
         state.pending_thumb_regen.extend(ids);
-        state.warning = Some(if n == 1 {
-            "Regenerating thumbnail…".to_string()
-        } else {
-            format!("Regenerating {n} thumbnails…")
-        });
+        state.notify(
+            crate::notifications::Level::Info,
+            if n == 1 {
+                "Regenerating thumbnail…".to_string()
+            } else {
+                format!("Regenerating {n} thumbnails…")
+            },
+        );
         ui.close_menu();
     }
 }

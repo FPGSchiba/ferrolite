@@ -384,10 +384,8 @@ impl AppState {
                 if !ok {
                     self.dirty = true;
                 }
-                match warning {
-                    Some(w) => self.warning = Some(w),
-                    None if ok => self.warning = None,
-                    None => {}
+                if let Some(w) = warning {
+                    self.notify(crate::notifications::Level::Error, w);
                 }
                 None
             }
@@ -396,10 +394,8 @@ impl AppState {
             AppEvent::OpsSaved { ok, warning } => {
                 self.ops_save_inflight = self.ops_save_inflight.saturating_sub(1);
                 self.ops_save_failed = !ok;
-                match warning {
-                    Some(w) => self.warning = Some(w),
-                    None if ok => self.warning = None,
-                    None => {}
+                if let Some(w) = warning {
+                    self.notify(crate::notifications::Level::Error, w);
                 }
                 None
             }
@@ -597,49 +593,27 @@ mod tests {
     }
 
     #[test]
-    fn metadata_result_clears_warning_on_clean_success() {
+    fn metadata_result_failure_pushes_error_toast() {
+        use crate::notifications::Level;
         let mut s = AppState::for_test();
-        s.warning = Some("stale warning".into());
-
-        // ok=true, no warning → warning should be cleared.
-        s.apply(AppEvent::MetadataResult {
-            ok: true,
-            warning: None,
-        });
-        assert_eq!(s.warning, None, "warning must be cleared on clean success");
-    }
-
-    #[test]
-    fn metadata_result_preserves_warning_on_failure() {
-        let mut s = AppState::for_test();
-        s.warning = Some("prior warning".into());
-
-        // ok=false, no warning → warning must NOT be cleared (keep the prior).
         s.apply(AppEvent::MetadataResult {
             ok: false,
-            warning: None,
+            warning: Some("catalog write failed".into()),
         });
-        assert_eq!(
-            s.warning,
-            Some("prior warning".into()),
-            "warning must be preserved when ok=false and no new warning"
-        );
+        assert!(s.dirty);
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert_eq!(n.level(), Level::Error);
+        assert_eq!(n.message(), "catalog write failed");
     }
 
     #[test]
-    fn metadata_result_sets_warning_when_provided() {
+    fn metadata_result_clean_success_pushes_nothing() {
         let mut s = AppState::for_test();
-        s.warning = None;
-
         s.apply(AppEvent::MetadataResult {
             ok: true,
-            warning: Some("sidecar write failed".into()),
+            warning: None,
         });
-        assert_eq!(
-            s.warning,
-            Some("sidecar write failed".into()),
-            "warning must be set when provided"
-        );
+        assert!(s.notifications.is_empty());
     }
 
     #[test]
@@ -647,16 +621,29 @@ mod tests {
         let mut s = AppState::for_test();
         s.ops_save_inflight = 1;
         s.ops_save_failed = true;
-        s.warning = Some("prior".into());
-
         s.apply(AppEvent::OpsSaved {
             ok: true,
             warning: None,
         });
+        assert_eq!(s.ops_save_inflight, 0);
+        assert!(!s.ops_save_failed);
+        assert!(s.notifications.is_empty());
+    }
 
-        assert_eq!(s.ops_save_inflight, 0, "inflight decremented to 0");
-        assert!(!s.ops_save_failed, "failed cleared on ok=true");
-        assert_eq!(s.warning, None, "warning cleared on clean ok=true");
+    #[test]
+    fn ops_saved_failure_pushes_error_toast() {
+        use crate::notifications::Level;
+        let mut s = AppState::for_test();
+        s.ops_save_inflight = 1;
+        s.apply(AppEvent::OpsSaved {
+            ok: false,
+            warning: Some("sidecar write failed".into()),
+        });
+        assert!(s.ops_save_failed);
+        assert_eq!(
+            s.notifications.iter_newest_first().next().unwrap().level(),
+            Level::Error
+        );
     }
 
     #[test]

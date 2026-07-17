@@ -169,8 +169,6 @@ pub struct AppState {
     pub selection: HashSet<i64>,
     /// The anchor image id for shift-click range selection.
     pub selection_anchor: Option<i64>,
-    /// Non-critical warning surfaced in the UI (e.g. query error).
-    pub warning: Option<String>,
     /// General-purpose in-app notifications (toasts). See `notifications` module.
     pub notifications: crate::notifications::Notifications,
     /// Image ids queued by the "Regenerate thumbnail" context-menu action,
@@ -307,7 +305,6 @@ impl AppState {
             visible_collections: HashMap::new(),
             selection: HashSet::new(),
             selection_anchor: None,
-            warning: None,
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
@@ -665,9 +662,6 @@ impl AppState {
 
     /// Push a toast from UI-thread code. Job threads instead send
     /// `AppEvent::Notify` over the event channel.
-    // Unreached in the bin until real call sites land (warning-slot migration,
-    // Task 4). Remove once Task 4 lands.
-    #[allow(dead_code)]
     pub fn notify(&mut self, level: crate::notifications::Level, message: impl Into<String>) {
         self.notifications
             .push(level, message, std::time::Instant::now());
@@ -749,7 +743,10 @@ impl AppState {
             Err(e) => {
                 eprintln!("ferrolite: export queue load failed: {e}");
                 self.export_queue = Vec::new();
-                self.warning = Some("Could not load export queue.".to_string());
+                self.notify(
+                    crate::notifications::Level::Warning,
+                    "Could not load export queue.",
+                );
             }
         }
     }
@@ -767,11 +764,21 @@ impl AppState {
     where
         F: FnOnce(&ferrolite_catalog::Catalog) -> Result<(), ferrolite_catalog::CatalogError>,
     {
-        if let Ok(cat) = self.writer.lock() {
+        let failed = if let Ok(cat) = self.writer.lock() {
             if let Err(e) = op(&cat) {
                 eprintln!("ferrolite: export queue persist failed: {e}");
-                self.warning = Some("Export queue not saved (kept for this session).".to_string());
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if failed {
+            self.notify(
+                crate::notifications::Level::Warning,
+                "Export queue not saved (kept for this session).",
+            );
         }
     }
 
@@ -908,7 +915,6 @@ impl AppState {
             visible_collections: HashMap::new(),
             selection: HashSet::new(),
             selection_anchor: None,
-            warning: None,
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),

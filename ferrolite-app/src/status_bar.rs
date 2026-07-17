@@ -94,14 +94,6 @@ pub fn show(ui: &mut egui::Ui, state: &AppState) {
                 );
             }
         });
-        if let Some(w) = &state.warning {
-            ui.separator();
-            ui.label(
-                egui::RichText::new(w)
-                    .color(crate::theme::SEMANTIC_RED)
-                    .size(11.0),
-            );
-        }
     });
 }
 

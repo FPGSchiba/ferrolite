@@ -3,6 +3,8 @@
 //! and byte formatting. Pure and unit-tested; the impure gather (reading live
 //! `AppState`) lives in `app.rs`, the egui shell in `draw_mem_overlay`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// One attributable slice of memory. CPU-resident categories count toward RSS
 /// (so `unattributed` = rss − Σ(cpu categories)); VRAM/disk categories are shown
 /// for context but excluded from that residual.
@@ -146,6 +148,55 @@ pub fn fmt_bytes(n: u64) -> String {
     }
 }
 
+static INFLIGHT_DECODE: AtomicU64 = AtomicU64::new(0);
+static INFLIGHT_PYRAMID: AtomicU64 = AtomicU64::new(0);
+
+#[allow(dead_code)] // read by app.rs / draw_mem_overlay (later task), not wired in yet
+pub fn inflight_decode_bytes() -> u64 {
+    INFLIGHT_DECODE.load(Ordering::Relaxed)
+}
+#[allow(dead_code)] // read by app.rs / draw_mem_overlay (later task), not wired in yet
+pub fn inflight_pyramid_bytes() -> u64 {
+    INFLIGHT_PYRAMID.load(Ordering::Relaxed)
+}
+
+/// RAII gauge: adds `bytes` to a global in-flight counter on construction and
+/// subtracts (saturating) on drop. Held by a decode/pyramid job for its lifetime
+/// so the memory overlay attributes buffers that are alive but not yet installed.
+#[allow(dead_code)] // handed to the pyramid decode job by a later task, not wired in yet
+pub struct InflightGuard {
+    counter: &'static AtomicU64,
+    bytes: u64,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(self.bytes))
+            });
+    }
+}
+
+#[allow(dead_code)] // called by the pyramid decode job (later task), not wired in yet
+pub fn track_inflight_decode(bytes: u64) -> InflightGuard {
+    INFLIGHT_DECODE.fetch_add(bytes, Ordering::Relaxed);
+    InflightGuard {
+        counter: &INFLIGHT_DECODE,
+        bytes,
+    }
+}
+
+#[allow(dead_code)] // called by the pyramid decode job (later task), not wired in yet
+pub fn track_inflight_pyramid(bytes: u64) -> InflightGuard {
+    INFLIGHT_PYRAMID.fetch_add(bytes, Ordering::Relaxed);
+    InflightGuard {
+        counter: &INFLIGHT_PYRAMID,
+        bytes,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +248,30 @@ mod tests {
         assert_eq!(fmt_bytes(1536), "1.5K");
         assert_eq!(fmt_bytes(2 * 1024 * 1024), "2.0M");
         assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0G");
+    }
+
+    #[test]
+    fn inflight_guard_adds_then_subtracts_on_drop() {
+        let base = inflight_decode_bytes();
+        {
+            let _g = track_inflight_decode(1000);
+            assert_eq!(inflight_decode_bytes(), base + 1000);
+            let _g2 = track_inflight_decode(500);
+            assert_eq!(inflight_decode_bytes(), base + 1500);
+        }
+        assert_eq!(
+            inflight_decode_bytes(),
+            base,
+            "both guards subtracted on drop"
+        );
+    }
+
+    #[test]
+    fn inflight_pyramid_is_independent() {
+        let d0 = inflight_decode_bytes();
+        let p0 = inflight_pyramid_bytes();
+        let _g = track_inflight_pyramid(2048);
+        assert_eq!(inflight_pyramid_bytes(), p0 + 2048);
+        assert_eq!(inflight_decode_bytes(), d0, "pyramid gauge is separate");
     }
 }

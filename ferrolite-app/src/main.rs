@@ -6,6 +6,7 @@ mod canvas;
 mod chrome;
 mod develop;
 mod diag;
+mod diag_mem;
 mod events;
 mod export;
 mod export_module;

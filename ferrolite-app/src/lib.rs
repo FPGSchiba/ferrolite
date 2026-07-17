@@ -5,6 +5,7 @@
 pub mod camera_matrix;
 pub mod develop;
 pub mod diag;
+pub mod diag_mem;
 pub mod events;
 pub mod export;
 pub mod icons;

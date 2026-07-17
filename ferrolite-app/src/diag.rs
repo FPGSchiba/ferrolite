@@ -660,6 +660,10 @@ pub struct DiagState {
     pub mem_overlay_visible: bool,
     /// Growth-graph ring buffer for the memory overlay (~5 min at 1/sec).
     pub mem_history: crate::diag_mem::MemHistory,
+    /// Memory breakdown cached from the last ~1/sec diag tick (or the F10
+    /// toggle-ON transition). The overlay draw site reads this instead of
+    /// gathering (which runs a process-RSS syscall) on every frame.
+    pub last_mem: Option<crate::diag_mem::MemBreakdown>,
 }
 
 impl DiagState {
@@ -673,6 +677,7 @@ impl DiagState {
             last_snapshot: None,
             mem_overlay_visible: false,
             mem_history: crate::diag_mem::MemHistory::new(300),
+            last_mem: None,
         }
     }
 

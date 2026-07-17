@@ -221,7 +221,6 @@ pub struct MemHistory {
     samples: VecDeque<MemSample>,
 }
 
-#[allow(dead_code)] // owned/updated by app.rs + draw_mem_overlay (later task), not wired in yet
 impl MemHistory {
     pub fn new(cap: usize) -> Self {
         Self {
@@ -293,9 +292,12 @@ pub fn format_mem_event_line(label: &str, prev: &MemBreakdown, cur: &MemBreakdow
     )
 }
 
-/// Full categorized snapshot for the Shift+F10 dump: one line per category.
-pub fn format_mem_dump(b: &MemBreakdown) -> String {
-    let mut out = String::from("[mem-dump]\n");
+/// Shared body of the category table: one line per `MemCategory`, followed by
+/// the `rss` / `unattributed` / `budget` totals. Used by both `format_mem_dump`
+/// and `draw_mem_overlay` so the two stay byte-identical apart from their own
+/// caller-specific header/prefix.
+fn mem_table_lines(b: &MemBreakdown) -> String {
+    let mut out = String::new();
     for c in MemCategory::ALL {
         out.push_str(&format!("  {:<18} {}\n", c.label(), fmt_bytes(b.get(c))));
     }
@@ -309,6 +311,11 @@ pub fn format_mem_dump(b: &MemBreakdown) -> String {
         fmt_bytes(b.budget),
     ));
     out
+}
+
+/// Full categorized snapshot for the Shift+F10 dump: one line per category.
+pub fn format_mem_dump(b: &MemBreakdown) -> String {
+    format!("[mem-dump]\n{}", mem_table_lines(b))
 }
 
 /// Paint the dedicated memory overlay: a category table + an RSS growth
@@ -326,19 +333,10 @@ pub fn draw_mem_overlay(ctx: &egui::Context, b: &MemBreakdown, history: &MemHist
                 .inner_margin(egui::Margin::same(8.0))
                 .rounding(egui::Rounding::same(4.0))
                 .show(ui, |ui| {
-                    let mut text = String::from("MEMORY  category            current\n");
-                    for c in MemCategory::ALL {
-                        text.push_str(&format!("  {:<18} {}\n", c.label(), fmt_bytes(b.get(c))));
-                    }
-                    text.push_str(&format!(
-                        "  {:<18} {}\n  {:<18} {}\n  {:<18} {}\n",
-                        "rss",
-                        fmt_bytes(b.rss),
-                        "unattributed",
-                        fmt_bytes(b.unattributed()),
-                        "budget",
-                        fmt_bytes(b.budget),
-                    ));
+                    let text = format!(
+                        "MEMORY  category            current\n{}",
+                        mem_table_lines(b)
+                    );
                     ui.label(
                         egui::RichText::new(text)
                             .monospace()

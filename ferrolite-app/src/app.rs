@@ -2896,6 +2896,11 @@ impl eframe::App for FerroliteApp {
                 crate::diag::write_log(&crate::diag_mem::format_mem_dump(&b));
             } else {
                 self.diag.toggle_mem_overlay();
+                // Populate the cache immediately on toggle-ON so the overlay
+                // isn't blank until the next ~1/sec diag tick.
+                if self.diag.mem_overlay_visible {
+                    self.diag.last_mem = Some(self.gather_mem_breakdown());
+                }
             }
         }
 
@@ -4547,7 +4552,8 @@ impl eframe::App for FerroliteApp {
                     crate::diag::write_log(&crate::diag::format_log(&snap));
                 }
                 // Memory: gather once per diag tick, push to the growth ring,
-                // and log the structured line.
+                // cache for the overlay draw site (avoids a per-frame RSS
+                // syscall), and log the structured line.
                 let mem = self.gather_mem_breakdown();
                 self.diag.mem_history.push(crate::diag_mem::MemSample {
                     t_secs: snap.dt as f32,
@@ -4555,6 +4561,7 @@ impl eframe::App for FerroliteApp {
                     cpu_known: mem.known_cpu_sum(),
                     cache: mem.get(crate::diag_mem::MemCategory::RamCache),
                 });
+                self.diag.last_mem = Some(mem);
                 if crate::diag::log_enabled() {
                     crate::diag::write_log(&crate::diag_mem::format_mem_log_line(snap.dt, &mem));
                 }
@@ -4565,8 +4572,9 @@ impl eframe::App for FerroliteApp {
                 }
             }
             if crate::diag::enabled() && self.diag.mem_overlay_visible {
-                let mem = self.gather_mem_breakdown();
-                crate::diag_mem::draw_mem_overlay(ctx, &mem, &self.diag.mem_history);
+                if let Some(mem) = self.diag.last_mem {
+                    crate::diag_mem::draw_mem_overlay(ctx, &mem, &self.diag.mem_history);
+                }
             }
         }
 

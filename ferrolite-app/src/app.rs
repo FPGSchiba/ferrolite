@@ -4564,6 +4564,10 @@ impl eframe::App for FerroliteApp {
                     crate::diag::draw_overlay(ctx, snap);
                 }
             }
+            if crate::diag::enabled() && self.diag.mem_overlay_visible {
+                let mem = self.gather_mem_breakdown();
+                crate::diag_mem::draw_mem_overlay(ctx, &mem, &self.diag.mem_history);
+            }
         }
 
         // End-of-frame: persist any settings mutated this frame, off the UI

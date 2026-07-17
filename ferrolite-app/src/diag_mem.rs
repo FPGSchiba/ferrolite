@@ -311,6 +311,79 @@ pub fn format_mem_dump(b: &MemBreakdown) -> String {
     out
 }
 
+/// Paint the dedicated memory overlay: a category table + an RSS growth
+/// sparkline, top-LEFT (so it does not overlap the top-right text overlay).
+/// Non-interactive, monospace, on the tooltip layer. Call only when the mem
+/// overlay is enabled AND visible.
+pub fn draw_mem_overlay(ctx: &egui::Context, b: &MemBreakdown, history: &MemHistory) {
+    egui::Area::new(egui::Id::new("ferrolite-mem-overlay"))
+        .order(egui::Order::Tooltip)
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(egui::Color32::from_black_alpha(210))
+                .inner_margin(egui::Margin::same(8.0))
+                .rounding(egui::Rounding::same(4.0))
+                .show(ui, |ui| {
+                    let mut text = String::from("MEMORY  category            current\n");
+                    for c in MemCategory::ALL {
+                        text.push_str(&format!("  {:<18} {}\n", c.label(), fmt_bytes(b.get(c))));
+                    }
+                    text.push_str(&format!(
+                        "  {:<18} {}\n  {:<18} {}\n  {:<18} {}\n",
+                        "rss",
+                        fmt_bytes(b.rss),
+                        "unattributed",
+                        fmt_bytes(b.unattributed()),
+                        "budget",
+                        fmt_bytes(b.budget),
+                    ));
+                    ui.label(
+                        egui::RichText::new(text)
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(120, 220, 255)),
+                    );
+                    draw_growth_sparkline(ui, history);
+                });
+        });
+}
+
+/// A simple RSS-over-time line graph, drawn with `Painter` (data-viz, not an
+/// icon). Fixed 220×48 box; scales y to the max RSS in the window.
+fn draw_growth_sparkline(ui: &mut egui::Ui, history: &MemHistory) {
+    let (w, h) = (220.0_f32, 48.0_f32);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, egui::Color32::from_black_alpha(120));
+    let samples = history.samples();
+    let max = history.max_rss().max(1) as f32;
+    if samples.len() >= 2 {
+        let n = samples.len();
+        let pts: Vec<egui::Pos2> = samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let x = rect.left() + w * (i as f32 / (n - 1) as f32);
+                let y = rect.bottom() - h * (s.rss as f32 / max);
+                egui::pos2(x, y)
+            })
+            .collect();
+        painter.add(egui::Shape::line(
+            pts,
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 220, 255)),
+        ));
+    }
+    painter.text(
+        rect.left_top() + egui::vec2(3.0, 1.0),
+        egui::Align2::LEFT_TOP,
+        format!("rss max {}", fmt_bytes(history.max_rss())),
+        egui::FontId::monospace(9.0),
+        egui::Color32::from_gray(200),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

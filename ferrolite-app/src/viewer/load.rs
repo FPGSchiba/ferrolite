@@ -67,7 +67,7 @@ pub fn spawn_preview(
                 eprintln!("ferrolite: preview decode failed for #{image_id}: {e}");
                 let _ = tx.send(AppEvent::Notify {
                     level: crate::notifications::Level::Error,
-                    message: format!("Could not load preview: {e}"),
+                    message: "Could not load preview".to_string(),
                 });
             }
         }
@@ -144,9 +144,7 @@ pub fn spawn_full(
                 eprintln!("ferrolite: full decode failed for #{image_id}: {e}");
                 let _ = tx.send(AppEvent::Notify {
                     level: crate::notifications::Level::Error,
-                    message: format!(
-                        "Could not load image (check the card/drive is connected): {e}"
-                    ),
+                    message: "Could not load image — check the card/drive is connected".to_string(),
                 });
                 let _ = tx.send(AppEvent::FullFailed { image_id });
             }

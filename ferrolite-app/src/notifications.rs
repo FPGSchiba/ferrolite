@@ -1,8 +1,8 @@
 //! General-purpose in-app notifications (toasts) with three severity levels.
 //! Pure, egui-free store: coalesces duplicate `(level, message)` bursts and
-//! auto-expires non-error toasts by TTL. Rendered by `notifications::show`
-//! (see the same module's `render` section) and fed both from the UI thread
-//! (`AppState::notify`) and job threads (`AppEvent::Notify`).
+//! auto-expires non-error toasts by TTL. Rendered by `notifications::show`,
+//! and fed both from the UI thread (`AppState::notify`) and job threads
+//! (`AppEvent::Notify`).
 
 use std::time::{Duration, Instant};
 
@@ -66,6 +66,9 @@ impl Notifications {
     /// duplicate (coalescing). Enforces `MAX_VISIBLE` by dropping the oldest.
     pub fn push(&mut self, level: Level, message: impl Into<String>, now: Instant) {
         let message = message.into();
+        // Invariant: coalescing guarantees at most one entry per (level, message),
+        // so the first match `find` returns is also the only — and thus newest —
+        // matching entry.
         if let Some(existing) = self
             .items
             .iter_mut()

@@ -714,7 +714,7 @@ impl AppState {
             eprintln!("ferrolite: remove_folder failed: {e}");
             self.notify(
                 crate::notifications::Level::Error,
-                format!("Could not remove folder: {e}"),
+                "Could not remove folder".to_string(),
             );
             return;
         }

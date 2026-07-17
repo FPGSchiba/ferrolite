@@ -134,7 +134,7 @@ pub fn show(ctx: &egui::Context, open: &mut bool, keymap: &Keymap) {
 }
 
 fn draw_about(ui: &mut egui::Ui) {
-    ui.heading("Ferrolite v0.0.1");
+    ui.heading(concat!("Ferrolite v", env!("CARGO_PKG_VERSION")));
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new("A fast, GPU-accelerated RAW photo cataloguing and editing app.")

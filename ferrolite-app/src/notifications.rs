@@ -205,9 +205,16 @@ pub fn show(ctx: &egui::Context, n: &mut Notifications) {
                                                 .color(crate::theme::TEXT_DIM)
                                                 .font(crate::icons::font(13.0)),
                                         )
+                                        // Not selectable text — it's a button, so
+                                        // suppress the I-beam and show a pointer.
+                                        .selectable(false)
                                         .sense(egui::Sense::click()),
                                     );
-                                    if close.on_hover_text("Dismiss").clicked() {
+                                    if close
+                                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                        .on_hover_text("Dismiss")
+                                        .clicked()
+                                    {
                                         to_dismiss = Some(toast.id());
                                     }
                                 },

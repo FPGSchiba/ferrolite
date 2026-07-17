@@ -262,7 +262,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
             // Copy id/clone name before the `&mut state` call to satisfy the borrow checker.
             let (cid, cname) = (c.id, c.name.clone());
             state.add_images_to_collection(&ids, cid);
-            state.warning = Some(format!("Added {} image(s) to \"{}\".", ids.len(), cname));
+            state.notify(
+                crate::notifications::Level::Info,
+                format!("Added {} image(s) to \"{}\".", ids.len(), cname),
+            );
         }
     }
 
@@ -383,7 +386,10 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
             // Copy id/clone name before the `&mut state` call to satisfy the borrow checker.
             let (tid, tname) = (t.id, t.name.clone());
             state.add_tag_to_images(ctx, &ids, tid);
-            state.warning = Some(format!("Tagged {} image(s) with \"{}\".", ids.len(), tname));
+            state.notify(
+                crate::notifications::Level::Info,
+                format!("Tagged {} image(s) with \"{}\".", ids.len(), tname),
+            );
         }
     }
     folder_opened

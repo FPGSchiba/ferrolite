@@ -169,8 +169,8 @@ pub struct AppState {
     pub selection: HashSet<i64>,
     /// The anchor image id for shift-click range selection.
     pub selection_anchor: Option<i64>,
-    /// Non-critical warning surfaced in the UI (e.g. query error).
-    pub warning: Option<String>,
+    /// General-purpose in-app notifications (toasts). See `notifications` module.
+    pub notifications: crate::notifications::Notifications,
     /// Image ids queued by the "Regenerate thumbnail" context-menu action,
     /// drained in `update()` where the GPU render state is available.
     pub pending_thumb_regen: Vec<i64>,
@@ -305,7 +305,7 @@ impl AppState {
             visible_collections: HashMap::new(),
             selection: HashSet::new(),
             selection_anchor: None,
-            warning: None,
+            notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
             iso_range: None,
@@ -660,6 +660,13 @@ impl AppState {
         self.ingest_done = 0;
     }
 
+    /// Push a toast from UI-thread code. Job threads instead send
+    /// `AppEvent::Notify` over the event channel.
+    pub fn notify(&mut self, level: crate::notifications::Level, message: impl Into<String>) {
+        self.notifications
+            .push(level, message, std::time::Instant::now());
+    }
+
     /// Reset per-folder job + counter state when switching folders.
     pub fn reset_for_new_folder(&mut self) {
         self.cancel_pending_jobs();
@@ -702,8 +709,13 @@ impl AppState {
             self.reset_for_new_folder();
             self.current_folder = None;
         }
-        if let Err(e) = self.writer.lock().expect("writer").remove_folder(folder_id) {
+        let remove_result = self.writer.lock().expect("writer").remove_folder(folder_id);
+        if let Err(e) = remove_result {
             eprintln!("ferrolite: remove_folder failed: {e}");
+            self.notify(
+                crate::notifications::Level::Error,
+                "Could not remove folder".to_string(),
+            );
             return;
         }
         self.expanded_folders.retain(|id| !removed_set.contains(id));
@@ -736,7 +748,10 @@ impl AppState {
             Err(e) => {
                 eprintln!("ferrolite: export queue load failed: {e}");
                 self.export_queue = Vec::new();
-                self.warning = Some("Could not load export queue.".to_string());
+                self.notify(
+                    crate::notifications::Level::Warning,
+                    "Could not load export queue.",
+                );
             }
         }
     }
@@ -754,11 +769,21 @@ impl AppState {
     where
         F: FnOnce(&ferrolite_catalog::Catalog) -> Result<(), ferrolite_catalog::CatalogError>,
     {
-        if let Ok(cat) = self.writer.lock() {
+        let failed = if let Ok(cat) = self.writer.lock() {
             if let Err(e) = op(&cat) {
                 eprintln!("ferrolite: export queue persist failed: {e}");
-                self.warning = Some("Export queue not saved (kept for this session).".to_string());
+                true
+            } else {
+                false
             }
+        } else {
+            false
+        };
+        if failed {
+            self.notify(
+                crate::notifications::Level::Warning,
+                "Export queue not saved (kept for this session).",
+            );
         }
     }
 
@@ -895,7 +920,7 @@ impl AppState {
             visible_collections: HashMap::new(),
             selection: HashSet::new(),
             selection_anchor: None,
-            warning: None,
+            notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
             iso_range: None,
@@ -1322,10 +1347,14 @@ mod tests {
     fn retain_visible_thumbnail_jobs_cancels_offscreen_only() {
         let mut s = AppState::for_test();
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
-        // Occupy the single worker so subsequently submitted jobs stay queued
-        // (so `pending_count` reflects the cancellation below).
+        // Occupy the single worker with a strictly-highest-priority blocking job
+        // so the `Visible` lazy-load jobs below stay queued (and `pending_count`
+        // reflects the cancellation). The gate MUST outrank those jobs: the queue
+        // is priority-then-FIFO, so a lower-priority gate would let the worker run
+        // the higher-priority `Visible` no-ops first, draining them before
+        // `before_pending` is captured — a load-sensitive flake.
         s.jobs
-            .submit(ferrolite_jobs::Priority::Background, move |_| {
+            .submit(ferrolite_jobs::Priority::Interactive, move |_| {
                 let _ = gate_rx.recv();
             });
 
@@ -1376,8 +1405,14 @@ mod tests {
     fn cancel_pending_jobs_drains_thumb_handles() {
         let mut s = AppState::for_test();
         let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        // Occupy the single worker with a strictly-highest-priority blocking job
+        // so the `Visible` lazy-load jobs below stay queued. The gate MUST outrank
+        // those jobs: the queue is priority-then-FIFO, so a lower-priority gate
+        // would let the worker run the higher-priority `Visible` no-ops first,
+        // draining them before `before_pending` is captured — a load-sensitive
+        // flake.
         s.jobs
-            .submit(ferrolite_jobs::Priority::Background, move |_| {
+            .submit(ferrolite_jobs::Priority::Interactive, move |_| {
                 let _ = gate_rx.recv();
             });
 

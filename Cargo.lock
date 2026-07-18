@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "core-foundation 0.10.1",
@@ -1255,7 +1255,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-catalog"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fast_image_resize",
  "ferrolite-decode",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-color"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "half",
  "moxcms",
@@ -1280,7 +1280,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-decode"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ferrolite-image",
  "image",
@@ -1293,7 +1293,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-export"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "fast_image_resize",
@@ -1316,7 +1316,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-gpu"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "egui-wgpu",
@@ -1327,15 +1327,15 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-image"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "ferrolite-jobs"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "ferrolite-lens"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "lensfun",
  "thiserror 2.0.18",
@@ -1343,7 +1343,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-mask"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "ferrolite-gpu",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-pipeline"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "ferrolite-catalog",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-previews"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ferrolite-color",
  "ferrolite-image",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "ferrolite-vt"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "ferrolite-gpu",

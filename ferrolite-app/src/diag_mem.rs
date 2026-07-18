@@ -313,13 +313,13 @@ pub fn format_mem_dump(b: &MemBreakdown) -> String {
 }
 
 /// Paint the dedicated memory overlay: a category table + an RSS growth
-/// sparkline, top-LEFT (so it does not overlap the top-right text overlay).
-/// Non-interactive, monospace, on the tooltip layer. Call only when the mem
-/// overlay is enabled AND visible.
+/// sparkline, bottom-LEFT (clears the top window chrome, and does not overlap
+/// the bottom-right text overlay). Non-interactive, monospace, on the tooltip
+/// layer. Call only when the mem overlay is enabled AND visible.
 pub fn draw_mem_overlay(ctx: &egui::Context, b: &MemBreakdown, history: &MemHistory) {
     egui::Area::new(egui::Id::new("ferrolite-mem-overlay"))
         .order(egui::Order::Tooltip)
-        .anchor(egui::Align2::LEFT_TOP, egui::vec2(8.0, 8.0))
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(8.0, -8.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::none()

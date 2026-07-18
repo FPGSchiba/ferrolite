@@ -680,7 +680,11 @@ impl DiagState {
             max_frame_ms: 0.0,
             overlay_visible: overlay_enabled(),
             last_snapshot: None,
-            mem_overlay_visible: false,
+            // Default the memory overlay ON whenever the overlay mode is enabled
+            // (matches `overlay_visible` above), so `FERROLITE_DIAG=overlay`/`1`
+            // shows it immediately — no F10 needed (F10 is unreliable on macOS,
+            // where the system grabs it for Mission Control).
+            mem_overlay_visible: overlay_enabled(),
             mem_history: crate::diag_mem::MemHistory::new(300),
             last_mem: None,
             mem_elapsed_s: 0.0,
@@ -846,7 +850,7 @@ pub fn format_overlay(s: &Snapshot) -> String {
 pub fn draw_overlay(ctx: &egui::Context, s: &Snapshot) {
     egui::Area::new(egui::Id::new("ferrolite-diag-overlay"))
         .order(egui::Order::Tooltip)
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-8.0, 8.0))
+        .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-8.0, -8.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::none()

@@ -273,7 +273,6 @@ pub fn format_mem_log_line(t_secs: f64, b: &MemBreakdown) -> String {
 /// Event-anchored line (open/close/nav): every changed category as a signed
 /// delta, plus the new RSS. Categories with no change are omitted to keep it
 /// scannable.
-#[allow(dead_code)] // wired into open/close/nav sites by a later task, not wired in yet
 pub fn format_mem_event_line(label: &str, prev: &MemBreakdown, cur: &MemBreakdown) -> String {
     let mut parts: Vec<String> = Vec::new();
     for c in MemCategory::ALL {

@@ -2613,6 +2613,7 @@ impl FerroliteApp {
         frame: &mut eframe::Frame,
         rec: &ferrolite_catalog::ImageRecord,
     ) {
+        let mem_before = crate::diag::enabled().then(|| self.gather_mem_breakdown());
         self.maybe_regen_on_leave(ctx, frame);
         if let Some(old) = self.state.viewer.as_ref() {
             let old_id = old.image_id;
@@ -2621,6 +2622,19 @@ impl FerroliteApp {
         }
         self.state.open_image_in_viewer(rec);
         self.module = crate::module::Module::Develop;
+        if let Some(before) = mem_before {
+            let after = self.gather_mem_breakdown();
+            let kind = if rec.kind == ferrolite_image::FileKind::Raw {
+                "RAW"
+            } else {
+                "JPG"
+            };
+            crate::diag::write_log(&crate::diag_mem::format_mem_event_line(
+                &format!("open #{} {}", rec.id, kind),
+                &before,
+                &after,
+            ));
+        }
         ctx.request_repaint();
     }
 

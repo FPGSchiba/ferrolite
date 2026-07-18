@@ -435,8 +435,19 @@ mod tests {
         assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0G");
     }
 
+    /// Serializes the two in-flight gauge tests below, which mutate the
+    /// process-global `INFLIGHT_DECODE` / `INFLIGHT_PYRAMID` atomics and then
+    /// assert absolute values against a baseline read at the top of the test.
+    /// Without this lock the default parallel test harness can interleave
+    /// the two tests' add/drop sequences on the shared globals between one
+    /// test's baseline read and its assertion, producing intermittent
+    /// failures. `unwrap_or_else(into_inner)` tolerates a poisoned lock from
+    /// an unrelated panicking test so that doesn't cascade-fail these.
+    static INFLIGHT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn inflight_guard_adds_then_subtracts_on_drop() {
+        let _guard = INFLIGHT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = inflight_decode_bytes();
         {
             let _g = track_inflight_decode(1000);
@@ -453,6 +464,7 @@ mod tests {
 
     #[test]
     fn inflight_pyramid_is_independent() {
+        let _guard = INFLIGHT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let d0 = inflight_decode_bytes();
         let p0 = inflight_pyramid_bytes();
         let _g = track_inflight_pyramid(2048);

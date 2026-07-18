@@ -570,6 +570,7 @@ pub fn paint(
     front_valid: bool,
     crossfade: f32,
     interactive: bool,
+    tier0_thumb: Option<&egui::TextureHandle>,
 ) -> (bool, PresentSource) {
     let rect = ui.available_rect_before_wrap();
     // Scope the painter so it drops before any `ui.put` / mutable-borrow calls
@@ -652,18 +653,34 @@ pub fn paint(
         ));
         (false, source)
     } else {
-        // First pixel not ready yet: show a spinner + "Loading…" so the decode
-        // wait reads as working, and keep animating so it spins + we pick up the
-        // preview as soon as it arrives.
+        // Tier-0: if the grid thumbnail for this image is already decoded, draw
+        // it upscaled-to-fit so the open shows the picture instantly instead of a
+        // black canvas. The real reveal replaces it (and Task 3 fades this out).
+        if let Some(thumb) = tier0_thumb {
+            let sz = thumb.size();
+            let dst = fit_rect(rect, (sz[0] as f32, sz[1] as f32));
+            ui.painter().image(
+                thumb.id(),
+                dst,
+                egui::Rect::from_min_max(
+                    egui::pos2(0.0_f32, 0.0_f32),
+                    egui::pos2(1.0_f32, 1.0_f32),
+                ),
+                egui::Color32::WHITE,
+            );
+        }
+        // First pixel not ready yet: keep a spinner + "Loading…" so the wait reads
+        // as working, and keep animating so we pick up the reveal as soon as it
+        // arrives. Over a thumbnail the spinner is a subtle "sharpening" hint.
         let center = rect.center();
-        let spinner_size = 32.0;
+        let spinner_size = 32.0_f32;
         let spinner_rect = egui::Rect::from_center_size(
-            center - egui::vec2(0.0, 10.0),
+            center - egui::vec2(0.0_f32, 10.0_f32),
             egui::vec2(spinner_size, spinner_size),
         );
         ui.put(spinner_rect, egui::Spinner::new().size(spinner_size));
         ui.painter().text(
-            center + egui::vec2(0.0, 22.0),
+            center + egui::vec2(0.0_f32, 22.0_f32),
             egui::Align2::CENTER_CENTER,
             "Loading\u{2026}",
             egui::FontId::proportional(12.0),
@@ -709,6 +726,17 @@ pub fn image_screen_rect(
     let right = ox + (iw - cx) * zoom;
     let bottom = oy + (ih - cy) * zoom;
     egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
+}
+
+/// Aspect-preserving, centered sub-rect of `canvas` that a `content`-sized image
+/// occupies when fit (letterboxed) — the same framing `ViewTransform::fit`
+/// produces, but computed directly from sizes for the Tier-0 placeholder shown
+/// before the real `image_dims` are known. Pure (no GPU/egui state).
+pub fn fit_rect(canvas: egui::Rect, content: (f32, f32)) -> egui::Rect {
+    let (cw, ch) = (content.0.max(1.0), content.1.max(1.0));
+    let scale = (canvas.width() / cw).min(canvas.height() / ch);
+    let (w, h) = (cw * scale, ch * scale);
+    egui::Rect::from_center_size(canvas.center(), egui::vec2(w, h))
 }
 
 #[cfg(test)]
@@ -911,6 +939,28 @@ mod tests {
             "bottom should be 75, got {}",
             r.bottom()
         );
+    }
+
+    #[test]
+    fn fit_rect_letterboxes_wide_image_in_tall_canvas() {
+        // 200x100 canvas, 200x200 content -> width-limited, centered vertically.
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let r = fit_rect(canvas, (200.0, 200.0));
+        // Square content in a 2:1 canvas fits to height 100 -> 100x100, centered.
+        assert!((r.width() - 100.0).abs() < 1e-3, "w={}", r.width());
+        assert!((r.height() - 100.0).abs() < 1e-3, "h={}", r.height());
+        assert!((r.center().x - 100.0).abs() < 1e-3, "centered x");
+        assert!((r.center().y - 50.0).abs() < 1e-3, "centered y");
+    }
+
+    #[test]
+    fn fit_rect_letterboxes_tall_image_in_wide_canvas() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        // 100x200 content in 200x100 canvas -> height-limited to 100 -> 50x100.
+        let r = fit_rect(canvas, (100.0, 200.0));
+        assert!((r.width() - 50.0).abs() < 1e-3, "w={}", r.width());
+        assert!((r.height() - 100.0).abs() < 1e-3, "h={}", r.height());
+        assert!((r.center().x - 100.0).abs() < 1e-3, "centered x");
     }
 
     #[test]

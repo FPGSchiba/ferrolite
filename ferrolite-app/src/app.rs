@@ -2411,12 +2411,25 @@ impl FerroliteApp {
         let split_active = v.split_compare && !show_full;
         let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
 
+        // Tier-0 placeholder: the resident grid thumbnail for this image (if any),
+        // cloned out of the texture cache BEFORE the `viewer::paint` borrow of `v`
+        // so the `self.state.textures` borrow is released first. A `TextureHandle`
+        // clone is a cheap refcount bump (no pixel copy).
+        let tier0_thumb = self.state.textures.get(image_id).cloned();
+
         // `paint` applies this frame's pan/zoom and clears `idle` when the view
         // moved, so read `idle` AFTER it to catch an interaction this frame. It
         // also folds this frame's `interacting` into the present source and returns
         // the chosen source so the repaint gate can keep the loop alive mid-fade.
-        let (loading_preview, present_source) =
-            viewer::paint(ui, v, full_ready, front_valid, factor, interactive);
+        let (loading_preview, present_source) = viewer::paint(
+            ui,
+            v,
+            full_ready,
+            front_valid,
+            factor,
+            interactive,
+            tier0_thumb.as_ref(),
+        );
         let idle = v.idle;
         let crossfading_present = matches!(present_source, viewer::PresentSource::Crossfade(_));
 

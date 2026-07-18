@@ -22,6 +22,12 @@ use ferrolite_vt::ViewTransform;
 /// long enough to avoid a hard pop.
 pub const CROSSFADE_SECS: f32 = 0.15;
 
+/// Tier-0 placeholder (upscaled grid thumbnail) fade-out duration (seconds).
+/// Short enough to read as an instant sharpen, long enough to hide the pop from
+/// the thumbnail's lower resolution as the real reveal lands.
+#[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
+pub const TIER0_FADE_SECS: f32 = 0.18;
+
 /// Debounce (seconds) between a preview recompute and the histogram dispatch, so
 /// a slider drag coalesces into one compute rather than one per frame.
 pub const HIST_DEBOUNCE: f32 = 0.10;
@@ -117,6 +123,16 @@ pub struct ViewerState {
     pub present_key: Option<(u64, ferrolite_vt::ViewTransform)>,
     /// Seconds elapsed into the active crossfade.
     pub crossfade_elapsed: f32,
+    /// True while the Tier-0 placeholder (the upscaled grid thumbnail shown at
+    /// open, before the real reveal) is fading out over the revealed image.
+    /// Begun when `loaded` first flips true; cleared when the ramp completes.
+    #[allow(dead_code)]
+    // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
+    pub tier0_fading: bool,
+    /// Seconds elapsed into the active Tier-0 placeholder fade.
+    #[allow(dead_code)]
+    // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
+    pub tier0_elapsed: f32,
     /// Terminal state: nothing more will load (preview failed AND/OR full failed,
     /// or full is ready and the crossfade is complete with no tiles pending). When
     /// set the paint loop stops requesting repaints to avoid a busy-loop.
@@ -313,6 +329,8 @@ impl ViewerState {
             crossfading: false,
             present_key: None,
             crossfade_elapsed: 0.0,
+            tier0_fading: false,
+            tier0_elapsed: 0.0,
             idle: false,
             showing_full: false,
             image_dims: None,
@@ -381,6 +399,31 @@ impl ViewerState {
         factor
     }
 
+    /// Begin the Tier-0 placeholder fade (called once, when the real reveal
+    /// first sets `loaded = true`). No-op semantics if called again mid-fade are
+    /// avoided by the caller's one-shot guard in `paint`.
+    #[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
+    pub fn begin_tier0_fade(&mut self) {
+        self.tier0_fading = true;
+        self.tier0_elapsed = 0.0;
+    }
+
+    /// Advance the Tier-0 fade by `dt` and return the current placeholder opacity
+    /// in `[0,1]`. Clears `tier0_fading` once the ramp completes so the repaint
+    /// loop can idle. Returns 0.0 when not fading.
+    #[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
+    pub fn tick_tier0_fade(&mut self, dt: f32) -> f32 {
+        if !self.tier0_fading {
+            return 0.0;
+        }
+        self.tier0_elapsed += dt;
+        let alpha = tier0_fade_alpha(self.tier0_elapsed);
+        if alpha <= 0.0 {
+            self.tier0_fading = false;
+        }
+        alpha
+    }
+
     /// Select the `(source buffer, color matrix)` the PREVIEW tier must use for
     /// this image's kind. This is the single source of truth for the RAW-vs-Standard
     /// preview color path, shared by `apply_full_decoded`, `set_preview_and_full`,
@@ -437,6 +480,14 @@ impl ViewerState {
             h.cancel();
         }
     }
+}
+
+/// Tier-0 placeholder opacity for a given elapsed time: ramps linearly from 1.0
+/// (fully covering the just-revealed image) to 0.0 over `TIER0_FADE_SECS`, then
+/// stays 0. Pure — unit-tested; the draw + ramp advance live in `paint`.
+#[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
+pub fn tier0_fade_alpha(elapsed: f32) -> f32 {
+    (1.0 - elapsed / TIER0_FADE_SECS).clamp(0.0, 1.0)
 }
 
 /// Zoom about the cursor: keep the image point under the cursor fixed.
@@ -754,6 +805,38 @@ mod tests {
         // Full ready but crossfade finished => 1.0 (show full).
         v.full_ready = true;
         assert_eq!(v.tick_crossfade(0.5), 1.0);
+    }
+
+    #[test]
+    fn tier0_fade_alpha_ramps_from_one_to_zero() {
+        assert_eq!(tier0_fade_alpha(0.0), 1.0, "full opacity at start");
+        assert_eq!(tier0_fade_alpha(TIER0_FADE_SECS), 0.0, "transparent at end");
+        assert_eq!(
+            tier0_fade_alpha(TIER0_FADE_SECS * 2.0),
+            0.0,
+            "clamped past end"
+        );
+        let mid = tier0_fade_alpha(TIER0_FADE_SECS * 0.5);
+        assert!((mid - 0.5).abs() < 1e-6, "linear midpoint, got {mid}");
+    }
+
+    #[test]
+    fn tick_tier0_fade_advances_and_terminates() {
+        let mut v = ViewerState::open(1, std::path::PathBuf::from("x.jpg"), FileKind::Standard);
+        assert!(!v.tier0_fading, "not fading until begun");
+        v.begin_tier0_fade();
+        assert!(v.tier0_fading);
+        // Half way: opacity ~0.5, still fading.
+        let a = v.tick_tier0_fade(TIER0_FADE_SECS * 0.5);
+        assert!((a - 0.5).abs() < 1e-6, "got {a}");
+        assert!(v.tier0_fading);
+        // Past the end: opacity 0, fading cleared.
+        let a = v.tick_tier0_fade(TIER0_FADE_SECS);
+        assert_eq!(a, 0.0);
+        assert!(
+            !v.tier0_fading,
+            "fade terminates so the repaint loop can idle"
+        );
     }
 
     #[test]

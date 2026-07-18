@@ -664,6 +664,11 @@ pub struct DiagState {
     /// toggle-ON transition). The overlay draw site reads this instead of
     /// gathering (which runs a process-RSS syscall) on every frame.
     pub last_mem: Option<crate::diag_mem::MemBreakdown>,
+    /// Cumulative wall time (s) since diagnostics started, advanced by each
+    /// mem-tick's `dt` at the point the memory breakdown is gathered. Feeds
+    /// the `[mem] t+{}s` log line and `MemSample.t_secs` so a scroll session's
+    /// log is reconstructable (elapsed time, not the ~1s inter-tick delta).
+    pub mem_elapsed_s: f64,
 }
 
 impl DiagState {
@@ -678,6 +683,7 @@ impl DiagState {
             mem_overlay_visible: false,
             mem_history: crate::diag_mem::MemHistory::new(300),
             last_mem: None,
+            mem_elapsed_s: 0.0,
         }
     }
 

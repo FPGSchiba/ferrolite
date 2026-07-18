@@ -4567,17 +4567,24 @@ impl eframe::App for FerroliteApp {
                 }
                 // Memory: gather once per diag tick, push to the growth ring,
                 // cache for the overlay draw site (avoids a per-frame RSS
-                // syscall), and log the structured line.
+                // syscall), and log the structured line. `mem_elapsed_s` is
+                // cumulative (not `snap.dt`, the ~1s inter-tick delta) so the
+                // log line reads e.g. `t+12.0s` and a scroll session's log is
+                // reconstructable.
                 let mem = self.gather_mem_breakdown();
+                self.diag.mem_elapsed_s += snap.dt;
                 self.diag.mem_history.push(crate::diag_mem::MemSample {
-                    t_secs: snap.dt as f32,
+                    t_secs: self.diag.mem_elapsed_s as f32,
                     rss: mem.rss,
                     cpu_known: mem.known_cpu_sum(),
                     cache: mem.get(crate::diag_mem::MemCategory::RamCache),
                 });
                 self.diag.last_mem = Some(mem);
                 if crate::diag::log_enabled() {
-                    crate::diag::write_log(&crate::diag_mem::format_mem_log_line(snap.dt, &mem));
+                    crate::diag::write_log(&crate::diag_mem::format_mem_log_line(
+                        self.diag.mem_elapsed_s,
+                        &mem,
+                    ));
                 }
             }
             if crate::diag::overlay_enabled() && self.diag.overlay_visible {

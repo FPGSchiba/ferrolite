@@ -25,7 +25,6 @@ pub enum MemCategory {
     InflightPyramid,
 }
 
-#[allow(dead_code)] // gathered/rendered by app.rs + draw_mem_overlay (later tasks), not wired in yet
 impl MemCategory {
     pub const COUNT: usize = 12;
     pub const ALL: [MemCategory; Self::COUNT] = [
@@ -83,14 +82,12 @@ impl MemCategory {
 
 /// A point-in-time memory attribution. `bytes` is indexed by `MemCategory::index`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // gathered/rendered by app.rs + draw_mem_overlay (later tasks), not wired in yet
 pub struct MemBreakdown {
     pub bytes: [u64; MemCategory::COUNT],
     pub rss: u64,
     pub budget: u64,
 }
 
-#[allow(dead_code)] // gathered/rendered by app.rs + draw_mem_overlay (later tasks), not wired in yet
 impl MemBreakdown {
     pub fn empty() -> Self {
         Self {
@@ -125,13 +122,11 @@ impl MemBreakdown {
 }
 
 /// Bytes of a `LinearRgbaF32` of the given dimensions (RGBA f32 = 16 B/px).
-#[allow(dead_code)] // called by app.rs's gather_mem_breakdown (later task), not wired in yet
 pub fn linear_bytes(width: u32, height: u32) -> u64 {
     width as u64 * height as u64 * 16
 }
 
 /// Adaptive RAM-cache budget = clamp(15% of total RAM, 512 MiB, 4 GiB).
-#[allow(dead_code)] // gathered by app.rs (later task), not wired in yet
 pub fn adaptive_budget(total_ram: u64) -> u64 {
     const FLOOR: u64 = 512 * 1024 * 1024;
     const CEILING: u64 = 4 * 1024 * 1024 * 1024;
@@ -139,7 +134,6 @@ pub fn adaptive_budget(total_ram: u64) -> u64 {
 }
 
 /// Human-readable bytes: `0B`, `512B`, `1.5K`, `2.0M`, `3.0G` (1024-based).
-#[allow(dead_code)] // rendered by draw_mem_overlay (later task), not wired in yet
 pub fn fmt_bytes(n: u64) -> String {
     const K: u64 = 1024;
     const M: u64 = K * 1024;
@@ -158,11 +152,9 @@ pub fn fmt_bytes(n: u64) -> String {
 static INFLIGHT_DECODE: AtomicU64 = AtomicU64::new(0);
 static INFLIGHT_PYRAMID: AtomicU64 = AtomicU64::new(0);
 
-#[allow(dead_code)] // read by app.rs / draw_mem_overlay (later task), not wired in yet
 pub fn inflight_decode_bytes() -> u64 {
     INFLIGHT_DECODE.load(Ordering::Relaxed)
 }
-#[allow(dead_code)] // read by app.rs / draw_mem_overlay (later task), not wired in yet
 pub fn inflight_pyramid_bytes() -> u64 {
     INFLIGHT_PYRAMID.load(Ordering::Relaxed)
 }
@@ -170,7 +162,6 @@ pub fn inflight_pyramid_bytes() -> u64 {
 /// RAII gauge: adds `bytes` to a global in-flight counter on construction and
 /// subtracts (saturating) on drop. Held by a decode/pyramid job for its lifetime
 /// so the memory overlay attributes buffers that are alive but not yet installed.
-#[allow(dead_code)] // handed to the pyramid decode job by a later task, not wired in yet
 pub struct InflightGuard {
     counter: &'static AtomicU64,
     bytes: u64,
@@ -186,7 +177,10 @@ impl Drop for InflightGuard {
     }
 }
 
-#[allow(dead_code)] // called by the pyramid decode job (later task), not wired in yet
+// reserved for Phase 1 decode tracking: no production call site wires a
+// decode job through this yet (only the pyramid path does, via
+// `track_inflight_pyramid` below); exercised directly by unit tests.
+#[allow(dead_code)]
 pub fn track_inflight_decode(bytes: u64) -> InflightGuard {
     INFLIGHT_DECODE.fetch_add(bytes, Ordering::Relaxed);
     InflightGuard {
@@ -195,7 +189,6 @@ pub fn track_inflight_decode(bytes: u64) -> InflightGuard {
     }
 }
 
-#[allow(dead_code)] // called by the pyramid decode job (later task), not wired in yet
 pub fn track_inflight_pyramid(bytes: u64) -> InflightGuard {
     INFLIGHT_PYRAMID.fetch_add(bytes, Ordering::Relaxed);
     InflightGuard {
@@ -204,10 +197,14 @@ pub fn track_inflight_pyramid(bytes: u64) -> InflightGuard {
     }
 }
 
-/// One time-series sample for the growth graph.
+/// One time-series sample for the growth graph. `t_secs`/`cpu_known`/`cache`
+/// are written each tick for a future sparkline series (only `rss` is
+/// plotted today) — kept dead_code-clean via the derived `PartialEq`, which
+/// reads every field.
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)] // constructed/read by draw_mem_overlay (later task), not wired in yet
 pub struct MemSample {
+    /// Mirrors `DiagState.mem_elapsed_s` at push time (cumulative, not the
+    /// inter-tick delta) for a future time axis.
     pub t_secs: f32,
     pub rss: u64,
     pub cpu_known: u64,
@@ -215,7 +212,6 @@ pub struct MemSample {
 }
 
 /// Bounded ring buffer of memory samples for the overlay's growth graph.
-#[allow(dead_code)] // owned/updated by app.rs + draw_mem_overlay (later task), not wired in yet
 pub struct MemHistory {
     cap: usize,
     samples: VecDeque<MemSample>,
@@ -255,7 +251,6 @@ fn fmt_delta(prev: u64, cur: u64) -> String {
 }
 
 /// ~1/sec structured memory line for the diag log sink.
-#[allow(dead_code)] // wired into the diag log sink by a later task, not wired in yet
 pub fn format_mem_log_line(t_secs: f64, b: &MemBreakdown) -> String {
     format!(
         "[mem] t+{t:.1}s rss={rss} live={live} inflight={inf} gpu={gpu} cache={cache} unattrib={un} budget={bud}",

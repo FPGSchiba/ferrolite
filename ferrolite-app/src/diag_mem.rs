@@ -86,6 +86,11 @@ pub struct MemBreakdown {
     pub bytes: [u64; MemCategory::COUNT],
     pub rss: u64,
     pub budget: u64,
+    /// Live-instance counts (diagnostics): a value above the expected small
+    /// number while the viewer sits on one image means prior-image GPU
+    /// resources are being retained (the develop-scroll leak signal).
+    pub pyramid_live: usize,
+    pub vt_live: usize,
 }
 
 impl MemBreakdown {
@@ -94,6 +99,8 @@ impl MemBreakdown {
             bytes: [0; MemCategory::COUNT],
             rss: 0,
             budget: 0,
+            pyramid_live: 0,
+            vt_live: 0,
         }
     }
 
@@ -253,7 +260,7 @@ fn fmt_delta(prev: u64, cur: u64) -> String {
 /// ~1/sec structured memory line for the diag log sink.
 pub fn format_mem_log_line(t_secs: f64, b: &MemBreakdown) -> String {
     format!(
-        "[mem] t+{t:.1}s rss={rss} live={live} inflight={inf} gpu={gpu} cache={cache} unattrib={un} budget={bud}",
+        "[mem] t+{t:.1}s rss={rss} live={live} inflight={inf} gpu={gpu} cache={cache} unattrib={un} budget={bud} pyr={pyr} vt={vt}",
         t = t_secs,
         rss = fmt_bytes(b.rss),
         live = fmt_bytes(b.get(MemCategory::ViewerFullLinear) + b.get(MemCategory::ViewerPreviewSrc)),
@@ -262,6 +269,8 @@ pub fn format_mem_log_line(t_secs: f64, b: &MemBreakdown) -> String {
         cache = fmt_bytes(b.get(MemCategory::RamCache)),
         un = fmt_bytes(b.unattributed()),
         bud = fmt_bytes(b.budget),
+        pyr = b.pyramid_live,
+        vt = b.vt_live,
     )
 }
 
@@ -296,13 +305,16 @@ fn mem_table_lines(b: &MemBreakdown) -> String {
         out.push_str(&format!("  {:<18} {}\n", c.label(), fmt_bytes(b.get(c))));
     }
     out.push_str(&format!(
-        "  {:<18} {}\n  {:<18} {}\n  {:<18} {}\n",
+        "  {:<18} {}\n  {:<18} {}\n  {:<18} {}\n  {:<18} {} / {}\n",
         "rss",
         fmt_bytes(b.rss),
         "unattributed",
         fmt_bytes(b.unattributed()),
         "budget",
         fmt_bytes(b.budget),
+        "live pyr/vt",
+        b.pyramid_live,
+        b.vt_live,
     ));
     out
 }

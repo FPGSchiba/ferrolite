@@ -2,6 +2,7 @@
 //! by the display shader with a zoom/pan transform. Also the fallback path.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -169,11 +170,43 @@ struct SparseResources {
     bind_group: Option<wgpu::BindGroup>,
 }
 
+// Diagnostics (CLAUDE.md memory profiling): count of live `VirtualTexture`
+// instances. Each owns GPU resources (a single texture, or a `TilePool` array
+// texture for the streaming/sparse tiers); a count that stays above the
+// expected small number while the viewer sits on one image reveals VTs (and
+// their pools) retained from prior images. `Relaxed` — diagnostics only.
+static LIVE_VT: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of `VirtualTexture` instances currently alive (all tiers).
+pub fn live_virtual_textures() -> usize {
+    LIVE_VT.load(Ordering::Relaxed)
+}
+
+/// RAII counter: one per live `VirtualTexture`. Held as a field so every
+/// constructor is forced (by the compiler) to account for it, and `Drop`
+/// decrements exactly once when the VT — and thus its GPU resources — is freed.
+struct VtLiveGuard;
+
+impl VtLiveGuard {
+    fn new() -> Self {
+        LIVE_VT.fetch_add(1, Ordering::Relaxed);
+        VtLiveGuard
+    }
+}
+
+impl Drop for VtLiveGuard {
+    fn drop(&mut self) {
+        LIVE_VT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub struct VirtualTexture {
     single: Option<SingleResources>,
     tiled: Option<TiledResources>,
     streaming: Option<StreamingResources>,
     sparse: Option<SparseResources>,
+    /// Live-instance counter guard (diagnostics); decrements on drop.
+    _live: VtLiveGuard,
 }
 
 impl VirtualTexture {
@@ -239,6 +272,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: None,
             sparse: None,
+            _live: VtLiveGuard::new(),
         }
     }
 
@@ -281,6 +315,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: None,
             sparse: None,
+            _live: VtLiveGuard::new(),
         }
     }
 
@@ -624,6 +659,7 @@ impl VirtualTexture {
             tiled: Some(tiled),
             streaming: None,
             sparse: None,
+            _live: VtLiveGuard::new(),
         }
     }
 
@@ -849,6 +885,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: Some(streaming),
             sparse: None,
+            _live: VtLiveGuard::new(),
         }
     }
 
@@ -1242,6 +1279,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: None,
             sparse: Some(sparse),
+            _live: VtLiveGuard::new(),
         }
     }
 

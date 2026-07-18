@@ -18,7 +18,7 @@ mod tile_edit;
 mod uniforms;
 
 pub use coord::{display_to_source, source_to_display};
-pub use gpu_pyramid::GpuPyramidSource;
+pub use gpu_pyramid::{live_gpu_pyramid_bytes, live_gpu_pyramids, GpuPyramidSource};
 pub use image::PipelineImage;
 pub use lens_bake::bake_products;
 pub use lens_gpu::{VignetteTexture, WarpGridTexture};

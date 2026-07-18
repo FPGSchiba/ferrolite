@@ -22,4 +22,4 @@ pub use producer::TileProducer;
 pub use residency::{needed_tiles, needed_tiles_prefetched, ResidencySet, VersionedResidency};
 pub use source::{PyramidTileSource, TileSource};
 pub use transform::ViewTransform;
-pub use view::VirtualTexture;
+pub use view::{live_virtual_textures, VirtualTexture};

@@ -2734,15 +2734,21 @@ impl FerroliteApp {
                 .map(|a| linear_bytes(a.width, a.height))
                 .sum::<u64>();
             b.set(MemCategory::ViewerPreviewSrc, preview_src);
-
-            // GPU pyramid VRAM estimate: full-res f32 + mip tail (~4/3). Present only
-            // once the pyramid has been installed.
-            if v.pyramid.is_some() {
-                if let Some((w, h)) = v.image_dims {
-                    b.set(MemCategory::GpuPyramid, linear_bytes(w, h) * 4 / 3);
-                }
-            }
         }
+
+        // GPU pyramids: EXACT summed bytes across all live `GpuPyramidSource`
+        // instances (Rgba16Float = 8 B/px per level), plus the live count. This
+        // is process-global on purpose — if it exceeds one image's worth while
+        // the viewer sits on a single image, prior-image pyramids are being
+        // retained (the develop-scroll leak). On unified memory this is real RSS.
+        b.set(
+            MemCategory::GpuPyramid,
+            ferrolite_pipeline::live_gpu_pyramid_bytes(),
+        );
+        b.pyramid_live = ferrolite_pipeline::live_gpu_pyramids();
+        // Live `VirtualTexture` count (each owns GPU textures / a tile pool); a
+        // count above the small expected number likewise flags retained VTs.
+        b.vt_live = ferrolite_vt::live_virtual_textures();
 
         // In-flight buffers (decode + pyramid jobs holding large Arcs).
         b.set(

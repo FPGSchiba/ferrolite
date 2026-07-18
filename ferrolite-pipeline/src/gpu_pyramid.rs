@@ -10,11 +10,42 @@ use ferrolite_image::{level_size, pyramid_level_count, LinearRgbaF32};
 use half::f16;
 use wgpu::util::DeviceExt;
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
+
+// Diagnostics (CLAUDE.md memory profiling): live-instance and live-GPU-byte
+// gauges. Incremented on `new`, decremented on `Drop`, so a value that stays
+// above ~1 while the viewer sits on a single image reveals pyramids retained
+// from prior images (the develop-scroll memory growth under investigation).
+// `Relaxed` — diagnostics, not synchronization.
+static LIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Number of `GpuPyramidSource` instances currently alive.
+pub fn live_gpu_pyramids() -> usize {
+    LIVE_COUNT.load(Ordering::Relaxed)
+}
+
+/// Total GPU bytes held by all live `GpuPyramidSource` instances (sum of every
+/// level texture, `Rgba16Float` = 8 B/px). On unified-memory GPUs this counts
+/// toward process RSS.
+pub fn live_gpu_pyramid_bytes() -> u64 {
+    LIVE_BYTES.load(Ordering::Relaxed)
+}
 
 #[derive(Debug)]
 pub struct GpuPyramidSource {
     levels: Vec<PipelineImage>, // index = lod
+    /// GPU bytes this pyramid contributed to `LIVE_BYTES` (subtracted on drop).
+    gpu_bytes: u64,
+}
+
+impl Drop for GpuPyramidSource {
+    fn drop(&mut self) {
+        LIVE_COUNT.fetch_sub(1, Ordering::Relaxed);
+        LIVE_BYTES.fetch_sub(self.gpu_bytes, Ordering::Relaxed);
+    }
 }
 
 impl GpuPyramidSource {
@@ -42,7 +73,15 @@ impl GpuPyramidSource {
         // per pyramid at build (CLAUDE.md GPU rule 2).
         ctx.queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
         ctx.device.poll(wgpu::Maintain::Wait);
-        Self { levels }
+        // Diagnostics: this pyramid's GPU footprint (Rgba16Float = 8 B/px across
+        // every level) so `live_gpu_pyramid_bytes` reflects real resident memory.
+        let gpu_bytes: u64 = cpu
+            .iter()
+            .map(|l| l.width as u64 * l.height as u64 * 8)
+            .sum();
+        LIVE_COUNT.fetch_add(1, Ordering::Relaxed);
+        LIVE_BYTES.fetch_add(gpu_bytes, Ordering::Relaxed);
+        Self { levels, gpu_bytes }
     }
 
     pub fn level_count(&self) -> u32 {

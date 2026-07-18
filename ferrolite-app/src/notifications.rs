@@ -171,7 +171,7 @@ pub fn show(ctx: &egui::Context, n: &mut Notifications) {
                 let color = level_color(toast.level());
                 egui::Frame::none()
                     .fill(crate::theme::BG_TOOLBAR)
-                    .stroke(egui::Stroke::new(1.0, color))
+                    .stroke(egui::Stroke::new(1.0_f32, color))
                     .rounding(6.0)
                     .inner_margin(egui::Margin::symmetric(10.0, 8.0))
                     .outer_margin(egui::Margin {

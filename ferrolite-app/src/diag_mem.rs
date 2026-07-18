@@ -369,7 +369,7 @@ fn draw_growth_sparkline(ui: &mut egui::Ui, history: &MemHistory) {
             .collect();
         painter.add(egui::Shape::line(
             pts,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 220, 255)),
+            egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 220, 255)),
         ));
     }
     painter.text(

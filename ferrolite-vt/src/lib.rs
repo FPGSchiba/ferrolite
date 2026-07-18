@@ -20,6 +20,6 @@ pub use pool::{SlotAllocator, TilePool, NOT_RESIDENT};
 pub use present::PresentBuffers;
 pub use producer::TileProducer;
 pub use residency::{needed_tiles, needed_tiles_prefetched, ResidencySet, VersionedResidency};
-pub use source::{PyramidTileSource, TileSource};
+pub use source::{live_pyramid_tile_source_bytes, PyramidTileSource, TileSource};
 pub use transform::ViewTransform;
-pub use view::{live_virtual_textures, VirtualTexture};
+pub use view::{live_virtual_texture_bytes, live_virtual_textures, VirtualTexture};

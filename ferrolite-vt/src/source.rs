@@ -2,10 +2,26 @@
 //! `TileSource`; it never knows what produced the pixels. `PyramidTileSource`
 //! builds an in-memory LOD pyramid (box-downsample) from one full image.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use ferrolite_image::{
     haloed_tile_extent, haloed_tile_origin, level_size as img_level_size, pyramid_level_count,
     LinearRgbaF32, TileCoord,
 };
+
+// Diagnostics (CLAUDE.md memory profiling): CPU bytes held by all live
+// `PyramidTileSource` instances. Each retains a full-res f32 LOD pyramid
+// (~545 MB for a 24 MP frame) for the whole time its image is open — a large,
+// real contributor to process RSS that was previously invisible (folded into the
+// overlay's `unaccounted`). Incremented on `new`, decremented on `Drop`.
+// `Relaxed` — diagnostics, not synchronization.
+static LIVE_CPU_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Total CPU bytes held by all live `PyramidTileSource` LOD pyramids
+/// (`LinearRgbaF32` = 16 B/px across every level).
+pub fn live_pyramid_tile_source_bytes() -> u64 {
+    LIVE_CPU_BYTES.load(Ordering::Relaxed)
+}
 
 pub trait TileSource {
     fn level_count(&self) -> u32;
@@ -23,6 +39,14 @@ pub trait TileSource {
 
 pub struct PyramidTileSource {
     levels: Vec<LinearRgbaF32>, // index = lod
+    /// CPU bytes this pyramid contributed to `LIVE_CPU_BYTES` (freed on drop).
+    cpu_bytes: u64,
+}
+
+impl Drop for PyramidTileSource {
+    fn drop(&mut self) {
+        LIVE_CPU_BYTES.fetch_sub(self.cpu_bytes, Ordering::Relaxed);
+    }
 }
 
 impl PyramidTileSource {
@@ -34,7 +58,14 @@ impl PyramidTileSource {
             let (w, h) = img_level_size(levels[0].width, levels[0].height, lod);
             levels.push(box_downsample(&levels[(lod - 1) as usize], w, h));
         }
-        Self { levels }
+        // Diagnostics: sum every level's f32 footprint (16 B/px) so
+        // `live_pyramid_tile_source_bytes` reflects the real retained CPU memory.
+        let cpu_bytes: u64 = levels
+            .iter()
+            .map(|l| l.width as u64 * l.height as u64 * 16)
+            .sum();
+        LIVE_CPU_BYTES.fetch_add(cpu_bytes, Ordering::Relaxed);
+        Self { levels, cpu_bytes }
     }
 }
 

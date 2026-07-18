@@ -2752,8 +2752,19 @@ impl FerroliteApp {
             ferrolite_pipeline::live_gpu_pyramid_bytes(),
         );
         b.pyramid_live = ferrolite_pipeline::live_gpu_pyramids();
-        // Live `VirtualTexture` count (each owns GPU textures / a tile pool); a
-        // count above the small expected number likewise flags retained VTs.
+        // CPU-side `PyramidTileSource` LOD pyramids (retained f32, ~545 MB per
+        // open) — the largest previously-unattributed chunk of `rss`.
+        b.set(
+            MemCategory::CpuPyramid,
+            ferrolite_vt::live_pyramid_tile_source_bytes(),
+        );
+        // Live `VirtualTexture` GPU bytes (single textures + streaming/sparse
+        // tile pools) and count; a count above the small expected number flags
+        // retained VTs.
+        b.set(
+            MemCategory::VtPools,
+            ferrolite_vt::live_virtual_texture_bytes(),
+        );
         b.vt_live = ferrolite_vt::live_virtual_textures();
 
         // In-flight buffers (decode + pyramid jobs holding large Arcs).
@@ -4588,7 +4599,7 @@ impl eframe::App for FerroliteApp {
                 self.diag.mem_history.push(crate::diag_mem::MemSample {
                     t_secs: self.diag.mem_elapsed_s as f32,
                     rss: mem.rss,
-                    cpu_known: mem.known_cpu_sum(),
+                    cpu_known: mem.total_modeled(),
                     cache: mem.get(crate::diag_mem::MemCategory::RamCache),
                 });
                 self.diag.last_mem = Some(mem);

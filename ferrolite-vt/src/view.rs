@@ -2,7 +2,7 @@
 //! by the display shader with a zoom/pan transform. Also the fallback path.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -170,33 +170,46 @@ struct SparseResources {
     bind_group: Option<wgpu::BindGroup>,
 }
 
-// Diagnostics (CLAUDE.md memory profiling): count of live `VirtualTexture`
-// instances. Each owns GPU resources (a single texture, or a `TilePool` array
-// texture for the streaming/sparse tiers); a count that stays above the
-// expected small number while the viewer sits on one image reveals VTs (and
-// their pools) retained from prior images. `Relaxed` — diagnostics only.
+// Diagnostics (CLAUDE.md memory profiling): count AND GPU bytes of live
+// `VirtualTexture` instances. Each owns GPU resources (a single texture, or a
+// `TilePool` array texture for the streaming/sparse tiers); a count above the
+// expected small number reveals VTs retained from prior images, and the byte
+// total attributes their GPU footprint (which, on unified memory, is real RSS).
+// `Relaxed` — diagnostics only.
 static LIVE_VT: AtomicUsize = AtomicUsize::new(0);
+static LIVE_VT_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Number of `VirtualTexture` instances currently alive (all tiers).
 pub fn live_virtual_textures() -> usize {
     LIVE_VT.load(Ordering::Relaxed)
 }
 
-/// RAII counter: one per live `VirtualTexture`. Held as a field so every
-/// constructor is forced (by the compiler) to account for it, and `Drop`
-/// decrements exactly once when the VT — and thus its GPU resources — is freed.
-struct VtLiveGuard;
+/// Total GPU bytes held by all live `VirtualTexture` instances (single textures
+/// + streaming/sparse tile pools, `Rgba16Float` = 8 B/px).
+pub fn live_virtual_texture_bytes() -> u64 {
+    LIVE_VT_BYTES.load(Ordering::Relaxed)
+}
+
+/// RAII gauge: one per live `VirtualTexture`. Held as a field so every
+/// constructor is forced (by the compiler) to account for it with its GPU byte
+/// footprint; `Drop` decrements the count and bytes exactly once when the VT —
+/// and thus its GPU resources — is freed.
+struct VtLiveGuard {
+    bytes: u64,
+}
 
 impl VtLiveGuard {
-    fn new() -> Self {
+    fn new(bytes: u64) -> Self {
         LIVE_VT.fetch_add(1, Ordering::Relaxed);
-        VtLiveGuard
+        LIVE_VT_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        VtLiveGuard { bytes }
     }
 }
 
 impl Drop for VtLiveGuard {
     fn drop(&mut self) {
         LIVE_VT.fetch_sub(1, Ordering::Relaxed);
+        LIVE_VT_BYTES.fetch_sub(self.bytes, Ordering::Relaxed);
     }
 }
 
@@ -217,6 +230,7 @@ impl VirtualTexture {
     ) -> Self {
         let device = &ctx.device;
         // f32 -> f16 RGBA.
+        let vt_gpu_bytes = image.width as u64 * image.height as u64 * 8;
         let texels: Vec<f16> = image.pixels.iter().map(|&v| f16::from_f32(v)).collect();
         let texture = device.create_texture_with_data(
             &ctx.queue,
@@ -272,7 +286,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: None,
             sparse: None,
-            _live: VtLiveGuard::new(),
+            _live: VtLiveGuard::new(vt_gpu_bytes),
         }
     }
 
@@ -285,6 +299,7 @@ impl VirtualTexture {
         pipelines: &DisplayPipelines,
     ) -> Self {
         let device = &ctx.device;
+        let vt_gpu_bytes = dims.0 as u64 * dims.1 as u64 * 8;
         let bgl = pipelines.layout(DisplayVariant::Single).clone();
         let pipeline = pipelines.pipeline(DisplayVariant::Single).clone();
         let sampler = pipelines.sampler().clone();
@@ -315,7 +330,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: None,
             sparse: None,
-            _live: VtLiveGuard::new(),
+            _live: VtLiveGuard::new(vt_gpu_bytes),
         }
     }
 
@@ -659,7 +674,7 @@ impl VirtualTexture {
             tiled: Some(tiled),
             streaming: None,
             sparse: None,
-            _live: VtLiveGuard::new(),
+            _live: VtLiveGuard::new(total_tiles as u64 * TILE_SIZE as u64 * TILE_SIZE as u64 * 8),
         }
     }
 
@@ -885,7 +900,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: Some(streaming),
             sparse: None,
-            _live: VtLiveGuard::new(),
+            _live: VtLiveGuard::new(budget_tiles as u64 * TILE_SIZE as u64 * TILE_SIZE as u64 * 8),
         }
     }
 
@@ -1279,7 +1294,7 @@ impl VirtualTexture {
             tiled: None,
             streaming: None,
             sparse: Some(sparse),
-            _live: VtLiveGuard::new(),
+            _live: VtLiveGuard::new(budget_tiles as u64 * TILE_SIZE as u64 * TILE_SIZE as u64 * 8),
         }
     }
 

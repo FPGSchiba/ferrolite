@@ -1,14 +1,15 @@
 //! Memory-diagnostics domain for the Develop memory overlay: category model,
-//! pure breakdown math (including the `unattributed` residual), adaptive budget,
+//! pure breakdown math (including the `unaccounted` residual), adaptive budget,
 //! and byte formatting. Pure and unit-tested; the impure gather (reading live
 //! `AppState`) lives in `app.rs`, the egui shell in `draw_mem_overlay`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// One attributable slice of memory. CPU-resident categories count toward RSS
-/// (so `unattributed` = rss − Σ(cpu categories)); VRAM/disk categories are shown
-/// for context but excluded from that residual.
+/// One attributable slice of memory. Every category is summed into
+/// `total_modeled`; the gap up to `rss` is `unaccounted` (allocator reserve).
+/// On unified-memory GPUs (the Apple-Silicon target) VRAM counts toward RSS, so
+/// GPU categories are included in the sum rather than excluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemCategory {
     ViewerFullLinear,
@@ -62,22 +63,6 @@ impl MemCategory {
             MemCategory::InflightPyramid => "inflight_pyramid",
         }
     }
-
-    /// True for categories that live in process RAM (count toward RSS). VRAM
-    /// (`GpuPyramid`, `VtPools`, `PresentBuffers`, `ThumbTex`) and disk
-    /// (`DiskPreview`) are excluded from the `unattributed` residual.
-    pub fn is_cpu_resident(self) -> bool {
-        matches!(
-            self,
-            MemCategory::ViewerFullLinear
-                | MemCategory::ViewerPreviewSrc
-                | MemCategory::CpuPyramid
-                | MemCategory::RamCache
-                | MemCategory::ThumbPix
-                | MemCategory::InflightDecode
-                | MemCategory::InflightPyramid
-        )
-    }
 }
 
 /// A point-in-time memory attribution. `bytes` is indexed by `MemCategory::index`.
@@ -112,19 +97,19 @@ impl MemBreakdown {
         self.bytes[cat.index()]
     }
 
-    /// Sum of the CPU-resident categories (the part of RSS we can attribute).
-    pub fn known_cpu_sum(&self) -> u64 {
-        MemCategory::ALL
-            .iter()
-            .filter(|c| c.is_cpu_resident())
-            .map(|c| self.bytes[c.index()])
-            .sum()
+    /// Total bytes across ALL modeled categories. On unified-memory GPUs — where
+    /// VRAM counts toward process RSS — this is everything we can name; the gap
+    /// up to `rss` is [`unaccounted`](Self::unaccounted).
+    pub fn total_modeled(&self) -> u64 {
+        self.bytes.iter().sum()
     }
 
-    /// The part of RSS we could NOT attribute. Climbing here = unmodeled growth
-    /// (the leak signal). Saturates at 0 (over-attribution never underflows).
-    pub fn unattributed(&self) -> u64 {
-        self.rss.saturating_sub(self.known_cpu_sum())
+    /// The part of `rss` we could NOT attribute to any modeled category: the
+    /// malloc / wgpu allocator high-water reserve plus anything unmodeled.
+    /// Saturates at 0. NOTE: this is a *slice of* `rss`, never additive to it —
+    /// `total_modeled + unaccounted == rss` on unified memory.
+    pub fn unaccounted(&self) -> u64 {
+        self.rss.saturating_sub(self.total_modeled())
     }
 }
 
@@ -260,14 +245,19 @@ fn fmt_delta(prev: u64, cur: u64) -> String {
 /// ~1/sec structured memory line for the diag log sink.
 pub fn format_mem_log_line(t_secs: f64, b: &MemBreakdown) -> String {
     format!(
-        "[mem] t+{t:.1}s rss={rss} live={live} inflight={inf} gpu={gpu} cache={cache} unattrib={un} budget={bud} pyr={pyr} vt={vt}",
+        // Everything left of `unacct` is a breakdown OF `rss` (they sum to it on
+        // unified memory); `unacct` is the allocator reserve, NOT additive to rss.
+        // `cache-budget` governs the RAM cache only — it is NOT a cap on rss.
+        "[mem] t+{t:.1}s rss={rss} = live={live} cpupyr={cpupyr} gpu={gpu} vt={vtb} cache={cache} inflight={inf} + unacct={un} | pyr#={pyr} vt#={vt} cache-budget={bud}",
         t = t_secs,
         rss = fmt_bytes(b.rss),
         live = fmt_bytes(b.get(MemCategory::ViewerFullLinear) + b.get(MemCategory::ViewerPreviewSrc)),
-        inf = fmt_bytes(b.get(MemCategory::InflightDecode) + b.get(MemCategory::InflightPyramid)),
+        cpupyr = fmt_bytes(b.get(MemCategory::CpuPyramid)),
         gpu = fmt_bytes(b.get(MemCategory::GpuPyramid)),
+        vtb = fmt_bytes(b.get(MemCategory::VtPools)),
         cache = fmt_bytes(b.get(MemCategory::RamCache)),
-        un = fmt_bytes(b.unattributed()),
+        inf = fmt_bytes(b.get(MemCategory::InflightDecode) + b.get(MemCategory::InflightPyramid)),
+        un = fmt_bytes(b.unaccounted()),
         bud = fmt_bytes(b.budget),
         pyr = b.pyramid_live,
         vt = b.vt_live,
@@ -296,7 +286,7 @@ pub fn format_mem_event_line(label: &str, prev: &MemBreakdown, cur: &MemBreakdow
 }
 
 /// Shared body of the category table: one line per `MemCategory`, followed by
-/// the `rss` / `unattributed` / `budget` totals. Used by both `format_mem_dump`
+/// the `rss` / `unaccounted` / `cache-budget` totals. Used by both `format_mem_dump`
 /// and `draw_mem_overlay` so the two stay byte-identical apart from their own
 /// caller-specific header/prefix.
 fn mem_table_lines(b: &MemBreakdown) -> String {
@@ -304,13 +294,16 @@ fn mem_table_lines(b: &MemBreakdown) -> String {
     for c in MemCategory::ALL {
         out.push_str(&format!("  {:<18} {}\n", c.label(), fmt_bytes(b.get(c))));
     }
+    // `rss` is the total; `unaccounted` is the part of it not in any category
+    // above (allocator reserve), NOT a separate number. `cache-budget` governs
+    // the RAM cache only — do not compare it to `rss`.
     out.push_str(&format!(
         "  {:<18} {}\n  {:<18} {}\n  {:<18} {}\n  {:<18} {} / {}\n",
-        "rss",
+        "= rss (total)",
         fmt_bytes(b.rss),
-        "unattributed",
-        fmt_bytes(b.unattributed()),
-        "budget",
+        "unaccounted",
+        fmt_bytes(b.unaccounted()),
+        "cache-budget",
         fmt_bytes(b.budget),
         "live pyr/vt",
         b.pyramid_live,
@@ -401,21 +394,23 @@ mod tests {
     }
 
     #[test]
-    fn unattributed_is_rss_minus_known_cpu() {
+    fn unaccounted_is_rss_minus_total_modeled() {
         let mut b = MemBreakdown::empty();
         b.rss = 1000;
-        b.set(MemCategory::ViewerFullLinear, 400); // cpu-resident
-        b.set(MemCategory::GpuPyramid, 900); // VRAM, NOT counted vs RSS
-        assert_eq!(b.known_cpu_sum(), 400);
-        assert_eq!(b.unattributed(), 600);
+        b.set(MemCategory::ViewerFullLinear, 400);
+        b.set(MemCategory::GpuPyramid, 250); // ALL modeled categories count now
+        assert_eq!(b.total_modeled(), 650);
+        assert_eq!(b.unaccounted(), 350);
+        // The invariant the overlay relies on: modeled + unaccounted == rss.
+        assert_eq!(b.total_modeled() + b.unaccounted(), b.rss);
     }
 
     #[test]
-    fn unattributed_saturates_when_known_exceeds_rss() {
+    fn unaccounted_saturates_when_modeled_exceeds_rss() {
         let mut b = MemBreakdown::empty();
         b.rss = 100;
         b.set(MemCategory::ViewerFullLinear, 500);
-        assert_eq!(b.unattributed(), 0, "must saturate, never underflow");
+        assert_eq!(b.unaccounted(), 0, "must saturate, never underflow");
     }
 
     #[test]
@@ -522,8 +517,8 @@ mod tests {
         let line = format_mem_log_line(12.0, &sample_breakdown());
         assert!(line.starts_with("[mem] t+12.0s"), "got: {line}");
         assert!(line.contains("rss="), "got: {line}");
-        assert!(line.contains("unattrib="), "got: {line}");
-        assert!(line.contains("budget="), "got: {line}");
+        assert!(line.contains("unacct="), "got: {line}");
+        assert!(line.contains("cache-budget="), "got: {line}");
     }
 
     #[test]
@@ -548,7 +543,7 @@ mod tests {
         for c in MemCategory::ALL {
             assert!(d.contains(c.label()), "missing {} in dump", c.label());
         }
-        assert!(d.contains("unattributed"));
-        assert!(d.contains("budget"));
+        assert!(d.contains("unaccounted"));
+        assert!(d.contains("cache-budget"));
     }
 }

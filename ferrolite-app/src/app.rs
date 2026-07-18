@@ -881,8 +881,14 @@ impl FerroliteApp {
         // tier a low-res proxy whose logical size ≠ its texture size, which broke
         // the zoom/LOD transform, the split compare, the histogram, and edited-
         // preview sharpness — so it was reverted.
+        // One owned copy of the full-res buffer, shared (by `Arc` refcount bump,
+        // NOT a second O(pixels) memcpy) between the RAW reveal source here and
+        // the pyramid job below — replacing what were two separate `image.clone()`s
+        // (~400 MB each for a 24 MP frame). This was a major driver of the
+        // develop-scroll RSS high-water mark (memory profiling, 2026-07).
+        let image_arc = std::sync::Arc::new(image.clone());
         let raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
-            is_raw.then(|| std::sync::Arc::new(image.clone()));
+            is_raw.then(|| std::sync::Arc::clone(&image_arc));
         let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if let Some(src) =
             raw_preview_source.as_ref()
         {
@@ -1038,13 +1044,13 @@ impl FerroliteApp {
             // GPU-resident edit pyramid) are CPU box-downsample heavy (~1.2 s
             // combined) — build them on a `ferrolite-jobs` Background worker rather
             // than the UI thread (CLAUDE.md rule 1; this was the open freeze). They
-            // need the FULL-res `image`, so clone it into an `Arc` for the job.
+            // need the FULL-res `image`; reuse the single shared `image_arc`
+            // (an `Arc` refcount bump, NOT a second ~400 MB clone) built above.
             // `GpuContext` is `Send + Sync`
             // (Arc device/queue handles), as are `PyramidTileSource` and
             // `GpuPyramidSource`, so both build off-thread and are delivered over
             // the channel; `apply_pyramid_ready` installs them + starts producing.
-            let image_full: std::sync::Arc<ferrolite_image::LinearRgbaF32> =
-                std::sync::Arc::new(image.clone());
+            let image_full = std::sync::Arc::clone(&image_arc);
             let gpu_job = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
             let tx = self.state.tx.clone();
             let repaint = ctx.clone();

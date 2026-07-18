@@ -247,22 +247,31 @@ pub fn prefetch_targets(ids: &[i64], current: i64, radius: usize) -> Vec<i64> {
         .collect()
 }
 
-/// For each of `neighbors` (RAW images only, resolved by the caller) that is
-/// not already cached under its DEFAULT (identity) preview key, spawn ONE
-/// `Priority::Background` job that decodes + demosaics + color-manages +
-/// encodes the identity render and stores it, mirroring the on-open
-/// write-back chain (`apply_full_decoded` in `app.rs`) EXACTLY so a prefetched
-/// entry is byte-for-byte what that write-back would have produced.
+/// Spawn a SINGLE `Priority::Background` job that walks `neighbors` (RAW images
+/// only, resolved by the caller) sequentially: for each not already cached under
+/// its DEFAULT (identity) preview key, it decodes + demosaics + color-manages +
+/// encodes the identity render and stores it, mirroring the on-open write-back
+/// chain (`apply_full_decoded` in `app.rs`) EXACTLY so a prefetched entry is
+/// byte-for-byte what that write-back would have produced.
+///
+/// **Bounded concurrency (memory, load-bearing):** one sequential job — NOT one
+/// job per neighbor. Each neighbor's full-res demosaic (`QuadBin` → a ~400 MB
+/// f32 buffer for a 24 MP frame) is dropped at the end of its loop iteration,
+/// before the next neighbor decodes, so the prefetch peak is a SINGLE such
+/// buffer rather than `neighbors.len()` of them resident at once. That
+/// concurrent pile-up was the dominant driver of the develop-scroll RSS
+/// high-water mark; radius/coverage is unchanged, only concurrency is bounded.
 ///
 /// Prefetch keys by the default op stack — it does NOT read each neighbor's
 /// edit sidecar, so an edited neighbor's default-keyed entry is simply never
 /// requested until reset (a deliberate, harmless miss; see the module docs).
 ///
-/// Every failure (cancelled, profile-decode error, key error, already cached,
-/// full-decode error, encode error, store error) resolves to a silent early
-/// return — a prefetch must never disturb the viewer, so failures are only
-/// logged via `eprintln!`, never surfaced as an event. Returns the spawned
-/// handles so the caller can cancel them on navigation.
+/// Per-neighbor failure (profile-decode error, key error, already cached,
+/// full-decode error, encode error, store error) skips that neighbor and
+/// continues; cancellation stops the whole walk. A prefetch must never disturb
+/// the viewer, so failures are only logged via `eprintln!`, never surfaced as an
+/// event. Returns the single job handle (in a `Vec`) so the caller can cancel
+/// the whole walk on navigation.
 pub fn spawn_prefetch(
     jobs: &Arc<JobSystem>,
     store: Arc<PreviewStore>,
@@ -271,75 +280,74 @@ pub fn spawn_prefetch(
     working_space: WorkingSpace,
     cap: u64,
 ) -> Vec<JobHandle> {
-    neighbors
-        .iter()
-        .map(|(image_id, path)| {
-            let store = Arc::clone(&store);
-            let ctx = ctx.clone();
-            let path = path.clone();
+    let neighbors = neighbors.to_vec();
+    let ctx = ctx.clone();
+    let handle = jobs.submit(Priority::Background, move |cancel| {
+        for (image_id, path) in &neighbors {
             let image_id = *image_id;
-            jobs.submit(Priority::Background, move |cancel| {
-                if cancel.is_cancelled() {
-                    return;
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Ok(profile) = decode_color_profile(path) else {
+                continue;
+            };
+            let Ok(key) = key_for(path, &OpStack::default(), working_space, &profile) else {
+                continue;
+            };
+            if store.contains(&key) {
+                continue; // already cached — skip the expensive decode
+            }
+            if cancel.is_cancelled() {
+                return;
+            }
+            let Ok(raw) = ferrolite_decode::decode_full(path) else {
+                continue;
+            };
+            // Demosaic (QuadBin — this is the tier-1 reveal/prefetch cache only;
+            // the on-screen full tier uses GPU RCD via `spawn_full`) + upright.
+            // This ~400 MB f32 `image` is dropped at the end of the iteration,
+            // before the next neighbor decodes (bounded-concurrency contract).
+            let image = ferrolite_decode::apply_orientation_linear(
+                QuadBin.to_linear_rgba_f32(&raw),
+                raw.orientation,
+            );
+            // Identity display matrix: camera→working then working→display,
+            // matching the write-back composition in `apply_full_decoded`.
+            let cam = ferrolite_color::normalize_neutral(ferrolite_color::camera_to_working(
+                raw.color_profile.xyz_to_cam,
+                ferrolite_color::Xy {
+                    x: raw.color_profile.white_xy[0],
+                    y: raw.color_profile.white_xy[1],
+                },
+                working_space,
+            ));
+            let display_matrix = ferrolite_color::mul_mat3(
+                &ferrolite_color::working_to_display(working_space),
+                &cam,
+            );
+            let jpeg = match encode_srgb_jpeg(
+                &image,
+                display_matrix,
+                PREVIEW_LONG_EDGE,
+                PREVIEW_JPEG_QUALITY,
+            ) {
+                Ok(jpeg) => jpeg,
+                Err(err) => {
+                    eprintln!("preview prefetch: encode failed for #{image_id}: {err}");
+                    continue;
                 }
-                let Ok(profile) = decode_color_profile(&path) else {
-                    return;
-                };
-                let Ok(key) = key_for(&path, &OpStack::default(), working_space, &profile) else {
-                    return;
-                };
-                if store.contains(&key) {
-                    return; // already cached — skip the expensive decode
-                }
-                if cancel.is_cancelled() {
-                    return;
-                }
-                let Ok(raw) = ferrolite_decode::decode_full(&path) else {
-                    return;
-                };
-                // Demosaic (QuadBin — this is the tier-1 reveal/prefetch cache only;
-                // the on-screen full tier uses GPU RCD via `spawn_full`) + upright.
-                let image = ferrolite_decode::apply_orientation_linear(
-                    QuadBin.to_linear_rgba_f32(&raw),
-                    raw.orientation,
-                );
-                // Identity display matrix: camera→working then working→display,
-                // matching the write-back composition in `apply_full_decoded`.
-                let cam = ferrolite_color::normalize_neutral(ferrolite_color::camera_to_working(
-                    raw.color_profile.xyz_to_cam,
-                    ferrolite_color::Xy {
-                        x: raw.color_profile.white_xy[0],
-                        y: raw.color_profile.white_xy[1],
-                    },
-                    working_space,
-                ));
-                let display_matrix = ferrolite_color::mul_mat3(
-                    &ferrolite_color::working_to_display(working_space),
-                    &cam,
-                );
-                let jpeg = match encode_srgb_jpeg(
-                    &image,
-                    display_matrix,
-                    PREVIEW_LONG_EDGE,
-                    PREVIEW_JPEG_QUALITY,
-                ) {
-                    Ok(jpeg) => jpeg,
-                    Err(err) => {
-                        eprintln!("preview prefetch: encode failed for #{image_id}: {err}");
-                        return;
-                    }
-                };
-                if let Err(err) = store.put(&key, &jpeg) {
-                    eprintln!("preview prefetch: put failed for #{image_id}: {err}");
-                    return;
-                }
-                if let Err(err) = store.evict_to(cap) {
-                    eprintln!("preview prefetch: evict_to failed after #{image_id}: {err}");
-                }
-                ctx.request_repaint();
-            })
-        })
-        .collect()
+            };
+            if let Err(err) = store.put(&key, &jpeg) {
+                eprintln!("preview prefetch: put failed for #{image_id}: {err}");
+                continue;
+            }
+            if let Err(err) = store.evict_to(cap) {
+                eprintln!("preview prefetch: evict_to failed after #{image_id}: {err}");
+            }
+            ctx.request_repaint();
+        }
+    });
+    vec![handle]
 }
 
 #[cfg(test)]

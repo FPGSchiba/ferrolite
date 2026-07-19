@@ -1,7 +1,7 @@
 use crate::app::FerroliteApp;
 use crate::events::AppEvent;
 use crate::viewer;
-use std::hash::{Hash, Hasher};
+
 
 pub struct AppController;
 
@@ -852,114 +852,6 @@ impl AppController {
         app.persist_ops(ctx, image_id, path, stack);
     }
 
-    pub fn rebuild_mask_overlay_if_needed(app: &mut FerroliteApp, frame: &eframe::Frame) {
-        use crate::develop::mask_edit;
-        use crate::develop::mask_overlay_color::OVERLAY_MAX_EDGE;
-
-        let Some(v) = app.state.viewer.as_mut() else {
-            return;
-        };
-        let la = mask_edit::layers(&v.op_stack);
-        let Some(sel) = v.mask.selected.filter(|&i| i < la.layers.len()) else {
-            v.mask.overlay_key = None;
-            return;
-        };
-        let committed_def = &la.layers[sel].mask;
-        let def = match v.mask.preview_component.clone() {
-            Some((c, mode)) => mask_edit::prospective_def(committed_def, c, mode),
-            None => committed_def.clone(),
-        };
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        sel.hash(&mut h);
-        v.opstack_version.hash(&mut h);
-        serde_json::to_string(&v.mask.preview_component)
-            .unwrap_or_default()
-            .hash(&mut h);
-        v.mask.highlight_component.hash(&mut h);
-        let key = h.finish();
-        if v.mask.overlay_key == Some(key) && app.state.mask_overlay_native.is_some() {
-            return;
-        }
-
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-        let gpu_ctx = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-        if v.mask_overlay.is_none() {
-            v.mask_overlay = Some(ferrolite_pipeline::MaskOverlayCompositor::new(
-                gpu_ctx.clone(),
-            ));
-        }
-        if v.mask_overlay_input.is_none() {
-            if let Some(src) = v.preview_source.as_ref() {
-                let small = downscale_linear(src, OVERLAY_MAX_EDGE);
-                v.mask_overlay_input = Some(ferrolite_pipeline::upload_source(&gpu_ctx, &small));
-                v.mask_overlay_input_gen = v.mask_overlay_input_gen.wrapping_add(1);
-            }
-        }
-        let (overlay, highlight) = {
-            let highlight_component = v.mask.highlight_component;
-            let input_id = v.mask_overlay_input_gen;
-            let (Some(oc), Some(input)) = (v.mask_overlay.as_mut(), v.mask_overlay_input.as_ref())
-            else {
-                return;
-            };
-            let overlay = oc.overlay_texture(
-                &def,
-                input,
-                input_id,
-                crate::develop::mask_overlay_color::OVERLAY_STRENGTH,
-            );
-            let highlight = highlight_component.and_then(|idx| {
-                oc.highlight_texture(idx, crate::develop::mask_overlay_color::HIGHLIGHT_STRENGTH)
-            });
-            v.mask.overlay_key = Some(key);
-            (overlay, highlight)
-        };
-        let view = overlay.srgb_view();
-        {
-            let mut renderer = rs.renderer.write();
-            match app.state.mask_overlay_native {
-                Some(id) => renderer.update_egui_texture_from_wgpu_texture(
-                    &gpu_ctx.device,
-                    &view,
-                    wgpu::FilterMode::Linear,
-                    id,
-                ),
-                None => {
-                    let id = renderer.register_native_texture(
-                        &gpu_ctx.device,
-                        &view,
-                        wgpu::FilterMode::Linear,
-                    );
-                    app.state.mask_overlay_native = Some(id);
-                }
-            }
-            if let Some(highlight) = &highlight {
-                let hview = highlight.srgb_view();
-                match app.state.mask_overlay_highlight_native {
-                    Some(id) => renderer.update_egui_texture_from_wgpu_texture(
-                        &gpu_ctx.device,
-                        &hview,
-                        wgpu::FilterMode::Linear,
-                        id,
-                    ),
-                    None => {
-                        let id = renderer.register_native_texture(
-                            &gpu_ctx.device,
-                            &hview,
-                            wgpu::FilterMode::Linear,
-                        );
-                        app.state.mask_overlay_highlight_native = Some(id);
-                    }
-                }
-            }
-        }
-        app.state.mask_overlay_gpu = Some(overlay);
-        if let Some(highlight) = highlight {
-            app.state.mask_overlay_highlight_gpu = Some(highlight);
-        }
-    }
 
     pub fn maybe_spawn_lens_bake(
         app: &mut FerroliteApp,
@@ -1188,27 +1080,3 @@ impl AppController {
     }
 }
 
-fn downscale_linear(
-    src: &ferrolite_image::LinearRgbaF32,
-    max_edge: u32,
-) -> ferrolite_image::LinearRgbaF32 {
-    let (sw, sh) = (src.width, src.height);
-    let scale = (max_edge as f32 / sw.max(sh) as f32).min(1.0);
-    let (dw, dh) = (
-        ((sw as f32 * scale) as u32).max(1),
-        ((sh as f32 * scale) as u32).max(1),
-    );
-    if (dw, dh) == (sw, sh) {
-        return src.clone();
-    }
-    let mut px = Vec::with_capacity((dw * dh * 4) as usize);
-    for y in 0..dh {
-        let sy = (y as f32 / dh as f32 * sh as f32) as u32;
-        for x in 0..dw {
-            let sx = (x as f32 / dw as f32 * sw as f32) as u32;
-            let i = ((sy * sw + sx) * 4) as usize;
-            px.extend_from_slice(&src.pixels[i..i + 4]);
-        }
-    }
-    ferrolite_image::LinearRgbaF32::new(dw, dh, px).expect("downscale length")
-}

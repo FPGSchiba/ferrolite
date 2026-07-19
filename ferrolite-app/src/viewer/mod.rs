@@ -25,7 +25,6 @@ pub const CROSSFADE_SECS: f32 = 0.15;
 /// Tier-0 placeholder (upscaled grid thumbnail) fade-out duration (seconds).
 /// Short enough to read as an instant sharpen, long enough to hide the pop from
 /// the thumbnail's lower resolution as the real reveal lands.
-#[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
 pub const TIER0_FADE_SECS: f32 = 0.18;
 
 /// Debounce (seconds) between a preview recompute and the histogram dispatch, so

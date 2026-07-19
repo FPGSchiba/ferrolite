@@ -127,6 +127,9 @@ pub struct AppState {
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
 
+    /// Interactive canvas panning/zooming/drag state parameters.
+    pub canvas: crate::develop::canvas::ViewerCanvasState,
+
     /// Develop tool/tab selection state (design §5). Session-wide (unlike the
     /// per-image fields on `ViewerState`) so switching images keeps the same
     /// tool/tab active; `ensure_valid_tab` re-validates it against the new
@@ -289,6 +292,7 @@ impl AppState {
             mask_overlay_highlight_native: None,
             mask_overlay_highlight_gpu: None,
             viewer: None,
+            canvas: crate::develop::canvas::ViewerCanvasState::default(),
             tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,
@@ -582,6 +586,7 @@ impl AppState {
                 old.cancel_loads();
             }
             self.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
+            self.canvas = crate::develop::canvas::ViewerCanvasState::default();
             // Keep the current selection in sync with the viewed image so the
             // bottom status bar (filename · dims · ISO, driven by `selected`)
             // updates on Develop filmstrip navigation, not just library clicks.
@@ -904,6 +909,7 @@ impl AppState {
             mask_overlay_highlight_native: None,
             mask_overlay_highlight_gpu: None,
             viewer: None,
+            canvas: crate::develop::canvas::ViewerCanvasState::default(),
             tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,

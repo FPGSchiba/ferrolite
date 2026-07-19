@@ -110,11 +110,6 @@ pub fn should_write_back(op_stack: &OpStack, is_cache_miss: bool) -> bool {
 /// matrix must be the **identity** (the working→display step the RAW path needs
 /// is already baked into `preview_source`). Confirmed by
 /// `standard_writeback_round_trips_srgb`.
-///
-/// `#[allow(dead_code)]`: not yet wired into `spawn_cache_write`'s call site —
-/// a later task (Task 6/7 of the fast-JPG plan) passes this as the Standard
-/// write-back `display_matrix` and MUST remove this allow then.
-#[allow(dead_code)]
 pub fn standard_writeback_matrix() -> Mat3 {
     ferrolite_color::identity()
 }

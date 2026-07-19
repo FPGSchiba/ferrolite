@@ -226,6 +226,7 @@ impl FerroliteApp {
     fn apply_preview_ready(
         &mut self,
         frame: &eframe::Frame,
+        ctx: &egui::Context,
         image_id: i64,
         linear: &ferrolite_image::LinearRgbaF32,
     ) {
@@ -254,7 +255,53 @@ impl FerroliteApp {
         }
 
         // Standard: the preview IS the full-resolution image — reveal it now.
-        self.reveal_srgb_preview(frame, image_id);
+        let revealed = self.reveal_srgb_preview(frame, image_id);
+        if !revealed {
+            return;
+        }
+
+        // Preview-cache write-back (Phase 3): on a qualifying Standard open, cache
+        // the identity color-managed 2048px render so a later open of the same JPG
+        // reveals instantly from disk (Task 6's read path). `preview_source` is
+        // already display-linear sRGB, so the write-back matrix is identity (Task
+        // 5). Gated on a default op stack + a genuine cache MISS
+        // (`v.cache_write_back`, set by the preview-cache read) so an edited image
+        // or a re-open with the entry already on disk never re-encodes.
+        //
+        // Reuse the retained `preview_source` Arc as the payload (no second
+        // O(pixels) copy); the Background job does the key stat + encode + disk IO
+        // off the UI thread (CLAUDE.md rule 1).
+        let write_back = self.state.viewer.as_ref().and_then(|v| {
+            if v.image_id != image_id {
+                return None;
+            }
+            crate::develop::preview_cache::should_write_back(&v.op_stack, v.cache_write_back).then(
+                || {
+                    (
+                        v.path.clone(),
+                        v.op_stack.clone(),
+                        v.color_profile.clone(),
+                        v.preview_source.clone(),
+                    )
+                },
+            )
+        });
+        if let Some((path, op_stack, color_profile, Some(render))) = write_back {
+            crate::develop::preview_cache::spawn_cache_write(
+                &self.state.jobs,
+                std::sync::Arc::clone(&self.state.preview_store),
+                &self.state.tx,
+                ctx,
+                path,
+                op_stack,
+                self.state.working_space,
+                color_profile,
+                render,
+                crate::develop::preview_cache::standard_writeback_matrix(),
+                ferrolite_previews::DEFAULT_CACHE_CAP_BYTES,
+                image_id,
+            );
+        }
     }
 
     /// Build the rung-1 preview `VirtualTexture` from the retained sRGB
@@ -2997,7 +3044,7 @@ impl eframe::App for FerroliteApp {
             events_this_frame += 1;
             match &event {
                 crate::events::AppEvent::PreviewReady { image_id, linear } => {
-                    self.apply_preview_ready(frame, *image_id, linear);
+                    self.apply_preview_ready(frame, ctx, *image_id, linear);
                     self.state.dirty = true;
                     continue;
                 }

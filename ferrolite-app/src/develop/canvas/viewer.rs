@@ -33,22 +33,22 @@ impl Viewer {
     pub fn show(
         self,
         ui: &mut egui::Ui,
-        state: &mut AppState,
+        app: &mut crate::app::FerroliteApp,
         frame: &eframe::Frame,
     ) -> Option<ViewerAction> {
         let mut action_outcome = None;
 
         // Verify that the viewer has the matching image open.
-        let v = match state.viewer.as_mut() {
+        let v = match app.state.viewer.as_mut() {
             Some(v) if v.image_id == self.image_id => v,
             _ => return None,
         };
 
         // Step 1: Detect crop_active mode transitions.
         let crop_active = v.crop_active;
-        if crop_active != state.canvas.crop_active_prev {
+        if crop_active != app.state.canvas.crop_active_prev {
             let stack = v.op_stack.clone();
-            state.canvas.crop_active_prev = crop_active;
+            app.state.canvas.crop_active_prev = crop_active;
             action_outcome = Some(ViewerAction::SetPreviewAndFull(stack));
         }
 
@@ -220,7 +220,7 @@ impl Viewer {
 
         // Draw the split compare divider if active.
         if split_active {
-            ensure_before_view(state, frame);
+            ensure_before_view(app, frame);
             let div_x = crate::develop::split::divider_x(
                 canvas_rect.left(),
                 canvas_rect.width(),
@@ -307,7 +307,7 @@ impl Viewer {
                         canvas_rect.width(),
                         pos.x,
                     );
-                    if let Some(v) = state.viewer.as_mut() {
+                    if let Some(v) = app.state.viewer.as_mut() {
                         v.split_pos = new_pos;
                     }
                     ui.ctx().request_repaint();
@@ -316,13 +316,13 @@ impl Viewer {
         }
 
         // Draw standard overlays.
-        if state.settings.show_histogram {
-            crate::develop::canvas::overlays::draw_histogram(ui, state);
+        if app.state.settings.show_histogram {
+            crate::develop::canvas::overlays::draw_histogram(ui, &app.state);
         }
-        crate::develop::canvas::overlays::draw_info(ui, state);
+        crate::develop::canvas::overlays::draw_info(ui, &app.state);
 
         let tool_registry = DevelopToolRegistry::standard();
-        let palette_action = crate::develop::canvas::overlays::draw_tool_palette(ui, state, &tool_registry);
+        let palette_action = crate::develop::canvas::overlays::draw_tool_palette(ui, &app.state, &tool_registry);
         if let Some(action) = palette_action {
             match action {
                 crate::develop::tool_palette::PaletteAction::SelectTool(id) => {
@@ -338,13 +338,13 @@ impl Viewer {
         }
 
         // Rebuild mask overlay if needed, and draw active tool canvas overlay.
-        let active_tool = state.viewer.as_ref().map(|_| state.tool_state.active);
+        let active_tool = app.state.viewer.as_ref().map(|_| app.state.tool_state.active);
         if active_tool == Some(crate::develop::tool::ToolId::Mask) {
-            rebuild_mask_overlay_if_needed(state, frame);
+            rebuild_mask_overlay_if_needed(&mut app.state, frame);
         }
 
         if let Some(id) = active_tool {
-            if let Some((dims, view, viewport)) = state
+            if let Some((dims, view, viewport)) = app.state
                 .viewer
                 .as_ref()
                 .map(|v| (v.image_dims.unwrap_or((1, 1)), v.view, v.viewport))
@@ -356,7 +356,7 @@ impl Viewer {
                     viewport,
                 );
                 if let Some(tool) = tool_registry.get(id) {
-                    if let Some(o) = tool.canvas(ui, image_rect, state) {
+                    if let Some(o) = tool.canvas(ui, image_rect, &mut app.state) {
                         action_outcome = Some(ViewerAction::ApplyEdit {
                             kind: o.kind,
                             stack: o.stack,
@@ -368,8 +368,8 @@ impl Viewer {
         }
 
         // Loupe context-menu widget.
-        let is_adjust_active = state.tool_state.active == crate::develop::tool::ToolId::Adjust;
-        let ctx_menu_id = state
+        let is_adjust_active = app.state.tool_state.active == crate::develop::tool::ToolId::Adjust;
+        let ctx_menu_id = app.state
             .viewer
             .as_ref()
             .filter(|_| is_adjust_active)
@@ -378,7 +378,7 @@ impl Viewer {
             let rect = ui.min_rect();
             let resp = ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());
             resp.context_menu(|ui| {
-                crate::library::image_context_menu::show(ui, state, image_id, true);
+                crate::library::image_context_menu::show(ui, &mut app.state, image_id, true);
             });
         }
 
@@ -388,40 +388,11 @@ impl Viewer {
 
 // ── Math & Color Helpers ───────────────────────────────────────────────────
 
-fn source_to_working(profile: &ferrolite_decode::ColorProfile, working_space: ferrolite_color::WorkingSpace) -> [[f32; 3]; 3] {
-    ferrolite_color::camera_to_working(
-        profile.xyz_to_cam,
-        ferrolite_color::Xy {
-            x: profile.white_xy[0],
-            y: profile.white_xy[1],
-        },
-        working_space,
-    )
-}
-
-fn camera_to_working(viewer: &crate::viewer::ViewerState, temp: f32, working_space: ferrolite_color::WorkingSpace) -> [[f32; 3]; 3] {
-    crate::camera_matrix::wb_camera_to_working(
-        &viewer.color_profile,
-        temp,
-        working_space,
-    )
-}
-
-fn current_wb_temp(viewer: &crate::viewer::ViewerState) -> f32 {
-    viewer.op_stack.white_balance()
-        .map(|w| w.temp)
-        .unwrap_or(0.0)
-}
-
-fn preview_to_working(working_space: ferrolite_color::WorkingSpace) -> [[f32; 3]; 3] {
-    source_to_working(&ferrolite_decode::ColorProfile::srgb_fallback(), working_space)
-}
-
-fn ensure_before_view(state: &mut AppState, frame: &eframe::Frame) {
+fn ensure_before_view(app: &crate::app::FerroliteApp, frame: &eframe::Frame) {
     let Some(rs) = frame.wgpu_render_state() else {
         return;
     };
-    let (active, image_id, is_raw, srgb_src, raw_src) = match state.viewer.as_ref() {
+    let (active, image_id, is_raw, srgb_src, raw_src) = match app.state.viewer.as_ref() {
         Some(v) => (
             v.split_compare,
             v.image_id,
@@ -444,8 +415,8 @@ fn ensure_before_view(state: &mut AppState, frame: &eframe::Frame) {
     }
     let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
     let (tex, dims) = if is_raw {
-        let temp = current_wb_temp(state.viewer.as_ref().unwrap());
-        let cam = camera_to_working(state.viewer.as_ref().unwrap(), temp, state.working_space);
+        let temp = app.current_wb_temp();
+        let cam = app.camera_to_working(temp);
         let Some(src) = raw_src else {
             return;
         };
@@ -459,7 +430,7 @@ fn ensure_before_view(state: &mut AppState, frame: &eframe::Frame) {
         let out = ep.evaluate();
         (out.texture.clone(), (out.width, out.height))
     } else {
-        let pw = preview_to_working(state.working_space);
+        let pw = app.preview_to_working();
         let Some(src) = srgb_src else {
             return;
         };

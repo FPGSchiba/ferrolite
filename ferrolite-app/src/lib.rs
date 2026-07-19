@@ -23,3 +23,8 @@ pub mod status_bar;
 pub mod theme;
 pub mod viewer;
 pub mod widgets;
+pub mod app;
+pub mod canvas;
+pub mod chrome;
+pub mod export_module;
+pub mod help;

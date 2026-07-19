@@ -1634,7 +1634,7 @@ impl eframe::App for FerroliteApp {
                 }
                 crate::module::Module::Develop => {
                     if let Some(v) = self.state.viewer.as_ref() {
-                        if let Some(action) = crate::develop::canvas::Viewer::new(v.image_id).show(ui, &mut self.state, frame) {
+                        if let Some(action) = crate::develop::canvas::Viewer::new(v.image_id).show(ui, self, frame) {
                             match action {
                                 crate::develop::canvas::ViewerAction::ApplyEdit { kind, stack, commit } => {
                                     crate::app::controller::AppController::apply_edit(self, ctx, frame, kind, stack, commit);

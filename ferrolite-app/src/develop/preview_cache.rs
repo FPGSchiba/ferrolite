@@ -101,6 +101,24 @@ pub fn should_write_back(op_stack: &OpStack, is_cache_miss: bool) -> bool {
     *op_stack == OpStack::default() && is_cache_miss
 }
 
+/// The display matrix for a Standard (JPG/PNG/…) preview-cache write-back.
+///
+/// A Standard image's retained `preview_source` is produced by
+/// [`crate::viewer::load::preview_to_linear`], which decodes 8-bit sRGB to
+/// **display-linear sRGB**. [`encode_srgb_jpeg`] applies its `display_matrix`
+/// and *then* the sRGB OETF, so to reproduce the source as an sRGB JPEG the
+/// matrix must be the **identity** (the working→display step the RAW path needs
+/// is already baked into `preview_source`). Confirmed by
+/// `standard_writeback_round_trips_srgb`.
+///
+/// `#[allow(dead_code)]`: not yet wired into `spawn_cache_write`'s call site —
+/// a later task (Task 6/7 of the fast-JPG plan) passes this as the Standard
+/// write-back `display_matrix` and MUST remove this allow then.
+#[allow(dead_code)]
+pub fn standard_writeback_matrix() -> Mat3 {
+    ferrolite_color::identity()
+}
+
 /// Look up `key` in `store`; on a hit decode the cached JPEG and convert it from
 /// 8-bit sRGB to display-linear (reusing [`crate::viewer::load::preview_to_linear`]),
 /// so the result matches `PreviewReady`'s shape for reveal via the Improvement-1
@@ -574,6 +592,45 @@ mod tests {
         assert!(
             !targets.contains(&30),
             "current id must never be its own neighbor"
+        );
+    }
+
+    #[test]
+    fn standard_writeback_matrix_is_identity() {
+        // preview_source is already display-linear sRGB, so the write-back matrix
+        // must be identity (encode applies matrix then sRGB OETF).
+        assert_eq!(
+            standard_writeback_matrix(),
+            ferrolite_color::identity(),
+            "Standard write-back must not re-apply a working->display transform"
+        );
+    }
+
+    #[test]
+    fn standard_writeback_round_trips_srgb() {
+        // Known sRGB 8-bit -> display-linear (as the Standard preview path does),
+        // encode with the Standard matrix, decode, back to linear: the round trip
+        // must land close to the original linear values (JPEG q90 + 8-bit tolerance).
+        use ferrolite_image::{ImageBuffer, PixelFormat};
+        // A 8x8 solid patch of sRGB 128 (mid gray) so JPEG has no edges to ring.
+        let src8 = ImageBuffer::new(8, 8, PixelFormat::Rgb8, vec![128u8; 8 * 8 * 3])
+            .expect("valid rgb8 patch");
+        let linear = crate::viewer::load::preview_to_linear(&src8); // display-linear sRGB
+        let jpeg = encode_srgb_jpeg(
+            &linear,
+            standard_writeback_matrix(),
+            PREVIEW_LONG_EDGE,
+            PREVIEW_JPEG_QUALITY,
+        )
+        .expect("encode succeeds");
+        let decoded = decode_srgb_jpeg(&jpeg).expect("decode succeeds");
+        let round = crate::viewer::load::preview_to_linear(&decoded);
+        // Center pixel comparison (avoid any border resampling); dims unchanged (8<2048).
+        assert_eq!((round.width, round.height), (8, 8));
+        let (o, r) = (linear.pixels[0], round.pixels[0]);
+        assert!(
+            (o - r).abs() < 0.02,
+            "sRGB round-trip within tolerance: {o} vs {r}"
         );
     }
 }

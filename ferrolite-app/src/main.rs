@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod app;
+pub mod app;
 mod camera_matrix;
 mod canvas;
 mod chrome;

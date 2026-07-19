@@ -1,12 +1,14 @@
+pub mod shortcuts;
+
 use crate::canvas::{self, CanvasResources};
 use crate::module::Module;
 use crate::theme;
 use crate::viewer;
 
 pub struct FerroliteApp {
-    module: Module,
+    pub(crate) module: Module,
     thumb_size: f32,
-    state: crate::state::AppState,
+    pub(crate) state: crate::state::AppState,
     /// Last frame's `viewer.crop_active`. A transition (enter/exit crop mode)
     /// with no other edit does not otherwise re-render the preview, so we detect
     /// the edge and force a `set_preview_and_full` on the same frame before paint:
@@ -30,10 +32,10 @@ pub struct FerroliteApp {
     did_restore: bool,
     /// Whether the Help modal (`crate::help::show`) is open. Opened by
     /// `Action::OpenHelp` (F1, global) or the Help menu.
-    show_help: bool,
+    pub(crate) show_help: bool,
     /// Whether the Settings window (`crate::settings::ui::show`) is open.
     /// Opened by `Action::OpenSettings` (Ctrl+, global) or the File menu.
-    show_settings: bool,
+    pub(crate) show_settings: bool,
     /// One-shot guard: set `true` the first frame that has a valid render state
     /// (pipelines pre-warmed), after kicking off the initial display-profile
     /// detect. Ensures the startup detect fires exactly once.
@@ -41,7 +43,7 @@ pub struct FerroliteApp {
     /// The Develop tool/tab registry (design §4): base adjustment tabs + the
     /// ordered canvas tools shown in the palette. Built once here; read in
     /// Tasks 10-11 to render the palette/tab bar/canvas overlay.
-    tool_registry: crate::develop::tool::DevelopToolRegistry,
+    pub(crate) tool_registry: crate::develop::tool::DevelopToolRegistry,
 }
 
 impl FerroliteApp {
@@ -124,7 +126,7 @@ impl FerroliteApp {
     /// persist the resulting op stack. Shared by the `Ctrl+Z`/`Ctrl+Shift+Z`/
     /// `Ctrl+Y` keyboard path and the Edit menu's Undo/Redo items so both
     /// route through the exact same logic.
-    fn apply_undo_redo(&mut self, ctx: &egui::Context, frame: &eframe::Frame, undo: bool) {
+    pub(crate) fn apply_undo_redo(&mut self, ctx: &egui::Context, frame: &eframe::Frame, undo: bool) {
         let result = self.state.viewer.as_mut().and_then(|v| {
             if undo {
                 v.history.undo()
@@ -165,7 +167,7 @@ impl FerroliteApp {
     /// Move the open Develop viewer to the previous/next image in the current
     /// image set, non-cyclic. Shared by the ←/→ keyboard path and the Photo
     /// menu's Previous/Next image items.
-    fn navigate_step(
+    pub(crate) fn navigate_step(
         &mut self,
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
@@ -197,7 +199,7 @@ impl FerroliteApp {
     /// which stays true while tiles are still streaming in after a pan/zoom),
     /// force the view back to fit so the preview tier (and thus the divider)
     /// is immediately visible again.
-    fn toggle_split_compare(&mut self) {
+    pub(crate) fn toggle_split_compare(&mut self) {
         if let Some(v) = self.state.viewer.as_mut() {
             let turning_on = !v.split_compare;
             v.split_compare = !v.split_compare;
@@ -483,7 +485,7 @@ impl FerroliteApp {
     /// stack, then clear the flag so re-entrant frames do not double-spawn.
     /// Called at every "leave Develop for this image" transition. No-op when
     /// there is no viewer, no session edits, or no GPU render state.
-    fn maybe_regen_on_leave(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    pub(crate) fn maybe_regen_on_leave(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let (image_id, path, kind, stack) = {
             let Some(v) = self.state.viewer.as_mut() else {
                 return;
@@ -1442,7 +1444,7 @@ impl FerroliteApp {
     /// Preview tier: build the EditPipeline once, reuse via set_stack; evaluate
     /// and swap the displayed single texture. Full-res tier: set_stack (color) or
     /// rebuild (geometry/halo), bump the opstack version to invalidate cached tiles.
-    fn set_preview_and_full(&mut self, frame: &eframe::Frame, stack: ferrolite_pipeline::OpStack) {
+    pub(crate) fn set_preview_and_full(&mut self, frame: &eframe::Frame, stack: ferrolite_pipeline::OpStack) {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -1631,7 +1633,7 @@ impl FerroliteApp {
 
     /// Apply a panel/widget edit: update both tiers immediately; on commit (drag
     /// release / discrete change) push undo history + persist off-thread.
-    fn apply_edit(
+    pub(crate) fn apply_edit(
         &mut self,
         ctx: &egui::Context,
         frame: &eframe::Frame,
@@ -2613,7 +2615,7 @@ impl FerroliteApp {
     /// tile jobs, open the new image's two-tier load, switch to Develop, and request
     /// a repaint so the viewer is drawn on the very next frame (otherwise egui would
     /// idle on the grid until the next input event, which reads as a stall).
-    fn open_record(
+    pub(crate) fn open_record(
         &mut self,
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
@@ -2670,7 +2672,7 @@ impl FerroliteApp {
     /// The VT lives in `callback_resources`; the decode jobs are cancelled
     /// separately via `ViewerState::cancel_loads`. Guarded on `image_id` so we
     /// never cancel a holder that already belongs to a newer viewer.
-    fn cancel_viewer_tiles(&self, frame: &eframe::Frame, image_id: i64) {
+    pub(crate) fn cancel_viewer_tiles(&self, frame: &eframe::Frame, image_id: i64) {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -3562,380 +3564,7 @@ impl eframe::App for FerroliteApp {
         // thing that reacts to a keypress, and stops shortcuts like Enter or
         // Ctrl+A from leaking through to the grid/viewer underneath.
         if !self.modal_active() {
-            // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
-            // closed image's work stops competing with whatever is opened next.
-            if self
-                .state
-                .settings
-                .keymap
-                .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
-            {
-                self.maybe_regen_on_leave(ctx, frame);
-                if let Some(v) = self.state.viewer.take() {
-                    v.cancel_loads();
-                    self.cancel_viewer_tiles(frame, v.image_id);
-                    self.module = crate::module::Module::Library;
-                }
-            }
-
-            // Enter opens the selected image in the viewer (library grid only, no
-            // viewer already open, exactly one image selected). Suppressed while a
-            // modal is up or a text field holds focus (so a future search box's
-            // Enter won't pop the viewer).
-            if self.module.is_library()
-                && self.state.viewer.is_none()
-                && !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::OpenImage)
-            {
-                if let Some(sel_id) = self.state.selected {
-                    if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
-                        self.open_record(ctx, frame, &rec);
-                    }
-                }
-            }
-
-            // F1 opens the Help modal. Global: works regardless of module/viewer
-            // state, but suppressed while a text field holds focus or another
-            // modal is up (consistent with the neighboring shortcuts here).
-            if !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::OpenHelp)
-            {
-                self.show_help = true;
-            }
-
-            // Ctrl+, opens the Settings window. Global, same gating as Help
-            // above. Since this whole region is gated on `!self.modal_active()`
-            // (which now includes `show_settings`), the shortcut only opens
-            // Settings when no modal is already up — acceptable, since a
-            // modal already on screen has its own dismissal path.
-            if !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::OpenSettings)
-            {
-                self.show_settings = true;
-            }
-
-            // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
-            // Library grid only (no viewer, no modal, no text field focused).
-            if self.module.is_library()
-                && self.state.viewer.is_none()
-                && !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::SelectAll)
-            {
-                self.state.toggle_select_all();
-            }
-
-            // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
-            // toggles. In Library (no viewer) they apply to the grid selection; in
-            // Develop or Library+viewer they apply to the open viewer image.
-            if !ctx.wants_keyboard_input() {
-                use ferrolite_image::{Flag, Rating};
-
-                // --- 1. Read key intent ---
-                enum KeyIntent {
-                    Rating(u8),
-                    Flag(Flag),
-                }
-                // Routed through the keymap (one lookup per Action, each its own
-                // `ctx.input` call inside `Keymap::pressed`); priority order (ratings
-                // 0..5, then Pick, then Reject) and "one intent per frame" preserved.
-                use crate::settings::keymap::Action;
-                let km = &self.state.settings.keymap;
-                let rating_actions = [
-                    Action::Rating0,
-                    Action::Rating1,
-                    Action::Rating2,
-                    Action::Rating3,
-                    Action::Rating4,
-                    Action::Rating5,
-                ];
-                let mut intent = None;
-                for (n, action) in rating_actions.into_iter().enumerate() {
-                    if km.pressed(ctx, action) {
-                        intent = Some(KeyIntent::Rating(n as u8));
-                        break;
-                    }
-                }
-                let intent = intent.or_else(|| {
-                    if km.pressed(ctx, Action::FlagPick) {
-                        Some(KeyIntent::Flag(Flag::Pick))
-                    } else if km.pressed(ctx, Action::FlagReject) {
-                        Some(KeyIntent::Flag(Flag::Reject))
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(intent) = intent {
-                    // --- 2. Resolve target image id ---
-                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                        self.state.selected
-                    } else {
-                        self.state.viewer.as_ref().map(|v| v.image_id)
-                    };
-
-                    if let Some(target_id) = target_id {
-                        // --- 3. Look up current value ---
-                        let rec = self.state.images.iter().find(|r| r.id == target_id);
-                        let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
-                        let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
-
-                        // --- 4. Build toggled edit ---
-                        let edit = match intent {
-                            KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(
-                                Rating::new(crate::metadata::toggle_rating(cur_rating, n)),
-                            ),
-                            KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
-                                crate::metadata::toggle_flag(cur_flag, f),
-                            ),
-                        };
-
-                        // --- 5. Apply ---
-                        if self.module.is_library() && self.state.viewer.is_none() {
-                            self.state.apply_metadata_edit(ctx, edit);
-                        } else {
-                            self.state
-                                .apply_metadata_edit_to_image(ctx, target_id, edit);
-                        }
-                    }
-                }
-
-                // Q toggles export-queue membership for the same target image used
-                // by the rating/flag intents above (grid selection in Library-no-
-                // viewer, else the open viewer image). Kept as a parallel check
-                // rather than folded into `KeyIntent` so the rating/flag toggle
-                // logic above is untouched.
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::AddToQueue)
-                {
-                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                        self.state.selected
-                    } else {
-                        self.state.viewer.as_ref().map(|v| v.image_id)
-                    };
-                    if let Some(target_id) = target_id {
-                        let was_queued = self.state.queue_contains(target_id);
-                        self.state.queue_toggle(target_id);
-                        self.state.notify(
-                            crate::notifications::Level::Info,
-                            if was_queued {
-                                "Removed from export queue."
-                            } else {
-                                "Added to export queue."
-                            },
-                        );
-                    }
-                }
-            }
-
-            // Left/Right move between images while viewing (Develop), non-cyclic.
-            if self.module == crate::module::Module::Develop
-                && self.state.viewer.is_some()
-                && !ctx.wants_keyboard_input()
-            {
-                let km = &self.state.settings.keymap;
-                let dir = if km.pressed(ctx, crate::settings::keymap::Action::NextImage) {
-                    Some(crate::viewer::nav::Step::Next)
-                } else if km.pressed(ctx, crate::settings::keymap::Action::PrevImage) {
-                    Some(crate::viewer::nav::Step::Prev)
-                } else {
-                    None
-                };
-                if let Some(dir) = dir {
-                    self.navigate_step(ctx, frame, dir);
-                }
-
-                // Before/After: `\` shows the empty (before) stack while held, and
-                // reverts to the live stack on release.
-                //
-                // NOTE (Task 2.3 keymap routing, deliberate behavior change): the
-                // dispatch for this refactor explicitly routes `HoldBeforePeek`
-                // through `Keymap::held` (level-triggered), matching the keymap's
-                // own design — `Action::HoldBeforePeek` is documented as "Hold to
-                // show original (before)" and `held()` exists specifically for this
-                // action. The pre-refactor code actually toggled `before_after` on
-                // each `key_pressed` (an edge-triggered latch), which contradicted
-                // its own doc comment in `viewer/mod.rs` calling it "momentary".
-                // This routes it to the momentary/hold behavior the naming always
-                // implied: `before_after` now directly mirrors "is the chord held",
-                // only re-evaluating the preview on an actual state transition
-                // (press or release), not every frame it's held.
-                let hold_before = self
-                    .state
-                    .settings
-                    .keymap
-                    .held(ctx, crate::settings::keymap::Action::HoldBeforePeek);
-                let before_after_changed = self
-                    .state
-                    .viewer
-                    .as_ref()
-                    .is_some_and(|v| v.before_after != hold_before);
-                if before_after_changed {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        v.before_after = hold_before;
-                    }
-                    let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
-                    self.set_preview_and_full(frame, stack); // re-evaluates with before_after
-                }
-
-                // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
-                // keymap's bound chord (defaults to Ctrl+Shift+Z) — kept for users
-                // used to the common Ctrl+Y redo convention.
-                let km = &self.state.settings.keymap;
-                let undo = km.pressed(ctx, crate::settings::keymap::Action::Undo);
-                let ctrl_y = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y));
-                let redo = km.pressed(ctx, crate::settings::keymap::Action::Redo) || ctrl_y;
-                if undo || redo {
-                    self.apply_undo_redo(ctx, frame, undo);
-                }
-
-                // Toggle before/after SPLIT-compare (draggable divider), mirroring
-                // the `develop_filter_bar` toggle button's click handling exactly:
-                // flips `split_compare` and, only when turning it on, resets
-                // `split_pos` to center. (Auto-fit-at-1:1 is a later task — not
-                // added here.)
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ToggleSplitCompare)
-                {
-                    self.toggle_split_compare();
-                }
-
-                // Tool-switch keybinds (A/C/M by default) and mask-overlay toggle.
-                // Mirrors the tool palette's `SelectTool` handler's borrow
-                // discipline: resolve `enabled` via a shared borrow first, then
-                // take `&mut self.state.viewer` to apply it.
-                let km = &self.state.settings.keymap;
-                let tool = if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolAdjust) {
-                    Some(crate::develop::tool::ToolId::Adjust)
-                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolCrop) {
-                    Some(crate::develop::tool::ToolId::Crop)
-                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolMask) {
-                    Some(crate::develop::tool::ToolId::Mask)
-                } else {
-                    None
-                };
-                if let Some(id) = tool {
-                    let enabled = self
-                        .tool_registry
-                        .get(id)
-                        .map(|t| {
-                            t.enabled(&crate::develop::tool::DevelopCtx { state: &self.state })
-                        })
-                        .unwrap_or(false);
-                    if self.state.viewer.is_some() {
-                        self.state
-                            .tool_state
-                            .select_tool(id, enabled, &self.tool_registry);
-                    }
-                }
-
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ToggleMaskOverlay)
-                {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        v.mask.overlay_on = !v.mask.overlay_on;
-                    }
-                }
-
-                // New Brush Layer (default `B`): starts a fresh, separately-deletable
-                // `Brush` component in the selected mask — the explicit "split" for the
-                // merge-by-default brush model. Gated on the Mask tool being active
-                // (mirrors `ToggleMaskOverlay` above) plus an actual mask selection.
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::NewBrushLayer)
-                {
-                    let stack_and_idx = self.state.viewer.as_ref().and_then(|v| {
-                        (v.mask.active && v.mask.selected.is_some())
-                            .then(|| (v.op_stack.clone(), v.mask.selected.unwrap()))
-                    });
-                    if let Some((stack, idx)) = stack_and_idx {
-                        let new_stack = crate::develop::mask_edit::new_brush_layer(&stack, idx);
-                        self.apply_edit(
-                            ctx,
-                            frame,
-                            ferrolite_pipeline::OpKind::LocalAdjustments,
-                            new_stack,
-                            true,
-                        );
-                    }
-                }
-
-                // Zoom-to-fit (default `F`) and Zoom 1:1 (default `Z`): rebuild the
-                // same transforms the canvas's double-click toggle already builds
-                // (`viewer/mod.rs`'s `paint`), just from a keybind instead of a
-                // double-click gesture.
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ZoomFit)
-                {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if let Some(dims) = v.image_dims {
-                            v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
-                            v.idle = false;
-                            // Snap cleanly to fit: drop any pending/residual scroll so
-                            // trackpad momentum can't keep zooming past the fit this
-                            // frame (drive_viewer reads these deltas later this frame).
-                            ctx.input_mut(|i| {
-                                i.raw_scroll_delta = egui::Vec2::ZERO;
-                                i.smooth_scroll_delta = egui::Vec2::ZERO;
-                            });
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ZoomActual)
-                {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_dims.is_some() {
-                            v.view = ferrolite_vt::ViewTransform {
-                                zoom: 1.0,
-                                pan: (0.0, 0.0),
-                            };
-                            v.idle = false;
-                            // Same as fit: kill residual scroll velocity so the 1:1
-                            // snap isn't immediately dragged off by trackpad momentum.
-                            ctx.input_mut(|i| {
-                                i.raw_scroll_delta = egui::Vec2::ZERO;
-                                i.smooth_scroll_delta = egui::Vec2::ZERO;
-                            });
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-            }
+            crate::app::shortcuts::dispatch(ctx, self, frame);
         }
 
         // Submit the tier-1 preview decode once when a viewer opens, and (for RAW,

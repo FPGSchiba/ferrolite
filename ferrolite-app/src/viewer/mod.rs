@@ -126,13 +126,12 @@ pub struct ViewerState {
     /// True while the Tier-0 placeholder (the upscaled grid thumbnail shown at
     /// open, before the real reveal) is fading out over the revealed image.
     /// Begun when `loaded` first flips true; cleared when the ramp completes.
-    #[allow(dead_code)]
-    // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
     pub tier0_fading: bool,
     /// Seconds elapsed into the active Tier-0 placeholder fade.
-    #[allow(dead_code)]
-    // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
     pub tier0_elapsed: f32,
+    /// One-shot: set true once the Tier-0 fade has been kicked off for this open,
+    /// so the `loaded`-edge trigger in `paint` fires exactly once.
+    pub tier0_started: bool,
     /// Terminal state: nothing more will load (preview failed AND/OR full failed,
     /// or full is ready and the crossfade is complete with no tiles pending). When
     /// set the paint loop stops requesting repaints to avoid a busy-loop.
@@ -331,6 +330,7 @@ impl ViewerState {
             crossfade_elapsed: 0.0,
             tier0_fading: false,
             tier0_elapsed: 0.0,
+            tier0_started: false,
             idle: false,
             showing_full: false,
             image_dims: None,
@@ -402,7 +402,6 @@ impl ViewerState {
     /// Begin the Tier-0 placeholder fade (called once, when the real reveal
     /// first sets `loaded = true`). No-op semantics if called again mid-fade are
     /// avoided by the caller's one-shot guard in `paint`.
-    #[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
     pub fn begin_tier0_fade(&mut self) {
         self.tier0_fading = true;
         self.tier0_elapsed = 0.0;
@@ -411,7 +410,6 @@ impl ViewerState {
     /// Advance the Tier-0 fade by `dt` and return the current placeholder opacity
     /// in `[0,1]`. Clears `tier0_fading` once the ramp completes so the repaint
     /// loop can idle. Returns 0.0 when not fading.
-    #[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
     pub fn tick_tier0_fade(&mut self, dt: f32) -> f32 {
         if !self.tier0_fading {
             return 0.0;
@@ -485,7 +483,6 @@ impl ViewerState {
 /// Tier-0 placeholder opacity for a given elapsed time: ramps linearly from 1.0
 /// (fully covering the just-revealed image) to 0.0 over `TIER0_FADE_SECS`, then
 /// stays 0. Pure — unit-tested; the draw + ramp advance live in `paint`.
-#[allow(dead_code)] // wired into paint by Task 2/3 (fast-JPG placeholder), not yet consumed
 pub fn tier0_fade_alpha(elapsed: f32) -> f32 {
     (1.0 - elapsed / TIER0_FADE_SECS).clamp(0.0, 1.0)
 }
@@ -651,6 +648,46 @@ pub fn paint(
                 which: crate::viewer::PreviewWhich::After,
             },
         ));
+
+        // Tier-0 fade-out: the first frame the real reveal is `loaded`, start a
+        // short ramp; while it runs, draw the grid thumbnail once more OVER the
+        // wgpu canvas at decreasing opacity, aligned to where the revealed image
+        // sits, so the lower-res placeholder dissolves into the sharp render with
+        // no hard pop. Only meaningful when a placeholder was actually shown
+        // (a thumbnail exists) — otherwise the ramp is a no-op fade of nothing.
+        if let Some(thumb) = tier0_thumb {
+            if !state.tier0_started {
+                state.tier0_started = true;
+                state.begin_tier0_fade();
+            }
+            if state.tier0_fading {
+                let dt = ui.input(|i| i.stable_dt);
+                let alpha = state.tick_tier0_fade(dt);
+                if alpha > 0.0 {
+                    // Align to the revealed image rect when dims are known
+                    // (seamless), else fall back to the fit letterbox.
+                    let dst = match state.image_dims {
+                        Some(dims) => image_screen_rect(rect, dims, state.view, viewport),
+                        None => {
+                            let sz = thumb.size();
+                            fit_rect(rect, (sz[0] as f32, sz[1] as f32))
+                        }
+                    };
+                    let tint = egui::Color32::from_white_alpha((alpha * 255.0) as u8);
+                    ui.painter().image(
+                        thumb.id(),
+                        dst,
+                        egui::Rect::from_min_max(
+                            egui::pos2(0.0_f32, 0.0_f32),
+                            egui::pos2(1.0_f32, 1.0_f32),
+                        ),
+                        tint,
+                    );
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+
         (false, source)
     } else {
         // Tier-0: if the grid thumbnail for this image is already decoded, draw

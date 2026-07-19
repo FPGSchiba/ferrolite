@@ -612,9 +612,18 @@ mod tests {
         // encode with the Standard matrix, decode, back to linear: the round trip
         // must land close to the original linear values (JPEG q90 + 8-bit tolerance).
         use ferrolite_image::{ImageBuffer, PixelFormat};
-        // A 8x8 solid patch of sRGB 128 (mid gray) so JPEG has no edges to ring.
-        let src8 = ImageBuffer::new(8, 8, PixelFormat::Rgb8, vec![128u8; 8 * 8 * 3])
-            .expect("valid rgb8 patch");
+        // A 8x8 solid CHROMATIC patch (distinct R,G,B) — NOT neutral gray. A gray
+        // triple is a scalar multiple of white, which every `working_to_display`
+        // matrix maps to itself, so a gray round trip could not distinguish the
+        // correct `identity()` from a wrong `working_to_display(...)` matrix (the
+        // one thing this test exists to confirm). A saturated color shifts under
+        // any non-identity matrix, so the round trip only closes when the matrix
+        // is truly identity. Solid block => JPEG q90 rings nothing, tolerance stays tight.
+        let mut px = Vec::with_capacity(8 * 8 * 3);
+        for _ in 0..(8 * 8) {
+            px.extend_from_slice(&[200u8, 90u8, 40u8]);
+        }
+        let src8 = ImageBuffer::new(8, 8, PixelFormat::Rgb8, px).expect("valid rgb8 patch");
         let linear = crate::viewer::load::preview_to_linear(&src8); // display-linear sRGB
         let jpeg = encode_srgb_jpeg(
             &linear,
@@ -625,12 +634,15 @@ mod tests {
         .expect("encode succeeds");
         let decoded = decode_srgb_jpeg(&jpeg).expect("decode succeeds");
         let round = crate::viewer::load::preview_to_linear(&decoded);
-        // Center pixel comparison (avoid any border resampling); dims unchanged (8<2048).
         assert_eq!((round.width, round.height), (8, 8));
-        let (o, r) = (linear.pixels[0], round.pixels[0]);
-        assert!(
-            (o - r).abs() < 0.02,
-            "sRGB round-trip within tolerance: {o} vs {r}"
-        );
+        // Compare all three channels of the first pixel (every pixel is identical
+        // in a solid block) so a channel-mixing matrix would be caught too.
+        for c in 0..3 {
+            let (o, r) = (linear.pixels[c], round.pixels[c]);
+            assert!(
+                (o - r).abs() < 0.02,
+                "sRGB round-trip channel {c} within tolerance: {o} vs {r}"
+            );
+        }
     }
 }

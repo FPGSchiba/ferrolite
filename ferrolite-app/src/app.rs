@@ -1126,14 +1126,11 @@ impl FerroliteApp {
                 if v.image_id != image_id {
                     return None;
                 }
-                crate::develop::preview_cache::should_write_back(
-                    is_raw,
-                    &v.op_stack,
-                    v.cache_write_back,
-                )
-                .then(|| (v.path.clone(), v.op_stack.clone()))
+                crate::develop::preview_cache::should_write_back(&v.op_stack, v.cache_write_back)
+                    .then(|| (v.path.clone(), v.op_stack.clone()))
             });
-            // `should_write_back` requires `is_raw`, so `raw_preview_source` is
+            // `apply_full_decoded` only runs for RAW opens (see the `is_raw.then`
+            // guard on `raw_preview_source` above), so `raw_preview_source` is
             // always `Some` here — but match defensively rather than unwrap.
             if let (Some((path, op_stack)), Some(render)) =
                 (write_back, raw_preview_source.as_ref())

@@ -2,9 +2,10 @@
 //!
 //! Task 5 wires the pure `ferrolite-previews` crate into the app: it builds a
 //! [`PreviewKey`] from the open RAW's file identity + edit stack + color
-//! pipeline, and — on a qualifying RAW open — spawns a `Background` job that
-//! encodes the identity (unedited) color-managed render to a 2048px sRGB JPEG
-//! and stores it under that key, then trims the cache to its cap.
+//! pipeline, and — on a qualifying open (RAW or Standard) — spawns a
+//! `Background` job that encodes the identity (unedited) color-managed render
+//! to a 2048px sRGB JPEG and stores it under that key, then trims the cache to
+//! its cap.
 //!
 //! ## Correctness guard (load-bearing)
 //!
@@ -87,16 +88,17 @@ pub fn key_for(
 
 /// Whether an open should write its render back to the preview cache.
 ///
-/// Three conditions must all hold:
-/// * **RAW** — Standard images never reach the RAW reveal path.
-/// * **default op stack** — Task 5 caches the identity render but keys by the
-///   actual stack, so caching under an edited key would later reveal the wrong
-///   image (see the module-level correctness guard).
+/// Two conditions must both hold (format-agnostic — RAW and Standard/JPG are
+/// treated equally, per the tiered-cache design: JPGs are first-class camera
+/// originals, not quick looks):
+/// * **default op stack** — the payload encoded is the *identity* render but the
+///   key hashes the *actual* stack, so caching under an edited key would later
+///   reveal the wrong image (see the module-level correctness guard).
 /// * **cache miss** (`is_cache_miss`) — a cache *hit* already has the entry on
-///   disk, so re-encoding + re-writing it would be pure waste. Task 6 threads
-///   the real miss flag here from the read path (`v.cache_write_back`).
-pub fn should_write_back(is_raw: bool, op_stack: &OpStack, is_cache_miss: bool) -> bool {
-    is_raw && *op_stack == OpStack::default() && is_cache_miss
+///   disk, so re-encoding it would be pure waste. The read path threads the real
+///   miss flag here (`v.cache_write_back`).
+pub fn should_write_back(op_stack: &OpStack, is_cache_miss: bool) -> bool {
+    *op_stack == OpStack::default() && is_cache_miss
 }
 
 /// Look up `key` in `store`; on a hit decode the cached JPEG and convert it from
@@ -456,22 +458,22 @@ mod tests {
     }
 
     #[test]
-    fn write_back_only_for_raw_default_stack_on_miss() {
+    fn write_back_gated_on_default_stack_and_miss_for_any_kind() {
         let default_stack = OpStack::default();
         let edited_stack = default_stack.set_op(ferrolite_pipeline::Op::Exposure(
             ferrolite_pipeline::Exposure { ev: 0.5 },
         ));
 
-        // RAW + default stack + cache MISS → write back (the only qualifying case).
-        assert!(should_write_back(true, &default_stack, true));
-        // RAW + default stack + cache HIT → SKIP: the entry already exists on
-        // disk, so re-encoding it is pure waste.
-        assert!(!should_write_back(true, &default_stack, false));
-        // RAW + edited stack → SKIP (guard: identity render under an edited key
+        // Default stack + cache MISS -> write back (the only qualifying case).
+        // Now format-agnostic: JPGs are first-class originals and cache the same
+        // way RAWs do (spec: JPG Tier-1 write-back).
+        assert!(should_write_back(&default_stack, true));
+        // Default stack + cache HIT -> SKIP: the entry already exists on disk, so
+        // re-encoding it is pure waste.
+        assert!(!should_write_back(&default_stack, false));
+        // Edited stack -> SKIP (guard: an identity render under an edited key
         // would reveal the wrong image), regardless of the miss flag.
-        assert!(!should_write_back(true, &edited_stack, true));
-        // Non-RAW → never (standard images do not reach the RAW reveal path).
-        assert!(!should_write_back(false, &default_stack, true));
+        assert!(!should_write_back(&edited_stack, true));
     }
 
     #[test]

@@ -232,7 +232,7 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
                 v.before_after = hold_before;
             }
             let stack = app.state.viewer.as_ref().unwrap().op_stack.clone();
-            app.set_preview_and_full(frame, stack); // re-evaluates with before_after
+            crate::app::controller::AppController::set_preview_and_full(app, frame, stack); // re-evaluates with before_after
         }
 
         // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
@@ -316,7 +316,8 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
             });
             if let Some((stack, idx)) = stack_and_idx {
                 let new_stack = crate::develop::mask_edit::new_brush_layer(&stack, idx);
-                app.apply_edit(
+                crate::app::controller::AppController::apply_edit(
+                    app,
                     ctx,
                     frame,
                     ferrolite_pipeline::OpKind::LocalAdjustments,

@@ -29,9 +29,7 @@ pub struct CacheKey {
 /// `tex` is `None` only in headless tests; production always stores `Some`.
 #[derive(Clone)]
 pub struct DisplayEntry {
-    #[allow(dead_code)] // read by try_warm_reveal (wired by Task 4)
     pub tex: Option<Arc<wgpu::Texture>>,
-    #[allow(dead_code)] // read by try_warm_reveal (wired by Task 4)
     pub dims: (u32, u32),
     pub bytes: u64,
 }
@@ -51,7 +49,6 @@ pub enum WarmHit {
         full: FullEntry,
         display: DisplayEntry,
     },
-    #[allow(dead_code)] // matched by try_warm_reveal (wired by Task 4)
     Display(DisplayEntry),
     Miss,
 }
@@ -59,23 +56,18 @@ pub enum WarmHit {
 /// A monotonically increasing tick used as the LRU last-touch stamp.
 type Touch = u64;
 
-// `Slot`/`WarmCache` are not yet constructed from production code — `AppState`
-// gains a `warm_cache: WarmCache` field in Task 4, which is the first production
-// call site. Until then the bin's private `mod develop;` tree (see main.rs) has
-// no reachable caller, so `-D warnings` needs these narrow allows (cf. the same
-// situation documented in icons.rs). Tests already exercise the pure logic.
-#[allow(dead_code)] // constructed by WarmCache::insert_display (wired by Task 4)
+// `AppState` holds a `warm_cache: WarmCache` field (Task 4), the production
+// construction site; `try_warm_reveal`/`warm_insert_display` (`app.rs`) are the
+// production `get`/`insert_display` call sites. Tests exercise the pure logic
+// directly, below.
 struct Slot<E> {
     entry: E,
     touched: Touch,
 }
 
-#[allow(dead_code)] // constructed by AppState::new (wired by Task 4)
 pub struct WarmCache {
-    #[allow(dead_code)] // read by evict_to_budget's real impl (wired by Task 3)
     budget: u64,
     clock: Touch,
-    #[allow(dead_code)] // read by evict_to_budget's real impl (wired by Task 3)
     open: Option<CacheKey>,
     display: HashMap<CacheKey, Slot<DisplayEntry>>,
     // Full tier added in Task 5.
@@ -84,7 +76,6 @@ pub struct WarmCache {
 }
 
 impl WarmCache {
-    #[allow(dead_code)] // wired by Task 4 (AppState::new)
     pub fn new(budget: u64) -> Self {
         Self {
             budget,
@@ -95,7 +86,6 @@ impl WarmCache {
         }
     }
 
-    #[allow(dead_code)] // called by get/insert_display (wired by Task 4)
     fn tick(&mut self) -> Touch {
         self.clock += 1;
         self.clock
@@ -110,12 +100,10 @@ impl WarmCache {
     }
 
     /// Mark which key is the currently-open image — it is never evicted.
-    #[allow(dead_code)] // wired by Task 4 (warm_insert_display)
     pub fn set_open(&mut self, open: Option<CacheKey>) {
         self.open = open;
     }
 
-    #[allow(dead_code)] // wired by Task 4 (try_warm_reveal)
     pub fn get(&mut self, key: CacheKey) -> WarmHit {
         let now = self.tick();
         if let Some(f) = self.full.get_mut(&key) {
@@ -136,7 +124,6 @@ impl WarmCache {
         WarmHit::Miss
     }
 
-    #[allow(dead_code)] // wired by Task 4 (warm_insert_display)
     pub fn insert_display(&mut self, key: CacheKey, entry: DisplayEntry) {
         let now = self.tick();
         self.display.insert(

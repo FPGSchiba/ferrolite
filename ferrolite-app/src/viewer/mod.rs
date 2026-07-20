@@ -302,6 +302,12 @@ pub struct ViewerState {
     /// not it found a candidate) — a one-shot guard so it re-runs at most once
     /// per open, not every frame while `meta`/`ops_loaded` are both `Some`.
     pub lens_auto_match_attempted: bool,
+
+    /// `true` once `try_warm_reveal` has installed a cached render for this
+    /// open (a warm-cache hit). Gates the normal Tier-0/1/decode submission in
+    /// the open-flow drive loop so a warm hit does not also kick off a
+    /// redundant decode — the reveal is already on screen from RAM.
+    pub warm_revealed: bool,
 }
 
 impl ViewerState {
@@ -373,6 +379,7 @@ impl ViewerState {
             meta_read_handle: None,
             lens_auto_match: None,
             lens_auto_match_attempted: false,
+            warm_revealed: false,
         }
     }
 
@@ -476,6 +483,13 @@ impl ViewerState {
         if let Some(h) = self.meta_read_handle.as_ref() {
             h.cancel();
         }
+    }
+
+    /// Stable hash of this viewer's current op stack, for warm-cache keying.
+    /// Uses the same `hash_serde` the disk preview cache keys with, so identical
+    /// stacks collide intentionally and any edit changes the hash.
+    pub fn op_stack_hash(&self) -> u64 {
+        ferrolite_previews::hash_serde(&self.op_stack)
     }
 }
 
@@ -799,6 +813,20 @@ mod tests {
         assert!(
             !v.edits_dirty,
             "a freshly opened viewer has no session edits"
+        );
+    }
+
+    #[test]
+    fn op_stack_hash_changes_with_edits() {
+        let mut v = ViewerState::open(1, std::path::PathBuf::from("x.raw"), FileKind::Raw);
+        let h0 = v.op_stack_hash();
+        v.op_stack = v.op_stack.set_op(ferrolite_pipeline::Op::Exposure(
+            ferrolite_pipeline::Exposure { ev: 1.0 },
+        ));
+        assert_ne!(
+            h0,
+            v.op_stack_hash(),
+            "an edit must change the warm-cache hash"
         );
     }
 

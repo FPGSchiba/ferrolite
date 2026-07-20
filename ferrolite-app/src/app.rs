@@ -347,6 +347,31 @@ impl FerroliteApp {
             )
         };
 
+        if !self.install_preview_holder(frame, image_id, vt, dims) {
+            return false;
+        }
+        self.warm_insert_display(frame, image_id);
+        true
+    }
+
+    /// Shared holder-install tail for a rung-1 preview reveal: fit the view to
+    /// `dims`, mark `image_dims`/`loaded`/`idle`, allocate fresh present
+    /// buffers, and insert the `ViewerGpu` callback resource wrapping `vt`.
+    /// Shared by `reveal_srgb_preview` (a freshly color-converted texture) and
+    /// `try_warm_reveal` (a warm-cache-hit texture) so there is exactly one
+    /// holder-install path (DRY). Returns `false` if the GPU render state is
+    /// unavailable or the viewer has since navigated away from `image_id`.
+    fn install_preview_holder(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        vt: ferrolite_vt::VirtualTexture,
+        dims: (u32, u32),
+    ) -> bool {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return false;
+        };
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
         let Some(v) = self.state.viewer.as_mut() else {
             return false;
         };
@@ -363,9 +388,10 @@ impl FerroliteApp {
         v.view = ferrolite_vt::ViewTransform::fit(dims, viewport);
         v.image_dims = Some(dims);
         v.loaded = true;
-        // This tier has no tier-2 to wait for (Standard preview IS full-res, and
-        // the RAW fallback has given up on the full) — go idle so the repaint
-        // loop does not spin.
+        // This tier has no tier-2 to wait for (Standard preview IS full-res, the
+        // RAW fallback has given up on the full, and a warm-cache display hit
+        // skips the decode ladder entirely for this open) — go idle so the
+        // repaint loop does not spin.
         v.idle = true;
 
         // Placeholder (1,1) present-buffer size: `drive_viewer`'s per-frame
@@ -392,6 +418,107 @@ impl FerroliteApp {
             });
         self.mark_histogram_dirty();
         true
+    }
+
+    /// If the open viewer's `(image_id, op_stack_hash)` is warm in the cache,
+    /// install its cached render immediately and return true (skipping Tier-0/1/
+    /// decode). A `Full` hit installs the full pipeline (instant 1:1); a `Display`
+    /// hit installs the rung-1 preview VT (instant fit). A miss returns false and
+    /// the normal ladder runs.
+    ///
+    /// A `Display` hit sets `v.warm_revealed = true`, which gates the open-flow's
+    /// Tier-1 preview / preview-cache-read / decode submission off for this open
+    /// (see `drive_viewer`) — the rung-1 reveal is already on screen from RAM, so
+    /// re-decoding it would be pure waste and risks a visible flicker from a
+    /// disk-preview-cache hit re-installing a redundant holder. `install_preview_
+    /// holder` leaves `v.idle = true` ("nothing more will load"), which is
+    /// accurate for Phase A's display tier: the sparse full (1:1) VT is not part
+    /// of this cache (Task 5/6 add the full-pipeline tier), so it does not stream
+    /// in after a display-tier warm reveal this session.
+    fn try_warm_reveal(&mut self, frame: &eframe::Frame, image_id: i64) -> bool {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return false;
+        };
+        let key = match self.state.viewer.as_ref() {
+            Some(v) if v.image_id == image_id => crate::develop::cache::CacheKey {
+                image_id,
+                op_stack_hash: v.op_stack_hash(),
+            },
+            _ => return false,
+        };
+        let hit = self.state.warm_cache.get(key);
+        let display = match hit {
+            crate::develop::cache::WarmHit::Miss => return false,
+            crate::develop::cache::WarmHit::Display(d) => d,
+            // Full-tier install is Task 5/6; for Phase A treat Full as its display.
+            crate::develop::cache::WarmHit::Full { display, .. } => display,
+        };
+        let Some(tex) = display.tex.clone() else {
+            return false;
+        };
+        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
+        let vt = {
+            let renderer = rs.renderer.read();
+            let vp = renderer
+                .callback_resources
+                .get::<viewer::ViewerPipelines>()
+                .expect("ViewerPipelines pre-warmed at startup");
+            self.apply_display_tail(&gpu, vp);
+            ferrolite_vt::VirtualTexture::single_from_texture(
+                &gpu,
+                tex,
+                display.dims,
+                &vp.pipelines,
+            )
+        };
+        if !self.install_preview_holder(frame, image_id, vt, display.dims) {
+            return false;
+        }
+        if let Some(v) = self.state.viewer.as_mut() {
+            if v.image_id == image_id {
+                v.warm_revealed = true;
+            }
+        }
+        true
+    }
+
+    /// Record the just-installed rung-1 display texture into the warm cache so a
+    /// later re-open of this `(image_id, op_stack_hash)` reveals instantly.
+    fn warm_insert_display(&mut self, frame: &eframe::Frame, image_id: i64) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let key = match self.state.viewer.as_ref() {
+            Some(v) if v.image_id == image_id => crate::develop::cache::CacheKey {
+                image_id,
+                op_stack_hash: v.op_stack_hash(),
+            },
+            _ => return,
+        };
+        let (tex, dims) = {
+            let renderer = rs.renderer.read();
+            let Some(g) = renderer.callback_resources.get::<viewer::ViewerGpu>() else {
+                return;
+            };
+            if g.image_id != image_id {
+                return;
+            }
+            match (g.preview.single_texture_arc(), g.preview.single_dims()) {
+                (Some(t), Some(d)) => (t, d),
+                _ => return,
+            }
+        };
+        // Rgba16Float rung-1 texture = 8 B/px.
+        let bytes = dims.0 as u64 * dims.1 as u64 * 8;
+        self.state.warm_cache.set_open(Some(key));
+        self.state.warm_cache.insert_display(
+            key,
+            crate::develop::cache::DisplayEntry {
+                tex: Some(tex),
+                dims,
+                bytes,
+            },
+        );
     }
 
     /// Flag the histogram stale so the next frame recomputes it (debounced).
@@ -1211,6 +1338,9 @@ impl FerroliteApp {
             }
         }
 
+        if preview_installed {
+            self.warm_insert_display(frame, image_id);
+        }
         self.mark_histogram_dirty();
     }
 
@@ -2685,6 +2815,10 @@ impl FerroliteApp {
             self.cancel_viewer_tiles(frame, old_id);
         }
         self.state.open_image_in_viewer(rec);
+        // Consult the warm cache immediately: a display-tier hit reveals sharp at
+        // fit instantly from RAM, short-circuiting the Tier-0/1/decode ladder
+        // below for this open (`v.warm_revealed`, checked in `drive_viewer`).
+        self.try_warm_reveal(frame, rec.id);
         self.module = crate::module::Module::Develop;
         if let Some(before) = mem_before {
             let after = self.gather_mem_breakdown();
@@ -4002,93 +4136,103 @@ impl eframe::App for FerroliteApp {
         // here — it is gated behind the preview-cache read below (mirrors RAW's
         // full-decode gate) so a re-open reveals the cached 2048px entry first.
         if let Some(v) = self.state.viewer.as_mut() {
-            if !v.preview_requested && v.kind == ferrolite_image::FileKind::Raw {
-                let h = viewer::load::spawn_preview(
-                    &self.state.jobs,
-                    &self.state.tx,
-                    ctx,
-                    v.image_id,
-                    v.path.clone(),
-                    v.kind,
-                );
-                v.preview_handle = Some(h);
-                v.preview_requested = true;
-            }
-            // Tier-1 preview-cache read, then the heavy decode — for BOTH kinds.
-            // Debounced (FULL_DECODE_DEBOUNCE) so fast arrow-nav doesn't submit a
-            // read/decode per image flipped through — only the settled-on image
-            // does, once `open_elapsed` crosses the threshold.
-            //
-            // Read-before-decode: consult the preview cache FIRST
-            // (`spawn_cache_read`). The heavy decode is gated on the read having
-            // resolved (`cache_resolved`), so a cache HIT reveals the 2048px entry
-            // from disk (`apply_preview_cache_hit`) and the decode then streams in
-            // the extra 1:1 detail — a MISS falls straight through to decode +
-            // write-back. Phase 2's Tier-0 thumbnail covers the debounce window.
-            let dt = ctx.input(|i| i.stable_dt);
-            v.open_elapsed += dt;
-            let heavy_pending = if v.kind == ferrolite_image::FileKind::Raw {
-                !v.full_requested
-            } else {
-                !v.preview_requested
-            };
-            if !v.cache_read_requested || (heavy_pending && v.cache_resolved) {
-                if v.open_elapsed >= FULL_DECODE_DEBOUNCE {
-                    if !v.cache_read_requested {
-                        let h = crate::develop::preview_cache::spawn_cache_read(
-                            &self.state.jobs,
-                            std::sync::Arc::clone(&self.state.preview_store),
-                            &self.state.tx,
-                            ctx,
-                            v.image_id,
-                            v.path.clone(),
-                            v.op_stack.clone(),
-                            self.state.working_space,
-                        );
-                        v.cache_read_handle = Some(h);
-                        v.cache_read_requested = true;
-                    } else if heavy_pending && v.cache_resolved {
-                        if v.kind == ferrolite_image::FileKind::Raw {
-                            if let Some(rs) = frame.wgpu_render_state() {
-                                let gpu = std::sync::Arc::new(
-                                    ferrolite_gpu::GpuContext::from_render_state(rs),
-                                );
-                                let h = viewer::load::spawn_full(
+            // A warm-cache display hit (`try_warm_reveal`, called from
+            // `open_record`) already installed a sharp rung-1 reveal from RAM for
+            // this open — skip the Tier-1 preview / preview-cache-read / decode
+            // submission below entirely so it doesn't ALSO decode (redundant CPU
+            // work, and a cache-read HIT would re-install a holder over the
+            // already-good warm content). `ops_read`/`meta_read` below are NOT
+            // decode work (cheap metadata reads unrelated to the reveal) and must
+            // still run so the real persisted edits / EXIF hydrate normally.
+            if !v.warm_revealed {
+                if !v.preview_requested && v.kind == ferrolite_image::FileKind::Raw {
+                    let h = viewer::load::spawn_preview(
+                        &self.state.jobs,
+                        &self.state.tx,
+                        ctx,
+                        v.image_id,
+                        v.path.clone(),
+                        v.kind,
+                    );
+                    v.preview_handle = Some(h);
+                    v.preview_requested = true;
+                }
+                // Tier-1 preview-cache read, then the heavy decode — for BOTH kinds.
+                // Debounced (FULL_DECODE_DEBOUNCE) so fast arrow-nav doesn't submit a
+                // read/decode per image flipped through — only the settled-on image
+                // does, once `open_elapsed` crosses the threshold.
+                //
+                // Read-before-decode: consult the preview cache FIRST
+                // (`spawn_cache_read`). The heavy decode is gated on the read having
+                // resolved (`cache_resolved`), so a cache HIT reveals the 2048px entry
+                // from disk (`apply_preview_cache_hit`) and the decode then streams in
+                // the extra 1:1 detail — a MISS falls straight through to decode +
+                // write-back. Phase 2's Tier-0 thumbnail covers the debounce window.
+                let dt = ctx.input(|i| i.stable_dt);
+                v.open_elapsed += dt;
+                let heavy_pending = if v.kind == ferrolite_image::FileKind::Raw {
+                    !v.full_requested
+                } else {
+                    !v.preview_requested
+                };
+                if !v.cache_read_requested || (heavy_pending && v.cache_resolved) {
+                    if v.open_elapsed >= FULL_DECODE_DEBOUNCE {
+                        if !v.cache_read_requested {
+                            let h = crate::develop::preview_cache::spawn_cache_read(
+                                &self.state.jobs,
+                                std::sync::Arc::clone(&self.state.preview_store),
+                                &self.state.tx,
+                                ctx,
+                                v.image_id,
+                                v.path.clone(),
+                                v.op_stack.clone(),
+                                self.state.working_space,
+                            );
+                            v.cache_read_handle = Some(h);
+                            v.cache_read_requested = true;
+                        } else if heavy_pending && v.cache_resolved {
+                            if v.kind == ferrolite_image::FileKind::Raw {
+                                if let Some(rs) = frame.wgpu_render_state() {
+                                    let gpu = std::sync::Arc::new(
+                                        ferrolite_gpu::GpuContext::from_render_state(rs),
+                                    );
+                                    let h = viewer::load::spawn_full(
+                                        &self.state.jobs,
+                                        &self.state.tx,
+                                        ctx,
+                                        v.image_id,
+                                        v.path.clone(),
+                                        gpu,
+                                    );
+                                    v.full_handle = Some(h);
+                                    v.full_requested = true;
+                                }
+                            } else {
+                                // Standard: the heavy tier-1 IS the full-res JPG decode.
+                                // This also runs after a cache HIT (`heavy_pending` is
+                                // `!preview_requested`, still true post-hit) — the 2048px
+                                // reveal from `apply_preview_cache_hit` shows first, then
+                                // this streams in the full-res 1:1 detail.
+                                let h = viewer::load::spawn_preview(
                                     &self.state.jobs,
                                     &self.state.tx,
                                     ctx,
                                     v.image_id,
                                     v.path.clone(),
-                                    gpu,
+                                    v.kind,
                                 );
-                                v.full_handle = Some(h);
-                                v.full_requested = true;
+                                v.preview_handle = Some(h);
+                                v.preview_requested = true;
                             }
-                        } else {
-                            // Standard: the heavy tier-1 IS the full-res JPG decode.
-                            // This also runs after a cache HIT (`heavy_pending` is
-                            // `!preview_requested`, still true post-hit) — the 2048px
-                            // reveal from `apply_preview_cache_hit` shows first, then
-                            // this streams in the full-res 1:1 detail.
-                            let h = viewer::load::spawn_preview(
-                                &self.state.jobs,
-                                &self.state.tx,
-                                ctx,
-                                v.image_id,
-                                v.path.clone(),
-                                v.kind,
-                            );
-                            v.preview_handle = Some(h);
-                            v.preview_requested = true;
                         }
+                    } else {
+                        // Guarantee a frame fires once the debounce elapses even if
+                        // the app would otherwise go idle waiting on input, so a
+                        // still (non-navigated) image's cache read still submits.
+                        ctx.request_repaint_after(std::time::Duration::from_secs_f32(
+                            FULL_DECODE_DEBOUNCE - v.open_elapsed,
+                        ));
                     }
-                } else {
-                    // Guarantee a frame fires once the debounce elapses even if
-                    // the app would otherwise go idle waiting on input, so a
-                    // still (non-navigated) image's cache read still submits.
-                    ctx.request_repaint_after(std::time::Duration::from_secs_f32(
-                        FULL_DECODE_DEBOUNCE - v.open_elapsed,
-                    ));
                 }
             }
             // Read the persisted frl:ops sidecar once per open; the OpsLoaded

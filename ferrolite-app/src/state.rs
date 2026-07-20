@@ -59,6 +59,8 @@ pub struct AppState {
     /// Session-only CPU cache of decoded thumbnail pixels so re-revealed cells
     /// re-upload without a new job / DB read / JPEG decode (Bug B).
     pub thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache,
+    /// Develop warm-navigation cache (two-level: display + full pipeline).
+    pub warm_cache: crate::develop::cache::WarmCache,
 
     /// Image ids with an in-flight off-thread thumbnail decode (lazy-load path).
     /// Dedups repeated `request_thumbnail` calls while the job is running;
@@ -272,6 +274,9 @@ impl AppState {
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,
             ),
+            warm_cache: crate::develop::cache::WarmCache::new(crate::diag_mem::adaptive_budget(
+                crate::mem_probe::total_ram_bytes(),
+            )),
             thumb_pending: HashSet::new(),
             thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),
@@ -887,6 +892,9 @@ impl AppState {
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,
             ),
+            warm_cache: crate::develop::cache::WarmCache::new(crate::diag_mem::adaptive_budget(
+                crate::mem_probe::total_ram_bytes(),
+            )),
             thumb_pending: HashSet::new(),
             thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),

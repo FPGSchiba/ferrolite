@@ -118,11 +118,18 @@ pub fn linear_bytes(width: u32, height: u32) -> u64 {
     width as u64 * height as u64 * 16
 }
 
-/// Adaptive RAM-cache budget = clamp(15% of total RAM, 512 MiB, 4 GiB).
+/// Fraction of total system RAM the develop warm cache may use, before clamping.
+/// Tunable: raise for more warm-navigation headroom on RAM-rich hosts.
+pub const BUDGET_FRACTION_PERCENT: u64 = 15;
+/// Lower clamp for the warm-cache budget — never below this on small-RAM hosts.
+pub const BUDGET_FLOOR_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+/// Upper clamp for the warm-cache budget — never above this on large-RAM hosts.
+pub const BUDGET_CEILING_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+
+/// Adaptive warm-cache byte budget = clamp(fraction × total RAM, floor, ceiling).
+/// Divide-then-multiply avoids `u64` overflow on large-RAM hosts.
 pub fn adaptive_budget(total_ram: u64) -> u64 {
-    const FLOOR: u64 = 512 * 1024 * 1024;
-    const CEILING: u64 = 4 * 1024 * 1024 * 1024;
-    (total_ram / 100 * 15).clamp(FLOOR, CEILING)
+    (total_ram / 100 * BUDGET_FRACTION_PERCENT).clamp(BUDGET_FLOOR_BYTES, BUDGET_CEILING_BYTES)
 }
 
 /// Human-readable bytes: `0B`, `512B`, `1.5K`, `2.0M`, `3.0G` (1024-based).
@@ -415,15 +422,16 @@ mod tests {
 
     #[test]
     fn adaptive_budget_clamps_to_floor_and_ceiling() {
-        const FLOOR: u64 = 512 * 1024 * 1024;
-        const CEIL: u64 = 4 * 1024 * 1024 * 1024;
         // Tiny RAM -> floor.
-        assert_eq!(adaptive_budget(1024 * 1024 * 1024), FLOOR);
+        assert_eq!(adaptive_budget(1024 * 1024 * 1024), BUDGET_FLOOR_BYTES);
         // Huge RAM -> ceiling.
-        assert_eq!(adaptive_budget(128 * 1024 * 1024 * 1024), CEIL);
-        // Mid RAM -> 15% of it.
+        assert_eq!(
+            adaptive_budget(128 * 1024 * 1024 * 1024),
+            BUDGET_CEILING_BYTES
+        );
+        // Mid RAM -> fraction of it (overflow-safe divide-then-multiply).
         let mid = 16u64 * 1024 * 1024 * 1024;
-        assert_eq!(adaptive_budget(mid), mid / 100 * 15);
+        assert_eq!(adaptive_budget(mid), mid / 100 * BUDGET_FRACTION_PERCENT);
     }
 
     #[test]

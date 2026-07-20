@@ -164,9 +164,27 @@ impl WarmCache {
         self.display.len()
     }
 
-    #[allow(dead_code)] // called by set_budget/insert_display (wired by Task 4)
+    /// Evict least-recently-touched DISPLAY entries until within budget. The open
+    /// image is never evicted (skipped as a candidate). The full tier is bounded
+    /// by count (Task 5), not evicted here. If the only remaining candidates are
+    /// protected, the cache may briefly exceed budget rather than drop the open
+    /// image — a bounded overshoot of at most the open image's own bytes.
     fn evict_to_budget(&mut self) {
-        // Implemented in Task 3.
+        while self.resident_bytes() > self.budget {
+            // Pick the LRU display entry that is not the open image.
+            let victim = self
+                .display
+                .iter()
+                .filter(|(k, _)| Some(**k) != self.open)
+                .min_by_key(|(_, s)| s.touched)
+                .map(|(k, _)| *k);
+            match victim {
+                Some(k) => {
+                    self.display.remove(&k);
+                }
+                None => break, // only protected entries remain
+            }
+        }
     }
 }
 
@@ -207,5 +225,40 @@ mod tests {
         // Re-inserting the same key replaces (does not double-count).
         c.insert_display(key(1, 0), disp(400));
         assert_eq!(c.resident_bytes(), 650);
+    }
+
+    #[test]
+    fn evicts_least_recently_touched_over_budget() {
+        let mut c = WarmCache::new(300);
+        c.insert_display(key(1, 0), disp(100)); // touch 1
+        c.insert_display(key(2, 0), disp(100)); // touch 2
+        c.insert_display(key(3, 0), disp(100)); // touch 3 -> 300, at budget
+        assert_eq!(c.resident_bytes(), 300);
+        // Touch #1 so it is now most-recent.
+        assert!(matches!(c.get(key(1, 0)), WarmHit::Display(_)));
+        // Insert #4 -> over budget by 100 -> evict the LRU, which is now #2.
+        c.insert_display(key(4, 0), disp(100));
+        assert_eq!(c.resident_bytes(), 300);
+        assert!(matches!(c.get(key(2, 0)), WarmHit::Miss), "LRU #2 evicted");
+        assert!(
+            matches!(c.get(key(1, 0)), WarmHit::Display(_)),
+            "#1 kept (touched)"
+        );
+    }
+
+    #[test]
+    fn never_evicts_the_open_image() {
+        let mut c = WarmCache::new(150);
+        c.insert_display(key(1, 0), disp(100)); // oldest
+        c.set_open(Some(key(1, 0)));
+        // Insert #2 -> 200 > 150; #1 is oldest but open, so #2... must free space
+        // WITHOUT touching #1. With only #1 and #2 present and #1 protected, the
+        // cache evicts #2's competitors — here nothing else — so it may exceed
+        // budget rather than drop the open image. Assert #1 survives.
+        c.insert_display(key(2, 0), disp(100));
+        assert!(
+            matches!(c.get(key(1, 0)), WarmHit::Display(_)),
+            "open image never evicted"
+        );
     }
 }

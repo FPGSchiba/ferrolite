@@ -196,8 +196,7 @@ pub fn color_grading_wheel(
     let mut changed = false;
     let mut commit = false;
 
-    let is_modified =
-        sat > 0.0_f32 || (hue != 0.0_f32 && sat > 0.0_f32) || lum.abs() > f32::EPSILON;
+    let is_modified = sat > 0.0_f32 || lum.abs() > f32::EPSILON;
 
     ui.vertical_centered(|ui| {
         if !label.is_empty() {
@@ -235,12 +234,6 @@ pub fn color_grading_wheel(
             custom_label_w: None,
         });
 
-        if slider_resp.changed() {
-            new_lum = slider_lum;
-            changed = true;
-            commit |= slider_resp.drag_stopped() || !slider_resp.dragged();
-        }
-
         // Per-control reset arrow (on the right end of the Lum slider row).
         let reset_rect = egui::Rect::from_min_max(
             pos2(slider_resp.rect.right() - 16.0_f32, slider_resp.rect.top()),
@@ -248,9 +241,26 @@ pub fn color_grading_wheel(
         );
         let reset_resp = ui.interact(reset_rect, base_id.with("grading_reset"), Sense::click());
 
+        let pointer_pos = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()));
+        let is_reset_clicked = reset_resp.clicked()
+            || ((slider_resp.clicked() || slider_resp.changed())
+                && pointer_pos.is_some_and(|p| reset_rect.contains(p)));
+
+        if is_modified && is_reset_clicked {
+            new_hue = 0.0_f32;
+            new_sat = 0.0_f32;
+            new_lum = 0.0_f32;
+            changed = true;
+            commit = true;
+        } else if slider_resp.changed() {
+            new_lum = slider_lum;
+            changed = true;
+            commit |= slider_resp.drag_stopped() || !slider_resp.dragged();
+        }
+
         // Over-draw reset arrow with combined modified state
         let reset_color = if is_modified {
-            if reset_resp.hovered() {
+            if reset_resp.hovered() || (is_modified && is_reset_clicked) {
                 theme::ACCENT_BRIGHT
             } else {
                 theme::TEXT_FAINT
@@ -259,19 +269,6 @@ pub fn color_grading_wheel(
             theme::BORDER_STRONG
         };
         draw_reset_arrow(ui.painter(), reset_rect.center(), RESET_R, reset_color);
-
-        if is_modified
-            && (reset_resp.clicked()
-                || (slider_resp.changed()
-                    && slider_lum == 0.0_f32
-                    && (sat > 0.0_f32 || hue != 0.0_f32)))
-        {
-            new_hue = 0.0_f32;
-            new_sat = 0.0_f32;
-            new_lum = 0.0_f32;
-            changed = true;
-            commit = true;
-        }
     });
 
     if changed {
@@ -340,38 +337,201 @@ mod tests {
             lum: -25.0_f32,
             commit: true,
         };
-        assert_eq!(edit.hue, 120.0_f32);
-        assert_eq!(edit.sat, 0.5_f32);
-        assert_eq!(edit.lum, -25.0_f32);
         assert!(edit.commit);
+    }
+
+    fn run_grading_wheel_frames(
+        hue: f32,
+        sat: f32,
+        lum: f32,
+        inputs: Vec<egui::RawInput>,
+    ) -> Option<ColorGradingEdit> {
+        let ctx = egui::Context::default();
+        let mut last_edit = None;
+
+        // Warm up frame so egui registers layout rects
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = color_grading_wheel(ui, "test_grading", "Shadows", hue, sat, lum);
+            });
+        });
+
+        for input in inputs {
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if let Some(edit) =
+                        color_grading_wheel(ui, "test_grading", "Shadows", hue, sat, lum)
+                    {
+                        last_edit = Some(edit);
+                    }
+                });
+            });
+        }
+        last_edit
     }
 
     #[test]
     fn color_grading_wheel_no_interaction_returns_none() {
-        let ctx = egui::Context::default();
-        let _ = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                let edit =
-                    color_grading_wheel(ui, "test_grading", "Shadows", 0.0_f32, 0.0_f32, 0.0_f32);
-                assert!(
-                    edit.is_none(),
-                    "Unmodified wheel without interaction returns None"
-                );
-            });
-        });
+        let edit = run_grading_wheel_frames(0.0, 0.0, 0.0, vec![Default::default()]);
+        assert!(
+            edit.is_none(),
+            "Unmodified wheel without interaction returns None"
+        );
+
+        let edit_mod = run_grading_wheel_frames(120.0, 0.5, 20.0, vec![Default::default()]);
+        assert!(
+            edit_mod.is_none(),
+            "Modified wheel without interaction returns None"
+        );
     }
 
     #[test]
-    fn color_grading_wheel_resets_all_parameters() {
-        let edit = ColorGradingEdit {
-            hue: 0.0_f32,
-            sat: 0.0_f32,
-            lum: 0.0_f32,
-            commit: true,
+    fn color_grading_wheel_lum_slider_independence() {
+        let screen_rect = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 300.0));
+        let p1 = pos2(140.0, 137.0);
+        let p2 = pos2(155.3, 137.0);
+
+        let input_down = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            time: Some(0.1),
+            events: vec![
+                egui::Event::PointerMoved(p1),
+                egui::Event::PointerButton {
+                    pos: p1,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
         };
-        assert_eq!(edit.hue, 0.0_f32);
-        assert_eq!(edit.sat, 0.0_f32);
-        assert_eq!(edit.lum, 0.0_f32);
-        assert!(edit.commit);
+        let input_drag = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            time: Some(0.2),
+            events: vec![
+                egui::Event::PointerMoved(p2),
+                egui::Event::PointerButton {
+                    pos: p2,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let input_up = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            time: Some(0.3),
+            events: vec![
+                egui::Event::PointerMoved(p2),
+                egui::Event::PointerButton {
+                    pos: p2,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let edit =
+            run_grading_wheel_frames(120.0, 0.5, 50.0, vec![input_down, input_drag, input_up]);
+        assert!(edit.is_some(), "Editing lum slider produces an edit");
+        let edit = edit.unwrap();
+        assert_eq!(
+            edit.hue, 120.0_f32,
+            "Hue must remain 120.0 when Lum slider is edited"
+        );
+        assert_eq!(
+            edit.sat, 0.5_f32,
+            "Sat must remain 0.5 when Lum slider is edited"
+        );
+        assert!(
+            (edit.lum - 0.0_f32).abs() <= 1.0_f32,
+            "Lum slider edit to center sets lum near 0.0, got {}",
+            edit.lum
+        );
+    }
+
+    #[test]
+    fn color_grading_wheel_reset_button_resets_all() {
+        let screen_rect = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 300.0));
+        let reset_pos = pos2(284.0, 137.0);
+
+        let input_down = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            time: Some(0.1),
+            events: vec![
+                egui::Event::PointerMoved(reset_pos),
+                egui::Event::PointerButton {
+                    pos: reset_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let input_up = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            time: Some(0.2),
+            events: vec![
+                egui::Event::PointerMoved(reset_pos),
+                egui::Event::PointerButton {
+                    pos: reset_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let edit = run_grading_wheel_frames(120.0, 0.5, 50.0, vec![input_down, input_up]);
+        assert!(edit.is_some(), "Clicking reset button produces an edit");
+        let edit = edit.unwrap();
+        assert_eq!(edit.hue, 0.0_f32, "Reset resets hue to 0");
+        assert_eq!(edit.sat, 0.0_f32, "Reset resets sat to 0");
+        assert_eq!(edit.lum, 0.0_f32, "Reset resets lum to 0");
+        assert!(edit.commit, "Reset commit flag is true");
+    }
+
+    #[test]
+    fn color_grading_wheel_reset_unmodified_does_nothing() {
+        let screen_rect = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 300.0));
+        let reset_pos = pos2(284.0, 137.0);
+
+        let input_down = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            events: vec![
+                egui::Event::PointerMoved(reset_pos),
+                egui::Event::PointerButton {
+                    pos: reset_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let input_up = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            events: vec![
+                egui::Event::PointerMoved(reset_pos),
+                egui::Event::PointerButton {
+                    pos: reset_pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let edit = run_grading_wheel_frames(0.0, 0.0, 0.0, vec![input_down, input_up]);
+        assert!(
+            edit.is_none(),
+            "Clicking reset when unmodified returns None"
+        );
     }
 }

@@ -1,9 +1,12 @@
 pub mod color_wheel;
 pub mod curve;
 pub mod slider;
+pub mod tabs;
 pub mod tool_button;
 pub use color_wheel::{color_wheel, WheelEdit};
 pub use slider::EguiSlider;
+#[allow(unused_imports)]
+pub use tabs::{tab_row, TabRow};
 pub(crate) use tool_button::tool_button;
 
 use egui::Color32;

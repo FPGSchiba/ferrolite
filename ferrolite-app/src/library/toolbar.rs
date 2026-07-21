@@ -172,6 +172,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                         unit: "",
                         bipolar: false,
                         signed: false,
+                        custom_label_w: None,
                     });
                 },
             );

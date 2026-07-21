@@ -48,6 +48,7 @@ fn wheel_row(
         unit: "",
         bipolar: true,
         signed: true,
+        custom_label_w: None,
     });
     if r.changed() {
         wheel.lum = lum;
@@ -92,6 +93,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         unit: "",
         bipolar: false,
         signed: false,
+        custom_label_w: None,
     });
     if rb.changed() {
         cg.blending = blending;
@@ -110,6 +112,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         unit: "",
         bipolar: true,
         signed: true,
+        custom_label_w: None,
     });
     if rbal.changed() {
         cg.balance = balance;

@@ -229,6 +229,7 @@ pub(crate) fn selected_section(
             unit: "",
             bipolar: bip,
             signed: bip,
+            custom_label_w: None,
         });
         if r.dragged() {
             *adjusting = true;
@@ -375,6 +376,7 @@ pub(crate) fn selected_section(
         unit: "",
         bipolar: false,
         signed: false,
+        custom_label_w: None,
     });
     if r.dragged() {
         adjusting = true;
@@ -417,6 +419,7 @@ pub(crate) fn selected_section(
                 unit: "",
                 bipolar: true,
                 signed: true,
+                custom_label_w: None,
             });
         })
         .response

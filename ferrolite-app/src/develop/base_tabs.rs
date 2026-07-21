@@ -56,6 +56,7 @@ impl PanelTab for LightTab {
             unit: " EV",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         });
         if r.changed() {
             out = Some(EditOutcome {
@@ -77,6 +78,7 @@ impl PanelTab for LightTab {
             unit: "",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         });
         if r.changed() {
             out = Some(EditOutcome {
@@ -99,6 +101,7 @@ impl PanelTab for LightTab {
             unit: "",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         });
         let rn = ui.add(EguiSlider {
             label: "Tint",
@@ -111,6 +114,7 @@ impl PanelTab for LightTab {
             unit: "",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         });
         if rt.changed() || rn.changed() {
             out = Some(EditOutcome {
@@ -218,6 +222,7 @@ impl PanelTab for DetailTab {
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         let rr = ui.add(EguiSlider {
             label: "Radius",
@@ -230,6 +235,7 @@ impl PanelTab for DetailTab {
             unit: " px",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         if ra.changed() || rr.changed() {
             out = Some(EditOutcome {
@@ -525,6 +531,7 @@ impl PanelTab for OpticsTab {
                         unit: "",
                         bipolar: params.bipolar,
                         signed: params.bipolar,
+                        custom_label_w: None,
                     });
                     if r.changed() {
                         if r.drag_stopped() {
@@ -610,6 +617,7 @@ impl PanelTab for OpticsTab {
                             unit: " mm",
                             bipolar: false,
                             signed: false,
+                            custom_label_w: None,
                         })
                         .on_hover_text("Affects Distortion and Transverse CA");
                     if rf.changed() {
@@ -686,6 +694,7 @@ impl PanelTab for OpticsTab {
                             unit: " f",
                             bipolar: false,
                             signed: false,
+                            custom_label_w: None,
                         })
                         .on_hover_text("Affects profile Vignette strength only");
                     if ra.changed() {

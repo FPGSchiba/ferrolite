@@ -2,7 +2,6 @@ use crate::app::FerroliteApp;
 use crate::events::AppEvent;
 use crate::viewer;
 
-
 pub struct AppController;
 
 impl AppController {
@@ -852,7 +851,6 @@ impl AppController {
         app.persist_ops(ctx, image_id, path, stack);
     }
 
-
     pub fn maybe_spawn_lens_bake(
         app: &mut FerroliteApp,
         ctx: &egui::Context,
@@ -946,7 +944,11 @@ impl AppController {
         }
     }
 
-    pub fn redetect_display_profile(app: &mut FerroliteApp, ctx: &egui::Context, frame: &eframe::Frame) {
+    pub fn redetect_display_profile(
+        app: &mut FerroliteApp,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
         use raw_window_handle::HasWindowHandle;
 
         app.state.display_detect_gen += 1;
@@ -1007,8 +1009,7 @@ impl AppController {
             return;
         }
         app.state.working_space = ws;
-        app.state.settings.working_space =
-            crate::settings::dto::PersistedWorkingSpace::from_ws(ws);
+        app.state.settings.working_space = crate::settings::dto::PersistedWorkingSpace::from_ws(ws);
         app.mark_settings_dirty();
         let Some(rs) = frame.wgpu_render_state() else {
             return;
@@ -1079,4 +1080,3 @@ impl AppController {
         ctx.request_repaint();
     }
 }
-

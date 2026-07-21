@@ -1,9 +1,8 @@
 //! Develop canvas viewer: interactive pan/zoom driving, split compares,
 //! tool palette, histogram, EXIF overlays, and active tool canvas overlays.
 
-use crate::state::AppState;
 use crate::develop::tool::DevelopToolRegistry;
-
+use crate::state::AppState;
 
 const MAX_PRODUCE_PER_FRAME: usize = 32;
 const PREFETCH_RING: u32 = 1;
@@ -58,12 +57,8 @@ impl Viewer {
             && v.mask.tool == crate::develop::mask_ui::MaskTool::Brush
         {
             let dims = v.image_dims.unwrap_or((1, 1));
-            let image_rect = crate::viewer::image_screen_rect(
-                ui.min_rect(),
-                dims,
-                v.view,
-                v.viewport,
-            );
+            let image_rect =
+                crate::viewer::image_screen_rect(ui.min_rect(), dims, v.view, v.viewport);
             let ctrl_scroll_over_image = ui.ctx().input(|i| {
                 let ctrl = i.modifiers.command || i.modifiers.ctrl;
                 let scroll_y = i.raw_scroll_delta.y;
@@ -71,8 +66,7 @@ impl Viewer {
                     .pointer
                     .hover_pos()
                     .is_some_and(|p| image_rect.contains(p));
-                (ctrl && scroll_y.abs() > f32::EPSILON && over_image)
-                    .then_some(scroll_y)
+                (ctrl && scroll_y.abs() > f32::EPSILON && over_image).then_some(scroll_y)
             });
             if let Some(scroll_y) = ctrl_scroll_over_image {
                 v.mask.brush_radius = crate::develop::mask_overlay::brush_radius_from_scroll(
@@ -82,7 +76,8 @@ impl Viewer {
                     crate::develop::mask_panel::BRUSH_RADIUS_MAX,
                 );
                 // Consume: zero the scroll so drive_viewer/paint zoom doesn't fire.
-                ui.ctx().input_mut(|i| i.raw_scroll_delta = egui::Vec2::ZERO);
+                ui.ctx()
+                    .input_mut(|i| i.raw_scroll_delta = egui::Vec2::ZERO);
             }
         }
 
@@ -105,7 +100,10 @@ impl Viewer {
             let cur_present_key = v.present_key;
             let mut renderer = rs.renderer.write();
 
-            if let Some(g) = renderer.callback_resources.get_mut::<crate::viewer::ViewerGpu>() {
+            if let Some(g) = renderer
+                .callback_resources
+                .get_mut::<crate::viewer::ViewerGpu>()
+            {
                 let ppp = ui.ctx().pixels_per_point();
                 let phys = (
                     (v.viewport.0 * ppp).round().max(1.0) as u32,
@@ -124,12 +122,8 @@ impl Viewer {
                         if let Some(producer) = v.edit_producer.as_mut() {
                             let needed =
                                 full.needed_prefetched(&cur_view, cur_viewport, PREFETCH_RING);
-                            produced_this_frame = full.produce_view(
-                                &g.ctx,
-                                producer,
-                                &needed,
-                                MAX_PRODUCE_PER_FRAME,
-                            );
+                            produced_this_frame =
+                                full.produce_view(&g.ctx, producer, &needed, MAX_PRODUCE_PER_FRAME);
                         }
                         tiles_pending = full.sparse_pending();
                         produce_pending = full.produce_pending();
@@ -138,9 +132,12 @@ impl Viewer {
                     }
 
                     if converged && cur_present_key != Some((cur_version, cur_view)) {
-                        let mut enc = g.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                            label: Some("viewer-present-compose"),
-                        });
+                        let mut enc =
+                            g.ctx
+                                .device
+                                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                                    label: Some("viewer-present-compose"),
+                                });
                         if let Some(full) = g.full.as_mut() {
                             full.compose_sparse_into(
                                 &g.ctx,
@@ -202,7 +199,8 @@ impl Viewer {
         let (loading_preview, present_source) =
             crate::viewer::paint(ui, v, full_ready, front_valid, factor, interactive);
         let idle = v.idle;
-        let crossfading_present = matches!(present_source, crate::viewer::PresentSource::Crossfade(_));
+        let crossfading_present =
+            matches!(present_source, crate::viewer::PresentSource::Crossfade(_));
 
         let tiles_loading = matches!(tiles_pending, Some(n) if n > 0);
         let full_warming = show_full && !full_converged;
@@ -322,7 +320,8 @@ impl Viewer {
         crate::develop::canvas::overlays::draw_info(ui, &app.state);
 
         let tool_registry = DevelopToolRegistry::standard();
-        let palette_action = crate::develop::canvas::overlays::draw_tool_palette(ui, &app.state, &tool_registry);
+        let palette_action =
+            crate::develop::canvas::overlays::draw_tool_palette(ui, &app.state, &tool_registry);
         if let Some(action) = palette_action {
             match action {
                 crate::develop::tool_palette::PaletteAction::SelectTool(id) => {
@@ -338,23 +337,24 @@ impl Viewer {
         }
 
         // Rebuild mask overlay if needed, and draw active tool canvas overlay.
-        let active_tool = app.state.viewer.as_ref().map(|_| app.state.tool_state.active);
+        let active_tool = app
+            .state
+            .viewer
+            .as_ref()
+            .map(|_| app.state.tool_state.active);
         if active_tool == Some(crate::develop::tool::ToolId::Mask) {
             rebuild_mask_overlay_if_needed(&mut app.state, frame);
         }
 
         if let Some(id) = active_tool {
-            if let Some((dims, view, viewport)) = app.state
+            if let Some((dims, view, viewport)) = app
+                .state
                 .viewer
                 .as_ref()
                 .map(|v| (v.image_dims.unwrap_or((1, 1)), v.view, v.viewport))
             {
-                let image_rect = crate::viewer::image_screen_rect(
-                    ui.min_rect(),
-                    dims,
-                    view,
-                    viewport,
-                );
+                let image_rect =
+                    crate::viewer::image_screen_rect(ui.min_rect(), dims, view, viewport);
                 if let Some(tool) = tool_registry.get(id) {
                     if let Some(o) = tool.canvas(ui, image_rect, &mut app.state) {
                         action_outcome = Some(ViewerAction::ApplyEdit {
@@ -369,7 +369,8 @@ impl Viewer {
 
         // Loupe context-menu widget.
         let is_adjust_active = app.state.tool_state.active == crate::develop::tool::ToolId::Adjust;
-        let ctx_menu_id = app.state
+        let ctx_menu_id = app
+            .state
             .viewer
             .as_ref()
             .filter(|_| is_adjust_active)
@@ -407,7 +408,10 @@ fn ensure_before_view(app: &crate::app::FerroliteApp, frame: &eframe::Frame) {
     }
     {
         let renderer = rs.renderer.read();
-        if let Some(g) = renderer.callback_resources.get::<crate::viewer::ViewerGpu>() {
+        if let Some(g) = renderer
+            .callback_resources
+            .get::<crate::viewer::ViewerGpu>()
+        {
             if g.image_id == image_id && g.preview_before.is_some() {
                 return;
             }
@@ -440,13 +444,19 @@ fn ensure_before_view(app: &crate::app::FerroliteApp, frame: &eframe::Frame) {
     };
     let vt = {
         let renderer = rs.renderer.read();
-        let Some(vp) = renderer.callback_resources.get::<crate::viewer::ViewerPipelines>() else {
+        let Some(vp) = renderer
+            .callback_resources
+            .get::<crate::viewer::ViewerPipelines>()
+        else {
             return;
         };
         ferrolite_vt::VirtualTexture::single_from_texture(&gpu, tex, dims, &vp.pipelines)
     };
     let mut renderer = rs.renderer.write();
-    if let Some(g) = renderer.callback_resources.get_mut::<crate::viewer::ViewerGpu>() {
+    if let Some(g) = renderer
+        .callback_resources
+        .get_mut::<crate::viewer::ViewerGpu>()
+    {
         if g.image_id == image_id {
             g.preview_before = Some(vt);
         }

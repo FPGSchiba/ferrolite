@@ -61,6 +61,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
             unit: "",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         },
     );
     add(
@@ -76,6 +77,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
             unit: "",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         },
     );
     add(
@@ -91,6 +93,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
             unit: "",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         },
     );
     add(
@@ -106,6 +109,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
             unit: "",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         },
     );
     // Split sliders (defaults 0.25 / 0.50 / 0.75).
@@ -122,6 +126,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         },
     );
     add(
@@ -137,6 +142,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         },
     );
     add(
@@ -152,6 +158,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         },
     );
 

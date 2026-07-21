@@ -78,6 +78,7 @@ impl PanelTab for CropTab {
             unit: "\u{b0}",
             bipolar: true,
             signed: true,
+            custom_label_w: None,
         });
         let mut aspect = geo.aspect;
         egui::ComboBox::from_label("Aspect")

@@ -136,9 +136,9 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
 
                 // --- 4. Build toggled edit ---
                 let edit = match intent {
-                    KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(
-                        Rating::new(crate::metadata::toggle_rating(cur_rating, n)),
-                    ),
+                    KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(Rating::new(
+                        crate::metadata::toggle_rating(cur_rating, n),
+                    )),
                     KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
                         crate::metadata::toggle_flag(cur_flag, f),
                     ),
@@ -148,8 +148,7 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
                 if app.module.is_library() && app.state.viewer.is_none() {
                     app.state.apply_metadata_edit(ctx, edit);
                 } else {
-                    app.state
-                        .apply_metadata_edit_to_image(ctx, target_id, edit);
+                    app.state.apply_metadata_edit_to_image(ctx, target_id, edit);
                 }
             }
         }
@@ -232,7 +231,8 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
                 v.before_after = hold_before;
             }
             let stack = app.state.viewer.as_ref().unwrap().op_stack.clone();
-            crate::app::controller::AppController::set_preview_and_full(app, frame, stack); // re-evaluates with before_after
+            crate::app::controller::AppController::set_preview_and_full(app, frame, stack);
+            // re-evaluates with before_after
         }
 
         // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
@@ -278,9 +278,7 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
             let enabled = app
                 .tool_registry
                 .get(id)
-                .map(|t| {
-                    t.enabled(&crate::develop::tool::DevelopCtx { state: &app.state })
-                })
+                .map(|t| t.enabled(&crate::develop::tool::DevelopCtx { state: &app.state }))
                 .unwrap_or(false);
             if app.state.viewer.is_some() {
                 app.state

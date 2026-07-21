@@ -1,5 +1,5 @@
-pub mod shortcuts;
 pub mod controller;
+pub mod shortcuts;
 
 use crate::canvas::{self, CanvasResources};
 use crate::module::Module;
@@ -123,7 +123,12 @@ impl FerroliteApp {
     /// persist the resulting op stack. Shared by the `Ctrl+Z`/`Ctrl+Shift+Z`/
     /// `Ctrl+Y` keyboard path and the Edit menu's Undo/Redo items so both
     /// route through the exact same logic.
-    pub(crate) fn apply_undo_redo(&mut self, ctx: &egui::Context, frame: &eframe::Frame, undo: bool) {
+    pub(crate) fn apply_undo_redo(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        undo: bool,
+    ) {
         let result = self.state.viewer.as_mut().and_then(|v| {
             if undo {
                 v.history.undo()
@@ -704,8 +709,6 @@ impl FerroliteApp {
     }
 }
 
-
-
 /// Physical tile-pool budget for the viewer's sparse VT. 256 tiles × 256² ×
 /// RGBA16F ≈ 128 MB of GPU memory — generous headroom for a fit-to-window view
 /// plus a few zoom levels of the quad-binned (half-res) full image.
@@ -725,7 +728,6 @@ pub(crate) const MAX_THUMB_UPLOADS_PER_FRAME: usize = 16;
 const FULL_DECODE_DEBOUNCE: f32 = 0.05;
 
 impl FerroliteApp {
-
     /// The single image-open path: cancel the previously-open viewer's in-flight
     /// tile jobs, open the new image's two-tier load, switch to Develop, and request
     /// a repaint so the viewer is drawn on the very next frame (otherwise egui would
@@ -805,7 +807,11 @@ impl FerroliteApp {
     /// Runs once per frame where the GPU render state is available; each image
     /// loads its edit stack from its `.xmp` sidecar inside the Background job
     /// (missing/malformed → identity, i.e. a color-managed unedited thumbnail).
-    pub(crate) fn drain_thumb_regen_requests(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    pub(crate) fn drain_thumb_regen_requests(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
         if self.state.pending_thumb_regen.is_empty() {
             return;
         }
@@ -953,8 +959,6 @@ fn window_resize(ctx: &egui::Context) {
     }
 }
 
-
-
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Free textures retired last frame BEFORE anything paints this frame (see
@@ -1005,7 +1009,9 @@ impl eframe::App for FerroliteApp {
             if let Ok(h) = frame.window_handle() {
                 let (_src, key) = crate::monitor_profile::detect(h.as_raw());
                 if key != self.state.last_monitor_key {
-                    crate::app::controller::AppController::redetect_display_profile(self, ctx, frame);
+                    crate::app::controller::AppController::redetect_display_profile(
+                        self, ctx, frame,
+                    );
                 }
             }
         }
@@ -1553,10 +1559,14 @@ impl eframe::App for FerroliteApp {
                 });
             if let Some(outcome) = outcome {
                 if let Some(ws) = outcome.working_space {
-                    crate::app::controller::AppController::apply_working_space(self, ctx, frame, ws);
+                    crate::app::controller::AppController::apply_working_space(
+                        self, ctx, frame, ws,
+                    );
                 }
                 if let Some(o) = outcome.edit {
-                    crate::app::controller::AppController::apply_edit(self, ctx, frame, o.kind, o.stack, o.commit);
+                    crate::app::controller::AppController::apply_edit(
+                        self, ctx, frame, o.kind, o.stack, o.commit,
+                    );
                 }
             }
         }
@@ -1634,10 +1644,18 @@ impl eframe::App for FerroliteApp {
                 }
                 crate::module::Module::Develop => {
                     if let Some(v) = self.state.viewer.as_ref() {
-                        if let Some(action) = crate::develop::canvas::Viewer::new(v.image_id).show(ui, self, frame) {
+                        if let Some(action) =
+                            crate::develop::canvas::Viewer::new(v.image_id).show(ui, self, frame)
+                        {
                             match action {
-                                crate::develop::canvas::ViewerAction::ApplyEdit { kind, stack, commit } => {
-                                    crate::app::controller::AppController::apply_edit(self, ctx, frame, kind, stack, commit);
+                                crate::develop::canvas::ViewerAction::ApplyEdit {
+                                    kind,
+                                    stack,
+                                    commit,
+                                } => {
+                                    crate::app::controller::AppController::apply_edit(
+                                        self, ctx, frame, kind, stack, commit,
+                                    );
                                 }
                                 crate::develop::canvas::ViewerAction::SelectTool(id) => {
                                     let enabled = self
@@ -1665,7 +1683,9 @@ impl eframe::App for FerroliteApp {
                                     self.apply_undo_redo(ctx, frame, false);
                                 }
                                 crate::develop::canvas::ViewerAction::SetPreviewAndFull(stack) => {
-                                    crate::app::controller::AppController::set_preview_and_full(self, frame, stack);
+                                    crate::app::controller::AppController::set_preview_and_full(
+                                        self, frame, stack,
+                                    );
                                 }
                             }
                         }
@@ -1758,7 +1778,9 @@ impl eframe::App for FerroliteApp {
                 _ => None,
             };
             if let Some(o) = modal_out {
-                crate::app::controller::AppController::apply_edit(self, ctx, frame, o.kind, o.stack, o.commit);
+                crate::app::controller::AppController::apply_edit(
+                    self, ctx, frame, o.kind, o.stack, o.commit,
+                );
             }
         }
 

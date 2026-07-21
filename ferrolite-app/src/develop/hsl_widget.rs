@@ -59,6 +59,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<Edit
         unit: "",
         bipolar: true,
         signed: true,
+        custom_label_w: None,
     });
     let rs = ui.add(EguiSlider {
         label: "Sat",
@@ -71,6 +72,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<Edit
         unit: "",
         bipolar: true,
         signed: true,
+        custom_label_w: None,
     });
     let rl = ui.add(EguiSlider {
         label: "Lum",
@@ -83,6 +85,7 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<Edit
         unit: "",
         bipolar: true,
         signed: true,
+        custom_label_w: None,
     });
     if rh.changed() || rs.changed() || rl.changed() {
         hsl.bands[b] = HslBand { hue, sat, lum };

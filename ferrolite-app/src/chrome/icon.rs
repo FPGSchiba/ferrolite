@@ -96,6 +96,7 @@ pub fn icon_rgba(px: u32) -> Vec<u8> {
     buf
 }
 
+#[allow(dead_code)]
 fn scaled(r: &[f32; 4], origin: egui::Pos2, s: f32) -> Rect {
     Rect::from_min_max(
         egui::pos2(origin.x + r[0] * s, origin.y + r[1] * s),
@@ -103,22 +104,16 @@ fn scaled(r: &[f32; 4], origin: egui::Pos2, s: f32) -> Rect {
     )
 }
 
-/// Paint the faceted-F mark (no tile, transparent bg) fitted into `rect`.
+/// Paint the logo mark (14×14 accent square with letter "F") fitted into `rect`.
 pub fn paint_mark(painter: &Painter, rect: Rect) {
-    // The F occupies design-space x 20..46, y 16..49 (26 x 33). Fit it into rect.
-    let s = (rect.width() / 26.0).min(rect.height() / 33.0);
-    // origin so that design point (20,16) maps near rect.min, vertically centered.
-    let origin = egui::pos2(rect.left() - 20.0 * s, rect.center().y - 32.5 * s); // 32.5 = 16 (F top) + 33/2 (half the F's design-space height) — centers the F's midpoint on rect.center().y
-    for r in [&STEM, &TOP_ARM, &MID_ARM] {
-        painter.rect_filled(scaled(r, origin, s), Rounding::ZERO, theme::ACCENT);
-    }
-    let facet = Color32::from_rgba_unmultiplied(
-        theme::ACCENT_BRIGHT.r(),
-        theme::ACCENT_BRIGHT.g(),
-        theme::ACCENT_BRIGHT.b(),
-        FACET_ALPHA,
+    painter.rect_filled(rect, Rounding::same(2.0_f32), theme::ACCENT);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "F",
+        egui::FontId::proportional(10.0_f32),
+        Color32::from_rgb(0x11, 0x11, 0x11),
     );
-    painter.rect_filled(scaled(&FACET, origin, s), Rounding::ZERO, facet);
 }
 
 #[cfg(test)]

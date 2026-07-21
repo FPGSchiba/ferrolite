@@ -4,8 +4,8 @@ use egui::{Color32, Context, FontData, FontDefinitions, FontFamily, Visuals};
 
 pub const BG_APP: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
 pub const BG_PANEL: Color32 = Color32::from_rgb(0x17, 0x17, 0x17);
-pub const BG_TITLEBAR: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-pub const BG_TOOLBAR: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x1d);
+pub const BG_TITLEBAR: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
+pub const BG_TOOLBAR: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
 pub const BG_BASE: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
 pub const BG_CANVAS: Color32 = Color32::from_rgb(0x0e, 0x0e, 0x0e);
 // Canonical design palette (design-system §2) — full token set kept for use across later specs.

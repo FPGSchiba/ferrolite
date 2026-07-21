@@ -4,11 +4,21 @@ pub mod window_controls;
 
 use crate::module::Module;
 use crate::settings::keymap::{Action, Keymap};
-use crate::theme;
+use crate::widgets::TabRow;
 use egui::{
-    pos2, vec2, Align, Align2, Button, Context, FontId, Layout, PointerButton, Rect, Sense,
-    UiBuilder,
+    pos2, vec2, Align, Align2, Button, Color32, Context, FontId, Layout, PointerButton, Rect,
+    Rounding, Sense, Stroke, UiBuilder,
 };
+
+/// Titlebar layout constants (Spec 3.2).
+#[allow(dead_code)]
+pub const TITLEBAR_HEIGHT: f32 = 30.0_f32;
+#[allow(dead_code)]
+pub const TITLEBAR_BG: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
+#[allow(dead_code)]
+pub const TITLEBAR_BORDER: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+#[allow(dead_code)]
+pub const VERSION_STRING: &str = "v0.1.2";
 
 /// A menu action selected from the title-bar menus, handled by the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,14 +57,8 @@ fn menu_button(
 }
 
 /// Render the borderless title bar contents. `ui` is the 30px top panel's ui.
-/// Left: icon + wordmark + interactive menu row. Center: Library/Develop
-/// tabs. Right: window controls + version. Empty space drags the window.
-///
-/// Layout mirrors eframe's `custom_window_frame` example: the window-drag region is
-/// registered first (lowest input priority), the non-interactive left content
-/// (icon + wordmark) is PAINTED directly (so it never occludes the drag region),
-/// and only the interactive groups (menus, controls, tabs) use child UIs — they
-/// sit on top and win their own clicks.
+/// Left: icon + wordmark + interactive menu row. Center: Library/Develop/Export
+/// tabs rendered with `TabRow`. Right: window controls + version. Empty space drags the window.
 #[allow(clippy::too_many_arguments)]
 pub fn title_bar(
     ctx: &Context,
@@ -72,6 +76,16 @@ pub fn title_bar(
 ) -> Option<MenuAction> {
     let bar = ui.max_rect();
 
+    // 1. Paint background #111111 and 1px #262626 bottom border.
+    ui.painter().rect_filled(bar, Rounding::ZERO, TITLEBAR_BG);
+    ui.painter().line_segment(
+        [
+            pos2(bar.left(), bar.bottom() - 0.5_f32),
+            pos2(bar.right(), bar.bottom() - 0.5_f32),
+        ],
+        Stroke::new(1.0_f32, TITLEBAR_BORDER),
+    );
+
     // Window drag + double-click-to-maximize over the whole bar (registered first).
     let drag = ui.interact(bar, ui.id().with("titlebar_drag"), Sense::click_and_drag());
     if drag.drag_started_by(PointerButton::Primary) {
@@ -88,38 +102,43 @@ pub fn title_bar(
     let x = {
         let painter = ui.painter();
         let cy = bar.center().y;
-        let mut x = bar.left() + 8.0;
+        let mut x = bar.left() + 8.0_f32;
+
+        // Logo mark: 14×14 accent square filled with letter "F".
         icon::paint_mark(
             painter,
-            Rect::from_min_size(pos2(x, cy - 9.0), vec2(18.0, 18.0)),
+            Rect::from_min_size(pos2(x, cy - 7.0_f32), vec2(14.0_f32, 14.0_f32)),
         );
-        x += 24.0;
+        x += 20.0_f32;
+
+        // Header text "FERROLITE" (11px, bold #dcdcdc)
         let logo = painter.text(
             pos2(x, cy),
             Align2::LEFT_CENTER,
             "FERROLITE",
-            FontId::proportional(11.0),
-            theme::TEXT_PRIMARY,
+            FontId::proportional(11.0_f32),
+            Color32::from_rgb(0xdc, 0xdc, 0xdc),
         );
-        logo.right() + 14.0
+        logo.right() + 14.0_f32
     };
 
-    // Interactive menu row (on top of the drag region, like the tabs). Only
-    // "Photo" is functional in this plan; the others are inert placeholders.
+    // Interactive menu row (on top of the drag region).
     let mut action: Option<MenuAction> = None;
     let menu_rect = Rect::from_min_max(
         pos2(x, bar.top()),
-        pos2(bar.center().x - 60.0, bar.bottom()),
+        pos2(bar.center().x - 110.0_f32, bar.bottom()),
     );
     ui.allocate_new_ui(
         UiBuilder::new()
             .max_rect(menu_rect)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
-            // Frameless, dim menu buttons to match the old painted look.
-            ui.visuals_mut().widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-            ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::NONE;
+            ui.spacing_mut().item_spacing.x = 12.0_f32;
+            ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            ui.visuals_mut().widgets.inactive.bg_stroke = Stroke::NONE;
+            ui.visuals_mut().widgets.inactive.fg_stroke =
+                Stroke::new(1.0_f32, Color32::from_rgb(0x9a, 0x9a, 0x9a));
+
             ui.menu_button("File", |ui| {
                 if menu_button(ui, keymap, "Settings…", Action::OpenSettings, true).clicked() {
                     action = Some(MenuAction::OpenSettings);
@@ -265,19 +284,21 @@ pub fn title_bar(
         },
     );
 
-    // Right group: window controls (close rightmost) + version, in a right-to-left
-    // child Ui over the WHOLE bar. As in eframe, the empty left part of this Ui stays
-    // draggable; only the buttons/version consume input.
+    // Right group: window controls + version string "v0.1.2" (IBM Plex Mono, 10.5px, #6a6a6a).
     let control_clicked = ui
         .allocate_new_ui(
             UiBuilder::new()
                 .max_rect(bar)
                 .layout(Layout::right_to_left(Align::Center)),
             |ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.spacing_mut().item_spacing.x = 0.0_f32;
                 let clicked = window_controls::controls_ui(ui, is_maximized);
-                ui.add_space(8.0);
-                ui.monospace(version);
+                ui.add_space(8.0_f32);
+                ui.add(egui::Label::new(
+                    egui::RichText::new(version)
+                        .font(FontId::monospace(10.5_f32))
+                        .color(Color32::from_rgb(0x6a, 0x6a, 0x6a)),
+                ));
                 clicked
             },
         )
@@ -286,48 +307,70 @@ pub fn title_bar(
         ctx.send_viewport_cmd(window_controls::command(action, is_maximized));
     }
 
-    // Center group: Library/Develop tabs in a content-sized rect at the bar centre
-    // (drawn last so the tabs sit on top of the drag region).
-    let font = egui::TextStyle::Button.resolve(ui.style());
-    let text_w = |t: &str| {
-        ui.fonts(|f| {
-            f.layout_no_wrap(t.to_owned(), font.clone(), egui::Color32::WHITE)
-                .size()
-                .x
-        })
-    };
-    let btn_pad = ui.spacing().button_padding.x * 2.0;
-    let tabs_w = text_w("Library")
-        + text_w("Develop")
-        + text_w("Export")
-        + btn_pad * 3.0
-        + ui.spacing().item_spacing.x * 2.0;
-    let center_rect = Rect::from_center_size(bar.center(), vec2(tabs_w, bar.height()));
+    // Center-right group: Library / Develop / Export navigation tabs rendered using `TabRow`.
+    let tabs = [
+        (Module::Library, "Library"),
+        (Module::Develop, "Develop"),
+        (Module::Export, "Export"),
+    ];
+    let center_rect = Rect::from_center_size(bar.center(), vec2(220.0_f32, bar.height()));
     ui.allocate_new_ui(
         UiBuilder::new()
             .max_rect(center_rect)
             .layout(Layout::left_to_right(Align::Center)),
         |ui| {
-            if ui
-                .selectable_label(*module == Module::Library, "Library")
-                .clicked()
-            {
-                *module = Module::Library;
-            }
-            if ui
-                .selectable_label(*module == Module::Develop, "Develop")
-                .clicked()
-            {
-                *module = Module::Develop;
-            }
-            if ui
-                .selectable_label(*module == Module::Export, "Export")
-                .clicked()
-            {
-                *module = Module::Export;
-            }
+            TabRow::new(module, &tabs).ui(ui);
         },
     );
 
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::RawInput;
+
+    #[test]
+    fn titlebar_layout_constants() {
+        assert_eq!(TITLEBAR_HEIGHT, 30.0_f32);
+        assert_eq!(TITLEBAR_BG, Color32::from_rgb(0x11, 0x11, 0x11));
+        assert_eq!(TITLEBAR_BORDER, Color32::from_rgb(0x26, 0x26, 0x26));
+    }
+
+    #[test]
+    fn titlebar_version_string() {
+        assert_eq!(VERSION_STRING, "v0.1.2");
+    }
+
+    #[test]
+    fn titlebar_renders_without_panic() {
+        let ctx = Context::default();
+        let mut module = Module::Library;
+        let keymap = Keymap::default();
+
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::TopBottomPanel::top("titlebar_test")
+                .exact_height(TITLEBAR_HEIGHT)
+                .show(ctx, |ui| {
+                    let action = title_bar(
+                        ctx,
+                        ui,
+                        &mut module,
+                        VERSION_STRING,
+                        false,
+                        false,
+                        &keymap,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                    );
+                    assert!(action.is_none());
+                });
+        });
+
+        assert_eq!(module, Module::Library);
+    }
 }

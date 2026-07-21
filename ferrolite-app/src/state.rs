@@ -195,6 +195,8 @@ pub struct AppState {
     // ── Cached toolbar metadata-filter aggregates (populated by reload_vocab) ──
     /// Distinct camera-model strings from the catalog.
     pub camera_options: Vec<String>,
+    /// Distinct lens-model strings from the catalog.
+    pub lens_options: Vec<String>,
     /// (min, max) ISO across the catalog, or None if no EXIF ISO is indexed.
     pub iso_range: Option<(u32, u32)>,
     /// (earliest, latest) capture-date strings from the catalog, or None.
@@ -316,6 +318,7 @@ impl AppState {
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
+            lens_options: Vec::new(),
             iso_range: None,
             date_range: None,
             renaming: None,
@@ -934,6 +937,7 @@ impl AppState {
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
+            lens_options: Vec::new(),
             iso_range: None,
             date_range: None,
             renaming: None,

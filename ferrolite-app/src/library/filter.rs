@@ -35,6 +35,15 @@ impl RatingCmp {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileTypeChip {
+    #[default]
+    Raw,
+    Jpeg,
+    Heic,
+    Tiff,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewSource {
     Folder(i64),
@@ -43,7 +52,7 @@ pub enum ViewSource {
     RecentlyAdded,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FilterState {
     pub search: String,
     pub sort_key: SortKey,
@@ -54,7 +63,11 @@ pub struct FilterState {
     pub tag_ids: Vec<TagId>,
     pub tag_mode: TagMode,
     pub camera: Option<String>,
+    pub lens: Option<String>,
+    pub file_type: Option<FileTypeChip>,
     pub iso: Option<(u32, u32)>,
+    pub aperture: Option<(f32, f32)>,
+    pub focal: Option<(f32, f32)>,
     pub date: Option<(String, String)>,
 }
 
@@ -70,13 +83,28 @@ impl Default for FilterState {
             tag_ids: Vec::new(),
             tag_mode: TagMode::Any,
             camera: None,
+            lens: None,
+            file_type: None,
             iso: None,
+            aperture: None,
+            focal: None,
             date: None,
         }
     }
 }
 
 impl FilterState {
+    /// Reset metadata popup filter selections to their default (unfiltered) state.
+    pub fn reset_metadata_filters(&mut self) {
+        self.camera = None;
+        self.lens = None;
+        self.file_type = None;
+        self.min_rating = 0;
+        self.iso = None;
+        self.aperture = None;
+        self.focal = None;
+    }
+
     pub fn to_query(&self, source: ViewSource, include_subfolders: bool) -> LibraryQuery {
         let scope = match source {
             ViewSource::Folder(id) => Scope::Folder {

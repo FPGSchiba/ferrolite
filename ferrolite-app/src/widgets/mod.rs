@@ -6,7 +6,8 @@ pub mod tabs;
 pub mod tool_button;
 #[allow(unused_imports)]
 pub use chips::{segmented_control, SegmentedControl};
-pub use color_wheel::{color_wheel, WheelEdit};
+#[allow(unused_imports)]
+pub use color_wheel::{color_grading_wheel, color_wheel, ColorGradingEdit, WheelEdit};
 pub use slider::EguiSlider;
 #[allow(unused_imports)]
 pub use tabs::{tab_row, TabRow};

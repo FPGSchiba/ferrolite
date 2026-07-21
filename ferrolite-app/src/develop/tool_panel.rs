@@ -29,21 +29,27 @@ pub fn show(
     }
     let mut ts = state.tool_state;
     ts.ensure_valid_tab(reg);
-    let bar = ts.tab_bar(reg);
-    let base_len = reg.base_tabs().len();
 
-    // Render the tab bar (base tabs, then a separator + the active tool's temp tab).
-    ui.horizontal_wrapped(|ui| {
-        for (i, id) in bar.iter().enumerate() {
-            if i == base_len && i > 0 {
-                ui.separator(); // visual break before the active tool's temp tab
-            }
-            let label = tab_label(reg, ts, *id);
-            if ui.selectable_label(ts.active_tab == *id, label).clicked() {
-                ts.select_tab(*id, reg);
-            }
-        }
-    });
+    let base_tabs = reg.base_tabs();
+    let tool_tabs = if ts.active != crate::develop::tool::ToolId::Adjust {
+        reg.get(ts.active).map(|t| t.tabs()).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut tab_items: Vec<(crate::develop::tool::TabId, &str)> = Vec::new();
+    for tab in base_tabs.iter() {
+        tab_items.push((tab.id(), tab.label()));
+    }
+    for tab in tool_tabs.iter() {
+        tab_items.push((tab.id(), tab.label()));
+    }
+
+    let mut active_tab = ts.active_tab;
+    let resp = crate::widgets::tabs::tab_row(ui, &mut active_tab, &tab_items);
+    if resp.changed() {
+        ts.select_tab(active_tab, reg);
+    }
     ui.separator();
 
     // 3) Dispatch the active tab's show(). Look the tab object up fresh (base ++ active
@@ -89,24 +95,4 @@ pub fn show(
         edit: out,
         working_space: ws_change,
     }
-}
-
-fn tab_label(
-    reg: &DevelopToolRegistry,
-    ts: crate::develop::tool_state::ToolState,
-    id: crate::develop::tool::TabId,
-) -> String {
-    for tab in reg.base_tabs() {
-        if tab.id() == id {
-            return tab.label().to_string();
-        }
-    }
-    if let Some(tool) = reg.get(ts.active) {
-        for tab in tool.tabs() {
-            if tab.id() == id {
-                return tab.label().to_string();
-            }
-        }
-    }
-    id.0.to_string()
 }

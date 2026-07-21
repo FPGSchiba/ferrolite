@@ -7,6 +7,9 @@ use crate::state::AppState;
 
 pub mod bottom_bar;
 pub mod queue_list;
+pub mod settings_panel;
+
+pub use settings_panel::export_settings_panel;
 
 /// Actions the Export module surfaces up to `app.rs` (which owns GPU state).
 pub enum ExportModuleAction {

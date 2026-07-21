@@ -1617,26 +1617,20 @@ impl eframe::App for FerroliteApp {
                     }
                 });
             egui::SidePanel::right("export_settings")
-                .resizable(true)
-                .default_width(296.0)
-                .width_range(250.0..=400.0)
+                .resizable(false)
+                .exact_width(300.0)
                 .frame(
                     egui::Frame::none()
                         .fill(theme::BG_APP)
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgb(0x26, 0x26, 0x26),
+                        ))
+                        .inner_margin(egui::Margin::symmetric(12.0, 12.0)),
                 )
                 .show(ctx, |ui| {
-                    ui.label(
-                        egui::RichText::new("EXPORT SETTINGS")
-                            .small()
-                            .color(theme::TEXT_FAINT),
-                    );
-                    ui.add_space(6.0);
                     let before = self.state.export_settings;
-                    crate::export::settings_form::settings_form(
-                        ui,
-                        &mut self.state.export_settings,
-                    );
+                    crate::export_module::export_settings_panel(ui, &mut self.state);
                     if self.state.export_settings != before {
                         self.state.settings.export =
                             crate::settings::dto::PersistedExport::from_options(

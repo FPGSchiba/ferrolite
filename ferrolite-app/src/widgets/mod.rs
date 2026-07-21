@@ -8,6 +8,11 @@ pub mod tool_button;
 pub use chips::{segmented_control, SegmentedControl};
 #[allow(unused_imports)]
 pub use color_wheel::{color_grading_wheel, color_wheel, ColorGradingEdit, WheelEdit};
+#[allow(unused_imports)]
+pub use curve::{
+    curve_editor, tone_curve_widget, CurveEdit, CurveStyle, ParametricCurveValues, ToneCurveEdit,
+    ToneCurveTab,
+};
 pub use slider::EguiSlider;
 #[allow(unused_imports)]
 pub use tabs::{tab_row, TabRow};

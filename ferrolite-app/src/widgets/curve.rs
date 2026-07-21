@@ -9,7 +9,9 @@
 
 use crate::develop::curve_math::{self, GrabOrInsert};
 use crate::theme;
+use crate::widgets::chips::SegmentedControl;
 use crate::widgets::draw_reset_arrow;
+use crate::widgets::slider::EguiSlider;
 use ferrolite_pipeline::{curve_lut, CurveMode};
 
 const SIZE: f32 = 260.0; // square edit area
@@ -33,6 +35,76 @@ pub struct CurveStyle {
 /// changed this frame.
 pub struct CurveEdit {
     pub points: Vec<(f32, f32)>,
+    pub mode: CurveMode,
+    pub reset: bool,
+    pub commit: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToneCurveTab {
+    Point,
+    Parametric,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParametricCurveValues {
+    pub highlights: f32,
+    pub lights: f32,
+    pub darks: f32,
+    pub shadows: f32,
+    pub shadow_split: f32,
+    pub midtone_split: f32,
+    pub highlight_split: f32,
+}
+
+impl Default for ParametricCurveValues {
+    fn default() -> Self {
+        Self {
+            highlights: 0.0_f32,
+            lights: 0.0_f32,
+            darks: 0.0_f32,
+            shadows: 0.0_f32,
+            shadow_split: 0.25_f32,
+            midtone_split: 0.50_f32,
+            highlight_split: 0.75_f32,
+        }
+    }
+}
+
+impl ParametricCurveValues {
+    #[allow(dead_code)]
+    pub fn to_pipeline(&self) -> ferrolite_pipeline::ParametricCurve {
+        ferrolite_pipeline::ParametricCurve {
+            highlights: self.highlights / 100.0_f32,
+            lights: self.lights / 100.0_f32,
+            darks: self.darks / 100.0_f32,
+            shadows: self.shadows / 100.0_f32,
+            shadow_split: self.shadow_split,
+            midtone_split: self.midtone_split,
+            highlight_split: self.highlight_split,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn from_pipeline(p: &ferrolite_pipeline::ParametricCurve) -> Self {
+        Self {
+            highlights: p.highlights * 100.0_f32,
+            lights: p.lights * 100.0_f32,
+            darks: p.darks * 100.0_f32,
+            shadows: p.shadows * 100.0_f32,
+            shadow_split: p.shadow_split,
+            midtone_split: p.midtone_split,
+            highlight_split: p.highlight_split,
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub struct ToneCurveEdit {
+    pub points: Option<Vec<(f32, f32)>>,
+    pub parametric: Option<ParametricCurveValues>,
     pub mode: CurveMode,
     pub reset: bool,
     pub commit: bool,
@@ -307,4 +379,343 @@ pub fn curve_editor(
         });
     }
     None
+}
+
+/// Tone curve widget providing both Point curve editing and Parametric region/split sliders.
+#[allow(dead_code)]
+pub fn tone_curve_widget(
+    ui: &mut egui::Ui,
+    id_source: impl std::hash::Hash,
+    active_tab: &mut ToneCurveTab,
+    points: &[(f32, f32)],
+    mode: CurveMode,
+    style: &CurveStyle,
+    parametric: &ParametricCurveValues,
+) -> Option<ToneCurveEdit> {
+    let base_id = ui.id().with(id_source);
+
+    let options = [
+        (ToneCurveTab::Point, "Point"),
+        (ToneCurveTab::Parametric, "Parametric"),
+    ];
+    SegmentedControl::new(active_tab, &options).ui(ui, base_id.with("tab_switcher"));
+
+    ui.add_space(4.0_f32);
+
+    match active_tab {
+        ToneCurveTab::Point => {
+            if let Some(edit) = curve_editor(ui, base_id.with("point_editor"), points, mode, style)
+            {
+                Some(ToneCurveEdit {
+                    points: Some(edit.points),
+                    parametric: None,
+                    mode: edit.mode,
+                    reset: edit.reset,
+                    commit: edit.commit,
+                })
+            } else {
+                None
+            }
+        }
+        ToneCurveTab::Parametric => {
+            let (rect, _) =
+                ui.allocate_exact_size(egui::vec2(SIZE, 140.0_f32), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 2.0_f32, theme::BG_BASE);
+
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), rect.bottom()),
+                    egui::pos2(rect.right(), rect.top()),
+                ],
+                egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
+            );
+
+            let lut = ferrolite_pipeline::parametric_curve_lut(&parametric.to_pipeline());
+            let poly: Vec<egui::Pos2> = lut
+                .iter()
+                .enumerate()
+                .map(|(i, &y)| {
+                    egui::pos2(
+                        rect.left() + (i as f32 / 255.0_f32) * rect.width(),
+                        rect.bottom() - y * rect.height(),
+                    )
+                })
+                .collect();
+            painter.add(egui::Shape::line(
+                poly,
+                egui::Stroke::new(1.5_f32, style.curve_color),
+            ));
+
+            ui.add_space(8.0_f32);
+
+            let mut p = parametric.clone();
+            let before = p.clone();
+
+            let mut dragged = false;
+            let mut drag_stopped = false;
+            let mut add_slider = |ui: &mut egui::Ui, s: EguiSlider| {
+                let r = ui.add(s);
+                if r.changed() {
+                    if r.drag_stopped() {
+                        drag_stopped = true;
+                    } else if r.dragged() {
+                        dragged = true;
+                    } else {
+                        drag_stopped = true;
+                    }
+                }
+            };
+
+            add_slider(
+                ui,
+                EguiSlider {
+                    label: "Highlights",
+                    value: &mut p.highlights,
+                    min: -100.0_f32,
+                    max: 100.0_f32,
+                    default: 0.0_f32,
+                    step: 1.0_f32,
+                    decimals: 0,
+                    unit: "",
+                    bipolar: true,
+                    signed: true,
+                    custom_label_w: None,
+                },
+            );
+            add_slider(
+                ui,
+                EguiSlider {
+                    label: "Lights",
+                    value: &mut p.lights,
+                    min: -100.0_f32,
+                    max: 100.0_f32,
+                    default: 0.0_f32,
+                    step: 1.0_f32,
+                    decimals: 0,
+                    unit: "",
+                    bipolar: true,
+                    signed: true,
+                    custom_label_w: None,
+                },
+            );
+            add_slider(
+                ui,
+                EguiSlider {
+                    label: "Darks",
+                    value: &mut p.darks,
+                    min: -100.0_f32,
+                    max: 100.0_f32,
+                    default: 0.0_f32,
+                    step: 1.0_f32,
+                    decimals: 0,
+                    unit: "",
+                    bipolar: true,
+                    signed: true,
+                    custom_label_w: None,
+                },
+            );
+            add_slider(
+                ui,
+                EguiSlider {
+                    label: "Shadows",
+                    value: &mut p.shadows,
+                    min: -100.0_f32,
+                    max: 100.0_f32,
+                    default: 0.0_f32,
+                    step: 1.0_f32,
+                    decimals: 0,
+                    unit: "",
+                    bipolar: true,
+                    signed: true,
+                    custom_label_w: None,
+                },
+            );
+
+            ui.add_space(4.0_f32);
+
+            add_slider(
+                ui,
+                EguiSlider {
+                    label: "Shadow Split",
+                    value: &mut p.shadow_split,
+                    min: 0.10_f32,
+                    max: 0.40_f32,
+                    default: 0.25_f32,
+                    step: 0.01_f32,
+                    decimals: 2,
+                    unit: "",
+                    bipolar: false,
+                    signed: false,
+                    custom_label_w: None,
+                },
+            );
+            add_slider(
+                ui,
+                EguiSlider {
+                    label: "Midtone Split",
+                    value: &mut p.midtone_split,
+                    min: 0.40_f32,
+                    max: 0.70_f32,
+                    default: 0.50_f32,
+                    step: 0.01_f32,
+                    decimals: 2,
+                    unit: "",
+                    bipolar: false,
+                    signed: false,
+                    custom_label_w: None,
+                },
+            );
+            add_slider(
+                ui,
+                EguiSlider {
+                    label: "Highlight Split",
+                    value: &mut p.highlight_split,
+                    min: 0.70_f32,
+                    max: 0.90_f32,
+                    default: 0.75_f32,
+                    step: 0.01_f32,
+                    decimals: 2,
+                    unit: "",
+                    bipolar: false,
+                    signed: false,
+                    custom_label_w: None,
+                },
+            );
+
+            ui.add_space(4.0_f32);
+
+            let mut reset_clicked = false;
+            let modified = p != ParametricCurveValues::default();
+            if ui
+                .add_enabled(modified, egui::Button::new("Reset curve").small())
+                .clicked()
+            {
+                p = ParametricCurveValues::default();
+                reset_clicked = true;
+            }
+
+            if reset_clicked {
+                return Some(ToneCurveEdit {
+                    points: None,
+                    parametric: Some(ParametricCurveValues::default()),
+                    mode,
+                    reset: true,
+                    commit: true,
+                });
+            }
+
+            if p != before {
+                return Some(ToneCurveEdit {
+                    points: None,
+                    parametric: Some(p),
+                    mode,
+                    reset: false,
+                    commit: drag_stopped || !dragged,
+                });
+            }
+
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Context, RawInput};
+
+    #[test]
+    fn parametric_curve_values_default() {
+        let p = ParametricCurveValues::default();
+        assert_eq!(p.highlights, 0.0);
+        assert_eq!(p.lights, 0.0);
+        assert_eq!(p.darks, 0.0);
+        assert_eq!(p.shadows, 0.0);
+        assert_eq!(p.shadow_split, 0.25);
+        assert_eq!(p.midtone_split, 0.50);
+        assert_eq!(p.highlight_split, 0.75);
+    }
+
+    #[test]
+    fn parametric_curve_values_pipeline_conversion() {
+        let p = ParametricCurveValues {
+            highlights: 50.0,
+            lights: -20.0,
+            darks: 10.0,
+            shadows: -50.0,
+            shadow_split: 0.30,
+            midtone_split: 0.60,
+            highlight_split: 0.80,
+        };
+        let pipe = p.to_pipeline();
+        assert_eq!(pipe.highlights, 0.5);
+        assert_eq!(pipe.lights, -0.2);
+        assert_eq!(pipe.darks, 0.1);
+        assert_eq!(pipe.shadows, -0.5);
+        assert_eq!(pipe.shadow_split, 0.30);
+        assert_eq!(pipe.midtone_split, 0.60);
+        assert_eq!(pipe.highlight_split, 0.80);
+
+        let roundtrip = ParametricCurveValues::from_pipeline(&pipe);
+        assert_eq!(roundtrip, p);
+    }
+
+    #[test]
+    fn tone_curve_widget_point_mode_render() {
+        let ctx = Context::default();
+        let mut tab = ToneCurveTab::Point;
+        let points = [(0.0, 0.0), (1.0, 1.0)];
+        let mode = CurveMode::Smooth;
+        let style = CurveStyle {
+            curve_color: theme::ACCENT,
+            point_color: theme::ACCENT_BRIGHT,
+        };
+        let parametric = ParametricCurveValues::default();
+
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let edit = tone_curve_widget(
+                    ui,
+                    "test_tone_curve",
+                    &mut tab,
+                    &points,
+                    mode,
+                    &style,
+                    &parametric,
+                );
+                assert!(edit.is_none());
+            });
+        });
+        assert_eq!(tab, ToneCurveTab::Point);
+    }
+
+    #[test]
+    fn tone_curve_widget_parametric_mode_render() {
+        let ctx = Context::default();
+        let mut tab = ToneCurveTab::Parametric;
+        let points = [(0.0, 0.0), (1.0, 1.0)];
+        let mode = CurveMode::Smooth;
+        let style = CurveStyle {
+            curve_color: theme::ACCENT,
+            point_color: theme::ACCENT_BRIGHT,
+        };
+        let parametric = ParametricCurveValues::default();
+
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let edit = tone_curve_widget(
+                    ui,
+                    "test_tone_curve",
+                    &mut tab,
+                    &points,
+                    mode,
+                    &style,
+                    &parametric,
+                );
+                assert!(edit.is_none());
+            });
+        });
+        assert_eq!(tab, ToneCurveTab::Parametric);
+    }
 }

@@ -1,8 +1,11 @@
+pub mod chips;
 pub mod color_wheel;
 pub mod curve;
 pub mod slider;
 pub mod tabs;
 pub mod tool_button;
+#[allow(unused_imports)]
+pub use chips::{segmented_control, SegmentedControl};
 pub use color_wheel::{color_wheel, WheelEdit};
 pub use slider::EguiSlider;
 #[allow(unused_imports)]

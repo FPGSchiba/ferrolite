@@ -1,0 +1,965 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *{ box-sizing:border-box; }
+  ::-webkit-scrollbar{ width:10px; height:10px; }
+  ::-webkit-scrollbar-track{ background:#141414; }
+  ::-webkit-scrollbar-thumb{ background:#383838; border:2px solid #141414; border-radius:5px; }
+  ::-webkit-scrollbar-thumb:hover{ background:#484848; }
+</style>
+</helmet>
+<div style="width:1440px; height:810px; background:#161616; color:#c8c8c8; font-family:'IBM Plex Sans',system-ui,sans-serif; font-size:12px; overflow:hidden; display:flex; flex-direction:column;">
+
+  <!-- ============ TITLE / MENU BAR ============ -->
+  <div style="height:30px; flex:0 0 30px; background:#111111; border-bottom:1px solid #262626; display:flex; align-items:center; padding:0 10px; gap:16px; user-select:none;">
+    <div style="display:flex; align-items:center; gap:7px;">
+      <div style="width:14px; height:14px; background:#6d97b5; border-radius:2px; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; color:#111;">F</div>
+      <span style="font-weight:600; letter-spacing:1.5px; font-size:11px; color:#dcdcdc;">FERROLITE</span>
+    </div>
+    <div style="display:flex; gap:2px; color:#9a9a9a; font-size:11.5px;">
+      <span style="padding:3px 8px; border-radius:3px;">File</span>
+      <span style="padding:3px 8px; border-radius:3px;">Edit</span>
+      <span style="padding:3px 8px; border-radius:3px;">Photo</span>
+      <span style="padding:3px 8px; border-radius:3px;">View</span>
+      <span style="padding:3px 8px; border-radius:3px;">Help</span>
+    </div>
+    <div style="flex:1 1 auto;"></div>
+    <div style="display:flex; gap:22px;">
+      <span onClick="{{ goLibrary }}" style="font-size:11.5px; cursor:pointer; color:{{ libTabColor }}; padding:3px 2px; border-bottom:2px solid {{ libTabBorder }};">Library</span>
+      <span onClick="{{ goDevelop }}" style="font-size:11.5px; cursor:pointer; color:{{ devTabColor }}; padding:3px 2px; border-bottom:2px solid {{ devTabBorder }};">Develop</span>
+      <span onClick="{{ goExport }}" style="font-size:11.5px; cursor:pointer; color:{{ expTabColor }}; padding:3px 2px; border-bottom:2px solid {{ expTabBorder }};">Export</span>
+    </div>
+    <div style="flex:1 1 auto;"></div>
+    <div style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#6a6a6a;">v0.1.2</div>
+    <div style="display:flex; gap:14px; color:#8a8a8a; font-size:11px; margin-left:6px;">
+      <span>—</span><span style="font-size:10px;">▢</span><span>✕</span>
+    </div>
+  </div>
+
+  <!-- ============ LIBRARY VIEW ============ -->
+  <sc-if value="{{ isLibrary }}" hint-placeholder-val="{{ true }}">
+  <div style="flex:1 1 auto; display:flex; flex-direction:column; min-height:0;">
+
+    <!-- top toolbar -->
+    <div style="height:38px; flex:0 0 38px; background:#1a1a1a; border-bottom:1px solid #262626; display:flex; align-items:center; padding:0 10px; gap:8px; user-select:none;">
+      <div style="display:flex; align-items:center; gap:6px; width:210px; height:23px; background:#101010; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px;">
+        <span style="color:#666; font-size:11.5px;">Search filename or tag…</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px; height:23px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px; min-width:104px;">
+        <span style="font-size:11px; color:#bcbcbc;">Capture Time</span><span style="flex:1 1 auto;"></span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+      </div>
+      <div style="width:24px; height:23px; display:flex; align-items:center; justify-content:center; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#9a9a9a; font-size:10px;">▾</div>
+      <div style="width:26px; height:23px; display:flex; align-items:center; justify-content:center; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#9a9a9a; font-size:10.5px; font-family:'IBM Plex Mono',monospace;">&gt;=</div>
+      <div style="display:flex; align-items:center; gap:2px; height:23px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 7px;">
+        <sc-for list="{{ filterStars }}" as="on" hint-placeholder-count="5">
+          <span style="font-size:12px; color:#5a5a5a;">☆</span>
+        </sc-for>
+      </div>
+      <span style="font-size:13px; color:#5a9a68;">⚑</span>
+      <span style="font-size:13px; color:#a05a5a;">⊘</span>
+      <div style="display:flex; align-items:center; gap:6px; height:23px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px; min-width:70px;">
+        <span style="font-size:11px; color:#bcbcbc;">Tags (0)</span><span style="flex:1 1 auto;"></span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span style="width:12px; height:12px; border:1px solid #444; border-radius:2px; display:inline-block;"></span>
+        <span style="font-size:11px; color:#9a9a9a;">Subfolders</span>
+      </div>
+
+      <!-- metadata filter -->
+      <div style="position:relative;">
+        <div onClick="{{ toggleFilters }}" style="display:flex; align-items:center; gap:6px; height:23px; padding:0 9px; background:{{ filtBtnBg }}; border:1px solid {{ filtBtnBorder }}; border-radius:3px; color:{{ filtBtnColor }}; font-size:11px; cursor:pointer;">
+          <span>Metadata</span><span style="font-size:8px; color:#7a7a7a;">▾</span>
+        </div>
+        <sc-if value="{{ filtersOpen }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; top:29px; left:0; width:300px; background:#1d1d1d; border:1px solid #353535; border-radius:4px; z-index:50;">
+          <div style="display:flex; align-items:center; padding:9px 12px; border-bottom:1px solid #2a2a2a;">
+            <span style="font-size:10px; letter-spacing:1px; color:#8a8a8a; font-weight:600; flex:1 1 auto;">METADATA FILTERS</span>
+            <span style="font-size:10px; color:#6d97b5; cursor:pointer;">Reset</span>
+          </div>
+          <div style="padding:10px 12px 12px;">
+            <sc-for list="{{ metaCombos }}" as="m" hint-placeholder-count="3">
+              <div style="display:flex; align-items:center; gap:8px; margin-bottom:7px;">
+                <span style="font-size:11px; color:#8a8a8a; width:66px; flex:0 0 66px;">{{ m.label }}</span>
+                <div style="display:flex; align-items:center; height:22px; flex:1 1 auto; background:#141414; border:1px solid {{ m.border }}; border-radius:3px; padding:0 8px;">
+                  <span style="font-size:11px; color:{{ m.valColor }}; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ m.value }}</span>
+                  <span style="color:#7a7a7a; font-size:8px;">▾</span>
+                </div>
+              </div>
+            </sc-for>
+            <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin:10px 0 6px;">FILE TYPE</div>
+            <div style="display:flex; gap:5px; margin-bottom:4px;">
+              <sc-for list="{{ fileTypes }}" as="ft" hint-placeholder-count="4">
+                <span style="flex:1 1 0; text-align:center; font-size:10px; padding:4px 0; border-radius:3px; background:{{ ft.bg }}; border:1px solid {{ ft.border }}; color:{{ ft.color }};">{{ ft.name }}</span>
+              </sc-for>
+            </div>
+            <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin:12px 0 2px;">EXPOSURE RANGE</div>
+            <dc-import name="EguiSlider" label="ISO" value="100" min="50" max="25600" default="100" step="50" decimals="0" hint-size="100%,22px"></dc-import>
+            <dc-import name="EguiSlider" label="Aperture" value="8" min="1" max="22" default="8" step="0.1" decimals="1" unit=" f" hint-size="100%,22px"></dc-import>
+            <dc-import name="EguiSlider" label="Focal" value="14" min="8" max="600" default="14" step="1" decimals="0" unit=" mm" hint-size="100%,22px"></dc-import>
+            <div style="display:flex; align-items:center; gap:8px; margin-top:12px;">
+              <span style="flex:1 1 0; text-align:center; font-size:11px; padding:5px 0; border-radius:3px; background:#232b30; border:1px solid #34464f; color:#cfe0ec; cursor:pointer;">Apply Filters</span>
+              <span style="font-size:11px; padding:5px 12px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;" onClick="{{ toggleFilters }}">Close</span>
+            </div>
+          </div>
+        </div>
+        </sc-if>
+      </div>
+
+      <span style="flex:1 1 auto;"></span>
+      <span style="color:#7a7a7a; font-size:11px;">Size</span>
+      <div onPointerDown="{{ onSizeDown }}" ref="{{ sizeTrackRef }}" style="position:relative; width:110px; height:18px; display:flex; align-items:center; cursor:ew-resize;">
+        <div style="position:absolute; left:0; right:0; top:50%; height:2px; transform:translateY(-50%); background:#333; border-radius:1px;"></div>
+        <div style="position:absolute; left:0; top:50%; height:2px; transform:translateY(-50%); width:{{ sizePct }}%; background:#585858; border-radius:1px;"></div>
+        <div style="position:absolute; top:50%; transform:translate(-50%,-50%); left:{{ sizePct }}%; width:11px; height:11px; border-radius:50%; background:#9a9a9a; border:1px solid #161616;"></div>
+      </div>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:11px; color:#bcbcbc; width:26px;">{{ sizePct }}</span>
+      <span style="color:#7a7a7a; font-size:12px;">↺</span>
+    </div>
+
+    <!-- body -->
+    <div style="flex:1 1 auto; display:flex; min-height:0;">
+
+      <!-- LEFT PANEL -->
+      <div style="width:216px; flex:0 0 216px; background:#171717; border-right:1px solid #262626; overflow-y:auto; user-select:none;">
+        <div style="padding:11px 12px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600;">CATALOG</div>
+        <div style="padding:0 8px;">
+          <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:3px; background:#242424; color:#e0e0e0;">All Photographs</div>
+          <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:3px; color:#a8a8a8;">Recently Added</div>
+        </div>
+        <div style="padding:8px 8px 0;">
+          <div style="text-align:center; font-size:11px; padding:6px 0; background:#1e1e1e; border:1px solid #2c2c2c; border-radius:3px; color:#a8a8a8;">Open folder…</div>
+        </div>
+
+        <div style="padding:14px 12px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600;">FOLDERS</div>
+        <div style="padding:0 8px;">
+          <div style="display:flex; align-items:center; gap:6px; padding:4px 8px; border-radius:3px; color:#b5b5b5;">
+            <span style="font-size:9px; color:#7a7a7a;">▸</span>
+            <span style="font-size:11.5px; flex:1 1 auto;">100MSDCF</span>
+            <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#666;">3333</span>
+          </div>
+        </div>
+
+        <div style="padding:14px 12px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; display:flex; align-items:center;">COLLECTIONS<span style="flex:1 1 auto;"></span><span style="color:#555; font-size:13px; cursor:pointer;">+</span></div>
+        <div style="padding:0 8px;">
+          <sc-for list="{{ collections }}" as="c" hint-placeholder-count="4">
+            <div onClick="{{ c.onClick }}" style="display:flex; align-items:center; gap:6px; padding:4px 8px; padding-left:{{ c.pad }}px; border-radius:3px; color:#b5b5b5; cursor:pointer;">
+              <span style="font-size:8px; color:#6a6a6a; width:8px;">{{ c.tri }}</span>
+              <span style="font-size:11px; color:#7a7a7a;">{{ c.icon }}</span>
+              <span style="font-size:11.5px; flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ c.name }}</span>
+              <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#666;">{{ c.count }}</span>
+            </div>
+          </sc-for>
+        </div>
+        <div style="padding:14px 12px 6px; font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; display:flex; align-items:center;">TAGS<span style="flex:1 1 auto;"></span><span style="color:#555; font-size:13px; cursor:pointer;">+</span></div>
+        <div style="padding:0 8px 12px;">
+          <sc-for list="{{ tags }}" as="t" hint-placeholder-count="2">
+            <div style="display:flex; align-items:center; gap:8px; padding:4px 8px; border-radius:3px; color:#b5b5b5;">
+              <span style="width:12px; height:12px; border-radius:3px; background:{{ t.color }}; display:inline-block;"></span>
+              <span style="font-size:11.5px; flex:1 1 auto;">{{ t.name }}</span>
+              <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#666;">{{ t.count }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <!-- GRID -->
+      <div style="flex:1 1 auto; display:flex; flex-direction:column; min-width:0; background:#131313;">
+        <div style="flex:1 1 auto; overflow-y:auto; padding:14px;">
+          <div style="display:grid; grid-template-columns:{{ gridCols }}; gap:10px;">
+            <sc-for list="{{ thumbs }}" as="t" hint-placeholder-count="18">
+              <div onClick="{{ t.onClick }}" style="cursor:pointer;">
+                <div style="position:relative; aspect-ratio:3/2; background:#0d0d0d; border:1px solid {{ t.border }}; outline:{{ t.outline }}; overflow:hidden;">
+                  <img src="{{ t.src }}" loading="lazy" style="width:100%; height:100%; object-fit:cover; display:block;" />
+                  <sc-if value="{{ t.hasStar }}" hint-placeholder-val="{{ false }}">
+                  <span style="position:absolute; bottom:4px; left:5px; font-size:11px; color:#d8c458; text-shadow:0 1px 2px #000;">★</span>
+                  </sc-if>
+                  <sc-if value="{{ t.hasLabel }}" hint-placeholder-val="{{ false }}">
+                  <span style="position:absolute; bottom:5px; right:5px; width:8px; height:8px; border-radius:50%; background:{{ t.labelColor }};"></span>
+                  </sc-if>
+                </div>
+                <div style="margin-top:4px; font-family:'IBM Plex Mono',monospace; font-size:10px; color:{{ t.nameColor }}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ t.name }}</div>
+                <div style="font-family:'IBM Plex Mono',monospace; font-size:9px; color:#5c5c5c;">{{ t.date }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div style="height:24px; flex:0 0 24px; border-top:1px solid #232323; display:flex; align-items:center; padding:0 14px; gap:14px; background:#141414; font-family:'IBM Plex Mono',monospace; font-size:10px; color:#6e6e6e; user-select:none;">
+          <span>{{ statusFile }}</span>
+          <span style="flex:1 1 auto;"></span>
+          <span>Idle</span><span>·</span><span>0 / 3333 indexed</span><span>·</span><span>GPU: idle</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ============ DEVELOP VIEW ============ -->
+  <sc-if value="{{ isDevelop }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1 1 auto; display:flex; flex-direction:column; min-height:0;">
+
+    <!-- shared filter/toggle toolbar -->
+    <div style="height:38px; flex:0 0 38px; background:#1a1a1a; border-bottom:1px solid #262626; display:flex; align-items:center; padding:0 10px; gap:8px; user-select:none;">
+      <div onClick="{{ toggleBA }}" style="display:flex; align-items:center; gap:6px; height:23px; padding:0 10px; background:{{ baBg }}; border:1px solid {{ baBorder }}; border-radius:3px; color:{{ baColor }}; font-size:11px; cursor:pointer;">
+        <span style="font-size:12px;">◐</span><span>Before/After</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:6px; height:23px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px; min-width:104px;">
+        <span style="font-size:11px; color:#bcbcbc;">Capture Time</span><span style="flex:1 1 auto;"></span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+      </div>
+      <div style="width:26px; height:23px; display:flex; align-items:center; justify-content:center; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#9a9a9a; font-size:10.5px; font-family:'IBM Plex Mono',monospace;">&gt;=</div>
+      <div style="display:flex; align-items:center; gap:2px; height:23px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 7px;">
+        <sc-for list="{{ filterStars }}" as="on" hint-placeholder-count="5">
+          <span style="font-size:12px; color:#5a5a5a;">☆</span>
+        </sc-for>
+      </div>
+      <span style="font-size:13px; color:#5a9a68;">⚑</span>
+      <span style="font-size:13px; color:#a05a5a;">⊘</span>
+      <div style="display:flex; align-items:center; gap:6px; height:23px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px; min-width:70px;">
+        <span style="font-size:11px; color:#bcbcbc;">Tags (0)</span><span style="flex:1 1 auto;"></span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+      </div>
+    </div>
+
+    <!-- top filmstrip -->
+    <div style="height:96px; flex:0 0 96px; background:#171717; border-bottom:1px solid #262626; display:flex; align-items:center; gap:8px; padding:0 12px; overflow-x:auto; user-select:none;">
+      <sc-for list="{{ filmstrip }}" as="f" hint-placeholder-count="14">
+        <div onClick="{{ f.onClick }}" style="position:relative; flex:0 0 auto; width:120px; aspect-ratio:3/2; background:#0d0d0d; border:1px solid {{ f.border }}; outline:{{ f.outline }}; overflow:hidden; cursor:pointer;">
+          <img src="{{ f.src }}" loading="lazy" style="width:100%; height:100%; object-fit:cover; display:block;" />
+        </div>
+      </sc-for>
+    </div>
+
+    <!-- body -->
+    <div style="flex:1 1 auto; display:flex; min-height:0;">
+
+      <!-- LEFT INFO PANEL (mirrors right panel) -->
+      <sc-if value="{{ showInfo }}" hint-placeholder-val="{{ false }}">
+      <div style="width:300px; flex:0 0 300px; background:#1a1a1a; border-right:1px solid #262626; overflow-y:auto; user-select:none;">
+        <div style="padding:12px 12px 8px;">
+          <div style="font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600;">INFO</div>
+        </div>
+        <div style="padding:0 12px 12px; font-size:11.5px; color:#c8c8c8; display:flex; flex-direction:column; gap:9px;">
+          <sc-for list="{{ infoRows }}" as="r" hint-placeholder-count="9">
+            <div style="display:flex; align-items:baseline; gap:8px;">
+              <span style="width:66px; flex:0 0 66px; color:#7a7a7a; font-size:11px;">{{ r.label }}</span>
+              <span style="color:#d0d0d0;">{{ r.value }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- CENTER CANVAS -->
+      <div style="flex:1 1 auto; min-width:0; background:#0d0d0d; display:flex; align-items:center; justify-content:center; position:relative;">
+        <img src="{{ heroSrc }}" style="display:block; max-width:94%; max-height:94%; object-fit:contain;" />
+
+        <!-- floating tool cluster -->
+        <div style="position:absolute; top:14px; left:14px; display:flex; gap:2px; background:#1c1c1cee; border:1px solid #2f2f2f; border-radius:5px; padding:3px;">
+          <sc-for list="{{ toolCluster }}" as="tl" hint-placeholder-count="4">
+            <span onClick="{{ tl.onClick }}" title="{{ tl.name }}" style="width:26px; height:26px; display:flex; align-items:center; justify-content:center; background:{{ tl.bg }}; border-radius:3px; color:{{ tl.color }}; font-size:13px; cursor:pointer;">{{ tl.glyph }}</span>
+          </sc-for>
+          <div style="width:1px; background:#333; margin:4px 2px;"></div>
+          <span style="width:26px; height:26px; display:flex; align-items:center; justify-content:center; color:#a0a0a0; font-size:13px;">↺</span>
+          <span style="width:26px; height:26px; display:flex; align-items:center; justify-content:center; color:#a0a0a0; font-size:13px;">↻</span>
+        </div>
+
+        <!-- crop overlay -->
+        <sc-if value="{{ isToolCrop }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; inset:3% 8%; border:1px solid #e8e8e8cc; pointer-events:none;">
+          <div style="position:absolute; left:33.33%; top:0; bottom:0; width:1px; background:#e8e8e866;"></div>
+          <div style="position:absolute; left:66.66%; top:0; bottom:0; width:1px; background:#e8e8e866;"></div>
+          <div style="position:absolute; top:33.33%; left:0; right:0; height:1px; background:#e8e8e866;"></div>
+          <div style="position:absolute; top:66.66%; left:0; right:0; height:1px; background:#e8e8e866;"></div>
+          <sc-for list="{{ cropHandles }}" as="h" hint-placeholder-count="8">
+            <div style="position:absolute; left:{{ h.x }}; top:{{ h.y }}; width:7px; height:7px; margin:-4px; background:#e8e8e8; border:1px solid #161616;"></div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <!-- mask overlay tint -->
+        <sc-if value="{{ isToolMask }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute; inset:0; background:#c02a2a; opacity:0.42; mix-blend-mode:multiply; pointer-events:none;"></div>
+        </sc-if>
+
+        <!-- floating histogram -->
+        <div style="position:absolute; top:14px; right:14px; width:280px; background:#0e0e0eee; border:1px solid #2f2f2f; border-radius:5px; padding:8px;">
+          <svg viewBox="0 0 264 90" preserveAspectRatio="none" style="width:100%; height:90px; display:block;">
+            <path d="{{ histR }}" fill="#b5494980" stroke="#cf6a6a" stroke-width="1"/>
+            <path d="{{ histG }}" fill="#4f9e5680" stroke="#6cc077" stroke-width="1"/>
+            <path d="{{ histB }}" fill="#4a73b580" stroke="#6d97d5" stroke-width="1"/>
+          </svg>
+        </div>
+
+        <!-- floating EXIF chip -->
+        <div style="position:absolute; bottom:14px; left:14px; background:#000000a0; padding:6px 10px; font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#d6d6d6; line-height:1.5;">
+          <div>{{ exif.focal }}</div><div>{{ exif.aperture }}</div><div>{{ exif.shutter }}</div><div>{{ exif.iso }}</div><div>{{ exif.zoom }}</div>
+        </div>
+
+        <!-- info panel toggle -->
+        <span onClick="{{ toggleInfo }}" title="Toggle Info panel" style="position:absolute; bottom:132px; left:14px; display:flex; align-items:center; gap:6px; padding:5px 10px; background:{{ infoBtnBg }}; border:1px solid {{ infoBtnBorder }}; border-radius:4px; color:{{ infoBtnColor }}; font-size:11px; cursor:pointer;">
+          <span>ℹ</span><span>Info</span>
+        </span>
+      </div>
+
+      <!-- RIGHT ADJUSTMENT PANEL -->
+      <div style="width:300px; flex:0 0 300px; background:#1a1a1a; border-left:1px solid #262626; overflow-y:auto; user-select:none;">
+        <div style="padding:12px 12px 8px;">
+          <div style="font-size:11.5px; color:#cfcfcf;">{{ camera }}</div>
+          <div style="font-size:11px; color:#6a6a6a; margin-top:2px;">{{ editStatus }}</div>
+          <div style="display:flex; align-items:center; gap:8px; margin-top:9px; height:23px;">
+            <div style="display:flex; align-items:center; height:23px; flex:0 0 100px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px;">
+              <span style="font-size:11px; color:#bcbcbc; flex:1 1 auto;">Rec2020</span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+            </div>
+            <span style="font-size:11px; color:#8a8a8a;">Working space</span>
+          </div>
+        </div>
+
+        <!-- ===== TOOL: ADJUST — shared options library, 3 tabs, nested disclosures ===== -->
+        <sc-if value="{{ isToolAdjust }}" hint-placeholder-val="{{ true }}">
+        <div style="display:flex; border-bottom:1px solid #262626; padding:0 6px;">
+          <sc-for list="{{ adjustTabs }}" as="tb" hint-placeholder-count="3">
+            <div onClick="{{ tb.onClick }}" style="padding:8px 12px; font-size:11.5px; cursor:pointer; color:{{ tb.color }}; border-bottom:2px solid {{ tb.border }};">{{ tb.name }}</div>
+          </sc-for>
+        </div>
+
+        <div style="padding:10px 10px 4px;">
+
+          <sc-if value="{{ isAdjLight }}" hint-placeholder-val="{{ true }}">
+          <dc-import name="EguiSlider" label="Exposure" value="0.35" min="-5" max="5" default="0" step="0.01" decimals="2" bipolar="true" signed="true" unit=" EV" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Contrast" value="12" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Highlights" value="-46" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Shadows" value="34" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Whites" value="8" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Blacks" value="-15" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Temp" value="5450" min="2000" max="12000" default="5500" step="10" decimals="0" unit=" K" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Tint" value="-6" min="-150" max="150" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+
+          <div onClick="{{ adjustSub.toggleCurve }}" style="display:flex; align-items:center; gap:6px; padding:9px 2px 4px; cursor:pointer; color:#8a8a8a; font-size:10.5px; margin-top:6px;">
+            <span style="width:8px;">{{ adjustSub.curveTri }}</span><span>Tone Curve</span>
+          </div>
+          <sc-if value="{{ adjustSub.curve }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex; gap:14px; margin:8px 0; font-size:11px;">
+            <sc-for list="{{ curveChannels }}" as="c" hint-placeholder-count="4">
+              <span onClick="{{ c.onClick }}" style="cursor:pointer; color:{{ c.color }}; font-weight:{{ c.weight }};">{{ c.name }}</span>
+            </sc-for>
+          </div>
+          <div style="position:relative; aspect-ratio:1/1; max-width:200px; margin:0 auto 6px; background:#0e0e0e; border:1px solid #262626;">
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%; height:100%; display:block;">
+              <line x1="25" y1="0" x2="25" y2="100" stroke="#1e1e1e"/><line x1="50" y1="0" x2="50" y2="100" stroke="#1e1e1e"/><line x1="75" y1="0" x2="75" y2="100" stroke="#1e1e1e"/>
+              <line x1="0" y1="25" x2="100" y2="25" stroke="#1e1e1e"/><line x1="0" y1="50" x2="100" y2="50" stroke="#1e1e1e"/><line x1="0" y1="75" x2="100" y2="75" stroke="#1e1e1e"/>
+              <line x1="0" y1="100" x2="100" y2="0" stroke="#333" stroke-dasharray="2 2"/>
+              <path d="M0,100 C30,78 38,40 60,30 C76,22 88,10 100,4" fill="none" stroke="#6d97b5" stroke-width="1.6"/>
+              <circle cx="0" cy="100" r="2.6" fill="#cfcfcf"/><circle cx="36" cy="62" r="2.6" fill="#cfcfcf"/><circle cx="68" cy="24" r="2.6" fill="#cfcfcf"/><circle cx="100" cy="4" r="2.6" fill="#cfcfcf"/>
+            </svg>
+          </div>
+          <div style="font-size:9.5px; color:#5a5a5a; text-align:center; margin-bottom:8px;">Drag to adjust · double/right-click or Delete to remove a point</div>
+          <div style="display:flex; gap:6px; margin-bottom:10px;">
+            <span style="flex:1 1 0; text-align:center; font-size:10.5px; padding:4px 0; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset</span>
+            <span style="flex:1 1 0; text-align:center; font-size:10.5px; padding:4px 0; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Linear</span>
+            <span style="flex:1 1 0; text-align:center; font-size:10.5px; padding:4px 0; border-radius:3px; background:#232b30; border:1px solid #34464f; color:#cfe0ec; cursor:pointer;">Smooth</span>
+          </div>
+          <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin-bottom:6px;">PARAMETRIC</div>
+          <dc-import name="EguiSlider" label="Highlights" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Lights" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Darks" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Shadow split" value="0.25" min="0" max="1" default="0.25" step="0.01" decimals="2" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Midtone split" value="0.5" min="0" max="1" default="0.5" step="0.01" decimals="2" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Highlight split" value="0.75" min="0" max="1" default="0.75" step="0.01" decimals="2" hint-size="100%,22px"></dc-import>
+          </sc-if>
+
+          <div style="display:flex; gap:8px; margin-top:12px;">
+            <span style="flex:1 1 0; text-align:center; font-size:11px; padding:5px 0; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset</span>
+            <span style="flex:1 1 0; text-align:center; font-size:11px; padding:5px 0; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset all</span>
+          </div>
+          </sc-if>
+
+          <sc-if value="{{ isAdjColor }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex; gap:4px; margin-bottom:10px;">
+            <sc-for list="{{ hslSwatches }}" as="sw" hint-placeholder-count="8">
+              <div style="width:24px; height:24px; border-radius:3px; background:{{ sw.color }}; border:1px solid {{ sw.border }}; outline:{{ sw.outline }};"></div>
+            </sc-for>
+          </div>
+          <dc-import name="EguiSlider" label="Hue" value="-8" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Sat" value="26" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Lum" value="-12" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <div style="height:1px; background:#242424; margin:10px 0;"></div>
+          <dc-import name="EguiSlider" label="Vibrance" value="14" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Saturation" value="-4" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+
+          <div onClick="{{ adjustSub.toggleGrade }}" style="display:flex; align-items:center; gap:6px; padding:9px 2px 4px; cursor:pointer; color:#8a8a8a; font-size:10.5px; margin-top:6px;">
+            <span style="width:8px;">{{ adjustSub.gradeTri }}</span><span>Color Grading</span>
+          </div>
+          <sc-if value="{{ adjustSub.grade }}" hint-placeholder-val="{{ false }}">
+          <sc-for list="{{ gradeWheels }}" as="w" hint-placeholder-count="4">
+            <div style="margin:10px 0;">
+              <div style="font-size:11px; color:#9a9a9a; margin-bottom:6px;">{{ w.name }}</div>
+              <div style="width:80px; height:80px; border-radius:50%; margin:0 auto; position:relative; background:conic-gradient(from 90deg,#e05a5a,#e0a25a,#dfd35a,#6bbf6b,#5ac6c2,#5a86e0,#a25ae0,#e05a9d,#e05a5a);">
+                <div style="position:absolute; left:50%; top:50%; width:8px; height:8px; border-radius:50%; background:#fff; border:1px solid #161616; transform:translate(-50%,-50%);"></div>
+              </div>
+              <dc-import name="EguiSlider" label="Lum" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+            </div>
+          </sc-for>
+          <dc-import name="EguiSlider" label="Blending" value="50" min="0" max="100" default="50" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Balance" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          </sc-if>
+
+          <div style="text-align:center; font-size:11px; padding:5px 0; margin-top:10px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset all</div>
+          </sc-if>
+
+          <sc-if value="{{ isAdjEffects }}" hint-placeholder-val="{{ false }}">
+          <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin-bottom:6px;">SHARPENING</div>
+          <dc-import name="EguiSlider" label="Amount" value="1.07" min="0" max="3" default="1" step="0.01" decimals="2" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Radius" value="1" min="0.5" max="10" default="1" step="0.1" decimals="1" unit=" px" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Detail" value="25" min="0" max="100" default="25" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <div style="height:1px; background:#242424; margin:12px 0 8px;"></div>
+          <div style="display:flex; align-items:center; gap:6px; font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin-bottom:6px;">
+            <span>NOISE REDUCTION</span>
+            <span title="AI raw-domain denoise (A1, opt-in)" style="font-size:9px; padding:2px 5px; border-radius:3px; border:1px solid #34464f; color:#6d97b5;">AI</span>
+          </div>
+          <dc-import name="EguiSlider" label="Luminance" value="18" min="0" max="100" default="0" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Detail" value="50" min="0" max="100" default="50" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Color" value="25" min="0" max="100" default="25" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Color Detail" value="50" min="0" max="100" default="50" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+
+          <div onClick="{{ adjustSub.toggleOptics }}" style="display:flex; align-items:center; gap:6px; padding:9px 2px 4px; cursor:pointer; color:#8a8a8a; font-size:10.5px; margin-top:6px;">
+            <span style="width:8px;">{{ adjustSub.opticsTri }}</span><span>Optics</span>
+          </div>
+          <sc-if value="{{ adjustSub.optics }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex; align-items:center; gap:8px; margin:8px 0;">
+            <span style="flex:1 1 auto; font-size:11px; color:#c0c0c0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">FE 28-70mm f/3.5-5.6 OSS (…</span>
+            <span style="font-size:10.5px; padding:5px 10px; border-radius:3px; background:#1e1e1e; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Choose lens…</span>
+          </div>
+          <div style="font-size:11px; color:#9a9a9a; margin-bottom:2px;">Distortion — <span style="color:#5a5a5a;">Needs a matched lens</span></div>
+          <dc-import name="EguiSlider" label="" value="1" min="0" max="2" default="1" step="0.01" decimals="2" hint-size="100%,22px"></dc-import>
+          <div style="font-size:11px; color:#9a9a9a; margin:8px 0 2px;">Vignette (manual)</div>
+          <dc-import name="EguiSlider" label="" value="1" min="-2" max="2" default="0" step="0.01" decimals="2" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          </sc-if>
+
+          <div style="text-align:center; font-size:11px; padding:5px 0; margin-top:10px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset all</div>
+          </sc-if>
+
+        </div>
+        </sc-if>
+
+        <!-- ===== TOOL: CROP — no tabs, dedicated crop panel + direct-format buttons ===== -->
+        <sc-if value="{{ isToolCrop }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:12px 12px 4px;">
+          <div style="font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; margin-bottom:10px;">CROP &amp; TRANSFORM</div>
+          <dc-import name="EguiSlider" label="Angle" value="0" min="-45" max="45" default="0" step="0.1" decimals="1" bipolar="true" signed="true" unit="°" hint-size="100%,22px"></dc-import>
+          <div style="display:flex; align-items:center; gap:8px; margin:10px 0 8px; height:23px;">
+            <div style="display:flex; align-items:center; height:23px; flex:1 1 auto; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px;">
+              <span style="font-size:11px; color:#bcbcbc; flex:1 1 auto;">Original</span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+            </div>
+            <span style="font-size:11px; color:#8a8a8a;">Aspect</span>
+          </div>
+          <div style="display:flex; flex-wrap:wrap; gap:5px; margin-bottom:12px;">
+            <sc-for list="{{ aspectChips }}" as="a" hint-placeholder-count="7">
+              <span style="font-size:10px; padding:4px 9px; border-radius:3px; background:{{ a.bg }}; border:1px solid {{ a.border }}; color:{{ a.color }}; cursor:pointer;">{{ a.name }}</span>
+            </sc-for>
+          </div>
+          <div style="text-align:center; font-size:11px; padding:5px 0; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset crop</div>
+
+          <div style="font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; margin:16px 0 10px;">GEOMETRY</div>
+          <dc-import name="EguiSlider" label="Keystone V" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Keystone H" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <div style="display:flex; gap:6px; margin-top:8px;">
+            <span style="flex:1 1 0; text-align:center; font-size:10px; padding:4px 0; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#7a7a7a;">Auto Perspective</span>
+            <span style="flex:1 1 0; text-align:center; font-size:10px; padding:4px 0; background:#141414; border:1px solid #2c2c2c; border-radius:3px; color:#7a7a7a;">Guided Upright</span>
+          </div>
+
+          <div style="display:flex; gap:8px; margin-top:16px;">
+            <span style="flex:1 1 0; text-align:center; font-size:11px; padding:5px 0; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset</span>
+            <span style="flex:1 1 0; text-align:center; font-size:11px; padding:5px 0; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset all</span>
+          </div>
+        </div>
+        </sc-if>
+
+        <!-- ===== TOOL: HEAL — classical (P5) + AI object removal (A3) stub ===== -->
+        <sc-if value="{{ isToolHeal }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:12px 12px 4px;">
+          <div style="font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; margin-bottom:10px;">HEAL / CLONE / REMOVE</div>
+          <div style="display:flex; gap:5px; margin-bottom:12px;">
+            <sc-for list="{{ healModes }}" as="m" hint-placeholder-count="3">
+              <span style="flex:1 1 0; text-align:center; font-size:10.5px; padding:5px 0; border-radius:3px; background:{{ m.bg }}; border:1px solid {{ m.border }}; color:{{ m.color }};">{{ m.name }}</span>
+            </sc-for>
+          </div>
+          <dc-import name="EguiSlider" label="Brush Size" value="45" min="1" max="500" default="45" step="1" decimals="0" unit="px" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Feather" value="35" min="0" max="100" default="35" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Opacity" value="100" min="0" max="100" default="100" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <div style="margin-top:10px; font-size:11px; color:#6a6a6a;">Click the canvas to place a spot. Alt-click to set a clone source.</div>
+          <div style="margin-top:16px; font-size:10px; color:#5a5a5a;">0 spots on this photo</div>
+        </div>
+        </sc-if>
+
+        <!-- ===== TOOL: MASK — local adjustments (P1) + AI auto-mask (A2) ===== -->
+        <sc-if value="{{ isToolMask }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:12px 12px 10px; border-bottom:1px solid #262626;">
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+            <span style="flex:1 1 auto; text-align:center; font-size:11px; padding:6px 0; border-radius:3px; background:#232b30; border:1px solid #34464f; color:#cfe0ec; cursor:pointer;">Create New Mask</span>
+            <span title="Auto mask (AI)" style="font-size:10px; padding:6px 8px; border-radius:3px; border:1px solid #34464f; color:#6d97b5; cursor:pointer;">AI</span>
+            <span style="font-size:13px; color:#9a9a9a; cursor:pointer;">◉</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+            <span style="width:12px; height:12px; border:1px solid #444; border-radius:2px; display:inline-block; background:#3f5f73;"></span>
+            <span style="font-size:10.5px; color:#9a9a9a;">Inv</span>
+            <span style="font-size:11px; color:#d0d0d0; flex:1 1 auto;">Mask 1</span>
+            <span style="font-size:12px; color:#8a5a5a; cursor:pointer;">🗑</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="font-size:10.5px; color:#6a6a6a; flex:1 1 auto;">0 components</span>
+            <span style="font-size:11px; padding:4px 10px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">New Brush Layer (B)</span>
+          </div>
+        </div>
+        <div style="padding:6px 12px 4px; font-size:10.5px; color:#6d97b5;">Editing: Mask 1 — adjustments below apply only inside this mask</div>
+
+        <div style="display:flex; border-bottom:1px solid #262626; padding:0 6px;">
+          <sc-for list="{{ maskTabs }}" as="tb" hint-placeholder-count="3">
+            <div onClick="{{ tb.onClick }}" style="padding:8px 12px; font-size:11.5px; cursor:pointer; color:{{ tb.color }}; border-bottom:2px solid {{ tb.border }};">{{ tb.name }}</div>
+          </sc-for>
+        </div>
+
+        <div style="padding:10px 10px 4px;">
+
+          <sc-if value="{{ isMaskLight }}" hint-placeholder-val="{{ true }}">
+          <dc-import name="EguiSlider" label="Exposure" value="0" min="-5" max="5" default="0" step="0.01" decimals="2" bipolar="true" signed="true" unit=" EV" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Contrast" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Highlights" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Shadows" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Whites" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Blacks" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Temp" value="0" min="-150" max="150" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Tint" value="0" min="-150" max="150" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+
+          <div onClick="{{ maskSub.toggleCurve }}" style="display:flex; align-items:center; gap:6px; padding:9px 2px 4px; cursor:pointer; color:#8a8a8a; font-size:10.5px; margin-top:6px;">
+            <span style="width:8px;">{{ maskSub.curveTri }}</span><span>Tone Curve</span>
+          </div>
+          <sc-if value="{{ maskSub.curve }}" hint-placeholder-val="{{ false }}">
+          <div style="position:relative; aspect-ratio:1/1; max-width:200px; margin:8px auto; background:#0e0e0e; border:1px solid #262626;">
+            <svg viewBox="0 0 100 100" preserveAspectRatio="none" style="width:100%; height:100%; display:block;">
+              <line x1="0" y1="100" x2="100" y2="0" stroke="#6d97b5" stroke-width="1.6"/>
+              <circle cx="0" cy="100" r="2.6" fill="#cfcfcf"/><circle cx="100" cy="0" r="2.6" fill="#cfcfcf"/>
+            </svg>
+          </div>
+          </sc-if>
+          <div style="text-align:center; font-size:11px; padding:5px 0; margin-top:10px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset all</div>
+          </sc-if>
+
+          <sc-if value="{{ isMaskColor }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex; gap:4px; margin-bottom:10px;">
+            <sc-for list="{{ hslSwatches }}" as="sw" hint-placeholder-count="8">
+              <div style="width:24px; height:24px; border-radius:3px; background:{{ sw.color }}; opacity:0.5;"></div>
+            </sc-for>
+          </div>
+          <dc-import name="EguiSlider" label="Hue" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Sat" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Lum" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Saturation" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+
+          <div onClick="{{ maskSub.toggleGrade }}" style="display:flex; align-items:center; gap:6px; padding:9px 2px 4px; cursor:pointer; color:#8a8a8a; font-size:10.5px; margin-top:6px;">
+            <span style="width:8px;">{{ maskSub.gradeTri }}</span><span>Color Grading</span>
+          </div>
+          <sc-if value="{{ maskSub.grade }}" hint-placeholder-val="{{ false }}">
+          <div style="margin:8px 0;">
+            <div style="width:70px; height:70px; border-radius:50%; margin:0 auto; position:relative; background:conic-gradient(from 90deg,#e05a5a,#e0a25a,#dfd35a,#6bbf6b,#5ac6c2,#5a86e0,#a25ae0,#e05a9d,#e05a5a); opacity:0.6;">
+              <div style="position:absolute; left:50%; top:50%; width:8px; height:8px; border-radius:50%; background:#fff; border:1px solid #161616; transform:translate(-50%,-50%);"></div>
+            </div>
+          </div>
+          </sc-if>
+          <div style="text-align:center; font-size:11px; padding:5px 0; margin-top:10px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset all</div>
+          </sc-if>
+
+          <sc-if value="{{ isMaskEffects }}" hint-placeholder-val="{{ false }}">
+          <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin-bottom:6px;">SHARPENING</div>
+          <dc-import name="EguiSlider" label="Clarity" value="0" min="-100" max="100" default="0" step="1" decimals="0" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Sharpness" value="0" min="0" max="100" default="0" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <div style="font-size:10px; letter-spacing:.5px; color:#6a6a6a; margin:10px 0 6px;">NOISE REDUCTION</div>
+          <dc-import name="EguiSlider" label="Luminance" value="0" min="0" max="100" default="0" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+          <dc-import name="EguiSlider" label="Color" value="0" min="0" max="100" default="0" step="1" decimals="0" hint-size="100%,22px"></dc-import>
+
+          <div onClick="{{ maskSub.toggleOptics }}" style="display:flex; align-items:center; gap:6px; padding:9px 2px 4px; cursor:pointer; color:#8a8a8a; font-size:10.5px; margin-top:6px;">
+            <span style="width:8px;">{{ maskSub.opticsTri }}</span><span>Vignette</span>
+          </div>
+          <sc-if value="{{ maskSub.optics }}" hint-placeholder-val="{{ false }}">
+          <dc-import name="EguiSlider" label="" value="0" min="-2" max="2" default="0" step="0.01" decimals="2" bipolar="true" signed="true" hint-size="100%,22px"></dc-import>
+          </sc-if>
+          <div style="text-align:center; font-size:11px; padding:5px 0; margin-top:10px; border-radius:3px; border:1px solid #2c2c2c; color:#9a9a9a; cursor:pointer;">Reset all</div>
+          </sc-if>
+
+        </div>
+        </sc-if>
+
+      </div>
+    </div>
+
+    <!-- bottom status bar -->
+    <div style="height:30px; flex:0 0 30px; border-top:1px solid #262626; display:flex; align-items:center; padding:0 14px; gap:12px; background:#141414; user-select:none;">
+      <span style="font-size:13px; color:#5a5a5a;">☆☆☆☆☆</span>
+      <span style="font-size:13px; color:#5a9a68;">⚑</span>
+      <span style="font-size:13px; color:#a05a5a;">⊘</span>
+      <span style="font-size:12px; color:#8a8a8a;">⇩</span>
+      <span style="font-size:11px; color:#8a8a8a;">Tags</span>
+      <div style="width:1px; height:16px; background:#2a2a2a;"></div>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:#6e6e6e;">{{ statusFile }}</span>
+      <span style="flex:1 1 auto;"></span>
+      <span style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:#6e6e6e;">Idle · 0 / 3333 indexed · GPU: idle</span>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- ============ EXPORT VIEW ============ -->
+  <sc-if value="{{ isExport }}" hint-placeholder-val="{{ false }}">
+  <div style="flex:1 1 auto; display:flex; flex-direction:column; min-height:0;">
+    <div style="height:36px; flex:0 0 36px; background:#1a1a1a; border-bottom:1px solid #262626; display:flex; align-items:center; padding:0 14px; gap:14px; user-select:none;">
+      <span style="font-size:11.5px; color:#c8c8c8;">Export queue — 0 image(s)</span>
+      <span style="font-size:11px; color:#5a5a5a;">Clear queue</span>
+    </div>
+    <div style="flex:1 1 auto; display:flex; min-height:0;">
+      <div style="flex:1 1 auto; display:flex; align-items:center; justify-content:center; background:#131313;">
+        <div style="text-align:center; color:#5a5a5a; font-size:12px; line-height:1.8;">
+          <div>Queue is empty.</div>
+          <div>Add images from Library or Develop.</div>
+        </div>
+      </div>
+      <div style="width:300px; flex:0 0 300px; background:#1a1a1a; border-left:1px solid #262626; overflow-y:auto; padding:14px 14px 0; user-select:none;">
+        <div style="font-size:10px; letter-spacing:1px; color:#6a6a6a; font-weight:600; margin-bottom:10px;">EXPORT SETTINGS</div>
+
+        <div style="display:flex; align-items:center; gap:8px; height:24px; margin-bottom:8px;">
+          <div style="display:flex; align-items:center; height:24px; flex:1 1 auto; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px;">
+            <span style="font-size:11px; color:#c0c0c0; flex:1 1 auto;">JPEG</span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+          </div>
+          <span style="font-size:11px; color:#9a9a9a; width:110px;">Format</span>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:8px; height:24px; margin-bottom:10px;">
+          <div style="display:flex; align-items:center; height:24px; flex:1 1 auto; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px;">
+            <span style="font-size:11px; color:#c0c0c0; flex:1 1 auto;">Srgb</span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+          </div>
+          <span style="font-size:11px; color:#9a9a9a; width:110px;">Output color space</span>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+          <span style="font-size:11px; color:#9a9a9a;">Bit depth</span>
+          <span style="font-size:10.5px; padding:4px 10px; border-radius:3px; background:#232b30; border:1px solid #34464f; color:#cfe0ec;">8-bit</span>
+          <span style="font-size:10.5px; padding:4px 10px; border-radius:3px; border:1px solid #2c2c2c; color:#7a7a7a;">16-bit</span>
+        </div>
+
+        <dc-import name="EguiSlider" label="" value="90" min="0" max="100" default="90" step="1" decimals="0" unit="" hint-size="100%,22px"></dc-import>
+        <div style="text-align:right; font-size:10.5px; color:#9a9a9a; margin:-4px 0 10px;">Quality</div>
+
+        <div style="display:flex; align-items:center; gap:6px; margin-bottom:10px;">
+          <span style="font-size:11px; color:#9a9a9a; margin-right:2px;">Effort</span>
+          <span style="font-size:10.5px; color:#7a7a7a;">Fast</span>
+          <span style="font-size:10.5px; padding:3px 8px; border-radius:3px; background:#232b30; border:1px solid #34464f; color:#cfe0ec;">Balanced</span>
+          <span style="font-size:10.5px; color:#7a7a7a;">Best</span>
+        </div>
+
+        <div style="display:flex; align-items:center; gap:8px; height:24px; margin-bottom:12px;">
+          <div style="display:flex; align-items:center; height:24px; flex:1 1 auto; background:#141414; border:1px solid #2c2c2c; border-radius:3px; padding:0 8px;">
+            <span style="font-size:11px; color:#c0c0c0; flex:1 1 auto;">None</span><span style="color:#7a7a7a; font-size:8px;">▾</span>
+          </div>
+          <span style="font-size:11px; color:#9a9a9a; width:110px;">Resize</span>
+        </div>
+
+        <div style="border-top:1px solid #262626; padding-top:10px; display:flex; flex-direction:column; gap:8px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="width:12px; height:12px; border:1px solid #444; border-radius:2px; display:inline-block; background:#3f5f73;"></span>
+            <span style="font-size:11px; color:#b0b0b0;">Copy EXIF metadata</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="width:12px; height:12px; border:1px solid #444; border-radius:2px; display:inline-block; background:#3f5f73;"></span>
+            <span style="font-size:11px; color:#b0b0b0;">Embed ICC profile</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="width:12px; height:12px; border:1px solid #444; border-radius:2px; display:inline-block;"></span>
+            <span style="font-size:11px; color:#b0b0b0;">Strip metadata</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="height:52px; flex:0 0 52px; border-top:1px solid #262626; background:#1a1a1a; display:flex; align-items:center; gap:10px; padding:0 14px; user-select:none;">
+      <span style="font-size:11px; padding:5px 12px; border-radius:3px; background:#1e1e1e; border:1px solid #2c2c2c; color:#8a8a8a;">Destination folder…</span>
+      <span style="font-size:11px; color:#5a5a5a;">(no folder chosen)</span>
+      <div style="width:1px; height:20px; background:#262626; margin:0 4px;"></div>
+      <span style="font-size:11px; color:#9a9a9a;">Filename</span>
+      <div style="height:22px; width:160px; background:#141414; border:1px solid #2c2c2c; border-radius:3px; display:flex; align-items:center; padding:0 8px;">
+        <span style="font-family:'IBM Plex Mono',monospace; font-size:11px; color:#c0c0c0;">{name}</span>
+      </div>
+      <span style="width:16px; height:16px; border-radius:50%; border:1px solid #444; color:#7a7a7a; font-size:10px; display:flex; align-items:center; justify-content:center;">?</span>
+      <span style="flex:1 1 auto;"></span>
+      <span style="font-size:11px; padding:6px 16px; border-radius:3px; background:#1e1e1e; border:1px solid #2c2c2c; color:#6a6a6a;">Start export</span>
+    </div>
+    <div style="height:24px; flex:0 0 24px; border-top:1px solid #232323; display:flex; align-items:center; padding:0 14px; gap:14px; background:#141414; font-family:'IBM Plex Mono',monospace; font-size:10px; color:#6e6e6e;">
+      <span>{{ statusFile }}</span><span style="flex:1 1 auto;"></span><span>Idle · 0 / 3333 indexed · GPU: idle</span>
+    </div>
+  </div>
+  </sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:810}}">
+class Component extends DCLogic {
+  constructor(props){
+    super(props);
+    this.sizeTrackRef = React.createRef();
+    this.state = {
+      module: 'library',
+      sizePct: 46,
+      beforeAfter: false,
+      filtersOpen: false,
+      selected: 2,
+      activeTool: 'adjust',
+      adjustTab: 'light',
+      adjustSub: { curve:false, grade:false, optics:false },
+      maskTab: 'light',
+      maskSub: { curve:false, grade:false, optics:false },
+      curveChannel: 'master',
+      showInfo: false,
+    };
+  }
+
+  goLibrary = () => this.setState({ module:'library' });
+  goDevelop = () => this.setState({ module:'develop' });
+  goExport = () => this.setState({ module:'export' });
+  toggleBA = () => this.setState(s => ({ beforeAfter: !s.beforeAfter }));
+  toggleFilters = () => this.setState(s => ({ filtersOpen: !s.filtersOpen }));
+  select = (i) => this.setState({ selected: i });
+  setActiveTool = (t) => this.setState({ activeTool: t });
+  setAdjustTab = (t) => this.setState({ adjustTab: t });
+  setMaskTab = (t) => this.setState({ maskTab: t });
+  toggleAdjustSub = (k) => this.setState(s => ({ adjustSub: { ...s.adjustSub, [k]: !s.adjustSub[k] } }));
+  toggleMaskSub = (k) => this.setState(s => ({ maskSub: { ...s.maskSub, [k]: !s.maskSub[k] } }));
+  setCurveChannel = (c) => this.setState({ curveChannel: c });
+  toggleInfo = () => this.setState(s => ({ showInfo: !s.showInfo }));
+
+  onSizeDown = (e) => {
+    e.preventDefault();
+    const move = (ev) => {
+      const el = this.sizeTrackRef.current; if(!el) return;
+      const r = el.getBoundingClientRect();
+      let f = (ev.clientX - r.left) / r.width; f = Math.max(0, Math.min(1, f));
+      this.setState({ sizePct: Math.round(f*100) });
+    };
+    move(e);
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  img(seed, w, h){ return 'https://picsum.photos/seed/' + seed + '/' + w + '/' + h; }
+
+  histPath(samples, W, H){
+    const n = samples.length;
+    let max = 0; for(const v of samples) if(v>max) max=v;
+    const pts = samples.map((v,i)=>{ const x=(i/(n-1))*W; const y=H-(v/max)*(H-4)-1; return [x,y]; });
+    let d = 'M0,' + H + ' ';
+    for(const [x,y] of pts) d += 'L' + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+    d += 'L' + W + ',' + H + ' Z';
+    return d;
+  }
+  gauss(center, spread, amp, n){
+    const out = [];
+    for(let i=0;i<n;i++){ const t=i/(n-1); out.push(amp*Math.exp(-((t-center)**2)/(2*spread*spread))); }
+    return out;
+  }
+  channel(peaks, n){
+    const out = new Array(n).fill(0);
+    for(const p of peaks){ const g=this.gauss(p.c,p.s,p.a,n); for(let i=0;i<n;i++) out[i]+=g[i]; }
+    return out;
+  }
+
+  renderVals(){
+    const s = this.state;
+    const accent = '#6d97b5';
+
+    const N = 90, W = 264, H = 90;
+    const rCh = this.channel([{c:0.28,s:0.13,a:1},{c:0.62,s:0.10,a:0.62},{c:0.86,s:0.06,a:0.35}], N);
+    const gCh = this.channel([{c:0.34,s:0.15,a:0.95},{c:0.66,s:0.12,a:0.7}], N);
+    const bCh = this.channel([{c:0.22,s:0.12,a:0.8},{c:0.55,s:0.16,a:0.9},{c:0.9,s:0.05,a:0.25}], N);
+
+    const data = [
+      ['ice01','DSC08039.ARW','2026-07-16 20:35'], ['ice02','DSC08038.ARW','2026-07-16 20:34'],
+      ['ice03','DSC08037.ARW','2026-07-12 10:55'], ['ice04','DSC08036.ARW','2026-07-12 10:55'],
+      ['ice05','DSC08035.ARW','2026-07-12 10:55'], ['ice06','DSC08034.ARW','2026-07-12 10:54'],
+      ['ice07','DSC08033.ARW','2026-07-12 10:54'], ['ice08','DSC08032.ARW','2026-07-12 10:51'],
+      ['ice09','DSC08031.ARW','2026-07-12 10:51'], ['ice10','DSC08030.ARW','2026-07-12 08:30'],
+      ['ice11','DSC08029.ARW','2026-07-12 08:30'], ['ice12','DSC08028.ARW','2026-07-12 08:29'],
+      ['ice13','DSC08027.ARW','2026-07-12 08:29'], ['ice14','DSC08002.ARW','2026-06-27 15:43'],
+      ['ice15','DSC08001.ARW','2026-06-27 15:43'], ['ice16','DSC08000.ARW','2026-06-27 15:43'],
+      ['ice17','DSC07999.ARW','2026-06-27 15:43'], ['ice18','DSC07998.ARW','2026-06-27 15:42'],
+      ['ice19','DSC07997.ARW','2026-06-27 15:42'], ['ice20','DSC07996.ARW','2026-06-27 15:42'],
+      ['ice21','DSC07995.ARW','2026-06-27 15:41'], ['ice22','DSC07994.ARW','2026-06-27 15:41'],
+      ['ice23','DSC07993.ARW','2026-06-27 15:41'], ['ice24','DSC07992.ARW','2026-06-27 15:41'],
+    ];
+
+    const labelCycle = [null, '#c75450', '#5aa06a', null, null, null];
+    const mkThumb = (d,i,w,h) => {
+      const sel = i === s.selected;
+      return {
+        src: this.img(d[0], w, h),
+        name: d[1], date: d[2],
+        border: sel ? '#e8e8e8' : '#000',
+        outline: sel ? '2px solid ' + accent : 'none',
+        nameColor: sel ? '#e8e8e8' : '#8a8a8a',
+        hasStar: i % 4 !== 3,
+        hasLabel: !!labelCycle[i % labelCycle.length],
+        labelColor: labelCycle[i % labelCycle.length] || 'transparent',
+        onClick: () => this.select(i),
+      };
+    };
+
+    const thumbs = data.map((d,i) => mkThumb(d,i,360,240));
+    const filmstrip = data.map((d,i) => mkThumb(d,i,240,160));
+
+    const hslCols = ['#c0504a','#cf8f3a','#cabf45','#5aa06a','#4aa6a0','#4a73b5','#6a5ab0','#b05a98'];
+    const hslSwatches = hslCols.map((c,i)=>({ color:c, border: i===5 ? '#a9c7dd' : '#00000055', outline: i===5 ? '2px solid '+accent : 'none' }));
+
+    const filterStars = [0,1,2,3,4];
+    const collections = [
+      { name:'Trips', count:'1,160', pad:8, isSet:true, expanded:true },
+      { name:'Japan 2025', count:'842', pad:24, isSet:false },
+      { name:'Iceland — Highlands', count:'318', pad:24, isSet:false },
+      { name:'Client Work', count:'36', pad:8, isSet:true, expanded:true },
+      { name:'Sent 2026', count:'36', pad:24, isSet:false },
+      { name:'Portfolio', count:'48', pad:8, isSet:false },
+    ].map(c => ({
+      ...c,
+      tri: c.isSet ? '▾' : '',
+      icon: c.isSet ? '▸' : '●',
+      onClick: () => {},
+    }));
+    const tags = [ { name:'Cool', color:'#c0504a', count:'128' }, { name:'Hammer', color:'#5aa06a', count:'14' } ];
+
+    const metaCombos = [
+      { label:'Camera', value:'Sony ILCE-7M2', set:true },
+      { label:'Lens', value:'Any lens', set:false },
+      { label:'Rating', value:'★★★ and up', set:true },
+    ].map(m => ({ ...m, border: m.set ? '#3f5f73' : '#303030', valColor: m.set ? '#cfe0ec' : '#7a7a7a' }));
+    const fileTypes = [
+      { name:'RAW', on:true }, { name:'JPEG', on:false }, { name:'HEIC', on:false }, { name:'TIFF', on:false },
+    ].map(ft => ({ ...ft, bg: ft.on ? '#232b30' : '#141414', border: ft.on ? '#34464f' : '#2c2c2c', color: ft.on ? '#cfe0ec' : '#8a8a8a' }));
+    const activeFilterCount = metaCombos.filter(m=>m.set).length + 1;
+
+    const toolDef = (key, glyph, name) => ({
+      glyph, name,
+      onClick: () => this.setActiveTool(key),
+      bg: s.activeTool === key ? '#2a3438' : 'transparent',
+      color: s.activeTool === key ? '#bcd6e4' : '#a0a0a0',
+    });
+    const toolCluster = [
+      toolDef('adjust','⚙','Adjust'), toolDef('crop','⌗','Crop'), toolDef('heal','✛','Heal'), toolDef('mask','◐','Mask'),
+    ];
+
+    const cropHandles = [
+      {x:'0%',y:'0%'},{x:'50%',y:'0%'},{x:'100%',y:'0%'},
+      {x:'0%',y:'50%'},{x:'100%',y:'50%'},
+      {x:'0%',y:'100%'},{x:'50%',y:'100%'},{x:'100%',y:'100%'},
+    ];
+    const aspectChips = ['Original','1:1','4:3','3:2','16:9','5:4','Custom'].map((name,i)=>({
+      name, bg: i===0 ? '#232b30' : '#141414', border: i===0 ? '#34464f' : '#2c2c2c', color: i===0 ? '#cfe0ec' : '#9a9a9a',
+    }));
+    const healModes = ['Heal','Clone','Remove (AI)'].map((name,i)=>({
+      name, bg: i===0 ? '#232b30' : '#141414', border: i===0 ? '#34464f' : '#2c2c2c', color: i===0 ? '#cfe0ec' : '#9a9a9a',
+    }));
+
+    // shared options library — one 3-tab set (Light/Color/Effects) used by both Adjust and Mask
+    const buildTabs = (activeKey, setter) => ['light','color','effects'].map(key => ({
+      name: key[0].toUpperCase() + key.slice(1),
+      onClick: () => setter(key),
+      color: activeKey === key ? '#eaf1f6' : '#9a9a9a',
+      border: activeKey === key ? accent : 'transparent',
+    }));
+    const buildSub = (subState, toggler) => ({
+      curve: subState.curve, curveTri: subState.curve ? '▾' : '▸', toggleCurve: () => toggler('curve'),
+      grade: subState.grade, gradeTri: subState.grade ? '▾' : '▸', toggleGrade: () => toggler('grade'),
+      optics: subState.optics, opticsTri: subState.optics ? '▾' : '▸', toggleOptics: () => toggler('optics'),
+    });
+
+    const adjustTabs = buildTabs(s.adjustTab, this.setAdjustTab);
+    const adjustSub = buildSub(s.adjustSub, this.toggleAdjustSub);
+    const maskTabs = buildTabs(s.maskTab, this.setMaskTab);
+    const maskSub = buildSub(s.maskSub, this.toggleMaskSub);
+
+    const gradeWheels = ['Shadows','Midtones','Highlights','Global'].map(name => ({ name }));
+
+    const curveChannels = [
+      { key:'master', name:'Master' }, { key:'r', name:'R' }, { key:'g', name:'G' }, { key:'b', name:'B' },
+    ].map(c => ({
+      name: c.name,
+      onClick: () => this.setCurveChannel(c.key),
+      color: s.curveChannel === c.key ? '#eaf1f6' : '#7a7a7a',
+      weight: s.curveChannel === c.key ? 600 : 400,
+    }));
+
+    const selData = data[s.selected] || data[0];
+
+    return {
+      isLibrary: s.module==='library', isDevelop: s.module==='develop', isExport: s.module==='export',
+      goLibrary: this.goLibrary, goDevelop: this.goDevelop, goExport: this.goExport,
+      libTabColor: s.module==='library' ? '#eaf1f6' : '#9a9a9a', libTabBorder: s.module==='library' ? accent : 'transparent',
+      devTabColor: s.module==='develop' ? '#eaf1f6' : '#9a9a9a', devTabBorder: s.module==='develop' ? accent : 'transparent',
+      expTabColor: s.module==='export' ? '#eaf1f6' : '#9a9a9a', expTabBorder: s.module==='export' ? accent : 'transparent',
+
+      sizePct: s.sizePct, onSizeDown: this.onSizeDown, sizeTrackRef: this.sizeTrackRef,
+      gridCols: 'repeat(auto-fill, minmax(' + Math.round(118 + s.sizePct*1.7) + 'px, 1fr))',
+
+      thumbs, filmstrip, hslSwatches, filterStars, metaCombos, fileTypes, collections, tags,
+      filtersOpen: s.filtersOpen, toggleFilters: this.toggleFilters,
+      filtBtnBg: s.filtersOpen ? '#232b30' : '#141414',
+      filtBtnBorder: s.filtersOpen ? '#34464f' : '#2c2c2c',
+      filtBtnColor: s.filtersOpen ? '#cfe0ec' : '#b0b0b0',
+      filtBadge: activeFilterCount + ' active',
+
+      heroSrc: this.img(selData[0], 1400, 933),
+      beforeAfter: s.beforeAfter, toggleBA: this.toggleBA,
+      baBg: s.beforeAfter ? '#232b30' : '#141414',
+      baBorder: s.beforeAfter ? '#34464f' : '#2c2c2c',
+      baColor: s.beforeAfter ? '#cfe0ec' : '#b0b0b0',
+
+      histR: this.histPath(rCh, W, H), histG: this.histPath(gCh, W, H), histB: this.histPath(bCh, W, H),
+
+      camera: 'Sony ILCE-7M2',
+      editStatus: 'No edits',
+      exif: { focal:'70mm', aperture:'f/5.6', shutter:'1/400', iso:'ISO 100', zoom:'100%' },
+      infoRows: [
+        { label:'Camera', value:'Sony ILCE-7M2' },
+        { label:'Lens', value:'FE 28-70mm F3.5-5.6 OSS' },
+        { label:'Focal', value:'70mm' },
+        { label:'Aperture', value:'f/5.6' },
+        { label:'Shutter', value:'1/25' },
+        { label:'ISO', value:'ISO 250' },
+        { label:'Captured', value:'2026:07:16 20:35:35' },
+        { label:'Size', value:'6000 × 4000' },
+        { label:'Zoom', value:'100%' },
+      ],
+
+      activeTool: s.activeTool,
+      isToolAdjust: s.activeTool==='adjust', isToolCrop: s.activeTool==='crop', isToolHeal: s.activeTool==='heal', isToolMask: s.activeTool==='mask',
+      toolCluster, cropHandles, aspectChips, healModes,
+
+      gradeWheels, curveChannels,
+      adjustTabs, adjustSub,
+      isAdjLight: s.adjustTab==='light', isAdjColor: s.adjustTab==='color', isAdjEffects: s.adjustTab==='effects',
+      maskTabs, maskSub,
+      isMaskLight: s.maskTab==='light', isMaskColor: s.maskTab==='color', isMaskEffects: s.maskTab==='effects',
+
+      showInfo: s.showInfo, toggleInfo: this.toggleInfo,
+      infoBtnBg: s.showInfo ? '#232b30' : '#1c1c1cee',
+      infoBtnBorder: s.showInfo ? '#34464f' : '#2f2f2f',
+      infoBtnColor: s.showInfo ? '#cfe0ec' : '#a0a0a0',
+
+      statusFile: selData[1] + ' · 6048×4024',
+    };
+  }
+}
+</script>
+</body>
+</html>

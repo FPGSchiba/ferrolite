@@ -1513,6 +1513,20 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        if self.module == crate::module::Module::Develop && self.state.show_info_panel {
+            egui::SidePanel::left("develop_info_panel")
+                .resizable(false)
+                .exact_width(300.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(0x1a, 0x1a, 0x1a))
+                        .inner_margin(egui::Margin::symmetric(12.0, 12.0)),
+                )
+                .show(ctx, |ui| {
+                    crate::develop::info_panel::show(ui, &self.state);
+                });
+        }
+
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
             self.maybe_update_histogram(ctx, frame);
         }

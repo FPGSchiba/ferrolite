@@ -37,8 +37,10 @@ pub fn draw_histogram(ui: &egui::Ui, state: &AppState) {
         });
 }
 
-/// Draw the floating EXIF info chip.
-pub fn draw_info(ui: &egui::Ui, state: &AppState) {
+/// Draw the floating EXIF info chip and toggle button.
+pub fn draw_info(ui: &egui::Ui, state: &mut AppState) {
+    crate::develop::info_overlay::draw_toggle_button(ui, &mut state.show_info_panel);
+
     if state.settings.show_info_overlay
         && state.tool_state.active_tab != crate::develop::tool::TabId("info")
     {

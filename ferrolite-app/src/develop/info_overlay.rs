@@ -43,3 +43,40 @@ pub fn draw(ui: &egui::Ui, facts: &crate::develop::info::ImageFacts) {
                 });
         });
 }
+
+/// Draw the floating `ℹ Info` pill button on the canvas (~132px from bottom edge,
+/// positioned above the EXIF chip). Highlights with accent tint when
+/// `show_info_panel` is true, and clicking toggles `show_info_panel`.
+pub fn draw_toggle_button(ui: &egui::Ui, show_info_panel: &mut bool) {
+    let canvas_rect = ui.min_rect();
+    let pos = egui::pos2(canvas_rect.left() + MARGIN, canvas_rect.bottom() - 132.0);
+
+    egui::Area::new(egui::Id::new("develop_info_pill_button"))
+        .order(egui::Order::Middle)
+        .fixed_pos(pos)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .show(ui.ctx(), |ui| {
+            let (bg_color, stroke_color, text_color) = if *show_info_panel {
+                (
+                    crate::theme::ACCENT_BG_SEL,
+                    egui::Stroke::new(1.0_f32, crate::theme::ACCENT),
+                    crate::theme::ACCENT_BRIGHT,
+                )
+            } else {
+                (
+                    egui::Color32::from_black_alpha(FILL_ALPHA),
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(30)),
+                    TEXT,
+                )
+            };
+
+            let btn = egui::Button::new(egui::RichText::new("ℹ Info").color(text_color))
+                .fill(bg_color)
+                .stroke(stroke_color)
+                .rounding(12.0);
+
+            if ui.add(btn).clicked() {
+                *show_info_panel = !*show_info_panel;
+            }
+        });
+}

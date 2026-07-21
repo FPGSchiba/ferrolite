@@ -130,6 +130,9 @@ pub struct AppState {
     /// Interactive canvas panning/zooming/drag state parameters.
     pub canvas: crate::develop::canvas::ViewerCanvasState,
 
+    /// Whether the Develop view read-only left info panel is visible.
+    pub show_info_panel: bool,
+
     /// Develop tool/tab selection state (design §5). Session-wide (unlike the
     /// per-image fields on `ViewerState`) so switching images keeps the same
     /// tool/tab active; `ensure_valid_tab` re-validates it against the new
@@ -293,6 +296,7 @@ impl AppState {
             mask_overlay_highlight_gpu: None,
             viewer: None,
             canvas: crate::develop::canvas::ViewerCanvasState::default(),
+            show_info_panel: false,
             tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,
@@ -910,6 +914,7 @@ impl AppState {
             mask_overlay_highlight_gpu: None,
             viewer: None,
             canvas: crate::develop::canvas::ViewerCanvasState::default(),
+            show_info_panel: false,
             tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,

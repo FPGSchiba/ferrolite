@@ -40,3 +40,103 @@ pub(crate) fn draw_reset_arrow(
         color,
     );
 }
+
+/// Collapsible section header row (design §6).
+/// Font: 10px monospace (`plex-mono`), 1.0px letter-spacing, `#6a6a6a` (`theme::TEXT_FAINT`).
+/// Chevron `▸` / `▾` + title + 1px `#232323` bottom divider line.
+/// Click toggles `*is_open = !*is_open` and marks response changed.
+#[allow(dead_code)]
+pub fn section_header(ui: &mut egui::Ui, label: &str, is_open: &mut bool) -> egui::Response {
+    let full = ui.available_width();
+    let row_h = 22.0;
+    let (rect, mut response) =
+        ui.allocate_exact_size(egui::vec2(full, row_h), egui::Sense::click());
+
+    if response.clicked() {
+        *is_open = !*is_open;
+        response.mark_changed();
+    }
+
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let chevron = if *is_open { "▾" } else { "▸" };
+        let text = format!("{chevron} {label}");
+
+        let mut job = egui::text::LayoutJob::default();
+        job.append(
+            &text,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(10.0),
+                color: crate::theme::TEXT_FAINT,
+                extra_letter_spacing: 1.0,
+                ..Default::default()
+            },
+        );
+
+        let galley = painter.layout_job(job);
+        let text_pos = egui::pos2(rect.left() + 4.0, rect.center().y - galley.size().y * 0.5);
+        painter.galley(text_pos, galley, crate::theme::TEXT_FAINT);
+
+        // 1px divider line (#232323) across the bottom edge
+        let line_y = rect.bottom() - 0.5;
+        let line_color = Color32::from_rgb(0x23, 0x23, 0x23);
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), line_y),
+                egui::pos2(rect.right(), line_y),
+            ],
+            egui::Stroke::new(1.0_f32, line_color),
+        );
+    }
+
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Context, RawInput};
+
+    #[test]
+    fn test_section_header_toggle() {
+        let ctx = Context::default();
+        let mut is_open = false;
+
+        // Render pass 1: non-clicked render
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let resp = section_header(ui, "BASIC TONE", &mut is_open);
+                assert!(!resp.changed());
+            });
+        });
+        assert!(!is_open);
+
+        // Pass 2: pointer click on header
+        let mut input = RawInput::default();
+        let click_pos = egui::pos2(50.0, 10.0);
+        input.events.push(egui::Event::PointerButton {
+            pos: click_pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos: click_pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+
+        let mut changed = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let resp = section_header(ui, "BASIC TONE", &mut is_open);
+                changed = resp.changed();
+            });
+        });
+
+        assert!(is_open);
+        assert!(changed);
+    }
+}

@@ -107,7 +107,7 @@ impl<'a> Widget for EguiSlider<'a> {
             self.custom_label_w.unwrap_or(LABEL_W)
         };
         let track_left = rect.left() + label_w + 8.0;
-        let track_right = rect.right() - VALUE_W - 8.0 - RESET_W;
+        let track_right = rect.right() - VALUE_W - 12.0 - RESET_W - 8.0;
         let track_w = (track_right - track_left).max(1.0);
         let mid_y = rect.center().y;
         let reset_rect = egui::Rect::from_min_max(
@@ -374,5 +374,14 @@ mod tests {
         .label_width(120.0);
 
         assert_eq!(s.custom_label_w, Some(120.0));
+    }
+
+    #[test]
+    fn slider_track_right_clearance_math() {
+        let rect_right = 300.0;
+        let track_right = rect_right - super::VALUE_W - 12.0 - super::RESET_W - 8.0;
+        // Total right side clearance reserved from rect.right():
+        // VALUE_W (48px) + 12px gap + RESET_W (16px) + 8px right clearance = 84px total
+        assert_eq!(rect_right - track_right, 84.0);
     }
 }

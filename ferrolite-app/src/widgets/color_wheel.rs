@@ -389,7 +389,7 @@ mod tests {
     fn color_grading_wheel_lum_slider_independence() {
         let screen_rect = egui::Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 300.0));
         let p1 = pos2(140.0, 137.0);
-        let p2 = pos2(155.3, 137.0);
+        let p2 = pos2(149.0, 137.0);
 
         let input_down = egui::RawInput {
             screen_rect: Some(screen_rect),

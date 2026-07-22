@@ -14,7 +14,7 @@ fn default_true() -> bool {
     true
 }
 
-fn default_filmstrip_height() -> f32 {
+pub(crate) fn default_filmstrip_height() -> f32 {
     96.0
 }
 
@@ -33,6 +33,8 @@ pub struct Settings {
     pub confirm_remove: bool,
     pub show_histogram: bool,
     pub show_info_overlay: bool,
+    #[serde(default)]
+    pub show_info_panel: bool,
     pub show_tool_palette: bool,
     pub restore_session: bool,
     pub last_module: dto::PersistedModule,
@@ -58,6 +60,7 @@ impl Default for Settings {
             confirm_remove: true,
             show_histogram: true,
             show_info_overlay: false,
+            show_info_panel: false,
             show_tool_palette: true,
             restore_session: false,
             last_module: dto::PersistedModule::default(),

@@ -301,7 +301,7 @@ impl AppState {
             mask_overlay_highlight_gpu: None,
             viewer: None,
             canvas: crate::develop::canvas::ViewerCanvasState::default(),
-            show_info_panel: false,
+            show_info_panel: settings.show_info_panel,
             tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,
@@ -2046,5 +2046,13 @@ mod tests {
             !s.batch_running(),
             "batch_running must go false once the batch is done"
         );
+    }
+
+    #[test]
+    fn app_state_binds_show_info_panel_from_settings() {
+        let mut s = AppState::for_test();
+        s.settings.show_info_panel = true;
+        s.show_info_panel = s.settings.show_info_panel;
+        assert!(s.show_info_panel);
     }
 }

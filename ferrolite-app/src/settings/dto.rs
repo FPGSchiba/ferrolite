@@ -485,4 +485,34 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn settings_layout_fields_defaults_and_json_roundtrip() {
+        use super::super::Settings;
+
+        let default_settings = Settings::default();
+        assert!(!default_settings.show_info_panel);
+        assert_eq!(default_settings.filmstrip_height, 96.0);
+        assert!(default_settings.tone_curve_open);
+        assert!(default_settings.color_grading_open);
+        assert!(default_settings.optics_open);
+
+        let empty_json = "{}";
+        let parsed: Settings = serde_json::from_str(empty_json).expect("deserialize empty json");
+        assert_eq!(parsed, default_settings);
+
+        let custom = Settings {
+            show_info_panel: true,
+            filmstrip_height: 140.0,
+            tone_curve_open: false,
+            color_grading_open: false,
+            optics_open: false,
+            ..Settings::default()
+        };
+
+        let serialized = serde_json::to_string(&custom).expect("serialize custom settings");
+        let deserialized: Settings =
+            serde_json::from_str(&serialized).expect("deserialize custom settings");
+        assert_eq!(deserialized, custom);
+    }
 }

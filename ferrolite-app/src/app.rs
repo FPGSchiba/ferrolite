@@ -1567,12 +1567,25 @@ impl eframe::App for FerroliteApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
+                            let prev_disclosures = (
+                                self.state.settings.tone_curve_open,
+                                self.state.settings.color_grading_open,
+                                self.state.settings.optics_open,
+                            );
                             outcome = Some(crate::develop::tool_panel::show(
                                 ui,
                                 &mut self.state,
                                 &self.tool_registry,
                                 working_space,
                             ));
+                            if (
+                                self.state.settings.tone_curve_open,
+                                self.state.settings.color_grading_open,
+                                self.state.settings.optics_open,
+                            ) != prev_disclosures
+                            {
+                                self.mark_settings_dirty();
+                            }
                         });
                 });
             if let Some(outcome) = outcome {

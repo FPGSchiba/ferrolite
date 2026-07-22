@@ -317,7 +317,12 @@ impl Viewer {
         if app.state.settings.show_histogram {
             crate::develop::canvas::overlays::draw_histogram(ui, &app.state);
         }
+        let info_before = app.state.show_info_panel;
         crate::develop::canvas::overlays::draw_info(ui, &mut app.state);
+        if app.state.show_info_panel != info_before {
+            app.state.settings.show_info_panel = app.state.show_info_panel;
+            app.mark_settings_dirty();
+        }
 
         let tool_registry = DevelopToolRegistry::standard();
         let palette_action =

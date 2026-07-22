@@ -105,6 +105,8 @@ pub struct AppState {
     pub include_subfolders: bool,
     /// Folder ids whose children are shown in the left-panel tree.
     pub expanded_folders: HashSet<i64>,
+    /// Collection ids whose children are shown in the left-panel tree.
+    pub expanded_collections: HashSet<i64>,
     /// A folder pending a remove-confirmation (set when it has subfolders).
     pub pending_remove: Option<PendingRemove>,
 
@@ -291,6 +293,7 @@ impl AppState {
             startup_rescan_done: false,
             include_subfolders: settings.filter.include_subfolders,
             expanded_folders: HashSet::new(),
+            expanded_collections: HashSet::new(),
             pending_remove: None,
             mask_overlay_native: None,
             mask_overlay_gpu: None,
@@ -910,6 +913,7 @@ impl AppState {
             startup_rescan_done: false,
             include_subfolders: true,
             expanded_folders: HashSet::new(),
+            expanded_collections: HashSet::new(),
             pending_remove: None,
             mask_overlay_native: None,
             mask_overlay_gpu: None,

@@ -7,12 +7,18 @@
 use crate::state::AppState;
 use crate::theme;
 
-/// Thumbnail row height and inter-cell gap, in points. Each cell's width is
-/// derived from the image's own upright aspect ratio (see `cell_aspect`) so
-/// portrait images aren't letterboxed into a fixed landscape box.
-const THUMB_H: f32 = 72.0;
+pub const MIN_FILMSTRIP_HEIGHT: f32 = 64.0;
+pub const MAX_FILMSTRIP_HEIGHT: f32 = 220.0;
+#[allow(dead_code)]
+pub const DEFAULT_FILMSTRIP_HEIGHT: f32 = 96.0;
+
+/// Clamp height between 64.0 and 220.0 pixels.
+pub fn clamp_filmstrip_height(h: f32) -> f32 {
+    h.clamp(MIN_FILMSTRIP_HEIGHT, MAX_FILMSTRIP_HEIGHT)
+}
+
 const GAP: f32 = 10.0;
-/// Clamp on cell width (as a multiple of `THUMB_H`) so extreme panoramas or
+/// Clamp on cell width (as a multiple of thumbnail height) so extreme panoramas or
 /// super-tall portraits can't break the strip's layout.
 const MIN_ASPECT: f32 = 0.4;
 const MAX_ASPECT: f32 = 2.5;
@@ -20,6 +26,9 @@ const MAX_ASPECT: f32 = 2.5;
 /// Render the strip; return the image id clicked this frame, if any.
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) -> Option<i64> {
     let mut clicked: Option<i64> = None;
+    let panel_h = clamp_filmstrip_height(state.settings.filmstrip_height);
+    let thumb_h = (panel_h - 24.0).clamp(32.0, 196.0);
+
     // Snapshot the ids/decode-status/aspect/rating/flag up front so we don't
     // hold an immutable borrow of `state.images` while mutably borrowing
     // `state` for thumbnails.
@@ -57,11 +66,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                     // for cells actually on screen. Without this, opening the
                     // viewer would synchronously decode EVERY image's thumbnail on
                     // the first Develop frame, blocking the UI thread for seconds.
-                    let cell_w = (aspect * THUMB_H)
+                    let cell_w = (aspect * thumb_h)
                         .round()
-                        .clamp(MIN_ASPECT * THUMB_H, MAX_ASPECT * THUMB_H);
+                        .clamp(MIN_ASPECT * thumb_h, MAX_ASPECT * thumb_h);
                     let (rect, resp) =
-                        ui.allocate_exact_size(egui::vec2(cell_w, THUMB_H), egui::Sense::click());
+                        ui.allocate_exact_size(egui::vec2(cell_w, thumb_h), egui::Sense::click());
                     if ui.is_rect_visible(rect) {
                         // Lazy-load the thumbnail (same path as the grid), visible-only.
                         // The DB read + JPEG decode run off-thread; decoded pixels
@@ -147,5 +156,59 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                 }
             });
         });
+
+    // Horizontal drag handle / splitter bar at the bottom edge of the filmstrip.
+    let (handle_rect, handle_resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
+
+    if handle_resp.hovered() || handle_resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+
+    if handle_resp.dragged() {
+        let delta = handle_resp.drag_delta().y;
+        if delta != 0.0 {
+            state.settings.filmstrip_height =
+                clamp_filmstrip_height(state.settings.filmstrip_height + delta);
+        }
+    }
+
+    let line_y = handle_rect.center().y;
+    let stroke_color = if handle_resp.hovered() || handle_resp.dragged() {
+        theme::ACCENT
+    } else {
+        egui::Color32::from_rgb(0x38, 0x38, 0x38)
+    };
+    ui.painter().line_segment(
+        [
+            egui::pos2(handle_rect.min.x, line_y),
+            egui::pos2(handle_rect.max.x, line_y),
+        ],
+        egui::Stroke::new(1.0_f32, stroke_color),
+    );
+
     clicked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filmstrip_height_drag_clamping() {
+        assert_eq!(clamp_filmstrip_height(50.0), MIN_FILMSTRIP_HEIGHT);
+        assert_eq!(clamp_filmstrip_height(64.0), 64.0);
+        assert_eq!(clamp_filmstrip_height(96.0), 96.0);
+        assert_eq!(clamp_filmstrip_height(150.0), 150.0);
+        assert_eq!(clamp_filmstrip_height(220.0), 220.0);
+        assert_eq!(clamp_filmstrip_height(300.0), MAX_FILMSTRIP_HEIGHT);
+
+        let mut height = DEFAULT_FILMSTRIP_HEIGHT;
+        height = clamp_filmstrip_height(height + 50.0);
+        assert_eq!(height, 146.0);
+        height = clamp_filmstrip_height(height + 100.0);
+        assert_eq!(height, MAX_FILMSTRIP_HEIGHT);
+        height = clamp_filmstrip_height(height - 200.0);
+        assert_eq!(height, MIN_FILMSTRIP_HEIGHT);
+    }
 }

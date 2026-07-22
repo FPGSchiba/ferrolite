@@ -14,6 +14,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_filmstrip_height() -> f32 {
+    96.0
+}
+
 /// Root persisted settings document. Every field defaults so older/partial
 /// files load cleanly (forward/backward tolerant).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,6 +28,8 @@ pub struct Settings {
     pub filter: dto::PersistedFilter,
     pub working_space: dto::PersistedWorkingSpace,
     pub grid_size: f32,
+    #[serde(default = "default_filmstrip_height")]
+    pub filmstrip_height: f32,
     pub confirm_remove: bool,
     pub show_histogram: bool,
     pub show_info_overlay: bool,
@@ -48,6 +54,7 @@ impl Default for Settings {
             filter: dto::PersistedFilter::default(),
             working_space: dto::PersistedWorkingSpace::default(),
             grid_size: 46.0,
+            filmstrip_height: default_filmstrip_height(),
             confirm_remove: true,
             show_histogram: true,
             show_info_overlay: false,

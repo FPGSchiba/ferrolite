@@ -171,101 +171,145 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
         }
     });
     let collections = state.collections.clone();
-    for c in &collections {
-        // Snapshot whether this collection is actively being renamed.
-        let is_renaming = matches!(
-            &state.renaming,
-            Some((RenameKind::Collection, id, _)) if *id == c.id
-        );
+    let tree = build_collection_tree(&collections);
 
-        let row_resp = ui
-            .horizontal(|ui| {
-                let col = egui::Color32::from_rgb(c.color.r, c.color.g, c.color.b);
-                let (rect, _) =
-                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter().circle_filled(rect.center(), 4.0, col);
+    for node in tree {
+        let c = &node.collection;
+        let is_set = !node.children.is_empty();
 
-                if is_renaming {
-                    // Inline rename TextEdit for collection.
-                    let buf = match &mut state.renaming {
-                        Some((RenameKind::Collection, id, buf)) if *id == c.id => buf,
-                        _ => unreachable!(),
-                    };
-                    let edit_resp = ui.add(
-                        egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 20.0),
+        if is_set {
+            let open = state.expanded_collections.contains(&c.id);
+            let is_renaming = matches!(
+                &state.renaming,
+                Some((RenameKind::Collection, id, _)) if *id == c.id
+            );
+
+            let row_resp = ui
+                .horizontal(|ui| {
+                    let chev = if open { "▾" } else { "▸" };
+                    if ui.selectable_label(false, chev).clicked() {
+                        if open {
+                            state.expanded_collections.remove(&c.id);
+                        } else {
+                            state.expanded_collections.insert(c.id);
+                        }
+                    }
+
+                    // Set icon (layered boxes)
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                    let p = ui.painter();
+                    let col = egui::Color32::from_rgb(c.color.r, c.color.g, c.color.b);
+                    p.rect_stroke(
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(2.0, 0.0),
+                            egui::vec2(8.0, 7.0),
+                        ),
+                        1.0,
+                        egui::Stroke::new(1.0_f32, theme::TEXT_DIM),
                     );
-                    edit_resp.request_focus();
-                    let commit =
-                        edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if commit {
-                        if let Some((RenameKind::Collection, id, buf)) = state.renaming.take() {
-                            if !buf.is_empty() {
-                                let _ = state
-                                    .writer
-                                    .lock()
-                                    .expect("writer")
-                                    .rename_collection(id, &buf);
-                                state.reload_vocab();
+                    p.rect_filled(
+                        egui::Rect::from_min_size(
+                            rect.min + egui::vec2(0.0, 3.0),
+                            egui::vec2(8.0, 7.0),
+                        ),
+                        1.0,
+                        col,
+                    );
+
+                    if is_renaming {
+                        let buf = match &mut state.renaming {
+                            Some((RenameKind::Collection, id, buf)) if *id == c.id => buf,
+                            _ => unreachable!(),
+                        };
+                        let edit_resp = ui.add(
+                            egui::TextEdit::singleline(buf)
+                                .desired_width(ui.available_width() - 20.0),
+                        );
+                        edit_resp.request_focus();
+                        let commit =
+                            edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if commit {
+                            if let Some((RenameKind::Collection, id, buf)) = state.renaming.take() {
+                                if !buf.is_empty() {
+                                    let _ = state
+                                        .writer
+                                        .lock()
+                                        .expect("writer")
+                                        .rename_collection(id, &buf);
+                                    state.reload_vocab();
+                                }
                             }
                         }
-                    }
-                } else {
-                    // Normal clickable label + context menu.
-                    let name_resp = ui.selectable_label(
-                        matches!(state.source, ViewSource::Collection(id) if id == c.id),
-                        &c.name,
-                    );
-                    if name_resp.clicked() {
-                        state.source = ViewSource::Collection(c.id);
-                        state.current_folder = None;
-                        state.dirty = true;
-                    }
-                    if name_resp.double_clicked() {
-                        state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
-                    }
-                    name_resp.context_menu(|ui| {
-                        if ui.button("Rename").clicked() {
+                    } else {
+                        let name_resp = ui.selectable_label(
+                            matches!(state.source, ViewSource::Collection(id) if id == c.id),
+                            &c.name,
+                        );
+                        if name_resp.clicked() {
+                            state.source = ViewSource::Collection(c.id);
+                            state.current_folder = None;
+                            state.dirty = true;
+                        }
+                        if name_resp.double_clicked() {
                             state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
-                            ui.close_menu();
                         }
-                        ui.separator();
-                        if ui.button("Delete").clicked() {
+                        name_resp.context_menu(|ui| {
+                            if ui.button("Rename").clicked() {
+                                state.renaming =
+                                    Some((RenameKind::Collection, c.id, c.name.clone()));
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Delete").clicked() {
+                                delete_collection(state, c.id);
+                                ui.close_menu();
+                            }
+                        });
+
+                        ui.label(
+                            egui::RichText::new(format!("({})", node.children.len()))
+                                .color(theme::TEXT_DIM)
+                                .size(11.0),
+                        );
+
+                        let x_slot =
+                            ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                        if name_resp.hovered() || x_slot.hovered() {
+                            let r = x_slot.rect.shrink(4.0);
+                            let color = if x_slot.hovered() {
+                                theme::TEXT_PRIMARY
+                            } else {
+                                theme::TEXT_DIM
+                            };
+                            let stroke = egui::Stroke::new(1.2_f32, color);
+                            let p = ui.painter();
+                            p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                            p.line_segment([r.left_bottom(), r.right_top()], stroke);
+                        }
+                        if x_slot.clicked() {
                             delete_collection(state, c.id);
-                            ui.close_menu();
                         }
-                    });
+                    }
+                })
+                .response;
 
-                    // Delete ✕ affordance (mirrors folder rows).
-                    let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
-                    if name_resp.hovered() || x_slot.hovered() {
-                        let r = x_slot.rect.shrink(4.0);
-                        let color = if x_slot.hovered() {
-                            theme::TEXT_PRIMARY
-                        } else {
-                            theme::TEXT_DIM
-                        };
-                        let stroke = egui::Stroke::new(1.2_f32, color);
-                        let p = ui.painter();
-                        p.line_segment([r.left_top(), r.right_bottom()], stroke);
-                        p.line_segment([r.left_bottom(), r.right_top()], stroke);
-                    }
-                    if x_slot.clicked() {
-                        delete_collection(state, c.id);
-                    }
+            if let Some(ids) = crate::library::drag::row_drop_target(ui, row_resp.rect) {
+                let (cid, cname) = (c.id, c.name.clone());
+                state.add_images_to_collection(&ids, cid);
+                state.notify(
+                    crate::notifications::Level::Info,
+                    format!("Added {} image(s) to \"{}\".", ids.len(), cname),
+                );
+            }
+
+            if open {
+                for child in &node.children {
+                    render_collection_row(ui, state, child, true);
                 }
-            })
-            .response;
-
-        // Drop target: dragging images from the grid onto a collection row
-        // adds them to that collection.
-        if let Some(ids) = crate::library::drag::row_drop_target(ui, row_resp.rect) {
-            // Copy id/clone name before the `&mut state` call to satisfy the borrow checker.
-            let (cid, cname) = (c.id, c.name.clone());
-            state.add_images_to_collection(&ids, cid);
-            state.notify(
-                crate::notifications::Level::Info,
-                format!("Added {} image(s) to \"{}\".", ids.len(), cname),
-            );
+            }
+        } else {
+            render_collection_row(ui, state, c, false);
         }
     }
 
@@ -429,5 +473,197 @@ fn request_remove(
         });
     } else {
         state.remove_folder_cascade(id);
+    }
+}
+
+use ferrolite_catalog::CollectionRecord;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionNode {
+    pub collection: CollectionRecord,
+    pub children: Vec<CollectionRecord>,
+}
+
+pub fn build_collection_tree(collections: &[CollectionRecord]) -> Vec<CollectionNode> {
+    let mut top_level: Vec<CollectionNode> = Vec::new();
+    let mut children_by_parent: std::collections::HashMap<i64, Vec<CollectionRecord>> =
+        std::collections::HashMap::new();
+
+    for c in collections {
+        if let Some(pid) = c.parent_id {
+            children_by_parent.entry(pid).or_default().push(c.clone());
+        }
+    }
+
+    for c in collections {
+        if c.parent_id.is_none() {
+            let children = children_by_parent.remove(&c.id).unwrap_or_default();
+            top_level.push(CollectionNode {
+                collection: c.clone(),
+                children,
+            });
+        }
+    }
+
+    for (_pid, orphans) in children_by_parent {
+        for orphan in orphans {
+            top_level.push(CollectionNode {
+                collection: orphan,
+                children: Vec::new(),
+            });
+        }
+    }
+
+    top_level
+}
+
+fn render_collection_row(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    c: &CollectionRecord,
+    is_child: bool,
+) {
+    let is_renaming = matches!(
+        &state.renaming,
+        Some((RenameKind::Collection, id, _)) if *id == c.id
+    );
+
+    let row_resp = ui
+        .horizontal(|ui| {
+            if is_child {
+                ui.add_space(16.0);
+            }
+            let col = egui::Color32::from_rgb(c.color.r, c.color.g, c.color.b);
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(rect.center(), 4.0, col);
+
+            if is_renaming {
+                let buf = match &mut state.renaming {
+                    Some((RenameKind::Collection, id, buf)) if *id == c.id => buf,
+                    _ => unreachable!(),
+                };
+                let edit_resp = ui.add(
+                    egui::TextEdit::singleline(buf).desired_width(ui.available_width() - 20.0),
+                );
+                edit_resp.request_focus();
+                let commit =
+                    edit_resp.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if commit {
+                    if let Some((RenameKind::Collection, id, buf)) = state.renaming.take() {
+                        if !buf.is_empty() {
+                            let _ = state
+                                .writer
+                                .lock()
+                                .expect("writer")
+                                .rename_collection(id, &buf);
+                            state.reload_vocab();
+                        }
+                    }
+                }
+            } else {
+                let name_resp = ui.selectable_label(
+                    matches!(state.source, ViewSource::Collection(id) if id == c.id),
+                    &c.name,
+                );
+                if name_resp.clicked() {
+                    state.source = ViewSource::Collection(c.id);
+                    state.current_folder = None;
+                    state.dirty = true;
+                }
+                if name_resp.double_clicked() {
+                    state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
+                }
+                name_resp.context_menu(|ui| {
+                    if ui.button("Rename").clicked() {
+                        state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Delete").clicked() {
+                        delete_collection(state, c.id);
+                        ui.close_menu();
+                    }
+                });
+
+                let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                if name_resp.hovered() || x_slot.hovered() {
+                    let r = x_slot.rect.shrink(4.0);
+                    let color = if x_slot.hovered() {
+                        theme::TEXT_PRIMARY
+                    } else {
+                        theme::TEXT_DIM
+                    };
+                    let stroke = egui::Stroke::new(1.2_f32, color);
+                    let p = ui.painter();
+                    p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                    p.line_segment([r.left_bottom(), r.right_top()], stroke);
+                }
+                if x_slot.clicked() {
+                    delete_collection(state, c.id);
+                }
+            }
+        })
+        .response;
+
+    if let Some(ids) = crate::library::drag::row_drop_target(ui, row_resp.rect) {
+        let (cid, cname) = (c.id, c.name.clone());
+        state.add_images_to_collection(&ids, cid);
+        state.notify(
+            crate::notifications::Level::Info,
+            format!("Added {} image(s) to \"{}\".", ids.len(), cname),
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ferrolite_image::Color;
+
+    #[test]
+    fn test_collection_tree_building() {
+        let c1 = CollectionRecord {
+            id: 1,
+            name: "Vacation 2026".to_string(),
+            color: Color { r: 255, g: 0, b: 0 },
+            sort_order: 0,
+            parent_id: None,
+        };
+        let c2 = CollectionRecord {
+            id: 2,
+            name: "Beach".to_string(),
+            color: Color { r: 0, g: 255, b: 0 },
+            sort_order: 1,
+            parent_id: Some(1),
+        };
+        let c3 = CollectionRecord {
+            id: 3,
+            name: "Mountains".to_string(),
+            color: Color { r: 0, g: 0, b: 255 },
+            sort_order: 2,
+            parent_id: Some(1),
+        };
+        let c4 = CollectionRecord {
+            id: 4,
+            name: "Favorites".to_string(),
+            color: Color {
+                r: 255,
+                g: 255,
+                b: 0,
+            },
+            sort_order: 3,
+            parent_id: None,
+        };
+
+        let collections = vec![c1.clone(), c2.clone(), c3.clone(), c4.clone()];
+        let tree = build_collection_tree(&collections);
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].collection.id, 1);
+        assert_eq!(tree[0].children.len(), 2);
+        assert_eq!(tree[0].children[0].id, 2);
+        assert_eq!(tree[0].children[1].id, 3);
+        assert_eq!(tree[1].collection.id, 4);
+        assert_eq!(tree[1].children.len(), 0);
     }
 }

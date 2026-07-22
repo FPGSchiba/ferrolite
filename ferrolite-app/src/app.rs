@@ -1272,16 +1272,20 @@ impl eframe::App for FerroliteApp {
                         }
                     });
                 egui::TopBottomPanel::top("develop_filmstrip")
-                    .exact_height(80.0)
+                    .exact_height(self.state.settings.filmstrip_height)
                     .frame(
                         egui::Frame::none()
                             .fill(theme::BG_TOOLBAR)
                             .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
                     )
                     .show(ctx, |ui| {
+                        let height_before = self.state.settings.filmstrip_height;
                         let current = self.state.viewer.as_ref().map(|v| v.image_id);
                         film_clicked =
                             crate::library::filmstrip::show(ui, &mut self.state, current);
+                        if (self.state.settings.filmstrip_height - height_before).abs() > 0.001 {
+                            self.mark_settings_dirty();
+                        }
                     });
             }
             crate::module::Module::Export => {

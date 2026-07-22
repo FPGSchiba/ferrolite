@@ -14,11 +14,15 @@ use crate::widgets::draw_reset_arrow;
 use crate::widgets::slider::EguiSlider;
 use ferrolite_pipeline::{curve_lut, CurveMode};
 
-const SIZE: f32 = 260.0; // square edit area
 const HIT_R: f32 = 0.06; // normalized hit radius
 const DOT_R: f32 = 5.0; // idle point-dot radius
 const DOT_R_HOVER: f32 = 6.5; // enlarged radius for the hovered point
 const MODE_RESET_R: f32 = 4.5; // mode-selector reset arrow radius
+
+/// Compute dynamic tone curve editor square size based on available panel width.
+pub fn curve_editor_size(available_width: f32) -> f32 {
+    available_width.clamp(180.0, 320.0)
+}
 
 /// The app default curve mode for newly-created curves (Spec 4.1 CD2 Task 6);
 /// also the target the mode selector's own reset returns to.
@@ -124,8 +128,9 @@ pub fn curve_editor(
     let base_id = ui.id().with(id_source);
     let mut points = points.to_vec();
 
+    let size = curve_editor_size(ui.available_width());
     let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(SIZE, SIZE), egui::Sense::click_and_drag());
+        ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click_and_drag());
 
     let selected_id = base_id.with("selected_point");
     let grab_id = base_id.with("grab_point");
@@ -140,15 +145,15 @@ pub fn curve_editor(
         let f = i as f32 / 4.0;
         painter.line_segment(
             [
-                egui::pos2(rect.left() + f * SIZE, rect.top()),
-                egui::pos2(rect.left() + f * SIZE, rect.bottom()),
+                egui::pos2(rect.left() + f * size, rect.top()),
+                egui::pos2(rect.left() + f * size, rect.bottom()),
             ],
             egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
         );
         painter.line_segment(
             [
-                egui::pos2(rect.left(), rect.top() + f * SIZE),
-                egui::pos2(rect.right(), rect.top() + f * SIZE),
+                egui::pos2(rect.left(), rect.top() + f * size),
+                egui::pos2(rect.right(), rect.top() + f * size),
             ],
             egui::Stroke::new(1.0_f32, theme::BORDER_STRONG),
         );
@@ -156,8 +161,8 @@ pub fn curve_editor(
 
     // Coord transforms: image y is inverted on screen (0 at bottom).
     let to_screen =
-        |p: (f32, f32)| egui::pos2(rect.left() + p.0 * SIZE, rect.bottom() - p.1 * SIZE);
-    let to_norm = |s: egui::Pos2| ((s.x - rect.left()) / SIZE, (rect.bottom() - s.y) / SIZE);
+        |p: (f32, f32)| egui::pos2(rect.left() + p.0 * size, rect.bottom() - p.1 * size);
+    let to_norm = |s: egui::Pos2| ((s.x - rect.left()) / size, (rect.bottom() - s.y) / size);
 
     // Curve polyline: sample the pipeline's own interpolation for `mode` so the
     // drawn shape matches the applied result (straight segments for Linear,
@@ -418,8 +423,9 @@ pub fn tone_curve_widget(
             }
         }
         ToneCurveTab::Parametric => {
+            let size = curve_editor_size(ui.available_width());
             let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(SIZE, 140.0_f32), egui::Sense::hover());
+                ui.allocate_exact_size(egui::vec2(size, 140.0_f32), egui::Sense::hover());
             let painter = ui.painter();
             painter.rect_filled(rect, 2.0_f32, theme::BG_BASE);
 
@@ -717,5 +723,14 @@ mod tests {
             });
         });
         assert_eq!(tab, ToneCurveTab::Parametric);
+    }
+
+    #[test]
+    fn test_curve_editor_size_clamping() {
+        assert_eq!(curve_editor_size(100.0), 180.0);
+        assert_eq!(curve_editor_size(180.0), 180.0);
+        assert_eq!(curve_editor_size(250.0), 250.0);
+        assert_eq!(curve_editor_size(320.0), 320.0);
+        assert_eq!(curve_editor_size(400.0), 320.0);
     }
 }

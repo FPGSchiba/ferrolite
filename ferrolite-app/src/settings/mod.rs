@@ -10,6 +10,10 @@ pub mod ui;
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 /// Root persisted settings document. Every field defaults so older/partial
 /// files load cleanly (forward/backward tolerant).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,6 +32,12 @@ pub struct Settings {
     pub last_module: dto::PersistedModule,
     pub last_folder: Option<std::path::PathBuf>,
     pub display_profile: dto::PersistedDisplayProfile,
+    #[serde(default = "default_true")]
+    pub tone_curve_open: bool,
+    #[serde(default = "default_true")]
+    pub color_grading_open: bool,
+    #[serde(default = "default_true")]
+    pub optics_open: bool,
 }
 
 impl Default for Settings {
@@ -46,6 +56,9 @@ impl Default for Settings {
             last_module: dto::PersistedModule::default(),
             last_folder: None,
             display_profile: dto::PersistedDisplayProfile::default(),
+            tone_curve_open: true,
+            color_grading_open: true,
+            optics_open: true,
         }
     }
 }

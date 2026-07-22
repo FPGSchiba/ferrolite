@@ -69,15 +69,37 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
 
     let mut changed = false;
     let mut commit = false;
-    for (id, label, wheel) in [
+    let cols = color_wheel::color_grading_grid_columns(ui.available_width());
+
+    let wheels = [
         ("grade_shadows", "Shadows", &mut cg.shadows),
         ("grade_midtones", "Midtones", &mut cg.midtones),
         ("grade_highlights", "Highlights", &mut cg.highlights),
         ("grade_global", "Global", &mut cg.global),
-    ] {
-        let (c, m) = wheel_row(ui, id, label, wheel);
-        changed |= c;
-        commit |= m;
+    ];
+
+    if cols == 2 {
+        egui::Grid::new("color_grading_wheels_grid")
+            .num_columns(2)
+            .spacing([12.0, 8.0])
+            .show(ui, |ui| {
+                for (idx, (id, label, wheel)) in wheels.into_iter().enumerate() {
+                    ui.vertical(|ui| {
+                        let (c, m) = wheel_row(ui, id, label, wheel);
+                        changed |= c;
+                        commit |= m;
+                    });
+                    if idx % 2 == 1 {
+                        ui.end_row();
+                    }
+                }
+            });
+    } else {
+        for (id, label, wheel) in wheels {
+            let (c, m) = wheel_row(ui, id, label, wheel);
+            changed |= c;
+            commit |= m;
+        }
     }
 
     ui.separator();

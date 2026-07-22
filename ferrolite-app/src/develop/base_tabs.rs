@@ -9,6 +9,7 @@ use crate::develop::{
 };
 use crate::state::AppState;
 use crate::theme;
+use crate::widgets::section_header;
 use crate::widgets::slider::EguiSlider;
 use ferrolite_lens::LensDb;
 use ferrolite_pipeline::{Correction, LensCorrection, OpKind};
@@ -37,171 +38,171 @@ impl PanelTab for LightTab {
         let stack = state.viewer.as_ref()?.op_stack.clone();
         let mut out: Option<EditOutcome> = None;
 
-        // Exposure (bipolar EV).
-        let mut ev = stack.exposure().map(|e| e.ev).unwrap_or(0.0);
-        let r_ev = ui.add(EguiSlider {
-            label: "Exposure",
-            value: &mut ev,
-            min: -5.0,
-            max: 5.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: " EV",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        if r_ev.changed() {
-            out = Some(EditOutcome {
-                stack: ops_edit::set_exposure(&stack, ev),
-                kind: OpKind::Exposure,
-                commit: r_ev.drag_stopped() || !r_ev.dragged(),
+        let mut basic_open = true;
+        section_header(ui, "BASIC SLIDERS", &mut basic_open);
+        if basic_open {
+            // Exposure (bipolar EV).
+            let mut ev = stack.exposure().map(|e| e.ev).unwrap_or(0.0);
+            let r_ev = ui.add(EguiSlider {
+                label: "Exposure",
+                value: &mut ev,
+                min: -5.0,
+                max: 5.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: " EV",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
             });
-        }
-        // Contrast (bipolar).
-        let mut c = stack.contrast().map(|c| c.amount).unwrap_or(0.0);
-        let r_c = ui.add(EguiSlider {
-            label: "Contrast",
-            value: &mut c,
-            min: -1.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        if r_c.changed() {
-            out = Some(EditOutcome {
-                stack: ops_edit::set_contrast(&stack, c),
-                kind: OpKind::Contrast,
-                commit: r_c.drag_stopped() || !r_c.dragged(),
+            if r_ev.changed() {
+                out = Some(EditOutcome {
+                    stack: ops_edit::set_exposure(&stack, ev),
+                    kind: OpKind::Exposure,
+                    commit: r_ev.drag_stopped() || !r_ev.dragged(),
+                });
+            }
+            // Contrast (bipolar).
+            let mut c = stack.contrast().map(|c| c.amount).unwrap_or(0.0);
+            let r_c = ui.add(EguiSlider {
+                label: "Contrast",
+                value: &mut c,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
             });
-        }
-        // White balance Temp + Tint.
-        let wb = stack.white_balance();
-        let (mut temp, mut tint) = wb.map(|w| (w.temp, w.tint)).unwrap_or((0.0, 0.0));
-        let rt = ui.add(EguiSlider {
-            label: "Temp",
-            value: &mut temp,
-            min: -1.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        let rn = ui.add(EguiSlider {
-            label: "Tint",
-            value: &mut tint,
-            min: -1.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        if rt.changed() || rn.changed() {
-            out = Some(EditOutcome {
-                stack: ops_edit::set_white_balance(&stack, temp, tint),
-                kind: OpKind::WhiteBalance,
-                commit: (rt.drag_stopped() || rn.drag_stopped()) || !(rt.dragged() || rn.dragged()),
+            if r_c.changed() {
+                out = Some(EditOutcome {
+                    stack: ops_edit::set_contrast(&stack, c),
+                    kind: OpKind::Contrast,
+                    commit: r_c.drag_stopped() || !r_c.dragged(),
+                });
+            }
+            // White balance Temp + Tint.
+            let wb = stack.white_balance();
+            let (mut temp, mut tint) = wb.map(|w| (w.temp, w.tint)).unwrap_or((0.0, 0.0));
+            let rt = ui.add(EguiSlider {
+                label: "Temp",
+                value: &mut temp,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
             });
-        }
+            let rn = ui.add(EguiSlider {
+                label: "Tint",
+                value: &mut tint,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
+            });
+            if rt.changed() || rn.changed() {
+                out = Some(EditOutcome {
+                    stack: ops_edit::set_white_balance(&stack, temp, tint),
+                    kind: OpKind::WhiteBalance,
+                    commit: (rt.drag_stopped() || rn.drag_stopped())
+                        || !(rt.dragged() || rn.dragged()),
+                });
+            }
 
-        // Highlights, Shadows, Whites, Blacks
-        let mut tc = stack.tone_curve().unwrap_or_default();
-        let mut p = tc.parametric;
+            // Highlights, Shadows, Whites, Blacks
+            let mut tc = stack.tone_curve().unwrap_or_default();
+            let mut p = tc.parametric;
 
-        let rh = ui.add(EguiSlider {
-            label: "Highlights",
-            value: &mut p.highlights,
-            min: -1.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        let rs = ui.add(EguiSlider {
-            label: "Shadows",
-            value: &mut p.shadows,
-            min: -1.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        let rw = ui.add(EguiSlider {
-            label: "Whites",
-            value: &mut p.lights,
-            min: -1.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        let rb = ui.add(EguiSlider {
-            label: "Blacks",
-            value: &mut p.darks,
-            min: -1.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: true,
-            signed: true,
-            custom_label_w: None,
-        });
-        if rh.changed() || rs.changed() || rw.changed() || rb.changed() {
-            tc.parametric = p;
-            let commit =
-                (rh.drag_stopped() || rs.drag_stopped() || rw.drag_stopped() || rb.drag_stopped())
+            let rh = ui.add(EguiSlider {
+                label: "Highlights",
+                value: &mut p.highlights,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
+            });
+            let rs = ui.add(EguiSlider {
+                label: "Shadows",
+                value: &mut p.shadows,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
+            });
+            let rw = ui.add(EguiSlider {
+                label: "Whites",
+                value: &mut p.lights,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
+            });
+            let rb = ui.add(EguiSlider {
+                label: "Blacks",
+                value: &mut p.darks,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
+            });
+            if rh.changed() || rs.changed() || rw.changed() || rb.changed() {
+                tc.parametric = p;
+                let commit = (rh.drag_stopped()
+                    || rs.drag_stopped()
+                    || rw.drag_stopped()
+                    || rb.drag_stopped())
                     || !(rh.dragged() || rs.dragged() || rw.dragged() || rb.dragged());
-            out = Some(EditOutcome {
-                stack: ops_edit::set_tone_curve(&stack, tc),
-                kind: OpKind::ToneCurve,
-                commit,
-            });
+                out = Some(EditOutcome {
+                    stack: ops_edit::set_tone_curve(&stack, tc),
+                    kind: OpKind::ToneCurve,
+                    commit,
+                });
+            }
         }
 
         ui.separator();
-        if let Some(curve_out) = curve_widget::show(ui, &stack) {
-            out = Some(curve_out);
+        let mut tone_curve_open = state.settings.tone_curve_open;
+        if section_header(ui, "TONE CURVE", &mut tone_curve_open).changed() {
+            state.settings.tone_curve_open = tone_curve_open;
         }
-
-        if ui.small_button("Reset").clicked() {
-            let s = stack
-                .reset(OpKind::Exposure)
-                .reset(OpKind::Contrast)
-                .reset(OpKind::WhiteBalance)
-                .reset(OpKind::ToneCurve);
-            out = Some(EditOutcome {
-                stack: s,
-                kind: OpKind::Exposure,
-                commit: true,
-            });
+        if tone_curve_open {
+            if let Some(curve_out) = curve_widget::show(ui, &stack) {
+                out = Some(curve_out);
+            }
         }
 
         out
@@ -220,16 +221,26 @@ impl PanelTab for ColorTab {
         let stack = state.viewer.as_ref()?.op_stack.clone();
         let mut out: Option<EditOutcome> = None;
 
-        if let Some(v) = state.viewer.as_mut() {
-            if let Some(o) = hsl_widget::show(ui, &stack, &mut v.hsl_band) {
-                out = Some(o);
+        let mut hsl_open = true;
+        section_header(ui, "COLOR (HSL)", &mut hsl_open);
+        if hsl_open {
+            if let Some(v) = state.viewer.as_mut() {
+                if let Some(o) = hsl_widget::show(ui, &stack, &mut v.hsl_band) {
+                    out = Some(o);
+                }
             }
         }
 
         ui.separator();
 
-        if let Some(grade_out) = grade_widget::show(ui, &stack) {
-            out = Some(grade_out);
+        let mut color_grading_open = state.settings.color_grading_open;
+        if section_header(ui, "COLOR GRADING", &mut color_grading_open).changed() {
+            state.settings.color_grading_open = color_grading_open;
+        }
+        if color_grading_open {
+            if let Some(grade_out) = grade_widget::show(ui, &stack) {
+                out = Some(grade_out);
+            }
         }
 
         out
@@ -249,135 +260,138 @@ impl PanelTab for EffectsTab {
         let mut out: Option<EditOutcome> = None;
 
         // Sharpening (Amount, Radius, Detail)
-        ui.label(egui::RichText::new("Sharpening").color(theme::TEXT_FAINT));
-        let sh = stack.sharpen();
-        let (mut amount, mut radius) = sh
-            .map(|s| (s.amount, s.radius as f32))
-            .unwrap_or((0.0, 1.0));
-        let mut detail = 0.0_f32;
+        let mut sharpening_open = true;
+        section_header(ui, "SHARPENING", &mut sharpening_open);
+        if sharpening_open {
+            let sh = stack.sharpen();
+            let (mut amount, mut radius) = sh
+                .map(|s| (s.amount, s.radius as f32))
+                .unwrap_or((0.0, 1.0));
+            let mut detail = 0.0_f32;
 
-        let ra = ui.add(EguiSlider {
-            label: "Amount",
-            value: &mut amount,
-            min: 0.0,
-            max: 2.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-            custom_label_w: None,
-        });
-        let rr = ui.add(EguiSlider {
-            label: "Radius",
-            value: &mut radius,
-            min: 1.0,
-            max: 8.0,
-            default: 1.0,
-            step: 1.0,
-            decimals: 0,
-            unit: " px",
-            bipolar: false,
-            signed: false,
-            custom_label_w: None,
-        });
-        let rd = ui.add(EguiSlider {
-            label: "Detail",
-            value: &mut detail,
-            min: 0.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-            custom_label_w: None,
-        });
-        if ra.changed() || rr.changed() || rd.changed() {
-            out = Some(EditOutcome {
-                stack: ops_edit::set_sharpen(&stack, amount, radius.round() as u32),
-                kind: OpKind::Sharpen,
-                commit: (ra.drag_stopped() || rr.drag_stopped() || rd.drag_stopped())
-                    || !(ra.dragged() || rr.dragged() || rd.dragged()),
+            let ra = ui.add(EguiSlider {
+                label: "Amount",
+                value: &mut amount,
+                min: 0.0,
+                max: 2.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
             });
+            let rr = ui.add(EguiSlider {
+                label: "Radius",
+                value: &mut radius,
+                min: 1.0,
+                max: 8.0,
+                default: 1.0,
+                step: 1.0,
+                decimals: 0,
+                unit: " px",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
+            });
+            let rd = ui.add(EguiSlider {
+                label: "Detail",
+                value: &mut detail,
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
+            });
+            if ra.changed() || rr.changed() || rd.changed() {
+                out = Some(EditOutcome {
+                    stack: ops_edit::set_sharpen(&stack, amount, radius.round() as u32),
+                    kind: OpKind::Sharpen,
+                    commit: (ra.drag_stopped() || rr.drag_stopped() || rd.drag_stopped())
+                        || !(ra.dragged() || rr.dragged() || rd.dragged()),
+                });
+            }
         }
 
         // Noise Reduction (Luminance, Detail, Color, Color Detail)
         ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Noise Reduction").color(theme::TEXT_FAINT));
-            ui.label(
-                egui::RichText::new("AI")
-                    .size(9.0)
-                    .color(theme::ACCENT)
-                    .background_color(theme::ACCENT_FILL),
-            );
-        });
-        let mut nr_lum = 0.0_f32;
-        let mut nr_lum_detail = 0.0_f32;
-        let mut nr_color = 0.0_f32;
-        let mut nr_color_detail = 0.0_f32;
+        let mut nr_open = true;
+        section_header(ui, "NOISE REDUCTION", &mut nr_open);
+        if nr_open {
+            let mut nr_lum = 0.0_f32;
+            let mut nr_lum_detail = 0.0_f32;
+            let mut nr_color = 0.0_f32;
+            let mut nr_color_detail = 0.0_f32;
 
-        ui.add(EguiSlider {
-            label: "Luminance",
-            value: &mut nr_lum,
-            min: 0.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-            custom_label_w: None,
-        });
-        ui.add(EguiSlider {
-            label: "Detail",
-            value: &mut nr_lum_detail,
-            min: 0.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-            custom_label_w: None,
-        });
-        ui.add(EguiSlider {
-            label: "Color",
-            value: &mut nr_color,
-            min: 0.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-            custom_label_w: None,
-        });
-        ui.add(EguiSlider {
-            label: "Color Detail",
-            value: &mut nr_color_detail,
-            min: 0.0,
-            max: 1.0,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: false,
-            signed: false,
-            custom_label_w: None,
-        });
+            ui.add(EguiSlider {
+                label: "Luminance",
+                value: &mut nr_lum,
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
+            });
+            ui.add(EguiSlider {
+                label: "Detail",
+                value: &mut nr_lum_detail,
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
+            });
+            ui.add(EguiSlider {
+                label: "Color",
+                value: &mut nr_color,
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
+            });
+            ui.add(EguiSlider {
+                label: "Color Detail",
+                value: &mut nr_color_detail,
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
+            });
+        }
 
         // Optics (lens picker, Distortion, Vignette, etc.)
         ui.separator();
-        ui.label(egui::RichText::new("Optics").color(theme::TEXT_FAINT));
-        if let Some(optics_out) = show_optics_section(ui, state, &stack) {
-            out = Some(optics_out);
+        let mut optics_open = state.settings.optics_open;
+        if section_header(ui, "OPTICS", &mut optics_open).changed() {
+            state.settings.optics_open = optics_open;
+        }
+        if optics_open {
+            if let Some(optics_out) = show_optics_section(ui, state, &stack) {
+                out = Some(optics_out);
+            }
         }
 
         out
@@ -721,19 +735,6 @@ fn show_optics_section(
         });
     }
 
-    if (lc.lens_id.is_some() || lc.distortion.enabled || lc.tca.enabled || lc.vignetting.enabled)
-        && ui.small_button("Reset").clicked()
-    {
-        if let Some(v) = state.viewer.as_mut() {
-            v.lens_resolved_name = None;
-        }
-        out = Some(EditOutcome {
-            stack: stack.reset(OpKind::LensCorrection),
-            kind: OpKind::LensCorrection,
-            commit: true,
-        });
-    }
-
     out
 }
 
@@ -755,5 +756,53 @@ mod tests {
         assert_eq!(tabs[1].label(), "Color");
         assert_eq!(tabs[2].id(), TabId("effects"));
         assert_eq!(tabs[2].label(), "Effects");
+    }
+
+    #[test]
+    fn test_light_tab_collapsible_sections() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new().unwrap();
+        state.settings.tone_curve_open = false;
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let tab = LightTab;
+                let res = tab.show(ui, &mut state);
+                assert!(res.is_none());
+            });
+        });
+        assert!(!state.settings.tone_curve_open);
+    }
+
+    #[test]
+    fn test_color_tab_collapsible_sections() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new().unwrap();
+        state.settings.color_grading_open = false;
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let tab = ColorTab;
+                let res = tab.show(ui, &mut state);
+                assert!(res.is_none());
+            });
+        });
+        assert!(!state.settings.color_grading_open);
+    }
+
+    #[test]
+    fn test_effects_tab_collapsible_sections() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new().unwrap();
+        state.settings.optics_open = false;
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let tab = EffectsTab;
+                let res = tab.show(ui, &mut state);
+                assert!(res.is_none());
+            });
+        });
+        assert!(!state.settings.optics_open);
     }
 }

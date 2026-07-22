@@ -13,6 +13,16 @@ const RADIUS: f32 = 44.0;
 const SEGMENTS: usize = 48;
 const RESET_R: f32 = 4.5;
 
+/// Returns the number of grid columns (1 or 2) for color grading wheels
+/// based on available width (2 columns when width >= 280.0 px, 1 column when narrower).
+pub fn color_grading_grid_columns(available_width: f32) -> usize {
+    if available_width >= 280.0 {
+        2
+    } else {
+        1
+    }
+}
+
 /// A change emitted by `color_wheel`. `commit` false = live drag preview.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WheelEdit {
@@ -533,5 +543,13 @@ mod tests {
             edit.is_none(),
             "Clicking reset when unmodified returns None"
         );
+    }
+
+    #[test]
+    fn test_color_grading_grid_columns() {
+        assert_eq!(color_grading_grid_columns(200.0), 1);
+        assert_eq!(color_grading_grid_columns(279.9), 1);
+        assert_eq!(color_grading_grid_columns(280.0), 2);
+        assert_eq!(color_grading_grid_columns(350.0), 2);
     }
 }

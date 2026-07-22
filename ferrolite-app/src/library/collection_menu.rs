@@ -50,6 +50,7 @@ mod tests {
             name: format!("c{id}"),
             color: Default::default(),
             sort_order: id,
+            parent_id: None,
         }
     }
 

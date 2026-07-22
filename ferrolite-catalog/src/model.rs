@@ -79,6 +79,7 @@ pub struct CollectionRecord {
     pub name: String,
     pub color: Color,
     pub sort_order: i64,
+    pub parent_id: Option<i64>,
 }
 
 /// A row of the persisted export queue (spec §8.4). Ordered by `position`.

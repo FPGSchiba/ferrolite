@@ -212,14 +212,16 @@ pub(crate) fn collections_for_images(
 pub(crate) fn list_collections(
     conn: &Connection,
 ) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {
-    let mut stmt = conn
-        .prepare("SELECT id, name, color, sort_order FROM collections ORDER BY sort_order, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, color, sort_order, parent_id FROM collections ORDER BY sort_order, name",
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok(crate::model::CollectionRecord {
             id: row.get(0)?,
             name: row.get(1)?,
             color: Color::from_packed(row.get::<_, i64>(2)? as u32),
             sort_order: row.get(3)?,
+            parent_id: row.get(4)?,
         })
     })?;
     let mut out = Vec::new();

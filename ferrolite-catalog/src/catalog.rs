@@ -471,12 +471,22 @@ impl Catalog {
         crate::queries::tags_for_images(self.conn(), image_ids)
     }
 
-    /// Create a new collection. Returns `CatalogError::Conflict` if a collection
+    /// Create a new collection without a parent. Returns `CatalogError::Conflict` if a collection
     /// with that name already exists (enforced by the UNIQUE constraint on `collections.name`).
     pub fn create_collection(&self, name: &str, color: Color) -> Result<i64, CatalogError> {
+        self.create_collection_with_parent(name, color, None)
+    }
+
+    /// Create a new collection with an optional parent collection id.
+    pub fn create_collection_with_parent(
+        &self,
+        name: &str,
+        color: Color,
+        parent_id: Option<i64>,
+    ) -> Result<i64, CatalogError> {
         let res = self.conn().execute(
-            "INSERT INTO collections (name, color) VALUES (?1, ?2)",
-            rusqlite::params![name, color.to_packed() as i64],
+            "INSERT INTO collections (name, color, parent_id) VALUES (?1, ?2, ?3)",
+            rusqlite::params![name, color.to_packed() as i64, parent_id],
         );
         match res {
             Ok(_) => Ok(self.conn().last_insert_rowid()),
@@ -685,6 +695,40 @@ mod collection_tests {
         a_colls.sort_unstable();
         assert_eq!(a_colls, vec![c1, c2]);
         assert_eq!(map.get(&b).cloned().unwrap_or_default(), vec![c1]);
+    }
+
+    #[test]
+    fn create_parent_child_collections() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let parent = cat
+            .create_collection("Vacations", Color::from_packed(0x30A46C))
+            .unwrap();
+        let child1 = cat
+            .create_collection_with_parent("Japan 2025", Color::default(), Some(parent))
+            .unwrap();
+        let child2 = cat
+            .create_collection_with_parent("Italy 2026", Color::default(), Some(parent))
+            .unwrap();
+
+        let collections = cat.list_collections().unwrap();
+        assert_eq!(collections.len(), 3);
+
+        let parent_rec = collections.iter().find(|c| c.id == parent).unwrap();
+        assert_eq!(parent_rec.name, "Vacations");
+        assert_eq!(parent_rec.parent_id, None);
+
+        let child1_rec = collections.iter().find(|c| c.id == child1).unwrap();
+        assert_eq!(child1_rec.name, "Japan 2025");
+        assert_eq!(child1_rec.parent_id, Some(parent));
+
+        let child2_rec = collections.iter().find(|c| c.id == child2).unwrap();
+        assert_eq!(child2_rec.name, "Italy 2026");
+        assert_eq!(child2_rec.parent_id, Some(parent));
+
+        // Deleting parent cascades to children due to ON DELETE CASCADE
+        cat.delete_collection(parent).unwrap();
+        let collections_after = cat.list_collections().unwrap();
+        assert!(collections_after.is_empty());
     }
 }
 

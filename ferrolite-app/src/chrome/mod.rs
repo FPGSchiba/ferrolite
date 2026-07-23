@@ -313,7 +313,10 @@ pub fn title_bar(
         (Module::Develop, "Develop"),
         (Module::Export, "Export"),
     ];
-    let center_rect = Rect::from_center_size(bar.center(), vec2(220.0_f32, bar.height()));
+    let center_rect = Rect::from_min_max(
+        pos2(bar.center().x - 110.0_f32, bar.top()),
+        pos2(bar.center().x + 110.0_f32, bar.bottom() - 2.0_f32),
+    );
     ui.allocate_new_ui(
         UiBuilder::new()
             .max_rect(center_rect)
@@ -341,6 +344,19 @@ mod tests {
     #[test]
     fn titlebar_version_string() {
         assert_eq!(VERSION_STRING, "v0.1.2");
+    }
+
+    #[test]
+    fn titlebar_tab_bounds_alignment() {
+        let bar = Rect::from_min_size(pos2(0.0_f32, 0.0_f32), vec2(1000.0_f32, TITLEBAR_HEIGHT));
+        let center_rect = Rect::from_min_max(
+            pos2(bar.center().x - 110.0_f32, bar.top()),
+            pos2(bar.center().x + 110.0_f32, bar.bottom() - 2.0_f32),
+        );
+        assert_eq!(center_rect.max.y, bar.bottom() - 2.0_f32);
+        assert_eq!(center_rect.height(), TITLEBAR_HEIGHT - 2.0_f32);
+        assert_eq!(center_rect.center().x, bar.center().x);
+        assert_eq!(center_rect.width(), 220.0_f32);
     }
 
     #[test]

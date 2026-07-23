@@ -1,12 +1,12 @@
-# V2 UI Refinements & Layout Persistence Implementation Plan
+# V2 Systematic UI Refinements Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement the eight V2 UI refinements: nested collection sets, slider reset scrollbar clearance, collapsible Develop sections, removal of redundant "Reset all" section buttons, responsive scaling for Tone Curve & Color Grading widgets, resizable Develop filmstrip, and full layout settings persistence.
+**Goal:** Implement the verified systematic fixes for all 9 UI items: persistent section disclosure states, complete removal of "Reset all" buttons, right-margin scrollbar clearance for sliders, fully responsive Tone Curve and 2x2 Color Grading grid, CRUD UI & count badges for nested collections, native resizable filmstrip top panel, persisted left & right panel widths, resizable Left Info Panel, and titlebar vertical alignment.
 
-**Architecture:** Extend SQLite schema in `ferrolite-catalog` with `parent_id` for nested collections. Add `section_header` helper and adjust track right margin in `slider.rs`. Update `base_tabs.rs` to wrap Develop sections in collapsible headers and remove section-level reset buttons. Enable responsive square sizing in `curve.rs` and auto-fitting grid in `color_wheel.rs`. Add vertical drag splitter in `filmstrip.rs`. Add layout fields to `settings/dto.rs` for automatic disk persistence.
+**Architecture:** Extend `Settings` DTO in `settings/dto.rs` with all 7 section collapse booleans (`basic_sliders_open`, `color_hsl_open`, `sharpening_open`, `noise_reduction_open`, `tone_curve_open`, `color_grading_open`, `optics_open`) plus `right_panel_width` and `info_panel_width`. Update `base_tabs.rs` to bind headers to `state.settings.xxx_open`. Delete `Reset all` footer in `tool_panel.rs`. Configure `SidePanel::right` and `SidePanel::left` inner margins and resizable bindings in `app.rs`. Refactor `curve.rs` to scale to `ui.available_width()`. Refactor `grade_widget.rs` to lay out 4 wheels in a balanced 2-column grid (`ui.columns(2)`). Add "+ Set" and "+ Sub-collection" UI buttons in `library/panel.rs` with count badges. Make top filmstrip panel natively resizable (`TopBottomPanel::top().resizable(true)`).
 
-**Tech Stack:** Rust, `egui` 0.28, `ferrolite-app`, `ferrolite-catalog` (SQLite), `rusqlite`.
+**Tech Stack:** Rust, `egui` 0.28, `ferrolite-app`, `ferrolite-catalog`.
 
 ## Global Constraints
 
@@ -20,110 +20,9 @@
 
 ---
 
-## File Structure
-
-- **Modify `ferrolite-catalog/src/schema.rs`**: Add `parent_id INTEGER` column to `collections` table.
-- **Modify `ferrolite-catalog/src/model.rs`**: Add `pub parent_id: Option<i64>` to `CollectionRecord`.
-- **Modify `ferrolite-catalog/src/catalog.rs` / `queries.rs` / `read_pool.rs`**: Update collection creation and listing queries to handle `parent_id`.
-- **Modify `ferrolite-app/src/widgets/slider.rs`**: Increase slider track right margin (`VALUE_W + 12.0 + RESET_W + 8.0`) to guarantee 24px clearance from panel scrollbars.
-- **Modify `ferrolite-app/src/widgets/mod.rs`**: Add `section_header` widget helper.
-- **Modify `ferrolite-app/src/develop/base_tabs.rs`**: Wrap Develop panel sections in collapsible headers; remove bottom section "Reset all" buttons.
-- **Modify `ferrolite-app/src/widgets/curve.rs`**: Dynamically scale tone curve editor box (`ui.available_width().clamp(180.0, 320.0)`).
-- **Modify `ferrolite-app/src/widgets/color_wheel.rs`**: Render color grading wheels in a responsive 2-column/1-column grid.
-- **Modify `ferrolite-app/src/library/filmstrip.rs`**: Add draggable height splitter handle (64.0..220.0px range).
-- **Modify `ferrolite-app/src/library/panel.rs`**: Render nested collection sets and child collections hierarchy.
-- **Modify `ferrolite-app/src/settings/dto.rs`**: Add layout persistence fields (`show_info_panel`, `filmstrip_height`, section collapse booleans).
-- **Modify `ferrolite-app/src/state.rs` & `app.rs`**: Wire settings dirty marking on layout change.
-
----
-
 ## Task Breakdown
 
-### Task 1: Catalog Nested Collections Schema (`ferrolite-catalog`)
-
-**Files:**
-- Modify: `ferrolite-catalog/src/schema.rs`
-- Modify: `ferrolite-catalog/src/model.rs`
-- Modify: `ferrolite-catalog/src/catalog.rs`
-- Modify: `ferrolite-catalog/src/queries.rs`
-- Modify: `ferrolite-catalog/src/read_pool.rs`
-
-**Interfaces:**
-- Produces: `CollectionRecord { id: i64, name: String, color: Color, sort_order: i64, parent_id: Option<i64> }`, `Catalog::create_collection_with_parent(&self, name: &str, color: Color, parent_id: Option<i64>)`.
-
-- [ ] **Step 1: Write unit tests in `queries.rs` for parent_id collection filtering**
-- [ ] **Step 2: Add `parent_id INTEGER` column to `collections` schema in `schema.rs`**
-- [ ] **Step 3: Update `CollectionRecord` struct in `model.rs`**
-- [ ] **Step 4: Update collection create & read queries in `queries.rs`, `catalog.rs`, `read_pool.rs`**
-- [ ] **Step 5: Run scoped gate for catalog**
-  `cargo test -p ferrolite-catalog`
-
----
-
-### Task 2: Slider Reset Clearance & Collapsible Section Headers (`src/widgets/`)
-
-**Files:**
-- Modify: `ferrolite-app/src/widgets/slider.rs`
-- Modify: `ferrolite-app/src/widgets/mod.rs`
-
-**Interfaces:**
-- Produces: 24px scrollbar right margin clearance for `EguiSlider`, `pub fn section_header(ui: &mut egui::Ui, label: &str, is_open: &mut bool) -> egui::Response`.
-
-- [ ] **Step 1: Write unit tests for `slider.rs` right clearance math and `section_header` toggle in `widgets/mod.rs`**
-- [ ] **Step 2: Adjust `EguiSlider::ui` track right margin in `slider.rs`**
-  - Reserve `VALUE_W + 12.0 + RESET_W + 8.0` from `rect.right()` so reset arrow icon is never covered by panel scrollbars.
-- [ ] **Step 3: Implement `section_header` in `src/widgets/mod.rs`**
-  - Font: `10px` monospace, `600` weight, letter-spaced, `#6a6a6a`.
-  - Chevron `▸`/`▾` + section title + 1px `#232323` divider line.
-- [ ] **Step 4: Run scoped gate**
-  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
-
----
-
-### Task 3: Develop Collapsible Sections & Responsive Widget Scaling (`src/develop/`)
-
-**Files:**
-- Modify: `ferrolite-app/src/develop/base_tabs.rs`
-- Modify: `ferrolite-app/src/widgets/curve.rs`
-- Modify: `ferrolite-app/src/widgets/color_wheel.rs`
-
-**Interfaces:**
-- Produces: Collapsible sections across `LightTab`, `ColorTab`, `EffectsTab` with section reset buttons removed; responsive curve sizing and color grading grid.
-
-- [ ] **Step 1: Write unit tests for dynamic curve sizing and color grading grid math**
-- [ ] **Step 2: Refactor `base_tabs.rs` section layouts**
-  - Wrap `BASIC SLIDERS`, `TONE CURVE`, `COLOR (HSL)`, `COLOR GRADING`, `SHARPENING`, `NOISE REDUCTION`, `OPTICS` in collapsible headers.
-  - Remove all bottom "Reset all" buttons from section footers.
-- [ ] **Step 3: Update `curve.rs` curve editor box size**
-  - Use `let size = ui.available_width().clamp(180.0, 320.0);`.
-- [ ] **Step 4: Update `color_wheel.rs` color grading layout**
-  - Layout 4 color wheels in a 2-column grid when width $\ge 280\text{px}$, 1-column when narrower.
-- [ ] **Step 5: Run scoped gate**
-  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
-
----
-
-### Task 4: Resizable Develop Filmstrip & Nested Collections UI (`src/library/`)
-
-**Files:**
-- Modify: `ferrolite-app/src/library/filmstrip.rs`
-- Modify: `ferrolite-app/src/library/panel.rs`
-
-**Interfaces:**
-- Produces: Draggable filmstrip height splitter, nested collection set tree rendering in left sidebar.
-
-- [ ] **Step 1: Write unit tests for filmstrip height drag clamping and collection tree building**
-- [ ] **Step 2: Add vertical drag splitter in `filmstrip.rs`**
-  - Height range `64.0..=220.0`, default `96.0`. Mouse drag updates height.
-- [ ] **Step 3: Update `library/panel.rs` collection tree rendering**
-  - Render Collection Sets (items with `parent_id == None` having children) with `▸`/`▾` chevrons + count.
-  - Render child collections indented 16px.
-- [ ] **Step 4: Run scoped gate**
-  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
-
----
-
-### Task 5: UI Layout & Settings Persistence (`src/settings/` & `src/state.rs`)
+### Task 1: Settings DTO Layout Fields & State Persistence (`src/settings/` & `src/state.rs`)
 
 **Files:**
 - Modify: `ferrolite-app/src/settings/dto.rs`
@@ -131,13 +30,97 @@
 - Modify: `ferrolite-app/src/app.rs`
 
 **Interfaces:**
-- Produces: `Settings` DTO layout fields (`show_info_panel`, `filmstrip_height`, `tone_curve_open`, `color_grading_open`, `optics_open`) persisted on change.
+- Produces: `Settings` DTO containing `basic_sliders_open`, `color_hsl_open`, `sharpening_open`, `noise_reduction_open`, `tone_curve_open`, `color_grading_open`, `optics_open`, `right_panel_width`, `info_panel_width`, `filmstrip_height`, `show_info_panel`.
 
-- [ ] **Step 1: Write unit test in `settings/dto.rs` for layout fields JSON serialization/deserialization**
-- [ ] **Step 2: Add layout fields to `Settings` struct in `settings/dto.rs`**
-- [ ] **Step 3: Connect `AppState` layout properties to `state.settings` in `app.rs`**
-- [ ] **Step 4: Call `mark_settings_dirty()` whenever filmstrip height or section collapse state is toggled**
+- [ ] **Step 1: Add all 7 collapse booleans, `right_panel_width`, and `info_panel_width` to `Settings` in `settings/dto.rs` with `#[serde(default)]` and default functions**
+- [ ] **Step 2: Add unit tests in `dto.rs` testing serde roundtripping for all layout fields**
+- [ ] **Step 3: Update `AppState::new()` in `state.rs` to bind layout fields**
+- [ ] **Step 4: Run scoped gate**
+  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
+
+---
+
+### Task 2: Persistent Section Headers & Removal of "Reset all" Buttons (`src/develop/`)
+
+**Files:**
+- Modify: `ferrolite-app/src/develop/base_tabs.rs`
+- Modify: `ferrolite-app/src/develop/tool_panel.rs`
+
+**Interfaces:**
+- Produces: All 7 Develop section headers bound to `state.settings.xxx_open` calling `mark_settings_dirty()`; complete deletion of `Reset all` footer in `tool_panel.rs`.
+
+- [ ] **Step 1: Refactor `base_tabs.rs` to bind `BASIC SLIDERS`, `COLOR (HSL)`, `SHARPENING`, `NOISE REDUCTION`, `TONE CURVE`, `COLOR GRADING`, `OPTICS` to `state.settings.xxx_open`**
+- [ ] **Step 2: Delete `if ui.button("Reset all").clicked()` footer block in `tool_panel.rs`**
+- [ ] **Step 3: Add unit tests in `base_tabs.rs` testing persistent toggle states for all 7 sections**
+- [ ] **Step 4: Run scoped gate**
+  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
+
+---
+
+### Task 3: Panel Scrollbar Clearance & Resizable Side/Top Panels (`src/app.rs`)
+
+**Files:**
+- Modify: `ferrolite-app/src/app.rs`
+- Modify: `ferrolite-app/src/library/filmstrip.rs`
+
+**Interfaces:**
+- Produces: `SidePanel::right("develop_adjust")` with right inner margin clearance (`right: 20.0`) and persisted width; `SidePanel::left("develop_info_panel")` with `.resizable(true)` and persisted width; `TopBottomPanel::top("develop_filmstrip")` with native `.resizable(true)`.
+
+- [ ] **Step 1: Configure `SidePanel::right("develop_adjust")` in `app.rs` with `.default_width(self.state.settings.right_panel_width)` and `inner_margin(Margin { left: 12.0, right: 20.0, top: 8.0, bottom: 8.0 })`**
+- [ ] **Step 2: Configure `SidePanel::left("develop_info_panel")` in `app.rs` with `.resizable(true)` and `.default_width(self.state.settings.info_panel_width)`**
+- [ ] **Step 3: Configure `TopBottomPanel::top("develop_filmstrip")` in `app.rs` with `.resizable(true)` and `.height_range(64.0..=220.0)`**
+- [ ] **Step 4: Remove manual bottom drag handle in `filmstrip.rs`**
 - [ ] **Step 5: Run scoped gate**
+  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
+
+---
+
+### Task 4: Responsive Tone Curve & 2x2 Color Grading Grid (`src/widgets/`)
+
+**Files:**
+- Modify: `ferrolite-app/src/widgets/curve.rs`
+- Modify: `ferrolite-app/src/widgets/grade_widget.rs`
+- Modify: `ferrolite-app/src/widgets/color_wheel.rs`
+
+**Interfaces:**
+- Produces: Full-width responsive Tone Curve (Point & Parametric view) box sizing; balanced 2x2 grid layout for Color Grading wheels with symmetric 50% width columns and centered Lum sliders.
+
+- [ ] **Step 1: Update `curve.rs` to set square box size and parametric preview size to `ui.available_width()`**
+- [ ] **Step 2: Update `grade_widget.rs` to lay out the 4 wheels using `ui.columns(2)` with 50% width cells and centered 88px discs + full-width Lum sliders**
+- [ ] **Step 3: Add unit tests for responsive curve sizing and 2x2 color wheel layout**
+- [ ] **Step 4: Run scoped gate**
+  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
+
+---
+
+### Task 5: Nested Collection Sets CRUD UI & Count Badges (`src/library/`)
+
+**Files:**
+- Modify: `ferrolite-app/src/library/panel.rs`
+- Modify: `ferrolite-app/src/library/collection_menu.rs`
+
+**Interfaces:**
+- Produces: "+ Set" button in Collections header, "Add Sub-collection..." context menu item, photo count badges `(N)` for collection sets and child items.
+
+- [ ] **Step 1: Add "+ Set" button to Collections header in `panel.rs`**
+- [ ] **Step 2: Add "Add Sub-collection..." option in `collection_menu.rs`**
+- [ ] **Step 3: Update collection set and collection item tree rendering in `panel.rs` to display photo count badges `(N)`**
+- [ ] **Step 4: Add unit tests for collection set creation, sub-collection creation, and count badges**
+- [ ] **Step 5: Run scoped gate**
+  `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
+
+---
+
+### Task 6: Titlebar Vertical Alignment & Tab Formatting (`src/chrome/`)
+
+**Files:**
+- Modify: `ferrolite-app/src/chrome/mod.rs`
+
+**Interfaces:**
+- Produces: Vertically centered titlebar `TabRow` navigation tabs with 2px bottom padding, keeping active underline stroke clean and clear of titlebar border.
+
+- [ ] **Step 1: Update `chrome/mod.rs` `center_rect` bounds to inset 2px from `bar.bottom()`**
+- [ ] **Step 2: Run scoped gate**
   `cargo fmt -p ferrolite-app -- --check` · `cargo clippy -p ferrolite-app --all-targets -- -D warnings` · `cargo test -p ferrolite-app`
 
 ---
@@ -146,15 +129,17 @@
 
 ### Automated Tests
 - `cargo test -p ferrolite-catalog` to verify nested collection queries and schema.
-- `cargo test -p ferrolite-app` to verify all widget clearance math, filmstrip drag clamping, section headers, and settings DTO serialization.
+- `cargo test -p ferrolite-app` to verify all 7 persistent collapse booleans, panel width persistence, responsive curve box math, 2x2 color wheel layout, and collection CRUD UI.
 - `cargo clippy --workspace --all-targets -- -D warnings` to verify zero warnings across workspace.
 
 ### Manual Verification
-- Hands-on visual testing of all 8 adjustments:
-  1. Collapsible Develop sections with clear titles.
-  2. Nested collections tree in Library left sidebar.
-  3. Slider reset arrows comfortably clear of right scrollbar.
-  4. No section-level "Reset all" buttons.
-  5. Tone Curve & Color Grading wheels resizing smoothly on panel drag.
-  6. Resizable top filmstrip in Develop view.
-  7. UI layout states persisting across app restarts.
+- Hands-on visual testing of all 9 items:
+  1. Expand/collapse any section (Basic Sliders, Sharpening, Noise Reduction, HSL, Tone Curve, Color Grading, Optics) — stays open/closed across frames and restarts.
+  2. Confirm total absence of "Reset all" footer button.
+  3. Confirm slider reset arrows sit comfortably to the left of the scrollbar track with zero overlap.
+  4. Confirm Tone Curve and Color Grading expand smoothly across the full width when resizing panel.
+  5. Create a Collection Set, add a Sub-collection inside it, and verify photo count badges `(N)`.
+  6. Drag top filmstrip bottom border to resize height.
+  7. Drag right panel or Left Info Panel border to resize width, restart app, verify widths are restored.
+  8. Confirm Left Info Panel is resizable.
+  9. Confirm titlebar navigation tabs are vertically centered and un-clipped.

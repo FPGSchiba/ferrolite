@@ -329,6 +329,92 @@ pub fn resolve(
     }
 }
 
+// ── Settings ────────────────────────────────────────────────────────────────
+pub fn default_true() -> bool {
+    true
+}
+
+pub fn default_panel_width() -> f32 {
+    300.0
+}
+
+pub fn default_filmstrip_height() -> f32 {
+    96.0
+}
+
+/// Root persisted settings document. Every field defaults so older/partial
+/// files load cleanly (forward/backward tolerant).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub keymap: super::keymap::Keymap,
+    pub export: PersistedExport,
+    pub filter: PersistedFilter,
+    pub working_space: PersistedWorkingSpace,
+    pub grid_size: f32,
+    #[serde(default = "default_filmstrip_height")]
+    pub filmstrip_height: f32,
+    #[serde(default = "default_panel_width")]
+    pub right_panel_width: f32,
+    #[serde(default = "default_panel_width")]
+    pub info_panel_width: f32,
+    pub confirm_remove: bool,
+    pub show_histogram: bool,
+    pub show_info_overlay: bool,
+    #[serde(default)]
+    pub show_info_panel: bool,
+    pub show_tool_palette: bool,
+    pub restore_session: bool,
+    pub last_module: PersistedModule,
+    pub last_folder: Option<std::path::PathBuf>,
+    pub display_profile: PersistedDisplayProfile,
+    #[serde(default = "default_true")]
+    pub basic_sliders_open: bool,
+    #[serde(default = "default_true")]
+    pub color_hsl_open: bool,
+    #[serde(default = "default_true")]
+    pub sharpening_open: bool,
+    #[serde(default = "default_true")]
+    pub noise_reduction_open: bool,
+    #[serde(default = "default_true")]
+    pub tone_curve_open: bool,
+    #[serde(default = "default_true")]
+    pub color_grading_open: bool,
+    #[serde(default = "default_true")]
+    pub optics_open: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            keymap: super::keymap::Keymap::defaults(),
+            export: PersistedExport::default(),
+            filter: PersistedFilter::default(),
+            working_space: PersistedWorkingSpace::default(),
+            grid_size: 46.0,
+            filmstrip_height: default_filmstrip_height(),
+            right_panel_width: default_panel_width(),
+            info_panel_width: default_panel_width(),
+            confirm_remove: true,
+            show_histogram: true,
+            show_info_overlay: false,
+            show_info_panel: false,
+            show_tool_palette: true,
+            restore_session: false,
+            last_module: PersistedModule::default(),
+            last_folder: None,
+            display_profile: PersistedDisplayProfile::default(),
+            basic_sliders_open: true,
+            color_hsl_open: true,
+            sharpening_open: true,
+            noise_reduction_open: true,
+            tone_curve_open: true,
+            color_grading_open: true,
+            optics_open: true,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,11 +574,15 @@ mod tests {
 
     #[test]
     fn settings_layout_fields_defaults_and_json_roundtrip() {
-        use super::super::Settings;
-
         let default_settings = Settings::default();
         assert!(!default_settings.show_info_panel);
         assert_eq!(default_settings.filmstrip_height, 96.0);
+        assert_eq!(default_settings.right_panel_width, 300.0);
+        assert_eq!(default_settings.info_panel_width, 300.0);
+        assert!(default_settings.basic_sliders_open);
+        assert!(default_settings.color_hsl_open);
+        assert!(default_settings.sharpening_open);
+        assert!(default_settings.noise_reduction_open);
         assert!(default_settings.tone_curve_open);
         assert!(default_settings.color_grading_open);
         assert!(default_settings.optics_open);
@@ -504,6 +594,12 @@ mod tests {
         let custom = Settings {
             show_info_panel: true,
             filmstrip_height: 140.0,
+            right_panel_width: 350.0,
+            info_panel_width: 250.0,
+            basic_sliders_open: false,
+            color_hsl_open: false,
+            sharpening_open: false,
+            noise_reduction_open: false,
             tone_curve_open: false,
             color_grading_open: false,
             optics_open: false,

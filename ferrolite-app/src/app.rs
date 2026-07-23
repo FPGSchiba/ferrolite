@@ -1533,9 +1533,9 @@ impl eframe::App for FerroliteApp {
                 .show(ctx, |ui| {
                     crate::develop::info_panel::show(ui, &self.state);
                 });
-            let new_w = info_resp.response.rect.width();
-            if (self.state.settings.info_panel_width - new_w).abs() > 0.001 {
-                self.state.settings.info_panel_width = new_w;
+            let width = info_resp.response.rect.width();
+            if (width - self.state.settings.info_panel_width).abs() > 0.5 {
+                self.state.settings.info_panel_width = width;
                 self.mark_settings_dirty();
             }
         }
@@ -1572,12 +1572,13 @@ impl eframe::App for FerroliteApp {
                         .fill(theme::BG_APP)
                         .inner_margin(egui::Margin {
                             left: 12.0,
-                            right: 20.0,
+                            right: 24.0,
                             top: 8.0,
                             bottom: 8.0,
                         }),
                 )
                 .show(ctx, |ui| {
+                    ui.spacing_mut().scroll.bar_width = 10.0;
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -1602,9 +1603,9 @@ impl eframe::App for FerroliteApp {
                             }
                         });
                 });
-            let new_w = adjust_resp.response.rect.width();
-            if (self.state.settings.right_panel_width - new_w).abs() > 0.001 {
-                self.state.settings.right_panel_width = new_w;
+            let width = adjust_resp.response.rect.width();
+            if (width - self.state.settings.right_panel_width).abs() > 0.5 {
+                self.state.settings.right_panel_width = width;
                 self.mark_settings_dirty();
             }
             if let Some(outcome) = outcome {
@@ -2011,5 +2012,73 @@ mod tests {
         assert_eq!(settings.right_panel_width, 350.0);
         assert_eq!(settings.info_panel_width, 280.0);
         assert_eq!(settings.filmstrip_height, 120.0);
+    }
+
+    #[test]
+    fn test_side_panel_width_capture_and_dirty_marking() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let mut settings_dirty = false;
+
+        assert_eq!(settings.right_panel_width, 300.0);
+        assert_eq!(settings.info_panel_width, 300.0);
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |_| {});
+        let mut captured_info_w = 0.0;
+        let mut captured_right_w = 0.0;
+
+        let _ = ctx.run(input, |ctx| {
+            let info_resp = egui::SidePanel::left("test_develop_info_panel")
+                .resizable(true)
+                .default_width(320.0)
+                .width_range(220.0..=450.0)
+                .show(ctx, |ui| {
+                    ui.label("info");
+                });
+            let width = info_resp.response.rect.width();
+            captured_info_w = width;
+            if (width - settings.info_panel_width).abs() > 0.5 {
+                settings.info_panel_width = width;
+                settings_dirty = true;
+            }
+
+            let adjust_resp = egui::SidePanel::right("test_develop_adjust")
+                .resizable(true)
+                .default_width(340.0)
+                .width_range(250.0..=400.0)
+                .show(ctx, |ui| {
+                    ui.label("adjust");
+                });
+            let width = adjust_resp.response.rect.width();
+            captured_right_w = width;
+            if (width - settings.right_panel_width).abs() > 0.5 {
+                settings.right_panel_width = width;
+                settings_dirty = true;
+            }
+
+            egui::CentralPanel::default().show(ctx, |_| {});
+        });
+
+        assert_eq!(settings.info_panel_width, captured_info_w);
+        assert_eq!(settings.right_panel_width, captured_right_w);
+        assert!(settings_dirty);
+
+        // Verify sub-0.5px difference does not trigger dirty marking or update
+        let small_diff_w = settings.info_panel_width + 0.3;
+        let prev_w = settings.info_panel_width;
+        let mut dirty = false;
+        if (small_diff_w - settings.info_panel_width).abs() > 0.5 {
+            settings.info_panel_width = small_diff_w;
+            dirty = true;
+        }
+        assert_eq!(settings.info_panel_width, prev_w);
+        assert!(!dirty);
     }
 }

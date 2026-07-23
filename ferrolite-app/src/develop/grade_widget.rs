@@ -39,19 +39,22 @@ fn wheel_row(
         }
     });
     let mut lum = wheel.lum;
-    let r = ui.add(EguiSlider {
-        label: "Lum",
-        value: &mut lum,
-        min: -1.0,
-        max: 1.0,
-        default: 0.0,
-        step: 0.01,
-        decimals: 2,
-        unit: "",
-        bipolar: true,
-        signed: true,
-        custom_label_w: None,
-    });
+    let r = ui.add(
+        EguiSlider {
+            label: "Lum",
+            value: &mut lum,
+            min: -1.0,
+            max: 1.0,
+            default: 0.0,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: true,
+            signed: true,
+            custom_label_w: None,
+        }
+        .label_width(32.0),
+    );
     if r.changed() {
         wheel.lum = lum;
         changed = true;
@@ -221,6 +224,51 @@ mod tests {
                     assert!(outcome.is_none(), "Unmodified grade widget returns None");
                 });
             });
+        }
+    }
+
+    #[test]
+    fn test_lum_slider_compact_label_width_in_2x2_grid() {
+        let ctx = egui::Context::default();
+        let stack = OpStack::default();
+        let width = 350.0_f32;
+
+        let screen_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = show(ui, &stack);
+            });
+        });
+
+        // In 2x2 grid mode (width=350), columns split panel width into ~170px cells.
+        // We verify that Lum slider track segment lines are present and have width > 30px
+        // (which requires custom_label_w of 32px; with default 74px label width, track width in 170px col would be < 10px).
+        let mut horizontal_track_widths = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::LineSegment { points, stroke } = &clipped.shape {
+                if stroke.width == 2.0 && (points[0].y - points[1].y).abs() < 0.1 {
+                    let seg_w = (points[1].x - points[0].x).abs();
+                    if seg_w > 10.0 {
+                        horizontal_track_widths.push(seg_w);
+                    }
+                }
+            }
+        }
+
+        assert!(
+            !horizontal_track_widths.is_empty(),
+            "Slider tracks should be rendered"
+        );
+        for &w in &horizontal_track_widths {
+            assert!(
+                w >= 30.0,
+                "Horizontal slider track width in 2x2 grid column should be expanded (got {w}px)"
+            );
         }
     }
 }

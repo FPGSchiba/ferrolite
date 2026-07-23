@@ -423,9 +423,10 @@ pub fn tone_curve_widget(
             }
         }
         ToneCurveTab::Parametric => {
-            let size = curve_editor_size(ui.available_width());
-            let (rect, _) =
-                ui.allocate_exact_size(egui::vec2(size, 140.0_f32), egui::Sense::hover());
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), 64.0_f32),
+                egui::Sense::hover(),
+            );
             let painter = ui.painter();
             painter.rect_filled(rect, 2.0_f32, theme::BG_BASE);
 
@@ -768,6 +769,53 @@ mod tests {
                 });
             });
             assert_eq!(curve_editor_size(width), width.max(180.0));
+        }
+    }
+
+    #[test]
+    fn test_parametric_curve_preview_rect_allocation() {
+        let ctx = Context::default();
+        let mut tab = ToneCurveTab::Parametric;
+        let points = [(0.0, 0.0), (1.0, 1.0)];
+        let mode = CurveMode::Smooth;
+        let style = CurveStyle {
+            curve_color: theme::ACCENT,
+            point_color: theme::ACCENT_BRIGHT,
+        };
+        let parametric = ParametricCurveValues::default();
+
+        for width in [200.0_f32, 350.0_f32, 500.0_f32] {
+            let screen_rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
+            let input = RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = tone_curve_widget(
+                        ui,
+                        "test_parametric_curve_preview",
+                        &mut tab,
+                        &points,
+                        mode,
+                        &style,
+                        &parametric,
+                    );
+                });
+            });
+
+            let found_rect = output.shapes.iter().any(|clipped| {
+                if let egui::Shape::Rect(rect_shape) = &clipped.shape {
+                    (rect_shape.rect.height() - 64.0).abs() < 1.0 && rect_shape.rect.width() > 100.0
+                } else {
+                    false
+                }
+            });
+            assert!(
+                found_rect,
+                "Parametric curve preview should allocate 64px height and full available width"
+            );
         }
     }
 }

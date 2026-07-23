@@ -21,7 +21,7 @@ const MODE_RESET_R: f32 = 4.5; // mode-selector reset arrow radius
 
 /// Compute dynamic tone curve editor square size based on available panel width.
 pub fn curve_editor_size(available_width: f32) -> f32 {
-    available_width.clamp(180.0, 320.0)
+    available_width.max(180.0)
 }
 
 /// The app default curve mode for newly-created curves (Spec 4.1 CD2 Task 6);
@@ -731,6 +731,43 @@ mod tests {
         assert_eq!(curve_editor_size(180.0), 180.0);
         assert_eq!(curve_editor_size(250.0), 250.0);
         assert_eq!(curve_editor_size(320.0), 320.0);
-        assert_eq!(curve_editor_size(400.0), 320.0);
+        assert_eq!(curve_editor_size(400.0), 400.0);
+        assert_eq!(curve_editor_size(600.0), 600.0);
+    }
+
+    #[test]
+    fn test_curve_editor_dynamic_size_rendering() {
+        let ctx = Context::default();
+        let mut tab = ToneCurveTab::Point;
+        let points = [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)];
+        let mode = CurveMode::Smooth;
+        let style = CurveStyle {
+            curve_color: theme::ACCENT,
+            point_color: theme::ACCENT_BRIGHT,
+        };
+        let parametric = ParametricCurveValues::default();
+
+        for width in [200.0_f32, 350.0_f32, 500.0_f32] {
+            let screen_rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
+            let input = RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = tone_curve_widget(
+                        ui,
+                        "test_dynamic_curve",
+                        &mut tab,
+                        &points,
+                        mode,
+                        &style,
+                        &parametric,
+                    );
+                });
+            });
+            assert_eq!(curve_editor_size(width), width.max(180.0));
+        }
     }
 }

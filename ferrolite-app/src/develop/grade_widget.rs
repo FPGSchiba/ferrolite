@@ -28,14 +28,16 @@ fn wheel_row(
 ) -> (bool, bool) {
     let mut changed = false;
     let mut commit = false;
-    ui.label(egui::RichText::new(label).color(theme::TEXT_FAINT));
-    let edit: Option<WheelEdit> = color_wheel(ui, id_source, wheel.hue, wheel.sat);
-    if let Some(e) = edit {
-        wheel.hue = e.hue;
-        wheel.sat = e.sat;
-        changed = true;
-        commit |= e.commit;
-    }
+    ui.vertical_centered(|ui| {
+        ui.label(egui::RichText::new(label).color(theme::TEXT_FAINT));
+        let edit: Option<WheelEdit> = color_wheel(ui, id_source, wheel.hue, wheel.sat);
+        if let Some(e) = edit {
+            wheel.hue = e.hue;
+            wheel.sat = e.sat;
+            changed = true;
+            commit |= e.commit;
+        }
+    });
     let mut lum = wheel.lum;
     let r = ui.add(EguiSlider {
         label: "Lum",
@@ -71,30 +73,41 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     let mut commit = false;
     let cols = color_wheel::color_grading_grid_columns(ui.available_width());
 
-    let wheels = [
-        ("grade_shadows", "Shadows", &mut cg.shadows),
-        ("grade_midtones", "Midtones", &mut cg.midtones),
-        ("grade_highlights", "Highlights", &mut cg.highlights),
-        ("grade_global", "Global", &mut cg.global),
-    ];
-
     if cols == 2 {
-        egui::Grid::new("color_grading_wheels_grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .show(ui, |ui| {
-                for (idx, (id, label, wheel)) in wheels.into_iter().enumerate() {
-                    ui.vertical(|ui| {
-                        let (c, m) = wheel_row(ui, id, label, wheel);
-                        changed |= c;
-                        commit |= m;
-                    });
-                    if idx % 2 == 1 {
-                        ui.end_row();
-                    }
-                }
-            });
+        ui.columns(2, |columns| {
+            let (c, m) = wheel_row(&mut columns[0], "grade_shadows", "Shadows", &mut cg.shadows);
+            changed |= c;
+            commit |= m;
+            let (c, m) = wheel_row(
+                &mut columns[1],
+                "grade_midtones",
+                "Midtones",
+                &mut cg.midtones,
+            );
+            changed |= c;
+            commit |= m;
+        });
+        ui.add_space(8.0);
+        ui.columns(2, |columns| {
+            let (c, m) = wheel_row(
+                &mut columns[0],
+                "grade_highlights",
+                "Highlights",
+                &mut cg.highlights,
+            );
+            changed |= c;
+            commit |= m;
+            let (c, m) = wheel_row(&mut columns[1], "grade_global", "Global", &mut cg.global);
+            changed |= c;
+            commit |= m;
+        });
     } else {
+        let wheels = [
+            ("grade_shadows", "Shadows", &mut cg.shadows),
+            ("grade_midtones", "Midtones", &mut cg.midtones),
+            ("grade_highlights", "Highlights", &mut cg.highlights),
+            ("grade_global", "Global", &mut cg.global),
+        ];
         for (id, label, wheel) in wheels {
             let (c, m) = wheel_row(ui, id, label, wheel);
             changed |= c;
@@ -180,5 +193,34 @@ mod tests {
             ..Default::default()
         };
         assert!(grade_changed(&a, &b));
+    }
+
+    #[test]
+    fn test_color_grading_grid_2x2_layout_math() {
+        assert_eq!(color_wheel::color_grading_grid_columns(200.0), 1);
+        assert_eq!(color_wheel::color_grading_grid_columns(279.0), 1);
+        assert_eq!(color_wheel::color_grading_grid_columns(280.0), 2);
+        assert_eq!(color_wheel::color_grading_grid_columns(350.0), 2);
+    }
+
+    #[test]
+    fn test_show_renders_in_2col_and_1col_layouts() {
+        let ctx = egui::Context::default();
+        let stack = OpStack::default();
+
+        for width in [240.0_f32, 320.0_f32, 450.0_f32] {
+            let screen_rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
+            let input = egui::RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let outcome = show(ui, &stack);
+                    assert!(outcome.is_none(), "Unmodified grade widget returns None");
+                });
+            });
+        }
     }
 }

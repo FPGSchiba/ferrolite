@@ -1271,22 +1271,25 @@ impl eframe::App for FerroliteApp {
                             self.toggle_split_compare();
                         }
                     });
-                egui::TopBottomPanel::top("develop_filmstrip")
-                    .exact_height(self.state.settings.filmstrip_height)
+                let filmstrip_resp = egui::TopBottomPanel::top("develop_filmstrip")
+                    .resizable(true)
+                    .default_height(self.state.settings.filmstrip_height)
+                    .height_range(64.0..=220.0)
                     .frame(
                         egui::Frame::none()
                             .fill(theme::BG_TOOLBAR)
                             .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
                     )
                     .show(ctx, |ui| {
-                        let height_before = self.state.settings.filmstrip_height;
                         let current = self.state.viewer.as_ref().map(|v| v.image_id);
                         film_clicked =
                             crate::library::filmstrip::show(ui, &mut self.state, current);
-                        if (self.state.settings.filmstrip_height - height_before).abs() > 0.001 {
-                            self.mark_settings_dirty();
-                        }
                     });
+                let new_h = filmstrip_resp.response.rect.height();
+                if (self.state.settings.filmstrip_height - new_h).abs() > 0.001 {
+                    self.state.settings.filmstrip_height = new_h;
+                    self.mark_settings_dirty();
+                }
             }
             crate::module::Module::Export => {
                 egui::TopBottomPanel::top("export_toolbar")
@@ -1518,9 +1521,10 @@ impl eframe::App for FerroliteApp {
         }
 
         if self.module == crate::module::Module::Develop && self.state.show_info_panel {
-            egui::SidePanel::left("develop_info_panel")
-                .resizable(false)
-                .exact_width(300.0)
+            let info_resp = egui::SidePanel::left("develop_info_panel")
+                .resizable(true)
+                .default_width(self.state.settings.info_panel_width)
+                .width_range(220.0..=450.0)
                 .frame(
                     egui::Frame::none()
                         .fill(egui::Color32::from_rgb(0x1a, 0x1a, 0x1a))
@@ -1529,6 +1533,11 @@ impl eframe::App for FerroliteApp {
                 .show(ctx, |ui| {
                     crate::develop::info_panel::show(ui, &self.state);
                 });
+            let new_w = info_resp.response.rect.width();
+            if (self.state.settings.info_panel_width - new_w).abs() > 0.001 {
+                self.state.settings.info_panel_width = new_w;
+                self.mark_settings_dirty();
+            }
         }
 
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
@@ -1554,14 +1563,19 @@ impl eframe::App for FerroliteApp {
             }
             let mut outcome = None;
             let working_space = self.state.working_space;
-            egui::SidePanel::right("develop_adjust")
+            let adjust_resp = egui::SidePanel::right("develop_adjust")
                 .resizable(true)
-                .default_width(296.0)
+                .default_width(self.state.settings.right_panel_width)
                 .width_range(250.0..=400.0)
                 .frame(
                     egui::Frame::none()
                         .fill(theme::BG_APP)
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                        .inner_margin(egui::Margin {
+                            left: 12.0,
+                            right: 20.0,
+                            top: 8.0,
+                            bottom: 8.0,
+                        }),
                 )
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical()
@@ -1588,6 +1602,11 @@ impl eframe::App for FerroliteApp {
                             }
                         });
                 });
+            let new_w = adjust_resp.response.rect.width();
+            if (self.state.settings.right_panel_width - new_w).abs() > 0.001 {
+                self.state.settings.right_panel_width = new_w;
+                self.mark_settings_dirty();
+            }
             if let Some(outcome) = outcome {
                 if let Some(ws) = outcome.working_space {
                     crate::app::controller::AppController::apply_working_space(
@@ -1970,5 +1989,27 @@ impl eframe::App for FerroliteApp {
                 before, joined, timeout_ms, on_exit_ms,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::settings::Settings;
+
+    #[test]
+    fn test_panel_width_and_height_persistence() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.right_panel_width, 300.0);
+        assert_eq!(settings.info_panel_width, 300.0);
+        assert_eq!(settings.filmstrip_height, 96.0);
+
+        // Mutate widths and height and verify settings values
+        settings.right_panel_width = 350.0;
+        settings.info_panel_width = 280.0;
+        settings.filmstrip_height = 120.0;
+
+        assert_eq!(settings.right_panel_width, 350.0);
+        assert_eq!(settings.info_panel_width, 280.0);
+        assert_eq!(settings.filmstrip_height, 120.0);
     }
 }

@@ -157,36 +157,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
             });
         });
 
-    // Horizontal drag handle / splitter bar at the bottom edge of the filmstrip.
-    let (handle_rect, handle_resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), egui::Sense::drag());
-
-    if handle_resp.hovered() || handle_resp.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-    }
-
-    if handle_resp.dragged() {
-        let delta = handle_resp.drag_delta().y;
-        if delta != 0.0 {
-            state.settings.filmstrip_height =
-                clamp_filmstrip_height(state.settings.filmstrip_height + delta);
-        }
-    }
-
-    let line_y = handle_rect.center().y;
-    let stroke_color = if handle_resp.hovered() || handle_resp.dragged() {
-        theme::ACCENT
-    } else {
-        egui::Color32::from_rgb(0x38, 0x38, 0x38)
-    };
-    ui.painter().line_segment(
-        [
-            egui::pos2(handle_rect.min.x, line_y),
-            egui::pos2(handle_rect.max.x, line_y),
-        ],
-        egui::Stroke::new(1.0_f32, stroke_color),
-    );
-
     clicked
 }
 

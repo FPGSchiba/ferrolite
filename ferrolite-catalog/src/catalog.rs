@@ -519,6 +519,15 @@ impl Catalog {
         Ok(())
     }
 
+    /// Update the parent collection of an existing collection.
+    pub fn update_collection_parent(
+        &self,
+        id: i64,
+        parent_id: Option<i64>,
+    ) -> Result<(), CatalogError> {
+        crate::queries::update_collection_parent(self.conn(), id, parent_id)
+    }
+
     /// Delete a collection and cascade-remove all its image memberships.
     pub fn delete_collection(&self, id: i64) -> Result<(), CatalogError> {
         self.conn()
@@ -734,6 +743,34 @@ mod collection_tests {
         cat.delete_collection(parent).unwrap();
         let collections_after = cat.list_collections().unwrap();
         assert!(collections_after.is_empty());
+    }
+
+    #[test]
+    fn update_collection_parent_reparents_correctly() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let parent = cat
+            .create_collection("Vacations", Color::default())
+            .unwrap();
+        let child = cat
+            .create_collection("Japan 2025", Color::default())
+            .unwrap();
+
+        // Initially both are flat (parent_id = None)
+        let collections = cat.list_collections().unwrap();
+        let child_rec = collections.iter().find(|c| c.id == child).unwrap();
+        assert_eq!(child_rec.parent_id, None);
+
+        // Update child to have parent_id = Some(parent)
+        cat.update_collection_parent(child, Some(parent)).unwrap();
+        let collections = cat.list_collections().unwrap();
+        let child_rec = collections.iter().find(|c| c.id == child).unwrap();
+        assert_eq!(child_rec.parent_id, Some(parent));
+
+        // Update child to have parent_id = None (flat collection again)
+        cat.update_collection_parent(child, None).unwrap();
+        let collections = cat.list_collections().unwrap();
+        let child_rec = collections.iter().find(|c| c.id == child).unwrap();
+        assert_eq!(child_rec.parent_id, None);
     }
 }
 

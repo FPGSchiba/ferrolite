@@ -248,6 +248,19 @@ pub(crate) fn list_collections(
     Ok(out)
 }
 
+pub(crate) fn update_collection_parent(
+    conn: &Connection,
+    id: i64,
+    parent_id: Option<i64>,
+) -> Result<(), CatalogError> {
+    conn.execute(
+        "UPDATE collections SET parent_id = ?1 WHERE id = ?2",
+        rusqlite::params![parent_id, id],
+    )?;
+    Ok(())
+}
+
+
 pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>, CatalogError> {
     let mut stmt = conn.prepare(
         "SELECT f.id, f.path, f.parent_id, COUNT(i.id)

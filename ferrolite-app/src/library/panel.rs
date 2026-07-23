@@ -151,37 +151,53 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
 
     // ── Collections ──────────────────────────────────────────────────────────
     ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new("COLLECTIONS")
-                .color(theme::TEXT_DIM)
-                .size(10.0),
-        );
-        if ui.small_button("+ Set").clicked() {
-            let name = format!("Collection Set {}", state.collections.len() + 1);
-            if state
-                .writer
-                .lock()
-                .expect("writer")
-                .create_collection(&name, ferrolite_image::Color::default())
-                .is_ok()
-            {
-                state.reload_vocab();
+    let collections_header_resp = ui
+        .horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("COLLECTIONS")
+                    .color(theme::TEXT_DIM)
+                    .size(10.0),
+            );
+            if ui.small_button("+ Set").clicked() {
+                let name = format!("Collection Set {}", state.collections.len() + 1);
+                if state
+                    .writer
+                    .lock()
+                    .expect("writer")
+                    .create_collection(&name, ferrolite_image::Color::default())
+                    .is_ok()
+                {
+                    state.reload_vocab();
+                }
             }
-        }
-        if ui.small_button("+").clicked() {
-            let name = format!("Collection {}", state.collections.len() + 1);
-            if state
-                .writer
-                .lock()
-                .expect("writer")
-                .create_collection(&name, ferrolite_image::Color::default())
-                .is_ok()
-            {
-                state.reload_vocab();
+            if ui.small_button("+").clicked() {
+                let name = format!("Collection {}", state.collections.len() + 1);
+                if state
+                    .writer
+                    .lock()
+                    .expect("writer")
+                    .create_collection(&name, ferrolite_image::Color::default())
+                    .is_ok()
+                {
+                    state.reload_vocab();
+                }
             }
+        })
+        .response;
+
+    if let Some(dragged_id) = collections_header_resp.dnd_release_payload::<i64>() {
+        let res = state
+            .writer
+            .lock()
+            .expect("writer")
+            .update_collection_parent(*dragged_id, None);
+        if let Err(err) = res {
+            eprintln!("failed to reparent collection: {err}");
+        } else {
+            state.reload_vocab();
+            state.dirty = true;
         }
-    });
+    }
     let collections = state.collections.clone();
     let tree = build_collection_tree(&collections);
     let raw_counts = state.reads.collection_image_counts().unwrap_or_default();
@@ -329,6 +345,24 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                     }
                 })
                 .response;
+
+            row_resp.dnd_set_drag_payload(c.id);
+
+            if let Some(dragged_id) = row_resp.dnd_release_payload::<i64>() {
+                if *dragged_id != c.id {
+                    let res = state
+                        .writer
+                        .lock()
+                        .expect("writer")
+                        .update_collection_parent(*dragged_id, Some(c.id));
+                    if let Err(err) = res {
+                        eprintln!("failed to reparent collection: {err}");
+                    } else {
+                        state.reload_vocab();
+                        state.dirty = true;
+                    }
+                }
+            }
 
             if let Some(ids) = crate::library::drag::row_drop_target(ui, row_resp.rect) {
                 let (cid, cname) = (c.id, c.name.clone());
@@ -692,6 +726,26 @@ fn render_collection_row(
         })
         .response;
 
+    row_resp.dnd_set_drag_payload(c.id);
+
+    if !is_child {
+        if let Some(dragged_id) = row_resp.dnd_release_payload::<i64>() {
+            if *dragged_id != c.id {
+                let res = state
+                    .writer
+                    .lock()
+                    .expect("writer")
+                    .update_collection_parent(*dragged_id, Some(c.id));
+                if let Err(err) = res {
+                    eprintln!("failed to reparent collection: {err}");
+                } else {
+                    state.reload_vocab();
+                    state.dirty = true;
+                }
+            }
+        }
+    }
+
     if let Some(ids) = crate::library::drag::row_drop_target(ui, row_resp.rect) {
         let (cid, cname) = (c.id, c.name.clone());
         state.add_images_to_collection(&ids, cid);
@@ -796,5 +850,45 @@ mod tests {
         assert_eq!(counts.get(&2), Some(&5));
         assert_eq!(counts.get(&3), Some(&3));
         assert_eq!(counts.get(&4), Some(&10));
+    }
+
+    #[test]
+    fn test_collection_reparenting_and_vocab_reload() {
+        let mut state = AppState::for_test();
+        let (id1, id2) = {
+            let writer = state.writer.lock().expect("writer");
+            let id1 = writer.create_collection("Set A", Color::default()).unwrap();
+            let id2 = writer
+                .create_collection("Collection B", Color::default())
+                .unwrap();
+            (id1, id2)
+        };
+
+        state.reload_vocab();
+        let tree = build_collection_tree(&state.collections);
+        assert_eq!(tree.len(), 2);
+
+        // Re-parent B under A
+        {
+            let writer = state.writer.lock().expect("writer");
+            writer.update_collection_parent(id2, Some(id1)).unwrap();
+        }
+
+        state.reload_vocab();
+        let tree = build_collection_tree(&state.collections);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].collection.id, id1);
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].id, id2);
+
+        // Un-nest B back to top-level
+        {
+            let writer = state.writer.lock().expect("writer");
+            writer.update_collection_parent(id2, None).unwrap();
+        }
+
+        state.reload_vocab();
+        let tree = build_collection_tree(&state.collections);
+        assert_eq!(tree.len(), 2);
     }
 }

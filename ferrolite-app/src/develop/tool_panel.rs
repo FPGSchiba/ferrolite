@@ -6,7 +6,6 @@ use crate::develop::adjustment_panel::{EditOutcome, PanelOutcome};
 use crate::develop::tool::DevelopToolRegistry;
 use crate::state::AppState;
 use ferrolite_color::WorkingSpace;
-use ferrolite_pipeline::{OpKind, OpStack};
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -75,18 +74,6 @@ pub fn show(
                 }
             }
         }
-    }
-
-    // 4) Global chrome (not tool/tab-specific): reset the entire OpStack to default.
-    //    Placed after the active tab's dispatch so a click here wins over any edit the
-    //    tab produced this frame (last-writer-wins, matching the pre-migration behavior).
-    ui.separator();
-    if ui.button("Reset all").clicked() {
-        out = Some(EditOutcome {
-            stack: OpStack::default(),
-            kind: OpKind::Exposure,
-            commit: true,
-        });
     }
 
     // Write ToolState back.

@@ -38,9 +38,8 @@ impl PanelTab for LightTab {
         let stack = state.viewer.as_ref()?.op_stack.clone();
         let mut out: Option<EditOutcome> = None;
 
-        let mut basic_open = true;
-        section_header(ui, "BASIC SLIDERS", &mut basic_open);
-        if basic_open {
+        section_header(ui, "BASIC SLIDERS", &mut state.settings.basic_sliders_open);
+        if state.settings.basic_sliders_open {
             // Exposure (bipolar EV).
             let mut ev = stack.exposure().map(|e| e.ev).unwrap_or(0.0);
             let r_ev = ui.add(EguiSlider {
@@ -195,11 +194,8 @@ impl PanelTab for LightTab {
         }
 
         ui.separator();
-        let mut tone_curve_open = state.settings.tone_curve_open;
-        if section_header(ui, "TONE CURVE", &mut tone_curve_open).changed() {
-            state.settings.tone_curve_open = tone_curve_open;
-        }
-        if tone_curve_open {
+        section_header(ui, "TONE CURVE", &mut state.settings.tone_curve_open);
+        if state.settings.tone_curve_open {
             if let Some(curve_out) = curve_widget::show(ui, &stack) {
                 out = Some(curve_out);
             }
@@ -221,9 +217,8 @@ impl PanelTab for ColorTab {
         let stack = state.viewer.as_ref()?.op_stack.clone();
         let mut out: Option<EditOutcome> = None;
 
-        let mut hsl_open = true;
-        section_header(ui, "COLOR (HSL)", &mut hsl_open);
-        if hsl_open {
+        section_header(ui, "COLOR (HSL)", &mut state.settings.color_hsl_open);
+        if state.settings.color_hsl_open {
             if let Some(v) = state.viewer.as_mut() {
                 if let Some(o) = hsl_widget::show(ui, &stack, &mut v.hsl_band) {
                     out = Some(o);
@@ -233,11 +228,8 @@ impl PanelTab for ColorTab {
 
         ui.separator();
 
-        let mut color_grading_open = state.settings.color_grading_open;
-        if section_header(ui, "COLOR GRADING", &mut color_grading_open).changed() {
-            state.settings.color_grading_open = color_grading_open;
-        }
-        if color_grading_open {
+        section_header(ui, "COLOR GRADING", &mut state.settings.color_grading_open);
+        if state.settings.color_grading_open {
             if let Some(grade_out) = grade_widget::show(ui, &stack) {
                 out = Some(grade_out);
             }
@@ -260,9 +252,8 @@ impl PanelTab for EffectsTab {
         let mut out: Option<EditOutcome> = None;
 
         // Sharpening (Amount, Radius, Detail)
-        let mut sharpening_open = true;
-        section_header(ui, "SHARPENING", &mut sharpening_open);
-        if sharpening_open {
+        section_header(ui, "SHARPENING", &mut state.settings.sharpening_open);
+        if state.settings.sharpening_open {
             let sh = stack.sharpen();
             let (mut amount, mut radius) = sh
                 .map(|s| (s.amount, s.radius as f32))
@@ -320,9 +311,12 @@ impl PanelTab for EffectsTab {
 
         // Noise Reduction (Luminance, Detail, Color, Color Detail)
         ui.separator();
-        let mut nr_open = true;
-        section_header(ui, "NOISE REDUCTION", &mut nr_open);
-        if nr_open {
+        section_header(
+            ui,
+            "NOISE REDUCTION",
+            &mut state.settings.noise_reduction_open,
+        );
+        if state.settings.noise_reduction_open {
             let mut nr_lum = 0.0_f32;
             let mut nr_lum_detail = 0.0_f32;
             let mut nr_color = 0.0_f32;
@@ -384,11 +378,8 @@ impl PanelTab for EffectsTab {
 
         // Optics (lens picker, Distortion, Vignette, etc.)
         ui.separator();
-        let mut optics_open = state.settings.optics_open;
-        if section_header(ui, "OPTICS", &mut optics_open).changed() {
-            state.settings.optics_open = optics_open;
-        }
-        if optics_open {
+        section_header(ui, "OPTICS", &mut state.settings.optics_open);
+        if state.settings.optics_open {
             if let Some(optics_out) = show_optics_section(ui, state, &stack) {
                 out = Some(optics_out);
             }
@@ -762,6 +753,7 @@ mod tests {
     fn test_light_tab_collapsible_sections() {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        state.settings.basic_sliders_open = false;
         state.settings.tone_curve_open = false;
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -771,6 +763,7 @@ mod tests {
                 assert!(res.is_none());
             });
         });
+        assert!(!state.settings.basic_sliders_open);
         assert!(!state.settings.tone_curve_open);
     }
 
@@ -778,6 +771,7 @@ mod tests {
     fn test_color_tab_collapsible_sections() {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        state.settings.color_hsl_open = false;
         state.settings.color_grading_open = false;
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -787,6 +781,7 @@ mod tests {
                 assert!(res.is_none());
             });
         });
+        assert!(!state.settings.color_hsl_open);
         assert!(!state.settings.color_grading_open);
     }
 
@@ -794,6 +789,8 @@ mod tests {
     fn test_effects_tab_collapsible_sections() {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        state.settings.sharpening_open = false;
+        state.settings.noise_reduction_open = false;
         state.settings.optics_open = false;
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -803,6 +800,49 @@ mod tests {
                 assert!(res.is_none());
             });
         });
+        assert!(!state.settings.sharpening_open);
+        assert!(!state.settings.noise_reduction_open);
+        assert!(!state.settings.optics_open);
+    }
+
+    #[test]
+    fn test_all_seven_section_headers_bound_and_persist() {
+        let mut state = AppState::new().unwrap();
+
+        // Defaults should all be open (true)
+        assert!(state.settings.basic_sliders_open);
+        assert!(state.settings.tone_curve_open);
+        assert!(state.settings.color_hsl_open);
+        assert!(state.settings.color_grading_open);
+        assert!(state.settings.sharpening_open);
+        assert!(state.settings.noise_reduction_open);
+        assert!(state.settings.optics_open);
+
+        // Toggle state settings fields
+        state.settings.basic_sliders_open = false;
+        state.settings.tone_curve_open = false;
+        state.settings.color_hsl_open = false;
+        state.settings.color_grading_open = false;
+        state.settings.sharpening_open = false;
+        state.settings.noise_reduction_open = false;
+        state.settings.optics_open = false;
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                LightTab.show(ui, &mut state);
+                ColorTab.show(ui, &mut state);
+                EffectsTab.show(ui, &mut state);
+            });
+        });
+
+        // Verify toggled booleans persisted after panel rendering
+        assert!(!state.settings.basic_sliders_open);
+        assert!(!state.settings.tone_curve_open);
+        assert!(!state.settings.color_hsl_open);
+        assert!(!state.settings.color_grading_open);
+        assert!(!state.settings.sharpening_open);
+        assert!(!state.settings.noise_reduction_open);
         assert!(!state.settings.optics_open);
     }
 }

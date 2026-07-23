@@ -70,10 +70,12 @@ pub fn draw_toggle_button(ui: &egui::Ui, show_info_panel: &mut bool) {
                 )
             };
 
-            let btn = egui::Button::new(egui::RichText::new("ℹ Info").color(text_color))
-                .fill(bg_color)
-                .stroke(stroke_color)
-                .rounding(12.0);
+            let btn = egui::Button::new(
+                egui::RichText::new(format!("{} Info", crate::icons::INFO)).color(text_color),
+            )
+            .fill(bg_color)
+            .stroke(stroke_color)
+            .rounding(12.0);
 
             if ui.add(btn).clicked() {
                 *show_info_panel = !*show_info_panel;

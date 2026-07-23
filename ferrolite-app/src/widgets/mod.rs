@@ -43,7 +43,7 @@ pub(crate) fn draw_reset_arrow(
 
 /// Collapsible section header row (design §6).
 /// Font: 10px monospace (`plex-mono`), 1.0px letter-spacing, `#6a6a6a` (`theme::TEXT_FAINT`).
-/// Chevron `▸` / `▾` + title + 1px `#232323` bottom divider line.
+/// Chevron `icons::CARET_RIGHT` / `icons::CARET_DOWN` + title + 1px `#232323` bottom divider line.
 /// Click toggles `*is_open = !*is_open` and marks response changed.
 #[allow(dead_code)]
 pub fn section_header(ui: &mut egui::Ui, label: &str, is_open: &mut bool) -> egui::Response {
@@ -59,12 +59,24 @@ pub fn section_header(ui: &mut egui::Ui, label: &str, is_open: &mut bool) -> egu
 
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
-        let chevron = if *is_open { "▾" } else { "▸" };
-        let text = format!("{chevron} {label}");
+        let chevron = if *is_open {
+            crate::icons::CARET_DOWN
+        } else {
+            crate::icons::CARET_RIGHT
+        };
 
         let mut job = egui::text::LayoutJob::default();
         job.append(
-            &text,
+            chevron,
+            0.0,
+            egui::TextFormat {
+                font_id: crate::icons::font(10.0),
+                color: crate::theme::TEXT_FAINT,
+                ..Default::default()
+            },
+        );
+        job.append(
+            &format!(" {label}"),
             0.0,
             egui::TextFormat {
                 font_id: egui::FontId::monospace(10.0),
@@ -138,5 +150,28 @@ mod tests {
 
         assert!(is_open);
         assert!(changed);
+    }
+
+    #[test]
+    fn test_section_header_icon_rendering() {
+        let ctx = Context::default();
+
+        // Render closed state (renders CARET_RIGHT)
+        let mut is_open_closed = false;
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let resp = section_header(ui, "CLOSED SECTION", &mut is_open_closed);
+                assert!(!resp.changed());
+            });
+        });
+
+        // Render open state (renders CARET_DOWN)
+        let mut is_open_open = true;
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let resp = section_header(ui, "OPEN SECTION", &mut is_open_open);
+                assert!(!resp.changed());
+            });
+        });
     }
 }

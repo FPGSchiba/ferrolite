@@ -36,6 +36,7 @@ pub const FLAG_FILL: &str = pf::FLAG; // pick flag filled — font_fill()
 pub const FLAG_REJECT: &str = p::PROHIBIT; // reject — font()
 pub const CARET_DOWN: &str = p::CARET_DOWN;
 pub const CARET_UP: &str = p::CARET_UP;
+pub const CARET_RIGHT: &str = p::CARET_RIGHT;
 pub const OVERLAY_ON: &str = p::EYE;
 pub const OVERLAY_OFF: &str = p::EYE_SLASH;
 pub const WARNING: &str = p::WARNING;
@@ -84,6 +85,7 @@ mod tests {
             ("FLAG_REJECT", FLAG_REJECT),
             ("CARET_DOWN", CARET_DOWN),
             ("CARET_UP", CARET_UP),
+            ("CARET_RIGHT", CARET_RIGHT),
             ("OVERLAY_ON", OVERLAY_ON),
             ("OVERLAY_OFF", OVERLAY_OFF),
             ("WARNING", WARNING),

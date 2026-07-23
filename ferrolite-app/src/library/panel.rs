@@ -201,7 +201,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
 
             let row_resp = ui
                 .horizontal(|ui| {
-                    let chev = if open { "▾" } else { "▸" };
+                    let chev = if open {
+                        crate::icons::CARET_DOWN
+                    } else {
+                        crate::icons::CARET_RIGHT
+                    };
                     if ui.selectable_label(false, chev).clicked() {
                         if open {
                             state.expanded_collections.remove(&c.id);

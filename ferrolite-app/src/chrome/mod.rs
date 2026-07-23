@@ -7,7 +7,7 @@ use crate::settings::keymap::{Action, Keymap};
 use crate::widgets::TabRow;
 use egui::{
     pos2, vec2, Align, Align2, Button, Color32, Context, FontId, Layout, PointerButton, Rect,
-    Rounding, Sense, Stroke, UiBuilder,
+    Sense, Stroke, UiBuilder,
 };
 
 /// Titlebar layout constants (Spec 3.2).
@@ -75,16 +75,6 @@ pub fn title_bar(
     show_tool_palette: bool,
 ) -> Option<MenuAction> {
     let bar = ui.max_rect();
-
-    // 1. Paint background #111111 and 1px #262626 bottom border.
-    ui.painter().rect_filled(bar, Rounding::ZERO, TITLEBAR_BG);
-    ui.painter().line_segment(
-        [
-            pos2(bar.left(), bar.bottom() - 0.5_f32),
-            pos2(bar.right(), bar.bottom() - 0.5_f32),
-        ],
-        Stroke::new(1.0_f32, TITLEBAR_BORDER),
-    );
 
     // Window drag + double-click-to-maximize over the whole bar (registered first).
     let drag = ui.interact(bar, ui.id().with("titlebar_drag"), Sense::click_and_drag());
@@ -315,7 +305,7 @@ pub fn title_bar(
     ];
     let center_rect = Rect::from_min_max(
         pos2(bar.center().x - 110.0_f32, bar.top()),
-        pos2(bar.center().x + 110.0_f32, bar.bottom() - 2.0_f32),
+        pos2(bar.center().x + 110.0_f32, bar.bottom()),
     );
     ui.allocate_new_ui(
         UiBuilder::new()
@@ -351,11 +341,12 @@ mod tests {
         let bar = Rect::from_min_size(pos2(0.0_f32, 0.0_f32), vec2(1000.0_f32, TITLEBAR_HEIGHT));
         let center_rect = Rect::from_min_max(
             pos2(bar.center().x - 110.0_f32, bar.top()),
-            pos2(bar.center().x + 110.0_f32, bar.bottom() - 2.0_f32),
+            pos2(bar.center().x + 110.0_f32, bar.bottom()),
         );
-        assert_eq!(center_rect.max.y, bar.bottom() - 2.0_f32);
-        assert_eq!(center_rect.height(), TITLEBAR_HEIGHT - 2.0_f32);
+        assert_eq!(center_rect.max.y, bar.bottom());
+        assert_eq!(center_rect.height(), TITLEBAR_HEIGHT);
         assert_eq!(center_rect.center().x, bar.center().x);
+        assert_eq!(center_rect.center().y, bar.center().y);
         assert_eq!(center_rect.width(), 220.0_f32);
     }
 
@@ -368,6 +359,7 @@ mod tests {
         let _ = ctx.run(RawInput::default(), |ctx| {
             egui::TopBottomPanel::top("titlebar_test")
                 .exact_height(TITLEBAR_HEIGHT)
+                .frame(egui::Frame::none())
                 .show(ctx, |ui| {
                     let action = title_bar(
                         ctx,
@@ -388,5 +380,44 @@ mod tests {
         });
 
         assert_eq!(module, Module::Library);
+    }
+
+    #[test]
+    fn test_titlebar_single_border_and_tab_alignment() {
+        let ctx = Context::default();
+        let mut module = Module::Library;
+        let keymap = Keymap::default();
+
+        let _ = ctx.run(RawInput::default(), |ctx| {
+            egui::TopBottomPanel::top("titlebar_single_border")
+                .exact_height(TITLEBAR_HEIGHT)
+                .frame(egui::Frame::none())
+                .show(ctx, |ui| {
+                    let action = title_bar(
+                        ctx,
+                        ui,
+                        &mut module,
+                        VERSION_STRING,
+                        false,
+                        false,
+                        &keymap,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                    );
+                    assert!(action.is_none());
+                    let bar = ui.max_rect();
+                    let center_rect = Rect::from_min_max(
+                        pos2(bar.center().x - 110.0_f32, bar.top()),
+                        pos2(bar.center().x + 110.0_f32, bar.bottom()),
+                    );
+                    assert_eq!(center_rect.center().y, bar.center().y);
+                    assert_eq!(center_rect.height(), bar.height());
+                    assert_eq!(center_rect.min.y, bar.top());
+                    assert_eq!(center_rect.max.y, bar.bottom());
+                });
+        });
     }
 }

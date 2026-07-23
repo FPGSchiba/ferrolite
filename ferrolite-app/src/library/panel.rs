@@ -157,6 +157,18 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                 .color(theme::TEXT_DIM)
                 .size(10.0),
         );
+        if ui.small_button("+ Set").clicked() {
+            let name = format!("Collection Set {}", state.collections.len() + 1);
+            if state
+                .writer
+                .lock()
+                .expect("writer")
+                .create_collection(&name, ferrolite_image::Color::default())
+                .is_ok()
+            {
+                state.reload_vocab();
+            }
+        }
         if ui.small_button("+").clicked() {
             let name = format!("Collection {}", state.collections.len() + 1);
             if state
@@ -172,10 +184,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
     });
     let collections = state.collections.clone();
     let tree = build_collection_tree(&collections);
+    let raw_counts = state.reads.collection_image_counts().unwrap_or_default();
+    let total_counts = compute_collection_counts(&collections, &raw_counts);
 
     for node in tree {
         let c = &node.collection;
         let is_set = !node.children.is_empty();
+        let set_count = total_counts.get(&c.id).copied().unwrap_or(0);
 
         if is_set {
             let open = state.expanded_collections.contains(&c.id);
@@ -255,6 +270,21 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                             state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
                         }
                         name_resp.context_menu(|ui| {
+                            if ui.button("Add Sub-collection...").clicked() {
+                                let sub_name =
+                                    format!("Sub-collection {}", state.collections.len() + 1);
+                                if crate::library::collection_menu::create_sub_collection(
+                                    &state.writer.lock().expect("writer"),
+                                    c.id,
+                                    &sub_name,
+                                )
+                                .is_ok()
+                                {
+                                    state.expanded_collections.insert(c.id);
+                                    state.reload_vocab();
+                                }
+                                ui.close_menu();
+                            }
                             if ui.button("Rename").clicked() {
                                 state.renaming =
                                     Some((RenameKind::Collection, c.id, c.name.clone()));
@@ -267,29 +297,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                             }
                         });
 
-                        ui.label(
-                            egui::RichText::new(format!("({})", node.children.len()))
-                                .color(theme::TEXT_DIM)
-                                .size(11.0),
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let x_slot =
+                                ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                            if name_resp.hovered() || x_slot.hovered() {
+                                let r = x_slot.rect.shrink(4.0);
+                                let color = if x_slot.hovered() {
+                                    theme::TEXT_PRIMARY
+                                } else {
+                                    theme::TEXT_DIM
+                                };
+                                let stroke = egui::Stroke::new(1.2_f32, color);
+                                let p = ui.painter();
+                                p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                                p.line_segment([r.left_bottom(), r.right_top()], stroke);
+                            }
+                            if x_slot.clicked() {
+                                delete_collection(state, c.id);
+                            }
 
-                        let x_slot =
-                            ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
-                        if name_resp.hovered() || x_slot.hovered() {
-                            let r = x_slot.rect.shrink(4.0);
-                            let color = if x_slot.hovered() {
-                                theme::TEXT_PRIMARY
-                            } else {
-                                theme::TEXT_DIM
-                            };
-                            let stroke = egui::Stroke::new(1.2_f32, color);
-                            let p = ui.painter();
-                            p.line_segment([r.left_top(), r.right_bottom()], stroke);
-                            p.line_segment([r.left_bottom(), r.right_top()], stroke);
-                        }
-                        if x_slot.clicked() {
-                            delete_collection(state, c.id);
-                        }
+                            ui.label(
+                                egui::RichText::new(format!("({})", set_count))
+                                    .color(theme::TEXT_DIM)
+                                    .size(11.0),
+                            );
+                        });
                     }
                 })
                 .response;
@@ -305,11 +337,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
 
             if open {
                 for child in &node.children {
-                    render_collection_row(ui, state, child, true);
+                    let child_count = total_counts.get(&child.id).copied().unwrap_or(0);
+                    render_collection_row(ui, state, child, true, child_count);
                 }
             }
         } else {
-            render_collection_row(ui, state, c, false);
+            let c_count = total_counts.get(&c.id).copied().unwrap_or(0);
+            render_collection_row(ui, state, c, false, c_count);
         }
     }
 
@@ -517,11 +551,38 @@ pub fn build_collection_tree(collections: &[CollectionRecord]) -> Vec<Collection
     top_level
 }
 
+pub fn compute_collection_counts(
+    collections: &[CollectionRecord],
+    image_counts: &std::collections::HashMap<i64, usize>,
+) -> std::collections::HashMap<i64, usize> {
+    let tree = build_collection_tree(collections);
+    let mut result = std::collections::HashMap::new();
+
+    for node in tree {
+        let direct = image_counts.get(&node.collection.id).copied().unwrap_or(0);
+        let children_sum: usize = node
+            .children
+            .iter()
+            .map(|child| image_counts.get(&child.id).copied().unwrap_or(0))
+            .sum();
+        let total = direct + children_sum;
+        result.insert(node.collection.id, total);
+
+        for child in &node.children {
+            let child_count = image_counts.get(&child.id).copied().unwrap_or(0);
+            result.insert(child.id, child_count);
+        }
+    }
+
+    result
+}
+
 fn render_collection_row(
     ui: &mut egui::Ui,
     state: &mut AppState,
     c: &CollectionRecord,
     is_child: bool,
+    count: usize,
 ) {
     let is_renaming = matches!(
         &state.renaming,
@@ -574,6 +635,20 @@ fn render_collection_row(
                     state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
                 }
                 name_resp.context_menu(|ui| {
+                    if c.parent_id.is_none() && ui.button("Add Sub-collection...").clicked() {
+                        let sub_name = format!("Sub-collection {}", state.collections.len() + 1);
+                        if crate::library::collection_menu::create_sub_collection(
+                            &state.writer.lock().expect("writer"),
+                            c.id,
+                            &sub_name,
+                        )
+                        .is_ok()
+                        {
+                            state.expanded_collections.insert(c.id);
+                            state.reload_vocab();
+                        }
+                        ui.close_menu();
+                    }
                     if ui.button("Rename").clicked() {
                         state.renaming = Some((RenameKind::Collection, c.id, c.name.clone()));
                         ui.close_menu();
@@ -585,22 +660,30 @@ fn render_collection_row(
                     }
                 });
 
-                let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
-                if name_resp.hovered() || x_slot.hovered() {
-                    let r = x_slot.rect.shrink(4.0);
-                    let color = if x_slot.hovered() {
-                        theme::TEXT_PRIMARY
-                    } else {
-                        theme::TEXT_DIM
-                    };
-                    let stroke = egui::Stroke::new(1.2_f32, color);
-                    let p = ui.painter();
-                    p.line_segment([r.left_top(), r.right_bottom()], stroke);
-                    p.line_segment([r.left_bottom(), r.right_top()], stroke);
-                }
-                if x_slot.clicked() {
-                    delete_collection(state, c.id);
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let x_slot = ui.allocate_response(egui::vec2(14.0, 14.0), egui::Sense::click());
+                    if name_resp.hovered() || x_slot.hovered() {
+                        let r = x_slot.rect.shrink(4.0);
+                        let color = if x_slot.hovered() {
+                            theme::TEXT_PRIMARY
+                        } else {
+                            theme::TEXT_DIM
+                        };
+                        let stroke = egui::Stroke::new(1.2_f32, color);
+                        let p = ui.painter();
+                        p.line_segment([r.left_top(), r.right_bottom()], stroke);
+                        p.line_segment([r.left_bottom(), r.right_top()], stroke);
+                    }
+                    if x_slot.clicked() {
+                        delete_collection(state, c.id);
+                    }
+
+                    ui.label(
+                        egui::RichText::new(format!("({})", count))
+                            .color(theme::TEXT_DIM)
+                            .size(11.0),
+                    );
+                });
             }
         })
         .response;
@@ -665,5 +748,49 @@ mod tests {
         assert_eq!(tree[0].children[1].id, 3);
         assert_eq!(tree[1].collection.id, 4);
         assert_eq!(tree[1].children.len(), 0);
+    }
+
+    #[test]
+    fn test_compute_collection_counts() {
+        let c1 = CollectionRecord {
+            id: 1,
+            name: "Set 1".to_string(),
+            color: Color::default(),
+            sort_order: 0,
+            parent_id: None,
+        };
+        let c2 = CollectionRecord {
+            id: 2,
+            name: "Sub 1".to_string(),
+            color: Color::default(),
+            sort_order: 1,
+            parent_id: Some(1),
+        };
+        let c3 = CollectionRecord {
+            id: 3,
+            name: "Sub 2".to_string(),
+            color: Color::default(),
+            sort_order: 2,
+            parent_id: Some(1),
+        };
+        let c4 = CollectionRecord {
+            id: 4,
+            name: "Single".to_string(),
+            color: Color::default(),
+            sort_order: 3,
+            parent_id: None,
+        };
+
+        let collections = vec![c1, c2, c3, c4];
+        let mut raw_counts = std::collections::HashMap::new();
+        raw_counts.insert(2, 5);
+        raw_counts.insert(3, 3);
+        raw_counts.insert(4, 10);
+
+        let counts = compute_collection_counts(&collections, &raw_counts);
+        assert_eq!(counts.get(&1), Some(&8));
+        assert_eq!(counts.get(&2), Some(&5));
+        assert_eq!(counts.get(&3), Some(&3));
+        assert_eq!(counts.get(&4), Some(&10));
     }
 }

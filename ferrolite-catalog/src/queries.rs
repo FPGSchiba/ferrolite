@@ -209,6 +209,23 @@ pub(crate) fn collections_for_images(
     Ok(map)
 }
 
+pub(crate) fn collection_image_counts(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<i64, usize>, CatalogError> {
+    let mut map: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT collection_id, COUNT(*) FROM collection_images GROUP BY collection_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, usize>(1)?))
+    })?;
+    for r in rows {
+        let (coll_id, count) = r?;
+        map.insert(coll_id, count);
+    }
+    Ok(map)
+}
+
 pub(crate) fn list_collections(
     conn: &Connection,
 ) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {

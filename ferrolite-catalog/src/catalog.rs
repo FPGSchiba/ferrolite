@@ -562,6 +562,11 @@ impl Catalog {
         crate::queries::collections_for_images(self.conn(), ids)
     }
 
+    /// Query image counts per collection.
+    pub fn collection_image_counts(&self) -> Result<HashMap<i64, usize>, CatalogError> {
+        crate::queries::collection_image_counts(self.conn())
+    }
+
     /// Execute a `LibraryQuery` and return matching image records.
     pub fn query_images(&self, q: &crate::LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {
         crate::query::run(self.conn(), q)

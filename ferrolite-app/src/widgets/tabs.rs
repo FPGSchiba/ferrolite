@@ -84,11 +84,10 @@ pub fn tab_row<T: PartialEq + Clone>(
             painter.galley(text_pos, text_galley, text_color);
 
             if is_active {
-                let stroke_y = rect.max.y - 1.0_f32;
                 painter.line_segment(
                     [
-                        egui::pos2(rect.min.x, stroke_y),
-                        egui::pos2(rect.max.x, stroke_y),
+                        egui::pos2(rect.left(), rect.bottom() - 1.0),
+                        egui::pos2(rect.right(), rect.bottom() - 1.0),
                     ],
                     egui::Stroke::new(2.0_f32, theme::ACCENT),
                 );
@@ -214,5 +213,39 @@ mod tests {
             });
         });
         assert_eq!(current, TestTab::First);
+    }
+
+    #[test]
+    fn tab_row_active_underline_stroke() {
+        let ctx = Context::default();
+        let mut current = TestTab::First;
+        let tabs = [(TestTab::First, "First"), (TestTab::Second, "Second")];
+
+        let output = ctx.run(RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = tab_row(ui, &mut current, &tabs);
+            });
+        });
+
+        fn has_accent_underline(shape: &egui::Shape) -> bool {
+            match shape {
+                egui::Shape::LineSegment { points, stroke } => {
+                    (stroke.width - 2.0_f32).abs() < 1e-4
+                        && stroke.color == egui::epaint::ColorMode::Solid(theme::ACCENT)
+                        && (points[0].y - points[1].y).abs() < 1e-4
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().any(has_accent_underline),
+                _ => false,
+            }
+        }
+
+        let found = output
+            .shapes
+            .iter()
+            .any(|clipped| has_accent_underline(&clipped.shape));
+        assert!(
+            found,
+            "Active tab underline stroke (2px theme::ACCENT line segment) should be painted"
+        );
     }
 }

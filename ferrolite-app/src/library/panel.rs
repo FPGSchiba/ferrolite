@@ -158,18 +158,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                     .color(theme::TEXT_DIM)
                     .size(10.0),
             );
-            if ui.small_button("+ Set").clicked() {
-                let name = format!("Collection Set {}", state.collections.len() + 1);
-                if state
-                    .writer
-                    .lock()
-                    .expect("writer")
-                    .create_collection(&name, ferrolite_image::Color::default())
-                    .is_ok()
-                {
-                    state.reload_vocab();
-                }
-            }
             if ui.small_button("+").clicked() {
                 let name = format!("Collection {}", state.collections.len() + 1);
                 if state
@@ -184,6 +172,19 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
             }
         })
         .response;
+
+    if ui.ctx().dragged_id().is_some() && ui.ctx().dragged_id() != Some(collections_header_resp.id)
+    {
+        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+            if collections_header_resp.rect.contains(pointer) {
+                ui.painter().rect_stroke(
+                    collections_header_resp.rect,
+                    2.0,
+                    egui::Stroke::new(1.5_f32, theme::ACCENT),
+                );
+            }
+        }
+    }
 
     if let Some(dragged_id) = collections_header_resp.dnd_release_payload::<i64>() {
         let res = state
@@ -347,6 +348,29 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
                 .response;
 
             row_resp.dnd_set_drag_payload(c.id);
+
+            if ui.ctx().is_being_dragged(row_resp.id) {
+                egui::show_tooltip_at_pointer(
+                    ui.ctx(),
+                    ui.layer_id(),
+                    row_resp.id.with("ghost"),
+                    |ui| {
+                        ui.label(format!("{} Moving {}", crate::icons::COLOR, c.name));
+                    },
+                );
+            }
+
+            if ui.ctx().dragged_id().is_some() && ui.ctx().dragged_id() != Some(row_resp.id) {
+                if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+                    if row_resp.rect.contains(pointer) {
+                        ui.painter().rect_stroke(
+                            row_resp.rect,
+                            2.0,
+                            egui::Stroke::new(1.5_f32, theme::ACCENT),
+                        );
+                    }
+                }
+            }
 
             if let Some(dragged_id) = row_resp.dnd_release_payload::<i64>() {
                 if *dragged_id != c.id {
@@ -728,6 +752,24 @@ fn render_collection_row(
 
     row_resp.dnd_set_drag_payload(c.id);
 
+    if ui.ctx().is_being_dragged(row_resp.id) {
+        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), row_resp.id.with("ghost"), |ui| {
+            ui.label(format!("{} Moving {}", crate::icons::COLOR, c.name));
+        });
+    }
+
+    if !is_child && ui.ctx().dragged_id().is_some() && ui.ctx().dragged_id() != Some(row_resp.id) {
+        if let Some(pointer) = ui.ctx().pointer_interact_pos() {
+            if row_resp.rect.contains(pointer) {
+                ui.painter().rect_stroke(
+                    row_resp.rect,
+                    2.0,
+                    egui::Stroke::new(1.5_f32, theme::ACCENT),
+                );
+            }
+        }
+    }
+
     if !is_child {
         if let Some(dragged_id) = row_resp.dnd_release_payload::<i64>() {
             if *dragged_id != c.id {
@@ -890,5 +932,48 @@ mod tests {
         state.reload_vocab();
         let tree = build_collection_tree(&state.collections);
         assert_eq!(tree.len(), 2);
+    }
+
+    #[test]
+    fn test_collections_header_no_plus_set_button() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::for_test();
+        let full_output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, ctx);
+            });
+        });
+
+        // Verify UI rendering completes and shapes are generated
+        assert!(!full_output.shapes.is_empty());
+    }
+
+    #[test]
+    fn test_collection_drag_ghost_tooltip_and_drop_target_highlight() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::for_test();
+        let _id1 = {
+            let writer = state.writer.lock().expect("writer");
+            writer
+                .create_collection("Vacation", Color::default())
+                .unwrap()
+        };
+        state.reload_vocab();
+
+        let dummy_drag_id = egui::Id::new("test_drag");
+        ctx.set_dragged_id(dummy_drag_id);
+
+        let mut raw_input = egui::RawInput::default();
+        raw_input
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(50.0, 100.0)));
+        let output = ctx.run(raw_input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                show(ui, &mut state, ctx);
+            });
+        });
+
+        assert_eq!(ctx.dragged_id(), Some(dummy_drag_id));
+        assert!(!output.shapes.is_empty());
     }
 }

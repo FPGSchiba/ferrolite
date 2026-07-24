@@ -1533,9 +1533,11 @@ impl eframe::App for FerroliteApp {
                 .show(ctx, |ui| {
                     crate::develop::info_panel::show(ui, &self.state);
                 });
-            let width = info_resp.response.rect.width();
-            if (width - self.state.settings.info_panel_width).abs() > 0.5 {
-                self.state.settings.info_panel_width = width;
+            if info_resp.response.drag_stopped()
+                && (info_resp.response.rect.width() - self.state.settings.info_panel_width).abs()
+                    > 0.5
+            {
+                self.state.settings.info_panel_width = info_resp.response.rect.width();
                 self.mark_settings_dirty();
             }
         }
@@ -1582,30 +1584,41 @@ impl eframe::App for FerroliteApp {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let prev_disclosures = (
-                                self.state.settings.tone_curve_open,
-                                self.state.settings.color_grading_open,
-                                self.state.settings.optics_open,
-                            );
-                            outcome = Some(crate::develop::tool_panel::show(
-                                ui,
-                                &mut self.state,
-                                &self.tool_registry,
-                                working_space,
-                            ));
-                            if (
-                                self.state.settings.tone_curve_open,
-                                self.state.settings.color_grading_open,
-                                self.state.settings.optics_open,
-                            ) != prev_disclosures
-                            {
-                                self.mark_settings_dirty();
-                            }
+                            egui::Frame::none()
+                                .inner_margin(egui::Margin {
+                                    left: 0.0,
+                                    right: 16.0,
+                                    top: 0.0,
+                                    bottom: 0.0,
+                                })
+                                .show(ui, |ui| {
+                                    let prev_disclosures = (
+                                        self.state.settings.tone_curve_open,
+                                        self.state.settings.color_grading_open,
+                                        self.state.settings.optics_open,
+                                    );
+                                    outcome = Some(crate::develop::tool_panel::show(
+                                        ui,
+                                        &mut self.state,
+                                        &self.tool_registry,
+                                        working_space,
+                                    ));
+                                    if (
+                                        self.state.settings.tone_curve_open,
+                                        self.state.settings.color_grading_open,
+                                        self.state.settings.optics_open,
+                                    ) != prev_disclosures
+                                    {
+                                        self.mark_settings_dirty();
+                                    }
+                                });
                         });
                 });
-            let width = adjust_resp.response.rect.width();
-            if (width - self.state.settings.right_panel_width).abs() > 0.5 {
-                self.state.settings.right_panel_width = width;
+            if adjust_resp.response.drag_stopped()
+                && (adjust_resp.response.rect.width() - self.state.settings.right_panel_width).abs()
+                    > 0.5
+            {
+                self.state.settings.right_panel_width = adjust_resp.response.rect.width();
                 self.mark_settings_dirty();
             }
             if let Some(outcome) = outcome {
@@ -2044,7 +2057,8 @@ mod tests {
                 });
             let width = info_resp.response.rect.width();
             captured_info_w = width;
-            if (width - settings.info_panel_width).abs() > 0.5 {
+            if info_resp.response.drag_stopped() && (width - settings.info_panel_width).abs() > 0.5
+            {
                 settings.info_panel_width = width;
                 settings_dirty = true;
             }
@@ -2058,7 +2072,9 @@ mod tests {
                 });
             let width = adjust_resp.response.rect.width();
             captured_right_w = width;
-            if (width - settings.right_panel_width).abs() > 0.5 {
+            if adjust_resp.response.drag_stopped()
+                && (width - settings.right_panel_width).abs() > 0.5
+            {
                 settings.right_panel_width = width;
                 settings_dirty = true;
             }
@@ -2066,19 +2082,96 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |_| {});
         });
 
-        assert_eq!(settings.info_panel_width, captured_info_w);
-        assert_eq!(settings.right_panel_width, captured_right_w);
-        assert!(settings_dirty);
+        // Without drag_stopped(), initial settings remain untouched
+        assert_eq!(settings.info_panel_width, 300.0);
+        assert_eq!(settings.right_panel_width, 300.0);
+        assert!(!settings_dirty);
 
-        // Verify sub-0.5px difference does not trigger dirty marking or update
+        // Verify sub-0.5px difference on drag stop does not trigger dirty marking or update
         let small_diff_w = settings.info_panel_width + 0.3;
         let prev_w = settings.info_panel_width;
         let mut dirty = false;
-        if (small_diff_w - settings.info_panel_width).abs() > 0.5 {
+        let drag_stopped = true;
+        if drag_stopped && (small_diff_w - settings.info_panel_width).abs() > 0.5 {
             settings.info_panel_width = small_diff_w;
             dirty = true;
         }
         assert_eq!(settings.info_panel_width, prev_w);
         assert!(!dirty);
+
+        // Verify >0.5px difference on drag stop updates settings and marks dirty
+        if drag_stopped && (captured_info_w - settings.info_panel_width).abs() > 0.5 {
+            settings.info_panel_width = captured_info_w;
+            settings_dirty = true;
+        }
+        assert_eq!(settings.info_panel_width, captured_info_w);
+        assert!(settings_dirty);
+    }
+
+    #[test]
+    fn test_panel_width_drag_stop_persistence_and_scrollbar_clearance() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let initial_width = settings.right_panel_width;
+        let mut settings_dirty = false;
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+
+        let mut inner_frame_right_margin = 0.0;
+
+        let _ = ctx.run(input, |ctx| {
+            let adjust_resp = egui::SidePanel::right("test_develop_adjust_drag_stop")
+                .resizable(true)
+                .default_width(340.0)
+                .width_range(250.0..=400.0)
+                .show(ctx, |ui| {
+                    ui.spacing_mut().scroll.bar_width = 10.0;
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let frame = egui::Frame::none().inner_margin(egui::Margin {
+                                left: 0.0,
+                                right: 16.0,
+                                top: 0.0,
+                                bottom: 0.0,
+                            });
+                            inner_frame_right_margin = frame.inner_margin.right;
+                            frame.show(ui, |ui| {
+                                ui.label("content inside clearance frame");
+                            });
+                        });
+                });
+
+            // If not drag_stopped(), width setting remains untouched
+            if adjust_resp.response.drag_stopped()
+                && (adjust_resp.response.rect.width() - settings.right_panel_width).abs() > 0.5
+            {
+                settings.right_panel_width = adjust_resp.response.rect.width();
+                settings_dirty = true;
+            }
+        });
+
+        // Since no drag stopped event occurred, width setting is unchanged
+        assert_eq!(settings.right_panel_width, initial_width);
+        assert!(!settings_dirty);
+
+        // Verify the scrollbar clearance frame right margin is 16.0px
+        assert_eq!(inner_frame_right_margin, 16.0);
+
+        // Simulate a drag stop condition
+        let simulated_width = 360.0;
+        let simulated_drag_stopped = true;
+        if simulated_drag_stopped && (simulated_width - settings.right_panel_width).abs() > 0.5 {
+            settings.right_panel_width = simulated_width;
+            settings_dirty = true;
+        }
+        assert_eq!(settings.right_panel_width, 360.0);
+        assert!(settings_dirty);
     }
 }

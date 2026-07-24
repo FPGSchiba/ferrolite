@@ -9,7 +9,6 @@ use crate::theme;
 use crate::widgets::slider::EguiSlider;
 use ferrolite_pipeline::{parametric_curve_lut, OpKind, OpStack, ParametricCurve, ToneCurve};
 
-const OVERLAY_W: f32 = 200.0;
 const OVERLAY_H: f32 = 60.0;
 
 /// True when any region value OR split point differs (drives the emit gate).
@@ -179,7 +178,8 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
 /// Draw a small read-only plot of the baked parametric LUT (diagonal reference +
 /// the parametric shape), so the region/split effect is visible at a glance.
 fn draw_overlay(ui: &mut egui::Ui, p: &ParametricCurve) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(OVERLAY_W, OVERLAY_H), egui::Sense::hover());
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, OVERLAY_H), egui::Sense::hover());
     let painter = ui.painter();
     painter.rect_filled(rect, 2.0, theme::BG_BASE);
     // Identity reference diagonal.
@@ -197,7 +197,7 @@ fn draw_overlay(ui: &mut egui::Ui, p: &ParametricCurve) {
         .enumerate()
         .map(|(i, &y)| {
             egui::pos2(
-                rect.left() + (i as f32 / 255.0) * OVERLAY_W,
+                rect.left() + (i as f32 / 255.0) * w,
                 rect.bottom() - y * OVERLAY_H,
             )
         })
@@ -211,6 +211,7 @@ fn draw_overlay(ui: &mut egui::Ui, p: &ParametricCurve) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::{Context, RawInput};
     use ferrolite_pipeline::ParametricCurve;
 
     #[test]
@@ -232,5 +233,40 @@ mod tests {
             ..Default::default()
         };
         assert!(param_changed(&a, &b));
+    }
+
+    #[test]
+    fn test_parametric_curve_overlay_width_scaling() {
+        let ctx = Context::default();
+        let p = ParametricCurve::default();
+
+        for width in [200.0_f32, 350.0_f32, 500.0_f32] {
+            let screen_rect =
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
+            let input = RawInput {
+                screen_rect: Some(screen_rect),
+                ..Default::default()
+            };
+            let output = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none())
+                    .show(ctx, |ui| {
+                        draw_overlay(ui, &p);
+                    });
+            });
+
+            let found_rect = output.shapes.iter().any(|clipped| {
+                if let egui::Shape::Rect(rect_shape) = &clipped.shape {
+                    (rect_shape.rect.height() - OVERLAY_H).abs() < 1.0
+                        && (rect_shape.rect.width() - width).abs() < 1.0
+                } else {
+                    false
+                }
+            });
+            assert!(
+                found_rect,
+                "Parametric curve overlay should allocate width equal to available container width {width}"
+            );
+        }
     }
 }

@@ -107,7 +107,13 @@ impl<'a> Widget for EguiSlider<'a> {
             self.custom_label_w.unwrap_or(LABEL_W)
         };
         let track_left = rect.left() + label_w + 8.0;
-        let track_right = rect.right() - VALUE_W - 12.0 - RESET_W - 8.0;
+        let default_right_m = VALUE_W + 12.0 + RESET_W + 8.0;
+        let right_m = if let Some(custom_w) = self.custom_label_w {
+            custom_w + 8.0
+        } else {
+            default_right_m
+        };
+        let track_right = rect.right() - right_m;
         let track_w = (track_right - track_left).max(1.0);
         let mid_y = rect.center().y;
         let reset_rect = egui::Rect::from_min_max(

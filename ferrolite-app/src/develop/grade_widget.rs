@@ -53,7 +53,7 @@ fn wheel_row(
             signed: true,
             custom_label_w: None,
         }
-        .label_width(32.0),
+        .label_width(38.0),
     );
     if r.changed() {
         wheel.lum = lum;
@@ -269,6 +269,67 @@ mod tests {
                 w >= 30.0,
                 "Horizontal slider track width in 2x2 grid column should be expanded (got {w}px)"
             );
+        }
+    }
+
+    #[test]
+    fn test_lum_slider_symmetrical_centering_in_2x2_grid() {
+        let ctx = egui::Context::default();
+        let stack = OpStack::default();
+        let width = 350.0_f32;
+
+        let screen_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
+        let input = egui::RawInput {
+            screen_rect: Some(screen_rect),
+            ..Default::default()
+        };
+
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = show(ui, &stack);
+            });
+        });
+
+        let mut track_midpoints = Vec::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::LineSegment { points, stroke } = &clipped.shape {
+                if stroke.width == 2.0 && (points[0].y - points[1].y).abs() < 0.1 {
+                    let seg_w = (points[1].x - points[0].x).abs();
+                    if seg_w > 10.0 {
+                        let track_left = points[0].x.min(points[1].x);
+                        let track_right = points[0].x.max(points[1].x);
+                        let track_mid = (track_left + track_right) / 2.0;
+                        track_midpoints.push((track_left, track_right, track_mid));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            track_midpoints.len() >= 4,
+            "Should render at least 4 wheel row Lum slider tracks"
+        );
+
+        for (track_left, track_right, track_mid) in &track_midpoints[..4] {
+            if *track_mid < 175.0 {
+                let col_left = 8.0_f32;
+                let col_right = 171.0_f32;
+                let left_m = track_left - col_left;
+                let right_m = col_right - track_right;
+                assert!(
+                    (left_m - right_m).abs() < 1.0,
+                    "Column 0 Lum slider track left margin ({left_m}px) and right margin ({right_m}px) should be symmetrical"
+                );
+            } else {
+                let col_left = 179.0_f32;
+                let col_right = 342.0_f32;
+                let left_m = track_left - col_left;
+                let right_m = col_right - track_right;
+                assert!(
+                    (left_m - right_m).abs() < 1.0,
+                    "Column 1 Lum slider track left margin ({left_m}px) and right margin ({right_m}px) should be symmetrical"
+                );
+            }
         }
     }
 }

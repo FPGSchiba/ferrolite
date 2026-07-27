@@ -7,6 +7,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use ferrolite_pipeline::GpuPyramidSource;
+use ferrolite_pipeline::OpStack;
+use ferrolite_vt::TileSource;
+
 /// Neighbors warmed AHEAD of the current image (the culling direction).
 #[allow(dead_code)] // wired by Task 7 (forward-biased prefetch window)
 pub const WARM_WINDOW_FORWARD: usize = 4;
@@ -14,7 +18,7 @@ pub const WARM_WINDOW_FORWARD: usize = 4;
 #[allow(dead_code)] // wired by Task 7 (forward-biased prefetch window)
 pub const WARM_WINDOW_BACK: usize = 2;
 /// How many most-recent images also retain the full pipeline (instant 1:1).
-#[allow(dead_code)] // wired by Task 5 (full-tier count cap)
+#[allow(dead_code)] // wired by Task 6 (full-tier reveal calls insert_full)
 pub const WARM_FULL_COUNT: usize = 2;
 
 /// Identity of a cached render: an edit (new op stack) yields a new hash, so the
@@ -34,18 +38,27 @@ pub struct DisplayEntry {
     pub bytes: u64,
 }
 
-/// Full-pipeline payload (Task 5 populates the GPU `Arc`s). Kept minimal here so
-/// the `WarmHit::Full` variant and the `full` map type-check from Task 2.
-#[allow(dead_code)] // wired by Task 5/6
+/// Full-pipeline payload for the 1–2 most-recent images: the GPU pyramid + tile
+/// source + the op stack/cam needed to rebuild the (`!Send`) producer + sparse
+/// VT on the render thread. GPU handles are `Option` only so headless tests can
+/// fabricate the struct; production always stores `Some`.
 #[derive(Clone)]
 pub struct FullEntry {
+    #[allow(dead_code)] // read by Task 6
+    pub pyramid: Option<Arc<GpuPyramidSource>>,
+    #[allow(dead_code)] // read by Task 6
+    pub tile_source: Option<Arc<dyn TileSource + Send + Sync>>,
+    #[allow(dead_code)] // read by Task 6
+    pub op_stack: OpStack,
+    #[allow(dead_code)] // read by Task 6
+    pub cam: [[f32; 3]; 3],
     pub bytes: u64,
 }
 
-/// Result of consulting the cache for a key. `Full` is populated by Task 5.
+/// Result of consulting the cache for a key.
 pub enum WarmHit {
-    #[allow(dead_code)] // wired by Task 5/6
     Full {
+        #[allow(dead_code)] // read by Task 6 (full-tier reveal)
         full: FullEntry,
         display: DisplayEntry,
     },
@@ -70,8 +83,6 @@ pub struct WarmCache {
     clock: Touch,
     open: Option<CacheKey>,
     display: HashMap<CacheKey, Slot<DisplayEntry>>,
-    // Full tier added in Task 5.
-    #[allow(dead_code)] // wired by Task 5/6
     full: HashMap<CacheKey, Slot<FullEntry>>,
 }
 
@@ -136,6 +147,42 @@ impl WarmCache {
         self.evict_to_budget();
     }
 
+    /// Insert a full-pipeline entry, bounding the tier to `WARM_FULL_COUNT` by
+    /// evicting the least-recently-touched full entry that is not the open image.
+    #[allow(dead_code)] // wired by Task 6 (full-tier reveal)
+    pub fn insert_full(&mut self, key: CacheKey, entry: FullEntry) {
+        let now = self.tick();
+        self.full.insert(
+            key,
+            Slot {
+                entry,
+                touched: now,
+            },
+        );
+        while self.full.len() > WARM_FULL_COUNT {
+            let victim = self
+                .full
+                .iter()
+                .filter(|(k, _)| Some(**k) != self.open)
+                .min_by_key(|(_, s)| s.touched)
+                .map(|(k, _)| *k);
+            match victim {
+                Some(k) => {
+                    self.full.remove(&k);
+                }
+                None => break,
+            }
+        }
+        self.evict_to_budget();
+    }
+
+    /// Not yet called by any task in this plan; kept for API completeness
+    /// alongside `resident_bytes`.
+    #[allow(dead_code)]
+    pub fn len_full(&self) -> usize {
+        self.full.len()
+    }
+
     /// Total resident bytes across both tiers (feeds the F10 `ram_cache` gauge).
     #[allow(dead_code)] // wired by Task 9 (diagnostics)
     pub fn resident_bytes(&self) -> u64 {
@@ -193,6 +240,18 @@ mod tests {
         }
     }
 
+    const IDENTITY_CAM: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+    fn full_e(bytes: u64) -> FullEntry {
+        FullEntry {
+            pyramid: None,
+            tile_source: None,
+            op_stack: Default::default(),
+            cam: IDENTITY_CAM,
+            bytes,
+        }
+    }
+
     #[test]
     fn display_hit_after_insert_and_miss_otherwise() {
         let mut c = WarmCache::new(1 << 30);
@@ -247,5 +306,49 @@ mod tests {
             matches!(c.get(key(1, 0)), WarmHit::Display(_)),
             "open image never evicted"
         );
+    }
+
+    #[test]
+    fn open_image_survives_even_when_it_alone_exceeds_budget() {
+        let mut c = WarmCache::new(50);
+        // Production always calls `set_open` before `insert_display` (see
+        // `app.rs::warm_insert_display`) so the just-opened image is already
+        // protected by the time its own insert runs its eviction pass.
+        c.set_open(Some(key(1, 0)));
+        c.insert_display(key(1, 0), disp(100)); // 100 > budget 50, but open
+        assert_eq!(
+            c.resident_bytes(),
+            100,
+            "open image kept despite exceeding budget"
+        );
+        // Re-run eviction via a no-op budget set; open entry must still not be dropped.
+        c.set_budget(50);
+        assert_eq!(
+            c.resident_bytes(),
+            100,
+            "open image kept despite exceeding budget"
+        );
+        assert!(matches!(c.get(key(1, 0)), WarmHit::Display(_)));
+    }
+
+    #[test]
+    fn full_tier_caps_at_warm_full_count() {
+        let mut c = WarmCache::new(1 << 30);
+        for i in 0..(WARM_FULL_COUNT as i64 + 2) {
+            c.insert_display(key(i, 0), disp(10));
+            c.insert_full(key(i, 0), full_e(10));
+        }
+        assert_eq!(c.len_full(), WARM_FULL_COUNT, "full tier bounded by count");
+    }
+
+    #[test]
+    fn get_returns_full_when_both_tiers_present() {
+        let mut c = WarmCache::new(1 << 30);
+        c.insert_display(key(1, 0), disp(10));
+        c.insert_full(key(1, 0), full_e(10));
+        assert!(matches!(c.get(key(1, 0)), WarmHit::Full { .. }));
+        // Full without display degrades to nothing (full needs its display too).
+        c.insert_full(key(2, 0), full_e(10));
+        assert!(matches!(c.get(key(2, 0)), WarmHit::Miss));
     }
 }

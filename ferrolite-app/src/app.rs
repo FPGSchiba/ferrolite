@@ -255,7 +255,9 @@ impl FerroliteApp {
         }
 
         // Standard: the preview IS the full-resolution image — reveal it now.
-        let revealed = self.reveal_srgb_preview(frame, image_id);
+        // `full_res = true`: this is the genuine cold full-res JPEG decode, so
+        // it is eligible to warm-cache.
+        let revealed = self.reveal_srgb_preview(frame, image_id, true);
         if !revealed {
             return;
         }
@@ -307,10 +309,23 @@ impl FerroliteApp {
     /// Build the rung-1 preview `VirtualTexture` from the retained sRGB
     /// `preview_source` via one `sRGB→working` color pass, install the holder,
     /// fit the view, and mark the viewer `loaded` + `idle`. Shared by the
-    /// Standard preview reveal (`apply_preview_ready`) and the RAW
+    /// Standard preview reveal (`apply_preview_ready`), the Standard/RAW
+    /// preview-cache-hit reveal (`apply_preview_cache_hit`), and the RAW
     /// full-decode-failure fallback (`FullFailed`). Returns `true` on success,
     /// `false` if a prerequisite (GPU / viewer / source) is missing.
-    fn reveal_srgb_preview(&mut self, frame: &eframe::Frame, image_id: i64) -> bool {
+    ///
+    /// `full_res` tells `warm_insert_display` whether `preview_source` is
+    /// genuinely full-resolution (a cold Standard decode) or a downscaled
+    /// stand-in (the 2048px preview-cache render, or RAW's embedded-JPEG
+    /// failure fallback) — only a full-resolution reveal may be warm-cached,
+    /// otherwise a later warm hit could get stuck serving a low-res texture
+    /// as if it were the sharp 1:1 tier (see `warm_insert_display`).
+    fn reveal_srgb_preview(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        full_res: bool,
+    ) -> bool {
         let pw = self.preview_to_working();
         let Some(rs) = frame.wgpu_render_state() else {
             return false; // no wgpu backend (should not happen in this build)
@@ -350,7 +365,7 @@ impl FerroliteApp {
         if !self.install_preview_holder(frame, image_id, vt, dims) {
             return false;
         }
-        self.warm_insert_display(frame, image_id);
+        self.warm_insert_display(frame, image_id, full_res);
         true
     }
 
@@ -475,24 +490,30 @@ impl FerroliteApp {
         }
         if let Some(v) = self.state.viewer.as_mut() {
             if v.image_id == image_id {
-                // The cached display texture serves the instant fit/preview reveal,
-                // but the SHARP tier must still stream in behind it so 1:1 zoom
-                // sharpens exactly as a normal open does (RAW: the sparse full
-                // pyramid; Standard: the full-res decode). Therefore, mirroring
+                // The cached display texture serves the instant fit/preview reveal.
+                // For RAW the SHARP tier must still stream in behind it so 1:1 zoom
+                // sharpens exactly as a normal open does (the sparse full pyramid) —
+                // RAW has no separate full-res display tier. For Standard the cached
+                // display texture IS already the full-resolution image (warm-cached
+                // ONLY when full-res, see `warm_insert_display`'s `full_res` gate),
+                // so there is no sharper tier left to stream. Therefore, mirroring
                 // `apply_preview_cache_hit`:
-                //  - `warm_revealed` skips ONLY the now-redundant tier-1 preview
-                //    (the RAW embedded-JPEG reveal) in `drive_viewer`; the tier-2
-                //    decode chain there still runs.
+                //  - `warm_revealed` skips the now-redundant tier-1 preview (the RAW
+                //    embedded-JPEG reveal) AND the redundant Standard heavy JPEG
+                //    re-decode in `drive_viewer`; RAW's tier-2 pyramid decode chain
+                //    there still runs (ungated — it must, RAW has no other route to
+                //    1:1 sharpness).
                 //  - Mark the disk preview-cache read already-resolved so the
-                //    debounced tier-2 decode fires DIRECTLY, without the disk read
+                //    debounced tier-2 step fires DIRECTLY, without the disk read
                 //    re-installing a lower-res 2048px holder over the warm texture,
                 //    and don't write back (a warm RAM hit says nothing new about the
                 //    on-disk entry, which this session's prior reveal already
                 //    settled).
-                //  - Clear `idle` so the drive loop stays alive to stream the full
-                //    tier; it returns to idle on convergence (`apply_pyramid_ready`
-                //    for RAW / `reveal_srgb_preview` for Standard) — NOT a per-frame
-                //    spin (nothing sets `idle` true until the sharp tier lands).
+                //  - Clear `idle` so the drive loop stays alive one more beat: RAW
+                //    returns to idle on pyramid convergence (`apply_pyramid_ready`);
+                //    Standard has nothing left to converge on, so `drive_viewer`'s
+                //    gated branch sets `idle` back to `true` immediately once the
+                //    debounce elapses — NOT a per-frame spin either way.
                 // (A future Task-6 FULL hit installs the 1:1 tier itself and will
                 // instead skip tier-2; that path is not reachable yet.)
                 v.warm_revealed = true;
@@ -507,7 +528,19 @@ impl FerroliteApp {
 
     /// Record the just-installed rung-1 display texture into the warm cache so a
     /// later re-open of this `(image_id, op_stack_hash)` reveals instantly.
-    fn warm_insert_display(&mut self, frame: &eframe::Frame, image_id: i64) {
+    ///
+    /// `full_res` MUST be `true` only when the just-installed texture is the
+    /// genuine full-resolution reveal (a cold Standard JPEG decode, or a RAW
+    /// full decode). It is `false` for a downscaled stand-in (the 2048px
+    /// preview-cache render, or RAW's embedded-JPEG failure fallback) — those
+    /// are NOT cached, because a later warm Standard hit skips the redundant
+    /// full-res re-decode entirely (see the `!v.warm_revealed` gate in
+    /// `drive_viewer`) and would otherwise get stuck serving the downscaled
+    /// texture as if it were the sharp 1:1 tier.
+    fn warm_insert_display(&mut self, frame: &eframe::Frame, image_id: i64, full_res: bool) {
+        if !full_res {
+            return;
+        }
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -1362,7 +1395,11 @@ impl FerroliteApp {
         }
 
         if preview_installed {
-            self.warm_insert_display(frame, image_id);
+            // `full_res = true`: `apply_full_decoded` only runs for RAW, and
+            // its rung-1 reveal render is always the full-resolution
+            // demosaiced image (see the comment above), so it is always
+            // eligible to warm-cache.
+            self.warm_insert_display(frame, image_id, true);
         }
         self.mark_histogram_dirty();
     }
@@ -1493,7 +1530,10 @@ impl FerroliteApp {
             }
             _ => return, // stale: viewer closed or a different image is open
         }
-        let revealed = self.reveal_srgb_preview(frame, image_id);
+        // `full_res = false`: this is the 2048px disk preview-cache render
+        // (RAW or Standard), not the full-resolution image — must not be
+        // warm-cached as if it were the sharp 1:1 tier.
+        let revealed = self.reveal_srgb_preview(frame, image_id, false);
         if revealed {
             self.mark_histogram_dirty();
         }
@@ -3235,7 +3275,10 @@ impl eframe::App for FerroliteApp {
                             && v.kind == ferrolite_image::FileKind::Raw
                             && !v.loaded
                     );
-                    if need_fallback && self.reveal_srgb_preview(frame, image_id) {
+                    // `full_res = false`: the embedded JPEG fallback is a
+                    // downscaled stand-in, not the full RAW decode — must not
+                    // be warm-cached as if it were the sharp 1:1 tier.
+                    if need_fallback && self.reveal_srgb_preview(frame, image_id, false) {
                         eprintln!(
                             "ferrolite: full decode failed for #{image_id}; showing embedded JPEG fallback"
                         );
@@ -4163,11 +4206,15 @@ impl eframe::App for FerroliteApp {
             // (`try_warm_reveal`, from `open_record`) — the cached display texture
             // already serves the fit/preview reveal, so this small embedded-JPEG
             // decode (only ever the full-decode-failure fallback source) would be
-            // pure waste. The tier-2 decode chain BELOW is intentionally NOT gated
-            // on `warm_revealed`: it must still run so the SHARP tier streams in
-            // behind the warm texture (RAW sparse full / Standard full-res),
-            // exactly as a normal open, and so `idle` (cleared by the warm hit)
-            // returns true only once the full tier converges — no permanent spin.
+            // pure waste. The tier-2 decode chain BELOW is gated on `warm_revealed`
+            // PER KIND: RAW's `spawn_full`/pyramid stays UNGATED — it must still run
+            // so the sparse full SHARP tier streams in behind the warm texture
+            // exactly as a normal open, and `idle` (cleared by the warm hit) returns
+            // true only once it converges. Standard's heavy JPEG decode IS gated —
+            // the warm display texture there is already the full-resolution image
+            // (see `warm_insert_display`'s `full_res` gate), so re-decoding would
+            // only reproduce what is already on screen; that branch settles `idle`
+            // back to `true` itself once the debounce elapses. Neither case spins.
             if !v.warm_revealed && !v.preview_requested && v.kind == ferrolite_image::FileKind::Raw
             {
                 let h = viewer::load::spawn_preview(
@@ -4237,12 +4284,21 @@ impl eframe::App for FerroliteApp {
                                 v.full_handle = Some(h);
                                 v.full_requested = true;
                             }
-                        } else {
+                        } else if !v.warm_revealed {
                             // Standard: the heavy tier-1 IS the full-res JPG decode.
                             // This also runs after a cache HIT (`heavy_pending` is
                             // `!preview_requested`, still true post-hit) — the 2048px
                             // reveal from `apply_preview_cache_hit` shows first, then
                             // this streams in the full-res 1:1 detail.
+                            //
+                            // Gated on `!v.warm_revealed`: unlike RAW, Standard has no
+                            // separate pyramid tier (`spawn_full`/the pyramid are
+                            // RAW-only) — a Standard image's full-resolution display
+                            // texture IS the sharp 1:1 artifact. A warm display hit
+                            // (`try_warm_reveal`) already installed that full-res
+                            // texture (warm-cached ONLY when full-res — see
+                            // `warm_insert_display`'s `full_res` gate), so re-decoding
+                            // here would just reproduce what is already on screen.
                             let h = viewer::load::spawn_preview(
                                 &self.state.jobs,
                                 &self.state.tx,
@@ -4253,6 +4309,17 @@ impl eframe::App for FerroliteApp {
                             );
                             v.preview_handle = Some(h);
                             v.preview_requested = true;
+                        } else {
+                            // Warm Standard hit: skip the redundant decode (see
+                            // above). Nothing will call `reveal_srgb_preview` /
+                            // `install_preview_holder` for this open, so there is no
+                            // other path left to converge `idle` — settle it here,
+                            // mirroring what `install_preview_holder` does for a tier-1
+                            // reveal with no tier-2 to wait on. Also mark
+                            // `preview_requested` so `heavy_pending` clears and this
+                            // branch is not re-entered every frame.
+                            v.preview_requested = true;
+                            v.idle = true;
                         }
                     }
                 } else {

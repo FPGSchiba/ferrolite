@@ -318,6 +318,15 @@ pub struct ViewerState {
     /// the open-flow drive loop so a warm hit does not also kick off a
     /// redundant decode — the reveal is already on screen from RAM.
     pub warm_revealed: bool,
+    /// `true` once the deferred warm-reveal attempt (`try_warm_reveal`) has run
+    /// for this open — a one-shot guard mirroring `lens_auto_match_attempted`.
+    /// The attempt is deferred until `ops_loaded` (the warm cache is keyed by
+    /// `op_stack_hash()`, which is only correct once the real op stack has
+    /// loaded — a fresh viewer starts at `OpStack::default()`), so this must
+    /// stay `false` across the frames spent waiting on the ops-sidecar read,
+    /// then flip `true` the first frame `ops_loaded` is `true` regardless of
+    /// hit or miss (a miss must not be retried every frame).
+    pub warm_reveal_attempted: bool,
 }
 
 impl ViewerState {
@@ -392,6 +401,7 @@ impl ViewerState {
             lens_auto_match: None,
             lens_auto_match_attempted: false,
             warm_revealed: false,
+            warm_reveal_attempted: false,
         }
     }
 

@@ -3076,10 +3076,13 @@ impl FerroliteApp {
             self.cancel_viewer_tiles(frame, old_id);
         }
         self.state.open_image_in_viewer(rec);
-        // Consult the warm cache immediately: a display-tier hit reveals sharp at
-        // fit instantly from RAM, short-circuiting the Tier-0/1/decode ladder
-        // below for this open (`v.warm_revealed`, checked in `drive_viewer`).
-        self.try_warm_reveal(frame, rec.id);
+        // The warm-cache lookup is deferred to `drive_viewer` (the
+        // `warm_reveal_attempted` one-shot gate) rather than attempted here: a
+        // fresh `ViewerState::open` starts with `op_stack: OpStack::default()`,
+        // and `try_warm_reveal` keys the cache by `op_stack_hash()` — consulting
+        // it here would key by the default (identity) stack even for an edited
+        // image, whose real op stack only arrives asynchronously via the
+        // `OpsLoaded` event. See `try_warm_reveal`'s doc comment.
         self.module = crate::module::Module::Develop;
         if let Some(before) = mem_before {
             let after = self.gather_mem_breakdown();
@@ -4400,15 +4403,41 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // Deferred warm-cache lookup (one-shot, mirrors `lens_auto_match_attempted`
+        // just below). `try_warm_reveal` keys the cache by `op_stack_hash()`, which
+        // is only meaningful once the real op stack has loaded — a fresh open
+        // starts at `OpStack::default()` and the loaded (possibly edited) stack
+        // only arrives async via `OpsLoaded`. Gating on `ops_loaded` here (rather
+        // than attempting the lookup in `open_record`, where it used to run) means
+        // an edited image's warm hit is keyed correctly and reveals the EDITED
+        // render, not a stale unedited one. Runs BEFORE the tier-1
+        // preview/heavy-decode submission below so a same-frame hit still gates
+        // them out via `warm_revealed`/`cache_read_requested`/`cache_resolved`,
+        // exactly as the old open_record-time attempt did. `self.try_warm_reveal`
+        // needs `&mut self`, so the `image_id` is read out and the `v` borrow
+        // dropped before calling it.
+        let pending_warm_reveal = self
+            .state
+            .viewer
+            .as_ref()
+            .filter(|v| v.ops_loaded && !v.warm_reveal_attempted)
+            .map(|v| v.image_id);
+        if let Some(image_id) = pending_warm_reveal {
+            if let Some(v) = self.state.viewer.as_mut() {
+                v.warm_reveal_attempted = true; // one-shot regardless of hit/miss
+            }
+            self.try_warm_reveal(frame, image_id);
+        }
+
         // Submit the tier-1 preview decode. RAW: the small EMBEDDED preview is
         // submitted immediately (keeps the tier-1 alive; cheap). Standard: the
         // tier-1 preview IS the full-res JPG decode (heavy), so it is NOT fired
         // here — it is gated behind the preview-cache read below (mirrors RAW's
         // full-decode gate) so a re-open reveals the cached 2048px entry first.
         if let Some(v) = self.state.viewer.as_mut() {
-            // RAW embedded tier-1 preview: skip it on a warm DISPLAY hit
-            // (`try_warm_reveal`, from `open_record`) — the cached display texture
-            // already serves the fit/preview reveal, so this small embedded-JPEG
+            // RAW embedded tier-1 preview: skip it on a warm DISPLAY hit (the
+            // deferred `try_warm_reveal` attempt just above) — the cached display
+            // texture already serves the fit/preview reveal, so this small embedded-JPEG
             // decode (only ever the full-decode-failure fallback source) would be
             // pure waste. The tier-2 decode chain BELOW is gated on `warm_revealed`
             // PER KIND: RAW's `spawn_full`/pyramid stays UNGATED — it must still run

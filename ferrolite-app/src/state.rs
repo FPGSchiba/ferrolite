@@ -9,7 +9,7 @@ use ferrolite_catalog::{
 };
 use ferrolite_image::TagId;
 use ferrolite_jobs::{JobHandle, JobSystem};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -61,6 +61,13 @@ pub struct AppState {
     pub thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache,
     /// Develop warm-navigation cache (two-level: display + full pipeline).
     pub warm_cache: crate::develop::cache::WarmCache,
+    /// Decoded warm-neighbor sources awaiting their render-thread edited
+    /// rung-1 render (Task 8). Queued by `AppState::apply` on
+    /// `AppEvent::WarmSourceReady`, drained ONE payload per frame by
+    /// `FerroliteApp::drain_one_warm_render` (bounded GPU work, CLAUDE.md rule
+    /// 2). Capped at `WARM_WINDOW_FORWARD + WARM_WINDOW_BACK` there (oldest
+    /// dropped on overflow) so a fast filmstrip scrub cannot pile up.
+    pub warm_render_queue: VecDeque<crate::events::WarmSourcePayload>,
 
     /// Image ids with an in-flight off-thread thumbnail decode (lazy-load path).
     /// Dedups repeated `request_thumbnail` calls while the job is running;
@@ -277,6 +284,7 @@ impl AppState {
             warm_cache: crate::develop::cache::WarmCache::new(crate::diag_mem::adaptive_budget(
                 crate::mem_probe::total_ram_bytes(),
             )),
+            warm_render_queue: VecDeque::new(),
             thumb_pending: HashSet::new(),
             thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),
@@ -895,6 +903,7 @@ impl AppState {
             warm_cache: crate::develop::cache::WarmCache::new(crate::diag_mem::adaptive_budget(
                 crate::mem_probe::total_ram_bytes(),
             )),
+            warm_render_queue: VecDeque::new(),
             thumb_pending: HashSet::new(),
             thumb_handles: HashMap::new(),
             thumb_missing: HashSet::new(),

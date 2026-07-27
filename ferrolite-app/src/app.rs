@@ -611,6 +611,96 @@ impl FerroliteApp {
         );
     }
 
+    /// Render at most ONE queued warm neighbor's edited rung-1 display texture
+    /// per frame (bounded GPU work, CLAUDE.md rule 2) and insert it into the
+    /// warm cache so clicking that neighbor later reveals instantly. The heavy
+    /// decode already happened off-thread (`warm_prefetch::spawn_warm_sources`,
+    /// Task 7); this is only the fast GPU edit pass — the SAME rung-1 build a
+    /// real open runs (`apply_full_decoded` for RAW, `reveal_srgb_preview` for
+    /// Standard), so a warm reveal is pixel-identical to a cold one. No holder
+    /// is installed here (unlike a real open) — only the output texture is
+    /// cached; `try_warm_reveal` installs it later, on click.
+    fn drain_one_warm_render(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(payload) = self.state.warm_render_queue.pop_front() else {
+            return;
+        };
+        let Some(rs) = frame.wgpu_render_state() else {
+            // No GPU this frame (should not happen in this build): retry next frame.
+            self.state.warm_render_queue.push_front(payload);
+            return;
+        };
+        let key = crate::develop::cache::CacheKey {
+            image_id: payload.image_id,
+            op_stack_hash: ferrolite_previews::hash_serde(&payload.op_stack),
+        };
+        // Already warm at this exact (image, stack)? Nothing to render.
+        if !matches!(
+            self.state.warm_cache.get(key),
+            crate::develop::cache::WarmHit::Miss
+        ) {
+            return;
+        }
+
+        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let (tex, dims) = match payload.kind {
+            ferrolite_image::FileKind::Raw => {
+                // Mirror `apply_full_decoded`'s rung-1 build: camera→working
+                // composed from the NEIGHBOR's own color profile + op-stack WB —
+                // NOT `self.camera_to_working`/`current_wb_temp`, which are
+                // scoped to the open viewer's profile/stack — via the SAME
+                // `wb_camera_to_working` helper `camera_to_working` itself
+                // calls. Lens/vignette are left at `EditPipeline::new`'s
+                // defaults (identity): this neighbor has not been lens-baked
+                // yet, and a real open re-bakes + re-renders regardless.
+                let temp = payload
+                    .op_stack
+                    .white_balance()
+                    .map(|w| w.temp)
+                    .unwrap_or(0.0);
+                let cam = crate::camera_matrix::wb_camera_to_working(
+                    &payload.color_profile,
+                    temp,
+                    self.state.working_space,
+                );
+                let mut ep = ferrolite_pipeline::EditPipeline::new(
+                    ctx_arc,
+                    &payload.source,
+                    payload.op_stack.clone(),
+                    cam,
+                );
+                let out = ep.evaluate();
+                (out.texture.clone(), (out.width, out.height))
+            }
+            ferrolite_image::FileKind::Standard => {
+                // Mirror `reveal_srgb_preview`'s path: the source is already
+                // display-linear sRGB, so run ONE sRGB→working color pass — no
+                // camera matrix. `preview_to_working` depends only on the
+                // current working space (not on which image is open), so it
+                // is reused as-is.
+                let pw = self.preview_to_working();
+                let out = ferrolite_pipeline::color_convert(ctx_arc, &payload.source, pw);
+                (out.texture.clone(), (out.width, out.height))
+            }
+        };
+        // Rgba16Float rung-1 texture = 8 B/px (matches `warm_insert_display`).
+        // The source is always genuinely full-resolution here (Task 7 decodes
+        // the full RAW / full-res Standard image, never a downscaled stand-in),
+        // so this is a full-res Display entry — consistent with the full-res-
+        // only rule `warm_insert_display` enforces for a real open's reveal.
+        let bytes = dims.0 as u64 * dims.1 as u64 * 8;
+        self.state.warm_cache.insert_display(
+            key,
+            crate::develop::cache::DisplayEntry {
+                tex: Some(tex),
+                dims,
+                bytes,
+            },
+        );
+        // Request the next frame so the following queued neighbor drains then —
+        // one-per-frame cadence, never a while-loop draining the whole queue.
+        ctx.request_repaint();
+    }
+
     /// Flag the histogram stale so the next frame recomputes it (debounced).
     fn mark_histogram_dirty(&mut self) {
         if let Some(v) = self.state.viewer.as_mut() {
@@ -4759,6 +4849,12 @@ impl eframe::App for FerroliteApp {
                             }
                         }
                         self.drive_viewer(ui, frame);
+                        // Bounded one-per-frame warm-neighbor render (Task 8):
+                        // pop at most one queued decoded source and turn it into
+                        // a cached display texture. Placed alongside
+                        // `drive_viewer` since both need `frame`'s render state
+                        // and both run only while Develop is open with a viewer.
+                        self.drain_one_warm_render(ctx, frame);
                         if self.state.settings.show_histogram {
                             self.draw_histogram_overlay(ui);
                         }

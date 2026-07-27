@@ -12,13 +12,32 @@ use ferrolite_pipeline::OpStack;
 use ferrolite_vt::TileSource;
 
 /// Neighbors warmed AHEAD of the current image (the culling direction).
-#[allow(dead_code)] // wired by Task 7 (forward-biased prefetch window)
 pub const WARM_WINDOW_FORWARD: usize = 4;
 /// Neighbors warmed BEHIND the current image.
-#[allow(dead_code)] // wired by Task 7 (forward-biased prefetch window)
 pub const WARM_WINDOW_BACK: usize = 2;
 /// How many most-recent images also retain the full pipeline (instant 1:1).
 pub const WARM_FULL_COUNT: usize = 2;
+
+/// Forward-biased neighbor selection for warm prefetch: up to `forward` ids ahead
+/// of `current` (the culling direction, listed first) then up to `back` behind,
+/// clamped to the list, excluding `current`. Empty if `current` is absent.
+pub fn warm_window(ids: &[i64], current: i64, forward: usize, back: usize) -> Vec<i64> {
+    let Some(pos) = ids.iter().position(|id| *id == current) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for i in 1..=forward {
+        if let Some(id) = ids.get(pos + i) {
+            out.push(*id);
+        }
+    }
+    for i in 1..=back {
+        if pos >= i {
+            out.push(ids[pos - i]);
+        }
+    }
+    out
+}
 
 /// Identity of a cached render: an edit (new op stack) yields a new hash, so the
 /// stale entry is a natural miss and ages out by LRU — no manual invalidation.
@@ -332,6 +351,18 @@ mod tests {
             c.insert_full(key(i, 0), full_e(10));
         }
         assert_eq!(c.len_full(), WARM_FULL_COUNT, "full tier bounded by count");
+    }
+
+    #[test]
+    fn warm_window_is_forward_biased_and_clamped() {
+        let ids = [10, 20, 30, 40, 50, 60, 70];
+        // current=30 (pos 2), forward 3 back 1 -> [40,50,60] forward + [20] back,
+        // forward first (culling direction), current excluded.
+        assert_eq!(warm_window(&ids, 30, 3, 1), vec![40, 50, 60, 20]);
+        // Clamp at the end.
+        assert_eq!(warm_window(&ids, 70, 3, 1), vec![60]);
+        // current absent -> empty.
+        assert!(warm_window(&ids, 999, 3, 1).is_empty());
     }
 
     #[test]

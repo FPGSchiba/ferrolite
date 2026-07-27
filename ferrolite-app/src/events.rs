@@ -102,6 +102,24 @@ pub enum AppEvent {
     /// decode error). Handled in `app.rs`: the full-decode path then runs and
     /// (Task 5) caches its result. Not folded by `apply`.
     PreviewCacheMiss { image_id: i64 },
+    /// A warm-neighbor SOURCE finished decoding off-thread
+    /// (`develop::warm_prefetch::spawn_warm_sources`, Task 7): the demosaiced
+    /// RAW / decoded Standard pixel source for a forward-biased filmstrip
+    /// neighbor, its persisted op stack, and enough context (`kind`,
+    /// `color_profile`) to render it exactly like a real open. Currently a
+    /// stub — `apply` drops it (no-op) until Task 8 wires the render-thread
+    /// warm-render that turns a source into a cached display texture.
+    WarmSourceReady {
+        image_id: i64,
+        #[allow(dead_code)] // read by Task 8 (render-thread warm-render)
+        source: std::sync::Arc<ferrolite_image::LinearRgbaF32>,
+        #[allow(dead_code)] // read by Task 8 (render-thread warm-render)
+        op_stack: ferrolite_pipeline::OpStack,
+        #[allow(dead_code)] // read by Task 8 (render-thread warm-render)
+        kind: ferrolite_image::FileKind,
+        #[allow(dead_code)] // read by Task 8 (render-thread warm-render)
+        color_profile: ferrolite_decode::ColorProfile,
+    },
     /// Tile progress for the running single-file export.
     ExportProgress {
         // The single active `ExportActivity` (there is only ever one running
@@ -253,6 +271,10 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("PreviewCacheMiss")
                 .field("image_id", image_id)
                 .finish(),
+            AppEvent::WarmSourceReady { image_id, .. } => f
+                .debug_struct("WarmSourceReady")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
             AppEvent::ExportProgress {
                 image_id,
                 done,
@@ -405,6 +427,9 @@ impl AppState {
             // decode); nothing to fold here.
             AppEvent::PreviewCacheHit { .. } => None,
             AppEvent::PreviewCacheMiss { .. } => None,
+            // Stub until Task 8 wires the render-thread warm-render: the
+            // decoded source is simply dropped.
+            AppEvent::WarmSourceReady { .. } => None,
             // Handled in `app.rs` (needs GPU-independent status-bar update, but
             // routed there alongside the other viewer-scoped events); nothing to
             // fold here.

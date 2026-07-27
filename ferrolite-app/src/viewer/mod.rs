@@ -249,6 +249,16 @@ pub struct ViewerState {
     /// leave stale background decodes racing the newly-opened one.
     pub prefetch_handles: Vec<JobHandle>,
 
+    // ── Warm-source neighbor prefetch (Task 7) ─────────────────────────────
+    /// True once the forward-biased warm-source prefetch pass
+    /// (`develop::warm_prefetch::spawn_warm_sources`) has been submitted for
+    /// this open (one-shot — fires only after `loaded`, never re-fires).
+    pub warm_prefetch_requested: bool,
+    /// Handle for the single serialized warm-source prefetch job; cancelled on
+    /// navigation alongside the other load handles for the same reason as
+    /// `prefetch_handles`.
+    pub warm_prefetch_handles: Vec<JobHandle>,
+
     /// True once any edit is applied to this image THIS session (including a
     /// reset-to-identity, which is also a change). Drives auto-regeneration of
     /// the Library thumbnail when leaving Develop. Set only in the app's
@@ -367,6 +377,8 @@ impl ViewerState {
             histogram: HistogramState::new(),
             prefetch_requested: false,
             prefetch_handles: Vec::new(),
+            warm_prefetch_requested: false,
+            warm_prefetch_handles: Vec::new(),
             edits_dirty: false,
             lens_warp: None,
             lens_vignette: None,
@@ -475,6 +487,9 @@ impl ViewerState {
             h.cancel();
         }
         for h in &self.prefetch_handles {
+            h.cancel();
+        }
+        for h in &self.warm_prefetch_handles {
             h.cancel();
         }
         if let Some(h) = self.lens_bake_handle.as_ref() {

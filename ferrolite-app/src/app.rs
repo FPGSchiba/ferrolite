@@ -4514,6 +4514,51 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // Task 7: alongside the disk preview-cache prefetch above, also warm the
+        // forward-biased neighbor window's SOURCES off-thread (decode + demosaic
+        // only — no display texture yet; Task 8 turns a delivered source into a
+        // cached render). One-shot per open, gated + cancelled the same way.
+        if self
+            .state
+            .viewer
+            .as_ref()
+            .is_some_and(|v| v.loaded && !v.warm_prefetch_requested)
+        {
+            if let Some(current_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
+                let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
+                let targets = crate::develop::cache::warm_window(
+                    &ids,
+                    current_id,
+                    crate::develop::cache::WARM_WINDOW_FORWARD,
+                    crate::develop::cache::WARM_WINDOW_BACK,
+                );
+                let neighbors: Vec<(i64, std::path::PathBuf, ferrolite_image::FileKind)> = targets
+                    .into_iter()
+                    .filter_map(|id| {
+                        let rec = self.state.images.iter().find(|r| r.id == id)?;
+                        let path = self.state.image_path(rec)?;
+                        Some((id, path, rec.kind))
+                    })
+                    .collect();
+                if let Some(rs) = frame.wgpu_render_state() {
+                    let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+                    let handles = crate::develop::warm_prefetch::spawn_warm_sources(
+                        &self.state.jobs,
+                        &self.state.tx,
+                        ctx,
+                        neighbors,
+                        gpu,
+                    );
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == current_id {
+                            v.warm_prefetch_handles = handles;
+                            v.warm_prefetch_requested = true;
+                        }
+                    }
+                }
+            }
+        }
+
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
             self.maybe_update_histogram(ctx, frame);
         }

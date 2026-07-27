@@ -40,3 +40,4 @@ pub mod tool_panel;
 pub mod tool_state;
 pub mod tools;
 pub mod vignette_mode;
+pub mod warm_prefetch;

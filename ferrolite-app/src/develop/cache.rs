@@ -196,7 +196,6 @@ impl WarmCache {
     }
 
     /// Total resident bytes across both tiers (feeds the F10 `ram_cache` gauge).
-    #[allow(dead_code)] // wired by Task 9 (diagnostics)
     pub fn resident_bytes(&self) -> u64 {
         let d: u64 = self.display.values().map(|s| s.entry.bytes).sum();
         let f: u64 = self.full.values().map(|s| s.entry.bytes).sum();

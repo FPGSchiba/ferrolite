@@ -3241,6 +3241,12 @@ impl FerroliteApp {
             self.state.textures.len() as u64 * 256 * 256 * 4,
         );
 
+        // Warm-navigation cache (display + full tiers) resident bytes.
+        b.set(
+            MemCategory::RamCache,
+            self.state.warm_cache.resident_bytes(),
+        );
+
         b
     }
 }

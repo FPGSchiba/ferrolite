@@ -22,10 +22,11 @@ use ferrolite_vt::ViewTransform;
 /// long enough to avoid a hard pop.
 pub const CROSSFADE_SECS: f32 = 0.15;
 
-/// Tier-0 placeholder (upscaled grid thumbnail) fade-out duration (seconds).
-/// Short enough to read as an instant sharpen, long enough to hide the pop from
-/// the thumbnail's lower resolution as the real reveal lands.
-pub const TIER0_FADE_SECS: f32 = 0.18;
+/// The Tier-0 grid-thumbnail placeholder is shown only once an open has been
+/// unrevealed for this long — so fast/warm reveals show no placeholder at all
+/// (no flash), while a genuinely slow cold decode still gets instant-ish
+/// feedback. Tunable.
+pub const TIER0_GRACE_SECS: f32 = 0.12;
 
 /// Debounce (seconds) between a preview recompute and the histogram dispatch, so
 /// a slider drag coalesces into one compute rather than one per frame.
@@ -122,15 +123,6 @@ pub struct ViewerState {
     pub present_key: Option<(u64, ferrolite_vt::ViewTransform)>,
     /// Seconds elapsed into the active crossfade.
     pub crossfade_elapsed: f32,
-    /// True while the Tier-0 placeholder (the upscaled grid thumbnail shown at
-    /// open, before the real reveal) is fading out over the revealed image.
-    /// Begun when `loaded` first flips true; cleared when the ramp completes.
-    pub tier0_fading: bool,
-    /// Seconds elapsed into the active Tier-0 placeholder fade.
-    pub tier0_elapsed: f32,
-    /// One-shot: set true once the Tier-0 fade has been kicked off for this open,
-    /// so the `loaded`-edge trigger in `paint` fires exactly once.
-    pub tier0_started: bool,
     /// Terminal state: nothing more will load (preview failed AND/OR full failed,
     /// or full is ready and the crossfade is complete with no tiles pending). When
     /// set the paint loop stops requesting repaints to avoid a busy-loop.
@@ -352,9 +344,6 @@ impl ViewerState {
             crossfading: false,
             present_key: None,
             crossfade_elapsed: 0.0,
-            tier0_fading: false,
-            tier0_elapsed: 0.0,
-            tier0_started: false,
             idle: false,
             showing_full: false,
             image_dims: None,
@@ -427,29 +416,6 @@ impl ViewerState {
         factor
     }
 
-    /// Begin the Tier-0 placeholder fade (called once, when the real reveal
-    /// first sets `loaded = true`). No-op semantics if called again mid-fade are
-    /// avoided by the caller's one-shot guard in `paint`.
-    pub fn begin_tier0_fade(&mut self) {
-        self.tier0_fading = true;
-        self.tier0_elapsed = 0.0;
-    }
-
-    /// Advance the Tier-0 fade by `dt` and return the current placeholder opacity
-    /// in `[0,1]`. Clears `tier0_fading` once the ramp completes so the repaint
-    /// loop can idle. Returns 0.0 when not fading.
-    pub fn tick_tier0_fade(&mut self, dt: f32) -> f32 {
-        if !self.tier0_fading {
-            return 0.0;
-        }
-        self.tier0_elapsed += dt;
-        let alpha = tier0_fade_alpha(self.tier0_elapsed);
-        if alpha <= 0.0 {
-            self.tier0_fading = false;
-        }
-        alpha
-    }
-
     /// Select the `(source buffer, color matrix)` the PREVIEW tier must use for
     /// this image's kind. This is the single source of truth for the RAW-vs-Standard
     /// preview color path, shared by `apply_full_decoded`, `set_preview_and_full`,
@@ -516,13 +482,6 @@ impl ViewerState {
     pub fn op_stack_hash(&self) -> u64 {
         ferrolite_previews::hash_serde(&self.op_stack)
     }
-}
-
-/// Tier-0 placeholder opacity for a given elapsed time: ramps linearly from 1.0
-/// (fully covering the just-revealed image) to 0.0 over `TIER0_FADE_SECS`, then
-/// stays 0. Pure — unit-tested; the draw + ramp advance live in `paint`.
-pub fn tier0_fade_alpha(elapsed: f32) -> f32 {
-    (1.0 - elapsed / TIER0_FADE_SECS).clamp(0.0, 1.0)
 }
 
 /// Zoom about the cursor: keep the image point under the cursor fixed.
@@ -687,50 +646,15 @@ pub fn paint(
             },
         ));
 
-        // Tier-0 fade-out: the first frame the real reveal is `loaded`, start a
-        // short ramp; while it runs, draw the grid thumbnail once more OVER the
-        // wgpu canvas at decreasing opacity, aligned to where the revealed image
-        // sits, so the lower-res placeholder dissolves into the sharp render with
-        // no hard pop. Only meaningful when a placeholder was actually shown
-        // (a thumbnail exists) — otherwise the ramp is a no-op fade of nothing.
-        if let Some(thumb) = tier0_thumb {
-            if !state.tier0_started {
-                state.tier0_started = true;
-                state.begin_tier0_fade();
-            }
-            if state.tier0_fading {
-                let dt = ui.input(|i| i.stable_dt);
-                let alpha = state.tick_tier0_fade(dt);
-                if alpha > 0.0 {
-                    // Align to the revealed image rect when dims are known
-                    // (seamless), else fall back to the fit letterbox.
-                    let dst = match state.image_dims {
-                        Some(dims) => image_screen_rect(rect, dims, state.view, viewport),
-                        None => {
-                            let sz = thumb.size();
-                            fit_rect(rect, (sz[0] as f32, sz[1] as f32))
-                        }
-                    };
-                    let tint = egui::Color32::from_white_alpha((alpha * 255.0) as u8);
-                    ui.painter().image(
-                        thumb.id(),
-                        dst,
-                        egui::Rect::from_min_max(
-                            egui::pos2(0.0_f32, 0.0_f32),
-                            egui::pos2(1.0_f32, 1.0_f32),
-                        ),
-                        tint,
-                    );
-                    ui.ctx().request_repaint();
-                }
-            }
-        }
-
         (false, source)
-    } else {
-        // Tier-0: if the grid thumbnail for this image is already decoded, draw
-        // it upscaled-to-fit so the open shows the picture instantly instead of a
-        // black canvas. The real reveal replaces it (and Task 3 fades this out).
+    } else if state.open_elapsed >= TIER0_GRACE_SECS {
+        // Grace elapsed without a reveal: this is a genuinely slow cold decode,
+        // so show the grid thumbnail (if decoded) upscaled-to-fit plus a spinner
+        // so the wait reads as working. A fast/warm reveal never reaches this
+        // branch — see the `state.open_elapsed < TIER0_GRACE_SECS` no-op case
+        // below, which keeps the open silent (just the black background already
+        // painted above) so there is no placeholder flash before a hard cut to
+        // the real reveal.
         if let Some(thumb) = tier0_thumb {
             let sz = thumb.size();
             let dst = fit_rect(rect, (sz[0] as f32, sz[1] as f32));
@@ -761,6 +685,14 @@ pub fn paint(
             egui::FontId::proportional(12.0),
             crate::theme::TEXT_DIM,
         );
+        (true, source)
+    } else {
+        // Still within the grace window: show nothing extra beyond the black
+        // background painted at the top of `paint` — no placeholder flash for
+        // fast/warm reveals. `loading_preview` stays `true` so the caller keeps
+        // requesting repaints and this branch re-evaluates every frame until
+        // either the reveal lands (`state.loaded` flips true above) or the grace
+        // elapses (the branch above takes over).
         (true, source)
     }
 }
@@ -922,38 +854,6 @@ mod tests {
         // Full ready but crossfade finished => 1.0 (show full).
         v.full_ready = true;
         assert_eq!(v.tick_crossfade(0.5), 1.0);
-    }
-
-    #[test]
-    fn tier0_fade_alpha_ramps_from_one_to_zero() {
-        assert_eq!(tier0_fade_alpha(0.0), 1.0, "full opacity at start");
-        assert_eq!(tier0_fade_alpha(TIER0_FADE_SECS), 0.0, "transparent at end");
-        assert_eq!(
-            tier0_fade_alpha(TIER0_FADE_SECS * 2.0),
-            0.0,
-            "clamped past end"
-        );
-        let mid = tier0_fade_alpha(TIER0_FADE_SECS * 0.5);
-        assert!((mid - 0.5).abs() < 1e-6, "linear midpoint, got {mid}");
-    }
-
-    #[test]
-    fn tick_tier0_fade_advances_and_terminates() {
-        let mut v = ViewerState::open(1, std::path::PathBuf::from("x.jpg"), FileKind::Standard);
-        assert!(!v.tier0_fading, "not fading until begun");
-        v.begin_tier0_fade();
-        assert!(v.tier0_fading);
-        // Half way: opacity ~0.5, still fading.
-        let a = v.tick_tier0_fade(TIER0_FADE_SECS * 0.5);
-        assert!((a - 0.5).abs() < 1e-6, "got {a}");
-        assert!(v.tier0_fading);
-        // Past the end: opacity 0, fading cleared.
-        let a = v.tick_tier0_fade(TIER0_FADE_SECS);
-        assert_eq!(a, 0.0);
-        assert!(
-            !v.tier0_fading,
-            "fade terminates so the repaint loop can idle"
-        );
     }
 
     #[test]

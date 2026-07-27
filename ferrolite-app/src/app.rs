@@ -2895,7 +2895,6 @@ impl FerroliteApp {
             && (loading_preview
                 || crossfading
                 || crossfading_present
-                || v.tier0_fading
                 || tiles_loading
                 || full_warming
                 || compose_pending)

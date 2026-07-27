@@ -18,7 +18,6 @@ pub const WARM_WINDOW_FORWARD: usize = 4;
 #[allow(dead_code)] // wired by Task 7 (forward-biased prefetch window)
 pub const WARM_WINDOW_BACK: usize = 2;
 /// How many most-recent images also retain the full pipeline (instant 1:1).
-#[allow(dead_code)] // wired by Task 6 (full-tier reveal calls insert_full)
 pub const WARM_FULL_COUNT: usize = 2;
 
 /// Identity of a cached render: an edit (new op stack) yields a new hash, so the
@@ -44,13 +43,9 @@ pub struct DisplayEntry {
 /// fabricate the struct; production always stores `Some`.
 #[derive(Clone)]
 pub struct FullEntry {
-    #[allow(dead_code)] // read by Task 6
     pub pyramid: Option<Arc<GpuPyramidSource>>,
-    #[allow(dead_code)] // read by Task 6
     pub tile_source: Option<Arc<dyn TileSource + Send + Sync>>,
-    #[allow(dead_code)] // read by Task 6
     pub op_stack: OpStack,
-    #[allow(dead_code)] // read by Task 6
     pub cam: [[f32; 3]; 3],
     pub bytes: u64,
 }
@@ -58,7 +53,6 @@ pub struct FullEntry {
 /// Result of consulting the cache for a key.
 pub enum WarmHit {
     Full {
-        #[allow(dead_code)] // read by Task 6 (full-tier reveal)
         full: FullEntry,
         display: DisplayEntry,
     },
@@ -149,7 +143,6 @@ impl WarmCache {
 
     /// Insert a full-pipeline entry, bounding the tier to `WARM_FULL_COUNT` by
     /// evicting the least-recently-touched full entry that is not the open image.
-    #[allow(dead_code)] // wired by Task 6 (full-tier reveal)
     pub fn insert_full(&mut self, key: CacheKey, entry: FullEntry) {
         let now = self.tick();
         self.full.insert(

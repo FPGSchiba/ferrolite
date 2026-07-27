@@ -120,11 +120,11 @@ pub fn linear_bytes(width: u32, height: u32) -> u64 {
 
 /// Fraction of total system RAM the develop warm cache may use, before clamping.
 /// Tunable: raise for more warm-navigation headroom on RAM-rich hosts.
-pub const BUDGET_FRACTION_PERCENT: u64 = 15;
+pub const BUDGET_FRACTION_PERCENT: u64 = 10;
 /// Lower clamp for the warm-cache budget — never below this on small-RAM hosts.
 pub const BUDGET_FLOOR_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 /// Upper clamp for the warm-cache budget — never above this on large-RAM hosts.
-pub const BUDGET_CEILING_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB
+pub const BUDGET_CEILING_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB
 
 /// Adaptive warm-cache byte budget = clamp(fraction × total RAM, floor, ceiling).
 /// Divide-then-multiply avoids `u64` overflow on large-RAM hosts.

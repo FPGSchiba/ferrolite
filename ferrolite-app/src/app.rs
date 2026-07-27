@@ -621,6 +621,22 @@ impl FerroliteApp {
     /// is installed here (unlike a real open) — only the output texture is
     /// cached; `try_warm_reveal` installs it later, on click.
     fn drain_one_warm_render(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        // C3: pause draining during active navigation. Only render a queued
+        // warm neighbor once the CURRENT viewer has settled (dwelled at least
+        // `WARM_SETTLE_SECS`) — during fast filmstrip scrubbing this GPU work
+        // would compete with the live reveal + pyramid installs on the render
+        // thread and cause frame spikes. The queue is bounded (caps length +
+        // drops oldest) and nothing is popped here while paused, so payloads
+        // are only DEFERRED, never dropped — draining resumes once the user
+        // settles on an image.
+        let settled = self
+            .state
+            .viewer
+            .as_ref()
+            .is_some_and(|v| v.open_elapsed >= crate::develop::cache::WARM_SETTLE_SECS);
+        if !settled {
+            return;
+        }
         let Some(payload) = self.state.warm_render_queue.pop_front() else {
             return;
         };
@@ -4642,12 +4658,23 @@ impl eframe::App for FerroliteApp {
         // forward-biased neighbor window's SOURCES off-thread (decode + demosaic
         // only — no display texture yet; Task 8 turns a delivered source into a
         // cached render). One-shot per open, gated + cancelled the same way.
-        if self
+        //
+        // Additionally gated on `open_elapsed >= WARM_SETTLE_SECS` (C1): the user
+        // must have DWELLED on this image before its neighbors are prefetched, so
+        // fast filmstrip scrubbing — where each image is superseded before it
+        // settles — never dispatches a neighbor-decode wave the app immediately
+        // discards. This does NOT affect the warm-cache REVEAL for the image being
+        // opened (`try_warm_reveal`, gated on `ops_loaded`) — that stays prompt.
+        let warm_settle_pending = self
             .state
             .viewer
             .as_ref()
-            .is_some_and(|v| v.loaded && !v.warm_prefetch_requested)
-        {
+            .is_some_and(|v| v.loaded && !v.warm_prefetch_requested);
+        if self.state.viewer.as_ref().is_some_and(|v| {
+            v.loaded
+                && !v.warm_prefetch_requested
+                && v.open_elapsed >= crate::develop::cache::WARM_SETTLE_SECS
+        }) {
             if let Some(current_id) = self.state.viewer.as_ref().map(|v| v.image_id) {
                 let ids: Vec<i64> = self.state.images.iter().map(|r| r.id).collect();
                 let targets = crate::develop::cache::warm_window(
@@ -4680,6 +4707,18 @@ impl eframe::App for FerroliteApp {
                         }
                     }
                 }
+            }
+        } else if warm_settle_pending {
+            // Not settled yet: guarantee a frame fires once WARM_SETTLE_SECS
+            // elapses even if the app would otherwise go idle waiting on input
+            // (mirrors the FULL_DECODE_DEBOUNCE guarantee above) — otherwise a
+            // still (non-navigated) image that reveals from the warm cache and
+            // goes idle before 0.4s could leave the prefetch dispatch waiting on
+            // an incidental repaint that may not come.
+            if let Some(v) = self.state.viewer.as_ref() {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f32(
+                    crate::develop::cache::WARM_SETTLE_SECS - v.open_elapsed,
+                ));
             }
         }
 

@@ -17,6 +17,10 @@ pub const WARM_WINDOW_FORWARD: usize = 4;
 pub const WARM_WINDOW_BACK: usize = 2;
 /// How many most-recent images also retain the full pipeline (instant 1:1).
 pub const WARM_FULL_COUNT: usize = 2;
+/// How long the user must dwell on an image before its neighbors are warm-
+/// prefetched — so fast filmstrip scrubbing doesn't flood the job system with
+/// neighbor decodes it will immediately supersede. Tunable.
+pub const WARM_SETTLE_SECS: f32 = 0.4;
 
 /// Forward-biased neighbor selection for warm prefetch: up to `forward` ids ahead
 /// of `current` (the culling direction, listed first) then up to `back` behind,

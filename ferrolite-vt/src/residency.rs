@@ -7,14 +7,16 @@ use ferrolite_image::{tiles_per_level, TileCoord, TILE_SIZE};
 
 use crate::transform::ViewTransform;
 
-/// Virtual tiles the current view needs at its chosen LOD (visible rect only).
-pub fn needed_tiles(
+/// Virtual tiles covering the visible image-space rect at an EXPLICIT `lod`
+/// (row-major, visibility order). Shared by `needed_tiles` (the picked level)
+/// and `needed_tiles_prefetched` (which also needs the next-coarser trilinear
+/// blend tap) so both compute the visible rect identically.
+fn visible_tiles_at_lod(
     image: (u32, u32),
     view: &ViewTransform,
     viewport: (f32, f32),
-    level_count: u32,
+    lod: u32,
 ) -> Vec<TileCoord> {
-    let lod = view.lod_for(image, level_count);
     let (cols, rows) = tiles_per_level(image.0, image.1, lod);
     // Visible image-space rect (centered pan). Half-viewport in image px = (vp/2)/zoom.
     let half_w = (viewport.0 * 0.5) / view.zoom;
@@ -36,6 +38,17 @@ pub fn needed_tiles(
     out
 }
 
+/// Virtual tiles the current view needs at its chosen LOD (visible rect only).
+pub fn needed_tiles(
+    image: (u32, u32),
+    view: &ViewTransform,
+    viewport: (f32, f32),
+    level_count: u32,
+) -> Vec<TileCoord> {
+    let lod = view.lod_for(image, level_count);
+    visible_tiles_at_lod(image, view, viewport, lod)
+}
+
 /// The visible needed set (visibility priority) expanded by a `ring` of tiles on
 /// each side at the same LOD, plus every tile of the coarsest level (the protected
 /// base that guarantees a resident coarse fallback). De-duplicated, visible-first.
@@ -46,12 +59,33 @@ pub fn needed_tiles_prefetched(
     level_count: u32,
     ring: u32,
 ) -> Vec<TileCoord> {
-    let mut out = needed_tiles(image, view, viewport, level_count);
+    let lo_visible = needed_tiles(image, view, viewport, level_count);
+    let mut out = lo_visible.clone();
     let mut seen: std::collections::HashSet<TileCoord> = out.iter().copied().collect();
 
-    // Ring: expand the visible bounding box at the chosen LOD by `ring` tiles.
+    // Trilinear blend coarse tap: `fs_sparse` samples the picked level `lo` AND
+    // the next-coarser `hi = lo+1`, blending by `fract(log2 density)`. If `hi`
+    // isn't resident the shader's `resolve_sparse(hi)` walks down to the
+    // protected COARSEST base, so the blend mixes the sharp `lo` with a far-
+    // coarser level and the whole view goes soft at any fractional (non-power-
+    // of-two) zoom — the zoom-out blur bug. Request `hi`'s visible tiles right
+    // after the sharp `lo` tiles (ahead of the ring/base) so the producer keeps
+    // the blend tap resident. `hi == lo` at the coarsest level (nothing to add).
+    let lo = view.lod_for(image, level_count);
+    let hi = (lo + 1).min(level_count.saturating_sub(1));
+    if hi != lo {
+        for t in visible_tiles_at_lod(image, view, viewport, hi) {
+            if seen.insert(t) {
+                out.push(t);
+            }
+        }
+    }
+
+    // Ring: expand the visible bounding box at the chosen (`lo`) LOD by `ring`
+    // tiles. Computed from `lo_visible` (not `out`, which now also holds the
+    // `hi` blend tap) so the bounding box stays the `lo` rect.
     if ring > 0 {
-        if let (Some(&first), Some(&last)) = (out.first(), out.last()) {
+        if let (Some(&first), Some(&last)) = (lo_visible.first(), lo_visible.last()) {
             let lod = first.lod;
             let (cols, rows) = tiles_per_level(image.0, image.1, lod);
             let x0 = first.x.saturating_sub(ring);
@@ -254,6 +288,47 @@ mod tests {
         let (to_load, to_evict) = r.diff(&needed);
         assert_eq!(to_load, vec![tc(0, 1, 0)]);
         assert_eq!(to_evict, vec![tc(0, 9, 9)]);
+    }
+
+    #[test]
+    fn prefetch_includes_the_trilinear_blend_coarse_tap() {
+        use crate::lod::lod_levels;
+        // Zoom-out blur root cause: the display (`fs_sparse`) trilinearly blends
+        // the picked level `lo` with the next-coarser `hi = lo+1` by
+        // `fract(log2 density)`. If `hi` is never in the producer's needed set it
+        // can't be resident, so `resolve_sparse(hi)` falls back to the protected
+        // COARSEST base — and the blend mixes sharp-`lo` with that far-coarser
+        // level, so any non-power-of-two (fractional-LOD) zoom-out is permanently
+        // soft. Guard that the prefetch set includes the `hi` tap the shader samples.
+        let image = (6000u32, 4000u32);
+        let level_count = 6u32;
+        // density = 2^2.5 -> lo=2, hi=3, frac~0.5 (a genuinely fractional LOD,
+        // i.e. zoomed out to between two pyramid levels).
+        let density = 2f32.powf(2.5);
+        let (lo, hi, frac) = lod_levels(density, level_count);
+        assert_eq!((lo, hi), (2, 3));
+        assert!(
+            frac > 0.05,
+            "fixture must be at a fractional LOD (frac={frac})"
+        );
+
+        let view = ViewTransform {
+            // `zoom` is screen px per image px, so `1/zoom == density`.
+            zoom: 1.0 / density,
+            pan: (0.0, 0.0),
+        };
+        let needed = needed_tiles_prefetched(image, &view, (1400.0, 900.0), level_count, 1);
+
+        assert!(
+            needed.iter().any(|t| t.lod == lo),
+            "picked level {lo} must be in the needed set"
+        );
+        assert!(
+            needed.iter().any(|t| t.lod == hi),
+            "trilinear blend tap (lod {hi}) missing from the prefetch set -> the \
+             display blends the sharp lod {lo} with the COARSEST base instead of \
+             lod {hi}, so a zoomed-out (fractional-LOD) view stays soft"
+        );
     }
 
     #[test]

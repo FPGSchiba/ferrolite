@@ -1249,6 +1249,18 @@ impl FerroliteApp {
             if let Some(a) = v.dehaze_atmos() {
                 producer.set_dehaze_atmos(a);
             }
+            // Seed the shared dehaze transmission (ST-Task 4) from the preview
+            // `EditPipeline` if it already exists and has evaluated (it's built +
+            // evaluated in `apply_full_decoded`, which runs before this pyramid-
+            // ready handler) — so a producer built outside an edit still starts
+            // with the current map instead of a stale passthrough. `producer` is a
+            // local here (not yet stored on `v`), so this doesn't conflict with
+            // the immutable `v.preview_edit` borrow.
+            producer.set_shared_transmission(
+                v.preview_edit
+                    .as_ref()
+                    .and_then(|ep| ep.transmission_texture()),
+            );
             v.edit_producer = Some(producer);
             // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
             // this producer was built from `v.op_stack`.
@@ -1429,6 +1441,17 @@ impl FerroliteApp {
             if let Some(a) = v.dehaze_atmos() {
                 producer.set_dehaze_atmos(a);
             }
+            // Re-seed the shared dehaze transmission (ST-Task 4): this rebuild
+            // discards the previous producer, so the fresh one needs the current
+            // map from the preview `EditPipeline` (already built + evaluated by
+            // now — see the preview-tier branch above in this same handler, or
+            // `apply_full_decoded` at open). `producer` is a local (not yet on
+            // `v`), so no borrow conflict with the immutable `v.preview_edit` read.
+            producer.set_shared_transmission(
+                v.preview_edit
+                    .as_ref()
+                    .and_then(|ep| ep.transmission_texture()),
+            );
             v.edit_producer = Some(producer);
             // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
             // this producer was rebuilt from `shown`.
@@ -1658,6 +1681,24 @@ impl FerroliteApp {
                     crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
                 producer.set_vig_amount(vig_amount);
                 producer.set_vig_manual(vig_manual);
+            }
+            // Hand the tiled producer the shared dehaze transmission (ST-Task 4):
+            // the preview `EditPipeline` above (`v.preview_edit`) is the SOLE place
+            // the transmission is computed — evaluated earlier in this same call,
+            // just above (line ~1569) — so it is current here. The tiled recovery
+            // only samples it (no per-tile recompute). Fetch the `Arc` (cheap
+            // clone) into a local BEFORE mutably borrowing `v.edit_producer`: both
+            // are fields of `v`, so the immutable fetch must finish before the
+            // mutable borrow starts, or this doesn't compile. Runs unconditionally
+            // whenever a producer exists — both the just-rebuilt producer and the
+            // updated-in-place (color-only / amount-only) producer above need the
+            // current map; `None` (dehaze inactive) sets a passthrough.
+            let shared_transmission = v
+                .preview_edit
+                .as_ref()
+                .and_then(|ep| ep.transmission_texture());
+            if let Some(producer) = v.edit_producer.as_mut() {
+                producer.set_shared_transmission(shared_transmission);
             }
             // Record the stack the producer now reflects — the rebuild baseline for
             // the next commit (see the `full_stack` field doc + the block comment).

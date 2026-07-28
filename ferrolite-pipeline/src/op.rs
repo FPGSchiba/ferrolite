@@ -513,6 +513,26 @@ impl EditDoc {
         d
     }
 
+    /// New doc with the GLOBAL adjustment set replaced (normalized — see
+    /// `AdjustmentSet::normalized`). The scoped-edit write path for
+    /// `EditScope::Global`.
+    pub fn with_global(&self, set: AdjustmentSet) -> EditDoc {
+        let mut d = self.clone();
+        d.global = set.normalized();
+        d
+    }
+
+    /// New doc with layer `idx`'s adjustment set replaced (normalized). The
+    /// scoped-edit write path for `EditScope::Mask(idx)`. An out-of-range
+    /// `idx` (stale selection racing a delete) returns the doc unchanged.
+    pub fn with_layer_adjustments(&self, idx: usize, set: AdjustmentSet) -> EditDoc {
+        let mut d = self.clone();
+        if let Some(layer) = d.layers.get_mut(idx) {
+            layer.adjustments = set.normalized();
+        }
+        d
+    }
+
     pub fn exposure(&self) -> Option<Exposure> {
         (self.global.exposure != 0.0).then_some(Exposure {
             ev: self.global.exposure,
@@ -1176,5 +1196,82 @@ mod tests {
             }));
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(serde_json::from_str::<EditDoc>(&json).unwrap(), d);
+    }
+
+    #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
+    #[allow(clippy::field_reassign_with_default)]
+    fn with_global_normalizes_identity_structures() {
+        let mut set = AdjustmentSet::default();
+        set.dehaze = Dehaze {
+            amount: 0.0,
+            radius: 9,
+        }; // identity, non-canonical radius
+        set.exposure = 0.5;
+        let d = EditDoc::default().with_global(set);
+        assert_eq!(
+            d.global.dehaze,
+            Dehaze::default(),
+            "identity dehaze snapped"
+        );
+        assert_eq!(d.global.exposure, 0.5, "live value preserved");
+    }
+
+    #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
+    #[allow(clippy::field_reassign_with_default)]
+    fn with_layer_adjustments_writes_only_that_layer_and_normalizes() {
+        let la = LocalAdjustments {
+            layers: vec![
+                crate::local::MaskLayer {
+                    name: "A".into(),
+                    visible: true,
+                    mask: Default::default(),
+                    adjustments: Default::default(),
+                },
+                crate::local::MaskLayer {
+                    name: "B".into(),
+                    visible: true,
+                    mask: Default::default(),
+                    adjustments: Default::default(),
+                },
+            ],
+        };
+        let d = EditDoc::default().set_op(Op::LocalAdjustments(la));
+        let mut set = AdjustmentSet::default();
+        set.exposure = -1.0;
+        set.sharpen = Sharpen {
+            amount: 0.0,
+            radius: 5,
+        }; // identity, non-canonical
+        let d2 = d.with_layer_adjustments(1, set);
+        assert_eq!(
+            d2.layers[0].adjustments,
+            AdjustmentSet::default(),
+            "layer 0 untouched"
+        );
+        assert_eq!(d2.layers[1].adjustments.exposure, -1.0);
+        assert_eq!(
+            d2.layers[1].adjustments.sharpen,
+            Sharpen::default(),
+            "identity sharpen snapped"
+        );
+    }
+
+    #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
+    #[allow(clippy::field_reassign_with_default)]
+    fn with_layer_adjustments_out_of_range_is_a_noop() {
+        let d = EditDoc::default();
+        let mut set = AdjustmentSet::default();
+        set.exposure = 1.0;
+        assert_eq!(
+            d.with_layer_adjustments(3, set),
+            d,
+            "no panic, unchanged doc"
+        );
     }
 }

@@ -98,7 +98,7 @@ pub fn set_component(
 }
 
 pub fn set_adjustments(stack: &OpStack, idx: usize, a: AdjustmentSet) -> OpStack {
-    edit_layer(stack, idx, |l| l.adjustments = a)
+    stack.with_layer_adjustments(idx, a)
 }
 
 /// The mask definition AS IT WOULD BE with `tentative` folded in at `mode` after the

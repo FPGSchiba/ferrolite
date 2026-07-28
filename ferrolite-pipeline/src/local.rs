@@ -125,6 +125,30 @@ impl AdjustmentSet {
             && self.noise_reduction == NoiseReduction::default()
     }
 
+    /// Copy with every identity-valued STRUCTURED field snapped to its exact
+    /// `Default`, so identity edits stay byte-equal to a reset — the same
+    /// invariant `EditDoc::set_op` maintains (is_identity, PartialEq-vs-default,
+    /// and the serde hash agree). Scalars pass through (0.0 is already canonical).
+    pub fn normalized(&self) -> Self {
+        let mut s = self.clone();
+        if s.dehaze.is_identity() {
+            s.dehaze = crate::op::Dehaze::default();
+        }
+        if s.sharpen.amount == 0.0 {
+            s.sharpen = crate::op::Sharpen::default();
+        }
+        if s.tone_curve.is_identity() {
+            s.tone_curve = crate::op::ToneCurve::default();
+        }
+        if s.color_grade.is_identity() {
+            s.color_grade = crate::op::ColorGrade::default();
+        }
+        if s.hsl.is_identity() {
+            s.hsl = crate::op::Hsl::default();
+        }
+        s
+    }
+
     /// New set with one Light control reset to identity (immutable per-control reset).
     pub fn reset_light(&self, c: LightControl) -> Self {
         let mut s = self.clone();

@@ -825,7 +825,12 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         // fraction there as it would at 1:1 (clamped to >=1 px). At scale==1
         // this is `radius`/`gr` unchanged.
         let radius_full = (raw.radius.max(0) as u32).min(MAX_DEHAZE_RADIUS);
-        let gr_full = guided_radius(radius_full).min(MAX_DEHAZE_RADIUS.saturating_mul(3));
+        // Cap mirrors `guided_radius`'s own multiplier (5r, widened from 3r —
+        // see that fn's doc) so this defensive `.min` doesn't silently clip the
+        // widened window back down to the old 3r for radii near
+        // `MAX_DEHAZE_RADIUS`; it's still a real bound in case `guided_radius`
+        // ever grows the multiplier further than this call site expects.
+        let gr_full = guided_radius(radius_full).min(MAX_DEHAZE_RADIUS.saturating_mul(5));
         let scale_down = |r: u32| -> i32 { ((r as f32 / scale as f32).round() as i32).max(1) };
         let radius = scale_down(radius_full);
         let gr = scale_down(gr_full);

@@ -116,8 +116,16 @@ pub const DEHAZE_GUIDED_EPS: f32 = 1e-3;
 /// luma edge across the FULL width of the block-min dilation halo (width ≈ `r`),
 /// otherwise the far end of the halo band never sees the edge and the filter
 /// blurs it instead of removing it (see `guided_refinement_removes_most_of_the_block_min_halo`).
+/// Widened from `3r` to `5r` (tuning pass): at max dehaze amount, high-contrast
+/// in-focus edges (e.g. a dark branch against bright sky) showed a residual
+/// bright halo — a wider guided window is stronger edge-aware smoothing of the
+/// transmission, tightening edge-following and reducing that residual. Cheap:
+/// the transmission is computed once at a bounded working resolution (see
+/// `transmission_working_dims`/`DEHAZE_MAX_TRANSMISSION_DIM`), not per pixel of
+/// the full image, so a larger box-filter radius does not reintroduce the
+/// full-res OOM this module's other bound (`DEHAZE_MAX_TRANSMISSION_DIM`) fixed.
 pub fn guided_radius(r: u32) -> u32 {
-    r.saturating_mul(3)
+    r.saturating_mul(5)
 }
 
 /// Separable clamp-to-edge min over a `(2r+1)²` window: horizontal min pass then
@@ -484,6 +492,11 @@ mod tests {
             "raw block-min must have a real halo to remove (raw={raw_halo}, clean={clean})"
         );
         let removed = (raw_halo - refined_halo) / (raw_halo - clean);
+        eprintln!(
+            "guided_refinement_removes_most_of_the_block_min_halo: gr={} removed={:.1}% (raw={raw_halo:.4}, refined={refined_halo:.4}, clean={clean:.4})",
+            guided_radius(radius),
+            removed * 100.0
+        );
         assert!(
             removed >= 0.6,
             "guided filter must remove >=60% of the halo at its location \

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use ferrolite_color::WorkingSpace;
 use ferrolite_gpu::GpuContext;
+use ferrolite_image::LinearRgbaF32;
 use ferrolite_jobs::CancelToken;
 use ferrolite_lens::LensfunDb;
 use ferrolite_pipeline::{GpuPyramidSource, OpStack};
@@ -41,6 +42,14 @@ pub struct ExportRequest<'a> {
     /// Use `ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL` when the caller has no
     /// dehaze (or hasn't computed `A` yet).
     pub atmospheric_light: [f32; 3],
+    /// CPU preview-resolution source to build this export's OWN bounded
+    /// whole-image dehaze transmission from (ST-Task 5). `render_tiled` never
+    /// samples the live preview `EditPipeline`'s transmission texture directly —
+    /// export runs in a background job while the user may keep editing, and that
+    /// texture's contents get overwritten on the next preview evaluate (a race).
+    /// `None` when the stack has no active dehaze (or no preview source has
+    /// decoded yet); the tiled recovery then stays a passthrough.
+    pub transmission_source: Option<&'a LinearRgbaF32>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +79,7 @@ pub fn run_export(
         req.lens_db,
         depth,
         req.atmospheric_light,
+        req.transmission_source,
         cancel,
         progress,
     )?;

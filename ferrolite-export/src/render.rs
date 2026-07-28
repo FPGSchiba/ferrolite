@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use ferrolite_color::{working_to_output, WorkingSpace};
 use ferrolite_gpu::GpuContext;
-use ferrolite_image::{tile_pixel_origin, TileCoord, TILE_SIZE};
+use ferrolite_image::{tile_pixel_origin, LinearRgbaF32, TileCoord, TILE_SIZE};
 use ferrolite_jobs::CancelToken;
 use ferrolite_lens::LensfunDb;
 use ferrolite_pipeline::{
-    bake_products, edited_output_dims, GpuPyramidSource, OpStack, TileEditPipeline,
+    bake_products, edited_output_dims, transmission_working_dims, EditPipeline, GpuPyramidSource,
+    OpStack, TileEditPipeline,
 };
 use half::f16;
 
@@ -95,10 +96,39 @@ fn read_tile_rgba16f(ctx: &GpuContext, tex: &wgpu::Texture) -> Vec<f32> {
     out
 }
 
+/// Downscale `src` (nearest-neighbor stride sampling) to the bounded dehaze
+/// transmission working resolution (`ferrolite_pipeline::transmission_working_dims`,
+/// capped to `DEHAZE_MAX_TRANSMISSION_DIM`), or return an unchanged clone when
+/// `src` is already within the cap. Used ONLY to keep the export's one-shot
+/// transmission `EditPipeline` (see `render_tiled`) small — feeding it the
+/// full-res source would allocate a full-res color chain (SourceNode + 5
+/// per-pixel passes) and re-introduce the tiled full-res OOM this effort fixes
+/// (CLAUDE.md §2: GPU work must be bounded).
+fn downscale_for_transmission(src: &LinearRgbaF32) -> LinearRgbaF32 {
+    let (dw, dh, scale) = transmission_working_dims(src.width, src.height);
+    if scale <= 1 {
+        return src.clone();
+    }
+    let mut px = Vec::with_capacity((dw * dh * 4) as usize);
+    for y in 0..dh {
+        let sy = (y * src.height / dh).min(src.height.saturating_sub(1));
+        for x in 0..dw {
+            let sx = (x * src.width / dw).min(src.width.saturating_sub(1));
+            let i = ((sy * src.width + sx) * 4) as usize;
+            px.extend_from_slice(&src.pixels[i..i + 4]);
+        }
+    }
+    LinearRgbaF32::new(dw, dh, px).expect("downscale length")
+}
+
 /// Render the full-res edited image to a quantized RGB buffer, tile by tile.
 /// `camera_to_working` is the row-major 3×3 for the open image + working space
 /// (from the app's `camera_to_working()`); `working_space`→`output_space` drives
-/// the output conversion. Checks `cancel` once per tile and reports `(done,total)`.
+/// the output conversion. `transmission_source` is the CPU preview source to build
+/// this export's OWN bounded whole-image dehaze transmission from (source-space,
+/// downscaled to `DEHAZE_MAX_TRANSMISSION_DIM`) — `None` when the stack has no
+/// active dehaze, which keeps the tiled recovery a passthrough. Checks `cancel`
+/// once per tile and reports `(done,total)`.
 #[allow(clippy::too_many_arguments)] // spec §8.1 public interface (task brief); each param is
                                      // an independent required input, not a natural group.
 pub fn render_tiled(
@@ -111,6 +141,7 @@ pub fn render_tiled(
     lens_db: Option<&Arc<LensfunDb>>,
     depth: BitDepth,
     atmospheric_light: [f32; 3],
+    transmission_source: Option<&LinearRgbaF32>,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(u32, u32),
 ) -> Result<RenderedImage, ExportError> {
@@ -155,6 +186,26 @@ pub fn render_tiled(
     // on the tiled producer before rendering any tile. With a no-dehaze stack this
     // is a harmless no-op (amount 0 → identity regardless of A).
     pipeline.set_dehaze_atmos(atmospheric_light);
+
+    // Export builds its OWN bounded whole-image transmission (source-space) —
+    // it must NOT sample the live preview `EditPipeline`'s texture, since export
+    // runs in a background job while the user may keep editing, and the preview
+    // texture's contents get overwritten on the next preview evaluate (a race).
+    // Downscaled first (never full-res — see `downscale_for_transmission`) so
+    // this one-shot `EditPipeline` stays small. `transmission_ep` is kept alive
+    // for the whole tile loop below: it owns the transmission texture the tiled
+    // `pipeline` samples from (an `Arc`, but tying its lifetime to the loop is
+    // the documented contract). `None` (no active dehaze) leaves the tiled
+    // recovery as a passthrough, unchanged from before this fix.
+    // Prefixed `_` — never read again, but MUST stay bound (not a throwaway
+    // `let _ = ...`) so it lives until the function returns, past the tile loop.
+    let _transmission_ep = transmission_source.map(|src| {
+        let bounded = downscale_for_transmission(src);
+        let mut ep = EditPipeline::new(ctx.clone(), &bounded, stack.clone(), camera_to_working);
+        ep.evaluate();
+        pipeline.set_shared_transmission(ep.transmission_texture());
+        ep
+    });
 
     let m = working_to_output(working_space, output_space); // ferrolite_color::Mat3
 

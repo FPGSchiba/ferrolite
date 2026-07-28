@@ -176,6 +176,9 @@ fn run_one(
         // from it above), so it can estimate the real value here — no fallback
         // needed for this path.
         atmospheric_light: ferrolite_pipeline::estimate_atmospheric_light(&linear),
+        // Batch export always renders `OpStack::default()` (no per-image edits),
+        // so dehaze can never be active — no transmission to build.
+        transmission_source: None,
     };
     match run_export(req, cancel, progress) {
         Ok(outcome) => {

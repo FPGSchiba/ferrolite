@@ -594,6 +594,19 @@ impl FerroliteApp {
         let source_path = v.path.clone();
         let image_id = v.image_id;
         let stack = v.op_stack.clone();
+        // Only when dehaze is actually active does export need a transmission
+        // source: the same CPU preview-tier selection `preview_tier_source` uses
+        // (RAW: `raw_preview_source`; Standard: `preview_source`), passed as a
+        // SNAPSHOT `Arc` — export builds its own bounded transmission from it on
+        // the worker thread rather than sampling the live preview pipeline's
+        // texture (see `spawn_export`'s `transmission_source` doc).
+        let transmission_source = stack
+            .dehaze()
+            .filter(|d| d.amount != 0.0)
+            .and_then(|_| match v.kind {
+                ferrolite_image::FileKind::Raw => v.raw_preview_source.clone(),
+                ferrolite_image::FileKind::Standard => v.preview_source.clone(),
+            });
 
         // Default filename: source basename + new extension.
         let stem = source_path
@@ -634,6 +647,7 @@ impl FerroliteApp {
             dest,
             image_id,
             atmospheric_light,
+            transmission_source,
         );
         let mut activity = crate::export::ExportActivity::new_single(current_name);
         activity.handles = vec![handle];

@@ -3,7 +3,7 @@
 //! `base_tabs()` is registered once as the registry's base.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::adjustments::{color_sliders, light_sliders, scoped_slider};
+use crate::develop::adjustments::{color_sliders, effects_sliders, light_sliders, scoped_slider};
 use crate::develop::scope::{self, EditScope, ScopedEdit};
 use crate::develop::tool::{PanelTab, TabId};
 use crate::develop::{
@@ -229,188 +229,81 @@ impl PanelTab for EffectsTab {
     }
     fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
         let stack = state.viewer.as_ref()?.op_stack.clone();
+        let scope = scope::current(state);
+        let scoped = ScopedEdit::new(scope, &stack);
         let mut out: Option<EditOutcome> = None;
 
-        // Sharpening (Amount, Radius, Detail)
+        // Sharpening (Amount, Radius). "Detail" from the pre-registry block is
+        // dropped — it mapped to no field/shader parameter (see adjustments.rs).
+        // per-scope flag lands in Task 6 — both scopes share sharpening_open for now.
         section_header(ui, "SHARPENING", &mut state.settings.sharpening_open);
         if state.settings.sharpening_open {
-            let sh = stack.sharpen();
-            let (mut amount, mut radius) = sh
-                .map(|s| (s.amount, s.radius as f32))
-                .unwrap_or((0.0, 1.0));
-            let mut detail = 0.0_f32;
-
-            let ra = ui.add(EguiSlider {
-                label: "Amount",
-                value: &mut amount,
-                min: 0.0,
-                max: 2.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
-            let rr = ui.add(EguiSlider {
-                label: "Radius",
-                value: &mut radius,
-                min: 1.0,
-                max: 8.0,
-                default: 1.0,
-                step: 1.0,
-                decimals: 0,
-                unit: " px",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
-            let rd = ui.add(EguiSlider {
-                label: "Detail",
-                value: &mut detail,
-                min: 0.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
-            if ra.changed() || rr.changed() || rd.changed() {
-                out = Some(EditOutcome {
-                    stack: ops_edit::set_sharpen(&stack, amount, radius.round() as u32),
-                    kind: OpKind::Sharpen,
-                    commit: (ra.drag_stopped() || rr.drag_stopped() || rd.drag_stopped())
-                        || !(ra.dragged() || rr.dragged() || rd.dragged()),
-                });
+            for spec in effects_sliders()
+                .iter()
+                .filter(|s| s.id.0.starts_with("sharpen"))
+            {
+                if let Some(edit) = scoped_slider(ui, spec, &scoped) {
+                    out = Some(edit);
+                }
             }
         }
 
-        // Noise Reduction (Luminance, Detail, Color, Color Detail)
+        // Noise Reduction (Luminance, Detail, Color, Color Detail) — honestly
+        // greyed in both scopes: no GPU pass wired yet (was enabled-but-dead
+        // locals before this registry rewrite).
         ui.separator();
+        // per-scope flag lands in Task 6 — both scopes share noise_reduction_open for now.
         section_header(
             ui,
             "NOISE REDUCTION",
             &mut state.settings.noise_reduction_open,
         );
         if state.settings.noise_reduction_open {
-            let mut nr_lum = 0.0_f32;
-            let mut nr_lum_detail = 0.0_f32;
-            let mut nr_color = 0.0_f32;
-            let mut nr_color_detail = 0.0_f32;
-
-            ui.add(EguiSlider {
-                label: "Luminance",
-                value: &mut nr_lum,
-                min: 0.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
-            ui.add(EguiSlider {
-                label: "Detail",
-                value: &mut nr_lum_detail,
-                min: 0.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
-            ui.add(EguiSlider {
-                label: "Color",
-                value: &mut nr_color,
-                min: 0.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
-            ui.add(EguiSlider {
-                label: "Color Detail",
-                value: &mut nr_color_detail,
-                min: 0.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
+            for spec in effects_sliders()
+                .iter()
+                .filter(|s| s.id.0.starts_with("nr_"))
+            {
+                if let Some(edit) = scoped_slider(ui, spec, &scoped) {
+                    out = Some(edit);
+                }
+            }
         }
 
         // Dehaze (amount + dark-channel patch radius). Per-control reset is the
         // EguiSlider reset column (CLAUDE.md — load-bearing).
         ui.separator();
+        // per-scope flag lands in Task 6 — both scopes share dehaze_open for now.
         section_header(ui, "DEHAZE", &mut state.settings.dehaze_open);
         if state.settings.dehaze_open {
-            let d = stack.dehaze();
-            let mut amount = d.map(|d| d.amount).unwrap_or(0.0);
-            let mut radius = d
-                .map(|d| d.radius as f32)
-                .unwrap_or(ferrolite_pipeline::DEHAZE_DEFAULT_RADIUS as f32);
-
-            // Dehaze amount (bipolar): >0 removes haze, <0 adds haze.
-            let ra = ui.add(EguiSlider {
-                label: "Dehaze",
-                value: &mut amount,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            // Radius (px) of the dark-channel patch (unipolar; drives the halo).
-            let rr = ui.add(EguiSlider {
-                label: "Radius",
-                value: &mut radius,
-                min: 1.0,
-                max: 24.0,
-                default: ferrolite_pipeline::DEHAZE_DEFAULT_RADIUS as f32,
-                step: 1.0,
-                decimals: 0,
-                unit: " px",
-                bipolar: false,
-                signed: false,
-                custom_label_w: None,
-            });
-            if ra.changed() || rr.changed() {
-                out = Some(EditOutcome {
-                    stack: ops_edit::set_dehaze(&stack, amount, radius.round() as u32),
-                    kind: OpKind::Dehaze,
-                    commit: (ra.drag_stopped() || rr.drag_stopped())
-                        || !(ra.dragged() || rr.dragged()),
-                });
+            for spec in effects_sliders()
+                .iter()
+                .filter(|s| s.id.0.starts_with("dehaze"))
+            {
+                if let Some(edit) = scoped_slider(ui, spec, &scoped) {
+                    out = Some(edit);
+                }
             }
         }
 
-        // Optics (lens picker, Distortion, Vignette, etc.)
-        ui.separator();
-        section_header(ui, "OPTICS", &mut state.settings.optics_open);
-        if state.settings.optics_open {
-            if let Some(optics_out) = show_optics_section(ui, state, &stack) {
-                out = Some(optics_out);
+        // Optics (lens picker, Distortion, Vignette, etc.) — global scope ONLY:
+        // geometric/lens corrections are not maskable (design 2026-07-28 §1).
+        if matches!(scope, EditScope::Global) {
+            ui.separator();
+            section_header(ui, "OPTICS", &mut state.settings.optics_open);
+            if state.settings.optics_open {
+                if let Some(optics_out) = show_optics_section(ui, state, &stack) {
+                    out = Some(optics_out);
+                }
+            }
+        }
+
+        // Read the adjusting flag into a local before touching `state` below —
+        // `scoped` borrows the local `stack` clone, not `state`, but keep the
+        // read-then-mutate order explicit per the scoped-edit contract.
+        let scoped_adjusting = scoped.adjusting.get();
+        if matches!(scope, EditScope::Mask(_)) {
+            if let Some(v) = state.viewer.as_mut() {
+                v.mask.adjusting = scoped_adjusting;
             }
         }
 

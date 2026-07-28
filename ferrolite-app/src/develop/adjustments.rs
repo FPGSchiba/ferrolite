@@ -368,6 +368,170 @@ pub fn color_sliders() -> &'static [SliderSpec] {
     &COLOR_SLIDERS
 }
 
+/// The Effects tab's SHARPENING/NOISE REDUCTION/DEHAZE specs, in display order
+/// (design 2026-07-28 §2 table; Task 6's invariant tests iterate this). NR is
+/// `global_ready: false, mask_ready: false` on all four rows — noise
+/// reduction has no GPU pass wired in any scope yet, so it renders honestly
+/// greyed everywhere (replacing the pre-registry enabled-but-dead sliders).
+/// Sharpen/Dehaze are `global_ready: true, mask_ready: false` — live today
+/// only on the global `AdjustmentSet` (`ops_edit::set_sharpen`/`set_dehaze`'s
+/// former data path, now reached through `scoped.write`); per-mask arrives
+/// with the per-mask neighborhood passes (Phase 4). The Sharpen "Detail"
+/// slider from the pre-registry hand-rolled block is dropped here: it mapped
+/// to no field and no planned shader parameter (YAGNI — the registry makes
+/// re-adding trivial once a shader defines it).
+static EFFECTS_SLIDERS: [SliderSpec; 8] = [
+    SliderSpec {
+        id: AdjustmentId("sharpen_amount"),
+        label: "Amount",
+        min: 0.0,
+        max: 2.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.sharpen.amount,
+        set: |s, v| s.sharpen.amount = v,
+        kind: ferrolite_pipeline::OpKind::Sharpen,
+        global_ready: true,
+        mask_ready: false,
+        global_reason: "",
+        mask_reason: "Per-mask Sharpening arrives with the per-mask neighborhood passes (Phase 4)",
+    },
+    SliderSpec {
+        id: AdjustmentId("sharpen_radius"),
+        label: "Radius",
+        min: 1.0,
+        max: 8.0,
+        default: 1.0,
+        step: 1.0,
+        decimals: 0,
+        unit: " px",
+        bipolar: false,
+        get: |s| s.sharpen.radius as f32,
+        set: |s, v| s.sharpen.radius = v.round() as u32,
+        kind: ferrolite_pipeline::OpKind::Sharpen,
+        global_ready: true,
+        mask_ready: false,
+        global_reason: "",
+        mask_reason: "Per-mask Sharpening arrives with the per-mask neighborhood passes (Phase 4)",
+    },
+    SliderSpec {
+        id: AdjustmentId("nr_luminance"),
+        label: "Luminance",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.noise_reduction.luminance,
+        set: |s, v| s.noise_reduction.luminance = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: false,
+        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+    },
+    SliderSpec {
+        id: AdjustmentId("nr_detail"),
+        label: "Detail",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.noise_reduction.detail,
+        set: |s, v| s.noise_reduction.detail = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: false,
+        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+    },
+    SliderSpec {
+        id: AdjustmentId("nr_color"),
+        label: "Color",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.noise_reduction.color,
+        set: |s, v| s.noise_reduction.color = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: false,
+        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+    },
+    SliderSpec {
+        id: AdjustmentId("nr_color_detail"),
+        label: "Color Detail",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.noise_reduction.color_detail,
+        set: |s, v| s.noise_reduction.color_detail = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: false,
+        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+    },
+    SliderSpec {
+        id: AdjustmentId("dehaze_amount"),
+        label: "Dehaze",
+        min: -1.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: true,
+        get: |s| s.dehaze.amount,
+        set: |s, v| s.dehaze.amount = v,
+        kind: ferrolite_pipeline::OpKind::Dehaze,
+        global_ready: true,
+        mask_ready: false,
+        global_reason: "",
+        mask_reason: "Per-mask Dehaze arrives with the per-mask neighborhood passes (Phase 4)",
+    },
+    SliderSpec {
+        id: AdjustmentId("dehaze_radius"),
+        label: "Radius",
+        min: 1.0,
+        max: 24.0,
+        default: ferrolite_pipeline::DEHAZE_DEFAULT_RADIUS as f32,
+        step: 1.0,
+        decimals: 0,
+        unit: " px",
+        bipolar: false,
+        get: |s| s.dehaze.radius as f32,
+        set: |s, v| s.dehaze.radius = v.round() as u32,
+        kind: ferrolite_pipeline::OpKind::Dehaze,
+        global_ready: true,
+        mask_ready: false,
+        global_reason: "",
+        mask_reason: "Per-mask Dehaze arrives with the per-mask neighborhood passes (Phase 4)",
+    },
+];
+
+/// The Effects tab's SHARPENING/NOISE REDUCTION/DEHAZE specs, in display order.
+pub fn effects_sliders() -> &'static [SliderSpec] {
+    &EFFECTS_SLIDERS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +658,32 @@ mod tests {
             .iter()
             .filter(|s| s.id.0 != "vibrance")
             .all(|s| s.mask_ready));
+    }
+
+    #[test]
+    fn effects_registry_rows_and_gating() {
+        let specs = crate::develop::adjustments::effects_sliders();
+        let ids: Vec<&str> = specs.iter().map(|s| s.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "sharpen_amount",
+                "sharpen_radius",
+                "nr_luminance",
+                "nr_detail",
+                "nr_color",
+                "nr_color_detail",
+                "dehaze_amount",
+                "dehaze_radius"
+            ]
+        );
+        assert!(specs
+            .iter()
+            .filter(|s| s.id.0.starts_with("nr_"))
+            .all(|s| !s.global_ready && !s.mask_ready));
+        assert!(specs
+            .iter()
+            .filter(|s| s.id.0.starts_with("sharpen") || s.id.0.starts_with("dehaze"))
+            .all(|s| s.global_ready && !s.mask_ready));
     }
 }

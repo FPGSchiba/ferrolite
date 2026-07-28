@@ -2,12 +2,10 @@
 //! op-stack edit helpers + undo/redo history, and off-thread frl:ops persistence.
 
 pub mod adjustment_panel;
-// Registry core for Tasks 3-6 (the base tabs rebuilt on scoped editing). Tasks
-// 3-4 (Light/Color) consume most of this, but `SliderSpec::id` (identity for
-// Task 6's invariant tests, not read by any render path) still reads as dead
-// code to the bin target until Effects (Task 5) adds its own specs and/or
-// Task 6 reads it directly.
-#[allow(dead_code)] // consumed by Task 3-6
+// Registry core for Tasks 3-6 (the base tabs rebuilt on scoped editing).
+// `SliderSpec::id` is now read outside tests too (Task 5's `EffectsTab::show`
+// filters `effects_sliders()` by `id.0` prefix per section), so the module is
+// fully consumed by the bin target.
 pub mod adjustments;
 pub mod base_tabs;
 pub mod cache;
@@ -40,9 +38,11 @@ pub mod meta_read;
 pub mod ops_edit;
 pub mod ops_persist;
 pub mod preview_cache;
-// `ScopedEdit::interactive` is unused until a later base tab (Task 5-6) needs
-// an explicit interactive-check outside `scoped_slider`'s own readiness gate.
-#[allow(dead_code)] // consumed by Task 3-6
+// `ScopedEdit::interactive` is still unused outside tests — Task 5's Effects
+// tab (like Light/Color before it) gates readiness entirely through
+// `scoped_slider`'s own check; no base tab needs an explicit interactive-only
+// probe yet. Kept for Task 6, which may.
+#[allow(dead_code)] // consumed by Task 6
 pub mod scope;
 pub mod split;
 pub mod thumb_regen;

@@ -1,25 +1,7 @@
 //! Pure helpers: map a UI value to a new immutable `OpStack`. A value at its
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
-use ferrolite_pipeline::{
-    sharpen_halo, ColorGrade, Dehaze, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
-};
-
-pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
-    if amount == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Sharpen)
-    } else {
-        s.set_op(Op::Sharpen(Sharpen { amount, radius }))
-    }
-}
-
-pub fn set_dehaze(s: &OpStack, amount: f32, radius: u32) -> OpStack {
-    if amount == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Dehaze)
-    } else {
-        s.set_op(Op::Dehaze(Dehaze { amount, radius }))
-    }
-}
+use ferrolite_pipeline::{sharpen_halo, ColorGrade, LensCorrection, Op, OpStack, ToneCurve};
 
 /// Set the tone curve, or REMOVE the op entirely when the whole curve (Master +
 /// R/G/B + parametric) is identity — so `is_identity()`/`has_edits` stay correct,
@@ -121,7 +103,7 @@ pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrolite_pipeline::{Op, OpStack};
+    use ferrolite_pipeline::{Dehaze, Op, OpStack, Sharpen};
 
     #[test]
     fn set_lens_correction_removes_when_unmatched_and_all_off() {
@@ -151,20 +133,6 @@ mod tests {
         };
         let s2 = set_lens_correction(&OpStack::default(), on);
         assert!(s2.lens_correction().is_some());
-    }
-
-    #[test]
-    fn set_sharpen_identity_when_amount_zero() {
-        let s = set_sharpen(&OpStack::default(), 0.0, 3);
-        assert!(s.sharpen().is_none(), "zero amount = no sharpen");
-        let s = set_sharpen(&OpStack::default(), 0.4, 2);
-        assert_eq!(
-            s.sharpen(),
-            Some(ferrolite_pipeline::Sharpen {
-                amount: 0.4,
-                radius: 2
-            })
-        );
     }
 
     #[test]
@@ -237,7 +205,10 @@ mod tests {
             !needs_full_rebuild(&base, &color_only),
             "color ops: no rebuild"
         );
-        let sharper = set_sharpen(&base, 0.5, 5);
+        let sharper = base.set_op(Op::Sharpen(Sharpen {
+            amount: 0.5,
+            radius: 5,
+        }));
         assert!(needs_full_rebuild(&base, &sharper), "halo change: rebuild");
         let geo = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
             crop: ferrolite_pipeline::CropRect::full(),
@@ -418,41 +389,19 @@ mod tests {
     }
 
     #[test]
-    fn set_dehaze_identity_when_amount_zero() {
-        // Radius alone (amount 0) creates no op.
-        let s = set_dehaze(&OpStack::default(), 0.0, 8);
-        assert!(s.dehaze().is_none(), "zero amount = no dehaze op");
-        let s = set_dehaze(&OpStack::default(), 0.5, 8);
-        assert_eq!(
-            s.dehaze(),
-            Some(ferrolite_pipeline::Dehaze {
-                amount: 0.5,
-                radius: 8
-            })
-        );
-        // Negative (add-haze) is a real edit too.
-        let s = set_dehaze(&OpStack::default(), -0.3, 12);
-        assert_eq!(
-            s.dehaze(),
-            Some(ferrolite_pipeline::Dehaze {
-                amount: -0.3,
-                radius: 12
-            })
-        );
-    }
-
-    #[test]
     fn dehaze_changes_never_force_a_rebuild() {
         // ST-Task 3: `dehaze_halo` is always 0 — the tiled dehaze recovery
         // samples a shared whole-image transmission (no per-tile
         // neighbourhood), so enabling/disabling dehaze, an amount-only change,
         // and a radius change are all `set_stack`-only, same as a color op.
         let base = OpStack::default();
-        let on = set_dehaze(&base, 0.5, 8);
+        let dehaze_op =
+            |amount: f32, radius: u32| base.set_op(Op::Dehaze(Dehaze { amount, radius }));
+        let on = dehaze_op(0.5, 8);
         assert!(!needs_full_rebuild(&base, &on), "dehaze on: no rebuild");
-        let on2 = set_dehaze(&base, 0.9, 8);
+        let on2 = dehaze_op(0.9, 8);
         assert!(!needs_full_rebuild(&on, &on2), "amount-only: no rebuild");
-        let on3 = set_dehaze(&base, 0.9, 16);
+        let on3 = dehaze_op(0.9, 16);
         assert!(!needs_full_rebuild(&on2, &on3), "radius change: no rebuild");
         assert!(!needs_full_rebuild(&on, &base), "dehaze off: no rebuild");
     }

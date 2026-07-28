@@ -605,11 +605,25 @@ pub struct LocalAdjustUniform {
     pub color_amount: f32,
     pub color_rgb: [f32; 3],
     pub contrast_pivot: f32,
+    // ── Phase 2b: per-layer curve/HSL/grade (identity when the layer leaves them default) ──
+    /// 8 bands × (hue, sat, lum, pad) — same packing as the global `HslUniform`.
+    pub hsl_bands: [[f32; 4]; 8],
+    /// Same packing as the global `ColorGradeUniform` (shadows/midtones/highlights/global/params).
+    pub grade_shadows: [f32; 4],
+    pub grade_midtones: [f32; 4],
+    pub grade_highlights: [f32; 4],
+    pub grade_global: [f32; 4],
+    pub grade_params: [f32; 4],
+    /// x = curve active (LUT differs from the linear ramp), y = hsl active,
+    /// z = grade active, w = pad. Skip flags so identity layers pay no extra math.
+    pub active_flags: [f32; 4],
 }
 
 /// `light_color_apply` (below) is still test-only; `local_adjust_uniform` is now
 /// consumed by `LocalAdjustmentsNode`.
 pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUniform {
+    let hsl_bands = hsl_uniform(Some(a.hsl)).bands;
+    let grade = color_grade_uniform(Some(a.color_grade));
     LocalAdjustUniform {
         exposure_gain: exposure_gain(a.exposure),
         contrast_gain: 1.0 + a.contrast,
@@ -623,7 +637,36 @@ pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUnifo
         color_amount: a.color.amount,
         color_rgb: [a.color.r, a.color.g, a.color.b],
         contrast_pivot: CONTRAST_PIVOT,
+        hsl_bands,
+        grade_shadows: grade.shadows,
+        grade_midtones: grade.midtones,
+        grade_highlights: grade.highlights,
+        grade_global: grade.global,
+        grade_params: grade.params,
+        active_flags: [
+            if !a.tone_curve.is_identity() {
+                1.0
+            } else {
+                0.0
+            },
+            if !a.hsl.is_identity() { 1.0 } else { 0.0 },
+            if !a.color_grade.is_identity() {
+                1.0
+            } else {
+                0.0
+            },
+            0.0,
+        ],
     }
+}
+
+/// Thin wrapper over `tone_curve_luts` giving Task 2's local-adjust node one
+/// named entry point for a mask layer's baked per-channel curve LUTs. Not yet
+/// wired into `LocalAdjustmentsNode` (Task 2 owns that); test-only for now,
+/// like `light_color_apply` below.
+#[allow(dead_code)]
+pub fn local_layer_lut(a: &crate::local::AdjustmentSet) -> [[f32; 256]; 3] {
+    tone_curve_luts(Some(&a.tone_curve))
 }
 
 fn luma709(c: [f32; 3]) -> f32 {
@@ -688,6 +731,62 @@ fn hsl_to_rgb(hsl: [f32; 3]) -> [f32; 3] {
     [hue(h + 1.0 / 3.0), hue(h), hue(h - 1.0 / 3.0)]
 }
 
+/// Band centers (degrees) for the 8-band HSL split — red, orange, yellow,
+/// green, aqua, blue, purple, magenta. Mirrors `hsl.wgsl`'s `band_center`.
+const HSL_BAND_CENTERS: [f32; 8] = [0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.0];
+/// Max hue rotation (degrees) at a band's full weight. Mirrors `hsl.wgsl`'s `MAX_HUE_SHIFT`.
+const HSL_MAX_HUE_SHIFT: f32 = 30.0;
+
+/// Triangular falloff weight for `hue` relative to a band `center`, wrapping across
+/// the 0/360 seam. Mirrors `hsl.wgsl`'s `band_weight` exactly (same constant, 60°).
+fn hsl_band_weight(hue: f32, center: f32) -> f32 {
+    let mut d = (hue - center).abs();
+    if d > 180.0 {
+        d = 360.0 - d;
+    }
+    (1.0 - d / 60.0).max(0.0)
+}
+
+/// CPU reference for the 8-band HSL pass (`hsl.wgsl`). `bands` uses the same
+/// `[hue, sat, lum, pad]` packing as `HslUniform`. Out-of-`[0,1]` channels bypass
+/// the HSL round-trip additively (P2 §5.3) exactly like the shader: only the
+/// in-gamut part is adjusted and the excess is re-added.
+fn hsl_bands_apply(c: [f32; 3], bands: &[[f32; 4]; 8]) -> [f32; 3] {
+    let in_gamut = [
+        c[0].clamp(0.0, 1.0),
+        c[1].clamp(0.0, 1.0),
+        c[2].clamp(0.0, 1.0),
+    ];
+    let excess = [c[0] - in_gamut[0], c[1] - in_gamut[1], c[2] - in_gamut[2]];
+    let hsl = rgb_to_hsl(in_gamut);
+
+    let mut hue_acc = 0.0f32;
+    let mut sat_acc = 0.0f32;
+    let mut lum_acc = 0.0f32;
+    for (i, band) in bands.iter().enumerate() {
+        let w = hsl_band_weight(hsl[0], HSL_BAND_CENTERS[i]);
+        hue_acc += w * band[0];
+        sat_acc += w * band[1];
+        lum_acc += w * band[2];
+    }
+
+    let mut out_hue = hsl[0] + hue_acc * HSL_MAX_HUE_SHIFT;
+    if out_hue < 0.0 {
+        out_hue += 360.0;
+    }
+    if out_hue >= 360.0 {
+        out_hue -= 360.0;
+    }
+    let out_hsl = [
+        out_hue,
+        (hsl[1] * (1.0 + sat_acc)).clamp(0.0, 1.0),
+        (hsl[2] * (1.0 + lum_acc)).clamp(0.0, 1.0),
+    ];
+
+    let rgb = hsl_to_rgb(out_hsl);
+    [rgb[0] + excess[0], rgb[1] + excess[1], rgb[2] + excess[2]]
+}
+
 /// CPU reference for the Light+Color point op. `local_adjust.wgsl` mirrors this
 /// exactly (golden tolerance absorbs f16/driver drift). Order: exposure → tonal
 /// region gains → contrast → wb → saturation → hue → color swatch. Output clamped ≥0.
@@ -725,6 +824,24 @@ pub fn light_color_apply(rgb: [f32; 3], a: &crate::local::AdjustmentSet) -> [f32
         let mut hsl = rgb_to_hsl([c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]);
         hsl[0] = (hsl[0] + u.hue_deg).rem_euclid(360.0);
         c = hsl_to_rgb(hsl);
+    }
+    // ── Phase 2b: per-layer curve → HSL bands → grade, mirroring the WGSL Task 2
+    // will add. Each step is gated by its identity flag (not just internal
+    // early-outs) so a fully-default AdjustmentSet takes none of these branches —
+    // required for `light_color_identity_is_a_no_op` to stay bit-exact, since
+    // linear-interp LUT sampling of the identity ramp is not guaranteed to be
+    // bit-identical to its input under float rounding.
+    if !a.tone_curve.is_identity() {
+        let luts = tone_curve_luts(Some(&a.tone_curve));
+        for (v, lut) in c.iter_mut().zip(luts.iter()) {
+            *v = sample_lut(lut, *v);
+        }
+    }
+    if !a.hsl.is_identity() {
+        c = hsl_bands_apply(c, &u.hsl_bands);
+    }
+    if !a.color_grade.is_identity() {
+        c = color_grade_px(c, &a.color_grade);
     }
     if u.color_amount != 0.0 {
         for (v, cr) in c.iter_mut().zip(u.color_rgb) {
@@ -1268,6 +1385,49 @@ mod tests {
         assert_eq!(u.contrast_gain, 1.0);
         assert_eq!(u.wb_mul, [1.0, 1.0, 1.0]);
         assert_eq!(std::mem::size_of::<LocalAdjustUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn extended_local_uniform_is_identity_safe() {
+        use crate::local::AdjustmentSet;
+        let a = AdjustmentSet::default();
+        let u = local_adjust_uniform(&a);
+        assert_eq!(u.active_flags, [0.0; 4]);
+        assert_eq!(u.hsl_bands, [[0.0; 4]; 8]);
+        // Identity LUT is the linear ramp.
+        let luts = local_layer_lut(&a);
+        assert!((luts[0][0] - 0.0).abs() < 1e-6);
+        assert!((luts[0][255] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cpu_reference_applies_curve_hsl_grade() {
+        use crate::local::AdjustmentSet;
+
+        // Curve: a strong lift must brighten the reference output.
+        let mut a = AdjustmentSet::default();
+        a.tone_curve.points = vec![(0.0, 0.3), (1.0, 1.0)];
+        let lifted = light_color_apply([0.2, 0.2, 0.2], &a);
+        let base = light_color_apply([0.2, 0.2, 0.2], &AdjustmentSet::default());
+        assert!(lifted[0] > base[0], "curve lift raises output");
+
+        // Grade: a saturated shadows tint must move channel balance.
+        let mut a = AdjustmentSet::default();
+        a.color_grade.shadows = crate::op::GradeWheel {
+            hue: 210.0,
+            sat: 0.5,
+            lum: 0.0,
+        };
+        let graded = light_color_apply([0.1, 0.1, 0.1], &a);
+        assert_ne!(graded, [0.1, 0.1, 0.1]);
+
+        // Identity set stays a pure pass-through (bit-stable vs the old reference).
+        let id = light_color_apply([0.4, 0.5, 0.6], &AdjustmentSet::default());
+        let old = {
+            // exposure-only path unchanged: 0 EV ⇒ input unchanged through the whole chain
+            [0.4, 0.5, 0.6]
+        };
+        assert_eq!(id, old, "identity extension is a no-op");
     }
 
     #[test]

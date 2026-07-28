@@ -396,10 +396,13 @@ impl Op {
 ///
 /// **Invariant:** an identity-valued `set_op` is byte-equal to a reset — that
 /// is, `is_identity()`, `PartialEq` against `EditDoc::default()`, and the
-/// serde hash (`hash_serde`, keyed for the warm/preview caches) all agree.
-/// `set_op` enforces this by writing the exact per-kind `Default` value
-/// whenever the incoming op's parameters are identity, rather than the raw
-/// (possibly non-canonical) params.
+/// serde hash (`hash_serde`, keyed for the warm/preview caches) all agree, for
+/// EVERY `Op` kind (including `Hsl`, whose bands can be `-0.0`-valued and thus
+/// `is_identity() == true` without being the literal `Default` bit pattern).
+/// `set_op` enforces this via `AdjustmentSet::normalized()`: the match writes
+/// each op's raw params into `global` (or a layer's `adjustments`), then a
+/// tail call snaps every identity-valued structured field to its exact
+/// `Default`, rather than checking identity per-arm.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct EditDoc {
     pub version: u32,
@@ -445,7 +448,12 @@ impl EditDoc {
     /// (see the invariant documented on `EditDoc`) so an identity `set_op`
     /// never leaves the doc `is_identity() == true` yet `!= EditDoc::default()`
     /// — which would otherwise desync `should_write_back`'s `== OpStack::default()`
-    /// check and the `hash_serde` cache key from `is_identity()`.
+    /// check and the `hash_serde` cache key from `is_identity()`. The match writes
+    /// each op's raw params; a single tail `AdjustmentSet::normalized()` call
+    /// (mirrored for each layer's set in the `LocalAdjustments` arm) then snaps
+    /// every identity-valued structured field to its exact `Default` in one
+    /// place, for ALL kinds — including `Hsl`, whose `-0.0`-valued bands are
+    /// `is_identity() == true` but not byte-equal to `Hsl::default()` without it.
     pub fn set_op(&self, op: Op) -> EditDoc {
         let mut d = self.clone();
         match op {
@@ -455,39 +463,25 @@ impl EditDoc {
                 d.global.tint = w.tint;
             }
             Op::Contrast(c) => d.global.contrast = c.amount,
-            Op::Dehaze(x) => {
-                d.global.dehaze = if x.is_identity() {
-                    Dehaze::default()
-                } else {
-                    x
-                }
-            }
-            Op::ToneCurve(t) => {
-                d.global.tone_curve = if t.is_identity() {
-                    ToneCurve::default()
-                } else {
-                    t
-                }
-            }
+            Op::Dehaze(x) => d.global.dehaze = x,
+            Op::ToneCurve(t) => d.global.tone_curve = t,
             Op::Hsl(h) => d.global.hsl = h,
-            Op::ColorGrade(g) => {
-                d.global.color_grade = if g.is_identity() {
-                    ColorGrade::default()
-                } else {
-                    g
-                }
+            Op::ColorGrade(g) => d.global.color_grade = g,
+            Op::LocalAdjustments(la) => {
+                d.layers = la
+                    .layers
+                    .into_iter()
+                    .map(|mut layer| {
+                        layer.adjustments = layer.adjustments.normalized();
+                        layer
+                    })
+                    .collect();
             }
-            Op::LocalAdjustments(la) => d.layers = la.layers,
-            Op::Sharpen(s) => {
-                d.global.sharpen = if s.amount == 0.0 {
-                    Sharpen::default()
-                } else {
-                    s
-                }
-            }
+            Op::Sharpen(s) => d.global.sharpen = s,
             Op::LensCorrection(l) => d.lens = Some(l),
             Op::Geometry(g) => d.geometry = Some(g),
         }
+        d.global = d.global.normalized();
         d
     }
 
@@ -706,6 +700,21 @@ mod tests {
             serde_json::to_string(&graded).unwrap(),
             serde_json::to_string(&default).unwrap(),
             "identity color grade must serialize byte-identically to default, \
+             not just PartialEq-equal (negative zero is == but not byte-equal)"
+        );
+
+        // Same -0.0 hole for Hsl: is_identity() treats -0.0 == 0.0, but a band
+        // literal with a -0.0 field is not byte-equal to Hsl::default() unless
+        // set_op's tail normalization snaps it back to the canonical default.
+        let mut bands = [HslBand::default(); 8];
+        bands[0].hue = -0.0;
+        let hsled = default.set_op(Op::Hsl(Hsl { bands }));
+        assert!(hsled.is_identity());
+        assert_eq!(hsled, default, "identity hsl must normalize to default");
+        assert_eq!(
+            serde_json::to_string(&hsled).unwrap(),
+            serde_json::to_string(&default).unwrap(),
+            "identity hsl must serialize byte-identically to default, \
              not just PartialEq-equal (negative zero is == but not byte-equal)"
         );
     }

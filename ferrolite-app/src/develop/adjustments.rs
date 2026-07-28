@@ -282,6 +282,92 @@ pub fn light_sliders() -> &'static [SliderSpec] {
     &LIGHT_SLIDERS
 }
 
+/// The Color tab's COLOR MIX specs, in display order (design 2026-07-28 §2
+/// table; Task 6's invariant tests iterate this). None are global-live yet
+/// (`global_ready: false` on all four) — Saturation/Hue/Color already have a
+/// per-mask shader (`local_adjust.wgsl`/the swatch overlay) so `mask_ready:
+/// true`; Vibrance has no shader in any scope yet (`mask_ready: false`) until
+/// the unified layer engine (Phase 3) lands it everywhere.
+static COLOR_SLIDERS: [SliderSpec; 4] = [
+    SliderSpec {
+        id: AdjustmentId("saturation"),
+        label: "Saturation",
+        min: -1.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: true,
+        get: |s| s.saturation,
+        set: |s, v| s.saturation = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: true,
+        global_reason: "Global Saturation arrives with the unified layer engine (Phase 3)",
+        mask_reason: "",
+    },
+    SliderSpec {
+        id: AdjustmentId("hue"),
+        label: "Hue",
+        min: -1.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: true,
+        get: |s| s.hue,
+        set: |s, v| s.hue = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: true,
+        global_reason: "Global Hue arrives with the unified layer engine (Phase 3)",
+        mask_reason: "",
+    },
+    SliderSpec {
+        id: AdjustmentId("vibrance"),
+        label: "Vibrance",
+        min: -1.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: true,
+        get: |s| s.vibrance,
+        set: |s, v| s.vibrance = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: false,
+        global_reason: "Vibrance arrives with the unified layer engine (Phase 3)",
+        mask_reason: "Vibrance arrives with the unified layer engine (Phase 3)",
+    },
+    SliderSpec {
+        id: AdjustmentId("color_amount"),
+        label: "Color",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.color.amount,
+        set: |s, v| s.color.amount = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: false,
+        mask_ready: true,
+        global_reason: "Global color overlay arrives with the unified layer engine (Phase 3)",
+        mask_reason: "",
+    },
+];
+
+/// The Color tab's COLOR MIX specs, in display order.
+pub fn color_sliders() -> &'static [SliderSpec] {
+    &COLOR_SLIDERS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +477,22 @@ mod tests {
         let mut set = AdjustmentSet::default();
         (spec.set)(&mut set, 2.5);
         assert_eq!((spec.get)(&set), 2.5);
+    }
+
+    #[test]
+    fn color_registry_rows_and_gating() {
+        let specs = crate::develop::adjustments::color_sliders();
+        let ids: Vec<&str> = specs.iter().map(|s| s.id.0).collect();
+        assert_eq!(ids, vec!["saturation", "hue", "vibrance", "color_amount"]);
+        assert!(
+            specs.iter().all(|s| !s.global_ready),
+            "none global-live until Phase 3"
+        );
+        let vib = specs.iter().find(|s| s.id.0 == "vibrance").unwrap();
+        assert!(!vib.mask_ready, "vibrance has no shader in any scope yet");
+        assert!(specs
+            .iter()
+            .filter(|s| s.id.0 != "vibrance")
+            .all(|s| s.mask_ready));
     }
 }

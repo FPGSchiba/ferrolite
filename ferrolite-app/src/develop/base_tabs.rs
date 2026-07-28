@@ -3,7 +3,7 @@
 //! `base_tabs()` is registered once as the registry's base.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::adjustments::{light_sliders, scoped_slider};
+use crate::develop::adjustments::{color_sliders, light_sliders, scoped_slider};
 use crate::develop::scope::{self, EditScope, ScopedEdit};
 use crate::develop::tool::{PanelTab, TabId};
 use crate::develop::{
@@ -97,28 +97,126 @@ impl PanelTab for ColorTab {
     }
     fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
         let stack = state.viewer.as_ref()?.op_stack.clone();
+        let scope = scope::current(state);
+        let scoped = ScopedEdit::new(scope, &stack);
         let mut out: Option<EditOutcome> = None;
 
+        // per-scope flag lands in Task 6 — both scopes share color_hsl_open for now.
         section_header(ui, "COLOR (HSL)", &mut state.settings.color_hsl_open);
         if state.settings.color_hsl_open {
-            if let Some(v) = state.viewer.as_mut() {
-                if let Some(o) = hsl_widget::show(ui, &stack, &mut v.hsl_band) {
-                    out = Some(o);
+            match scope {
+                EditScope::Global => {
+                    if let Some(v) = state.viewer.as_mut() {
+                        if let Some(o) = hsl_widget::show(ui, &stack, &mut v.hsl_band) {
+                            out = Some(o);
+                        }
+                    }
+                }
+                EditScope::Mask(_) | EditScope::MaskNone => {
+                    ui.label(
+                        egui::RichText::new(
+                            "Per-mask HSL arrives with the layer engine (Phase 2b)",
+                        )
+                        .color(theme::TEXT_FAINT),
+                    );
                 }
             }
         }
 
         ui.separator();
 
+        // per-scope flag lands in Task 6 — both scopes share color_mix_open for now.
+        section_header(ui, "COLOR MIX", &mut state.settings.color_mix_open);
+        if state.settings.color_mix_open {
+            for spec in color_sliders() {
+                if let Some(edit) = scoped_slider(ui, spec, &scoped) {
+                    out = Some(edit);
+                }
+            }
+            show_color_swatch(ui, scope, &scoped, &mut out);
+        }
+
+        ui.separator();
+
+        // per-scope flag lands in Task 6 — both scopes share color_grading_open for now.
         section_header(ui, "COLOR GRADING", &mut state.settings.color_grading_open);
         if state.settings.color_grading_open {
-            if let Some(grade_out) = grade_widget::show(ui, &stack) {
-                out = Some(grade_out);
+            match scope {
+                EditScope::Global => {
+                    if let Some(grade_out) = grade_widget::show(ui, &stack) {
+                        out = Some(grade_out);
+                    }
+                }
+                EditScope::Mask(_) | EditScope::MaskNone => {
+                    ui.label(
+                        egui::RichText::new(
+                            "Per-mask Color Grading arrives with the layer engine (Phase 2b)",
+                        )
+                        .color(theme::TEXT_FAINT),
+                    );
+                }
+            }
+        }
+
+        // Read the adjusting flag into a local before touching `state` below —
+        // `scoped` borrows the local `stack` clone, not `state`, but keep the
+        // read-then-mutate order explicit per the scoped-edit contract.
+        let scoped_adjusting = scoped.adjusting.get();
+        if matches!(scope, EditScope::Mask(_)) {
+            if let Some(v) = state.viewer.as_mut() {
+                v.mask.adjusting = scoped_adjusting;
             }
         }
 
         out
     }
+}
+
+/// The Color swatch picker (not a registry slider — `AdjustmentSet.color` is
+/// an RGB+amount overlay, and only the amount fits `SliderSpec`'s single-f32
+/// shape). Moved here verbatim from `mask_panel::selected_section` (Task 6
+/// deletes the original there): mask-live commits an RGB change through
+/// `scoped.write`; global scope stays greyed with the same Phase 3 reason as
+/// the `color_amount` row it sits beside, since both gate on the same
+/// unified-layer-engine milestone.
+fn show_color_swatch(
+    ui: &mut egui::Ui,
+    scope: EditScope,
+    scoped: &ScopedEdit<'_>,
+    out: &mut Option<EditOutcome>,
+) {
+    const GLOBAL_REASON: &str =
+        "Global color overlay arrives with the unified layer engine (Phase 3)";
+    const NO_MASK_REASON: &str = "Create or select a mask first";
+
+    let set = scoped.set();
+    let mut rgb = set
+        .map(|s| [s.color.r, s.color.g, s.color.b])
+        .unwrap_or([0.0, 0.0, 0.0]);
+    let enabled = matches!(scope, EditScope::Mask(_)) && set.is_some();
+
+    if enabled {
+        if ui.color_edit_button_rgb(&mut rgb).changed() {
+            let mut new_set = set.expect("enabled implies a set to read").clone();
+            new_set.color.r = rgb[0];
+            new_set.color.g = rgb[1];
+            new_set.color.b = rgb[2];
+            if let Some(edit) = scoped.write(new_set, OpKind::LocalAdjustments, true) {
+                *out = Some(edit);
+            }
+        }
+        return;
+    }
+
+    let reason = match scope {
+        EditScope::Global => GLOBAL_REASON,
+        EditScope::Mask(_) | EditScope::MaskNone => NO_MASK_REASON,
+    };
+    ui.add_enabled_ui(false, |ui| {
+        ui.color_edit_button_rgb(&mut rgb);
+    })
+    .response
+    .on_hover_text(reason);
 }
 
 pub struct EffectsTab;
@@ -737,6 +835,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
         state.settings.color_hsl_open = false;
+        state.settings.color_mix_open = false;
         state.settings.color_grading_open = false;
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -747,7 +846,21 @@ mod tests {
             });
         });
         assert!(!state.settings.color_hsl_open);
+        assert!(!state.settings.color_mix_open);
         assert!(!state.settings.color_grading_open);
+    }
+
+    #[test]
+    fn color_tab_renders_without_viewer() {
+        // No viewer ⇒ tab renders nothing and returns None (unchanged behavior),
+        // mirroring `light_tab_edits_the_selected_mask_when_mask_scope_active`.
+        let ctx = egui::Context::default();
+        let mut state = AppState::new().unwrap();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(ColorTab.show(ui, &mut state).is_none());
+            });
+        });
     }
 
     #[test]
@@ -780,6 +893,7 @@ mod tests {
         assert!(state.settings.basic_sliders_open);
         assert!(state.settings.tone_curve_open);
         assert!(state.settings.color_hsl_open);
+        assert!(state.settings.color_mix_open);
         assert!(state.settings.color_grading_open);
         assert!(state.settings.sharpening_open);
         assert!(state.settings.noise_reduction_open);
@@ -790,6 +904,7 @@ mod tests {
         state.settings.basic_sliders_open = false;
         state.settings.tone_curve_open = false;
         state.settings.color_hsl_open = false;
+        state.settings.color_mix_open = false;
         state.settings.color_grading_open = false;
         state.settings.sharpening_open = false;
         state.settings.noise_reduction_open = false;
@@ -809,6 +924,7 @@ mod tests {
         assert!(!state.settings.basic_sliders_open);
         assert!(!state.settings.tone_curve_open);
         assert!(!state.settings.color_hsl_open);
+        assert!(!state.settings.color_mix_open);
         assert!(!state.settings.color_grading_open);
         assert!(!state.settings.sharpening_open);
         assert!(!state.settings.noise_reduction_open);

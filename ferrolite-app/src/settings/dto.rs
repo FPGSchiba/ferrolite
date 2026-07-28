@@ -373,6 +373,8 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub color_hsl_open: bool,
     #[serde(default = "default_true")]
+    pub color_mix_open: bool,
+    #[serde(default = "default_true")]
     pub sharpening_open: bool,
     #[serde(default = "default_true")]
     pub noise_reduction_open: bool,
@@ -408,6 +410,7 @@ impl Default for Settings {
             display_profile: PersistedDisplayProfile::default(),
             basic_sliders_open: true,
             color_hsl_open: true,
+            color_mix_open: true,
             sharpening_open: true,
             noise_reduction_open: true,
             dehaze_open: true,
@@ -584,6 +587,7 @@ mod tests {
         assert_eq!(default_settings.info_panel_width, 300.0);
         assert!(default_settings.basic_sliders_open);
         assert!(default_settings.color_hsl_open);
+        assert!(default_settings.color_mix_open);
         assert!(default_settings.sharpening_open);
         assert!(default_settings.noise_reduction_open);
         assert!(default_settings.dehaze_open);
@@ -602,6 +606,7 @@ mod tests {
             info_panel_width: 250.0,
             basic_sliders_open: false,
             color_hsl_open: false,
+            color_mix_open: false,
             sharpening_open: false,
             noise_reduction_open: false,
             dehaze_open: false,

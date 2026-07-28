@@ -45,7 +45,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Graph, NodeId};
-use ferrolite_image::{haloed_tile_origin, level_size, TileCoord, TILE_SIZE};
+use ferrolite_image::{haloed_tile_extent, haloed_tile_origin, level_size, TileCoord, TILE_SIZE};
 use ferrolite_mask::TileTransform;
 
 use crate::dehaze::{dehaze_halo, DEHAZE_ATMOS_MIN, DEHAZE_ATMOS_NEUTRAL};
@@ -62,10 +62,10 @@ use crate::nodes::{
 };
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
-    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform, hsl_uniform,
-    lens_halo_px, sharpen_halo, sharpen_uniform, tone_curve_luts, ColorGradeUniform,
-    ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform, LensUniform, SharpenUniform,
-    VignetteUniform, WbUniform,
+    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform,
+    geometry_uniform, hsl_uniform, lens_halo_px, sharpen_halo, sharpen_uniform, tone_curve_luts,
+    ColorGradeUniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform,
+    LensUniform, SharpenUniform, VignetteUniform, WbUniform,
 };
 use ferrolite_lens::{VignetteMap, WarpGrid};
 
@@ -94,8 +94,18 @@ pub struct TileEditPipeline {
     // nodes so an amount-only edit dirties only the recovery node.
     dehaze_transmission_id: NodeId,
     transmission_params: Rc<Cell<TransmissionParams>>,
+    dehaze_transmission_node: Rc<DehazeTransmissionNode>,
     dehaze_recovery_id: NodeId,
     recovery_params: Rc<Cell<RecoveryParams>>,
+    // Handle to the recovery node, retained so `produce_tile` can hand it the
+    // transmission node's fresh output every call (ST-Task 2: no longer a
+    // graph-edge dependent of `dehaze_transmission_id` — see `produce_tile`'s
+    // doc). Interim wiring (ST-Task 3 will switch this to the tiled tier's
+    // real shared whole-image transmission): each tile's OWN per-tile
+    // transmission output, sampled via a LOCAL identity mapping (this tile's
+    // own haloed extent, origin [0,0]) — byte-identical to the pre-ST-Task-2
+    // two-graph-input behavior.
+    dehaze_recovery_node: Rc<DehazeRecoveryNode>,
     /// Whole-image atmospheric light (design §5.3). Unlike `EditPipeline`,
     /// `TileEditPipeline` has no CPU source to estimate this from directly — it
     /// starts at `DEHAZE_ATMOS_NEUTRAL` and the app hands it the real estimate
@@ -244,11 +254,24 @@ impl TileEditPipeline {
             stack.dehaze(),
             dehaze_atmos,
         )));
-        let dehaze_recovery_node = DehazeRecoveryNode::new(ctx.clone(), recovery_params.clone());
-        let dehaze_recovery_id = graph.add_node(
-            Box::new(dehaze_recovery_node),
-            vec![contrast_id, dehaze_transmission_id],
-        );
+        // ST-Task 2 interim wiring: the recovery node takes only `I`
+        // (contrast_id) as a graph input now; its shared transmission is bound
+        // out-of-band in `produce_tile` (each tile's own per-tile transmission
+        // output, NOT yet the tiled tier's real shared whole-image texture —
+        // that switch is ST-Task 3). A dedicated default-origin frame (NOT the
+        // `frame` shared with the head/vignette) keeps this a LOCAL identity
+        // mapping over the tile's own haloed extent, so behavior stays
+        // byte-identical to the pre-ST-Task-2 two-graph-input version.
+        let dehaze_recovery_node = Rc::new(DehazeRecoveryNode::new(
+            ctx.clone(),
+            recovery_params.clone(),
+            Rc::new(Cell::new(TileFrame::default())),
+        ));
+        let ext = haloed_tile_extent(halo);
+        let (identity_geo, _, _) = geometry_uniform(None, ext, ext);
+        dehaze_recovery_node.set_geometry(identity_geo);
+        let dehaze_recovery_id =
+            graph.add_node(Box::new(dehaze_recovery_node.clone()), vec![contrast_id]);
 
         let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_id = graph.add_node(
@@ -331,8 +354,10 @@ impl TileEditPipeline {
             contrast,
             dehaze_transmission_id,
             transmission_params,
+            dehaze_transmission_node,
             dehaze_recovery_id,
             recovery_params,
+            dehaze_recovery_node,
             dehaze_atmos,
             tone_curve,
             hsl,
@@ -380,6 +405,13 @@ impl TileEditPipeline {
         if t != self.transmission_params.get() {
             self.transmission_params.set(t);
             self.graph.mark_dirty(self.dehaze_transmission_id);
+            // ST-Task 2: recovery reads transmission's OUTPUT via an out-of-band
+            // shared-texture handle, not a graph edge (see `produce_tile`), so
+            // dirty it explicitly too — see the identical note in
+            // `EditPipeline::set_stack`. (Redundant today since `produce_tile`
+            // already force-dirties the whole chain per tile, but keeps this
+            // correct independent of that.)
+            self.graph.mark_dirty(self.dehaze_recovery_id);
         }
         let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
         if r != self.recovery_params.get() {
@@ -498,6 +530,13 @@ impl TileEditPipeline {
     /// Render the edited interior `TILE_SIZE`² for `coord` as an `Rgba16Float`
     /// `COPY_SRC` texture. Re-runs the whole per-tile chain (the geometry head is
     /// dirtied each call because the tile coord changed).
+    ///
+    /// ST-Task 2: `DehazeRecoveryNode` is no longer a graph-edge dependent of
+    /// `dehaze_transmission_id` (see that node's doc), so `dehaze_transmission_id`
+    /// is no longer an ancestor of `output_id` — the graph's own lazy pull would
+    /// never evaluate it. Force it via the graph (dirtied by the `mark_dirty
+    /// (head_id)` cascade below, same as before) and hand its current output to
+    /// the recovery node BEFORE evaluating the rest of the chain.
     pub fn produce_tile(&mut self, coord: TileCoord) -> wgpu::Texture {
         self.request.set(TileRequest {
             coord,
@@ -517,6 +556,9 @@ impl TileEditPipeline {
         }));
         self.graph.mark_dirty(self.head_id);
         self.graph.mark_dirty(self.local_adjust_id);
+        self.graph.evaluate(self.dehaze_transmission_id);
+        self.dehaze_recovery_node
+            .set_shared_transmission(self.dehaze_transmission_node.current_output_texture());
         let haloed = self.graph.evaluate(self.output_id).clone();
         self.extract_interior(&haloed)
     }

@@ -16,7 +16,7 @@ use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::LocalAdjustments;
 use crate::local_node::LocalAdjustmentsNode;
-use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode, VignetteNode};
+use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode, TileFrame, VignetteNode};
 use crate::op::OpStack;
 use crate::uniforms::{
     color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform,
@@ -53,6 +53,11 @@ pub struct EditPipeline {
     dehaze_transmission_node: Rc<DehazeTransmissionNode>,
     dehaze_recovery_id: NodeId,
     recovery_params: Rc<Cell<RecoveryParams>>,
+    // Handle to the recovery node, retained so `evaluate` can hand it the
+    // transmission node's fresh output every call (ST-Task 2: the recovery node
+    // is no longer a graph-edge dependent of `dehaze_transmission_id` — see
+    // `evaluate`'s doc — so this hand-off can't happen via the graph itself).
+    dehaze_recovery_node: Rc<DehazeRecoveryNode>,
     /// Whole-image atmospheric light, estimated once from the CPU source at
     /// construction (design §5.3) and reused by every `set_stack` (it is an image
     /// property, independent of the edit stack).
@@ -162,11 +167,24 @@ impl EditPipeline {
             stack.dehaze(),
             dehaze_atmos,
         )));
-        let dehaze_recovery_node = DehazeRecoveryNode::new(ctx.clone(), recovery_params.clone());
-        let dehaze_recovery_id = graph.add_node(
-            Box::new(dehaze_recovery_node),
-            vec![contrast_id, dehaze_transmission_id],
-        );
+        // ST-Task 2: the recovery node takes only `I` (contrast_id) as a graph
+        // input now — the transmission is bound out-of-band via
+        // `set_shared_transmission` (see `evaluate`), not a graph edge, so the
+        // shared texture can later also serve the tiled tier. No tiling here, so
+        // a dedicated default-origin frame (not shared with anything else).
+        let dehaze_recovery_node = Rc::new(DehazeRecoveryNode::new(
+            ctx.clone(),
+            recovery_params.clone(),
+            Rc::new(Cell::new(TileFrame::default())),
+        ));
+        // Geometry (crop/rotate) runs downstream of dehaze in this graph (at
+        // `geometry_id`, the very end), so recovery always sees the FULL source
+        // dims here — identity mapping makes source UV == whole-image UV,
+        // exactly matching the pre-ST-Task-2 `(xy+0.5)/dims(img)` sampling.
+        let (identity_geo, _, _) = geometry_uniform(None, src_w, src_h);
+        dehaze_recovery_node.set_geometry(identity_geo);
+        let dehaze_recovery_id =
+            graph.add_node(Box::new(dehaze_recovery_node.clone()), vec![contrast_id]);
 
         let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
@@ -228,6 +246,7 @@ impl EditPipeline {
             dehaze_transmission_node,
             dehaze_recovery_id,
             recovery_params,
+            dehaze_recovery_node,
             dehaze_atmos,
             tone_curve_id,
             tone_curve,
@@ -335,6 +354,13 @@ impl EditPipeline {
         if t != self.transmission_params.get() {
             self.transmission_params.set(t);
             self.graph.mark_dirty(self.dehaze_transmission_id);
+            // ST-Task 2: the recovery node reads the transmission's OUTPUT via an
+            // out-of-band shared-texture handle, not a graph edge, so
+            // `mark_dirty`'s automatic dependent-propagation no longer reaches
+            // it. A transmission change (radius/atmos/active) can change that
+            // texture's CONTENT in place (same `Arc`, same dims) without
+            // changing its identity, so dirty recovery explicitly here too.
+            self.graph.mark_dirty(self.dehaze_recovery_id);
         }
         let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
         if r != self.recovery_params.get() {
@@ -383,7 +409,19 @@ impl EditPipeline {
     }
 
     /// Evaluate the pipeline output (re-running only dirty nodes).
+    ///
+    /// ST-Task 2: `DehazeRecoveryNode` is no longer a graph-edge dependent of
+    /// `dehaze_transmission_id` (so the same shared-texture hand-off can also
+    /// serve the tiled tier without a redundant per-tile transmission compute).
+    /// That means `dehaze_transmission_id` is no longer an ancestor of
+    /// `output_id`, so the graph's own lazy pull would never evaluate it. Force
+    /// it via the graph (reusing its own dirty-cache — cheap when clean) and
+    /// hand its current output to the recovery node BEFORE evaluating the rest
+    /// of the chain, so recovery always samples the up-to-date transmission.
     pub fn evaluate(&mut self) -> PipelineImage {
+        self.graph.evaluate(self.dehaze_transmission_id);
+        self.dehaze_recovery_node
+            .set_shared_transmission(self.dehaze_transmission_node.current_output_texture());
         self.graph.evaluate(self.output_id).clone()
     }
 

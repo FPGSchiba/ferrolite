@@ -44,7 +44,9 @@ use crate::dehaze::{
     DEHAZE_T0,
 };
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
+use crate::nodes::TileFrame;
 use crate::op::Dehaze;
+use crate::uniforms::GeometryUniform;
 use crate::MAX_DEHAZE_RADIUS;
 
 /// Single-channel intermediate plane format used by every transmission pass.
@@ -133,11 +135,25 @@ impl TransmissionParams {
     }
 }
 
-/// Public params for `DehazeRecoveryNode` (QS-Task 3), read from a shared `Cell`
-/// each `evaluate`. `amount` drives the blend from I toward the recovered J
+/// Public params for `DehazeRecoveryNode`, read from a shared `Cell` each
+/// `evaluate`. `amount` drives the blend from I toward the recovered J
 /// (amount >= 0) or toward the hazed version (amount < 0). `t0` is the transmission
 /// floor (DEHAZE_T0), `atmos` is `[r,g,b,pad]`. Field order MIRRORS the WGSL
 /// `struct P` in `dehaze_recovery.wgsl` exactly (both must be 16-byte aligned).
+///
+/// ST-Task 2: this struct also carries the geometry (`geo_m`/`geo_off`/
+/// `src_dims`), `frame_origin`, and `has_transmission` fields the shader needs
+/// for source-UV sampling of the externally-set shared transmission — but on
+/// THIS shared/pipeline-visible `Cell<RecoveryParams>` those fields are inert
+/// placeholders, always the zeroed default `from_op` produces. `set_geometry`/
+/// `set_shared_transmission` (on `DehazeRecoveryNode`) store the real values in
+/// node-private `Cell`s instead, and `evaluate` merges them into a FRESH,
+/// evaluate-local `RecoveryParams` (base amount/t0/atmos from this Cell + the
+/// real geo/frame/has_transmission from the node-private state) before
+/// uploading it — mirroring `VignetteNode::evaluate`'s merge of its `params`
+/// Cell with the separate `TileFrame`. This keeps a `set_stack`-driven
+/// `self.recovery_params.set(RecoveryParams::from_op(..))` reseed (amount/t0/
+/// atmos only) from ever clobbering the geometry/transmission-binding state.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct RecoveryParams {
@@ -146,16 +162,35 @@ pub(crate) struct RecoveryParams {
     pub pad0: f32,
     pub pad1: f32,
     pub atmos: [f32; 4],
+    /// Row-major 2×2 output→source mapping (mirrors `GeometryUniform::m`).
+    /// Inert on the shared Cell (see struct doc) — real value lives in
+    /// `DehazeRecoveryNode`'s private `geometry` Cell.
+    pub geo_m: [f32; 4],
+    /// Source-pixel translation (mirrors `GeometryUniform::off`). Inert here.
+    pub geo_off: [f32; 2],
+    /// Source dims the shared transmission is aligned to. Inert here.
+    pub src_dims: [f32; 2],
+    /// This pass's output-space frame origin (from the shared `TileFrame`).
+    /// Inert here — refreshed from `DehazeRecoveryNode::frame` every evaluate.
+    pub frame_origin: [f32; 2],
+    /// 1 when a real shared transmission is bound (`set_shared_transmission`),
+    /// else 0 (default 1×1 neutral texture) — gates the shader's sample.
+    /// Inert here — refreshed from `DehazeRecoveryNode::has_transmission`.
+    pub has_transmission: u32,
+    pub pad2: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<RecoveryParams>() == 32);
+const _: () = assert!(std::mem::size_of::<RecoveryParams>() == 80);
 const _: () = assert!(std::mem::size_of::<RecoveryParams>().is_multiple_of(16));
 
 impl RecoveryParams {
     /// Seed from the op's `amount` and the whole-image atmospheric light
     /// (QS-Task 4). Independent of `radius` — an amount-only drag re-seeds
     /// only these params (and dirties `DehazeRecoveryNode`), leaving the
-    /// cached `DehazeTransmissionNode` output untouched.
+    /// cached `DehazeTransmissionNode` output untouched. `geo_m`/`geo_off`/
+    /// `src_dims`/`frame_origin`/`has_transmission` are zeroed placeholders
+    /// (see struct doc) — `DehazeRecoveryNode::evaluate` never reads them from
+    /// this instance for those fields.
     pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
         let amount = op.map(|d| d.amount).unwrap_or(0.0);
         Self {
@@ -169,6 +204,37 @@ impl RecoveryParams {
                 atmos[2].max(DEHAZE_ATMOS_MIN),
                 0.0,
             ],
+            geo_m: [0.0; 4],
+            geo_off: [0.0; 2],
+            src_dims: [0.0; 2],
+            frame_origin: [0.0; 2],
+            has_transmission: 0,
+            pad2: 0,
+        }
+    }
+}
+
+/// Output→source geometry mapping held internally by `DehazeRecoveryNode`
+/// (set via `set_geometry`, merged into the uniform at each `evaluate`). Kept
+/// OUT of the pipeline-visible `RecoveryParams` cell (see that struct's doc) so
+/// a `set_stack`-driven `RecoveryParams::from_op` reseed can never clobber it.
+#[derive(Clone, Copy)]
+struct RecoveryGeometry {
+    m: [f32; 4],
+    off: [f32; 2],
+    src_dims: [f32; 2],
+}
+
+impl Default for RecoveryGeometry {
+    /// Identity mapping over a nominal 1×1 source. Harmless even if `evaluate`
+    /// runs before the first `set_geometry` call: `has_transmission` (default
+    /// 0, from the neutral-texture fallback) gates the shader's sample, so this
+    /// mapping is never actually used for real math in that state.
+    fn default() -> Self {
+        Self {
+            m: [1.0, 0.0, 0.0, 1.0],
+            off: [0.0, 0.0],
+            src_dims: [1.0, 1.0],
         }
     }
 }
@@ -1057,26 +1123,48 @@ impl Node<PipelineImage> for Rc<DehazeTransmissionNode> {
     }
 }
 
-/// Two-input recovery + blend node (QS-Task 3): takes the original image `I`
-/// and the refined transmission `q`, and produces the recovered/haze-adjusted
-/// image by blending per-pixel via the `amount` parameter. Mirrors the pure
-/// `dehaze_recover` reference exactly, but takes `q` directly in the shader
-/// (while the CPU reference takes `dark` derived as `(1-q)/DEHAZE_OMEGA`).
+/// Recovery + blend node (ST-Task 2): takes the original image `I` (its ONLY
+/// graph input) and samples an EXTERNALLY-supplied shared transmission texture
+/// (source space, `set_shared_transmission`) at each output pixel's SOURCE UV —
+/// the geometry mapping (`set_geometry`) plus the shared `TileFrame`'s output-
+/// space origin, mirroring exactly what `GeometryHeadNode` used to resample the
+/// source for this tile/image. This lets the tiled tier (ST-Task 3) bind ONE
+/// whole-image transmission instead of computing it per tile. Mirrors the pure
+/// `dehaze_recover` reference exactly (the CPU reference takes `dark` derived
+/// as `(1-q)/DEHAZE_OMEGA`; the shader takes `q` directly).
 pub(crate) struct DehazeRecoveryNode {
     ctx: Arc<GpuContext>,
+    // amount/t0/atmos only — see `RecoveryParams`'s doc for why the geo/frame/
+    // has_transmission fields on THIS cell are inert placeholders.
     params: Rc<Cell<RecoveryParams>>,
+    geometry: Cell<RecoveryGeometry>,
+    /// Shared with the tiled tier's `GeometryHeadNode`/`VignetteNode` (the head
+    /// writes this each evaluate); a dedicated default-origin `Rc` on the
+    /// whole-image tier (no per-tile frame there). Read for `frame_origin`.
+    frame: Rc<Cell<TileFrame>>,
     pipeline: wgpu::ComputePipeline,
     bgl: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
-    // Linear, clamp-to-edge sampler upsampling `trans` (possibly smaller than
-    // `img` — see `DehazeTransmissionNode`) to the image resolution. Built
-    // once here, never per-evaluate (CLAUDE.md GPU rule).
+    // Linear, clamp-to-edge sampler for the shared transmission's source-UV
+    // sample. Built once here, never per-evaluate (CLAUDE.md GPU rule).
     sampler: wgpu::Sampler,
+    // 1x1 neutral fallback (source-space) transmission so the bind group always
+    // validates before `set_shared_transmission` is ever called (or after it is
+    // cleared back to `None`); `has_transmission` is false in that state, so the
+    // shader passes `I` through regardless of this texture's (unused) content.
+    neutral_tex: Arc<wgpu::Texture>,
+    shared_tex: RefCell<Arc<wgpu::Texture>>,
+    shared_view: RefCell<wgpu::TextureView>,
+    has_transmission: Cell<bool>,
     out: RefCell<Option<PipelineImage>>,
 }
 
 impl DehazeRecoveryNode {
-    pub(crate) fn new(ctx: Arc<GpuContext>, params: Rc<Cell<RecoveryParams>>) -> Self {
+    pub(crate) fn new(
+        ctx: Arc<GpuContext>,
+        params: Rc<Cell<RecoveryParams>>,
+        frame: Rc<Cell<TileFrame>>,
+    ) -> Self {
         let device = &ctx.device;
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1086,9 +1174,10 @@ impl DehazeRecoveryNode {
             mapped_at_creation: false,
         });
 
-        // Two-input variant: 0 = img texture (loaded 1:1), 1 = trans texture
-        // (SAMPLED — may be smaller than img, see `DehazeTransmissionNode`),
-        // 2 = dst storage, 3 = uniform, 4 = filtering sampler for `trans`.
+        // Bind layout unchanged from the two-graph-input version: 0 = img
+        // texture (loaded 1:1), 1 = the shared transmission (SAMPLED, source
+        // space — ST-Task 2, set via `set_shared_transmission` rather than a
+        // graph edge), 2 = dst storage, 3 = uniform, 4 = filtering sampler.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("dehaze-recovery-bgl"),
             entries: &[
@@ -1156,15 +1245,70 @@ impl DehazeRecoveryNode {
 
         let sampler = linear_clamp_sampler(&ctx);
 
+        let neutral_tex = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("dehaze-recovery-neutral-transmission"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PIPELINE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }));
+        let neutral_view = neutral_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         Self {
             ctx,
             params,
+            geometry: Cell::new(RecoveryGeometry::default()),
+            frame,
             pipeline,
             bgl,
             uniform_buf,
             sampler,
+            neutral_tex: neutral_tex.clone(),
+            shared_tex: RefCell::new(neutral_tex),
+            shared_view: RefCell::new(neutral_view),
+            has_transmission: Cell::new(false),
             out: RefCell::new(None),
         }
+    }
+
+    /// Bind (or clear) the externally-supplied shared transmission texture
+    /// (source space; e.g. `DehazeTransmissionNode::current_output_texture()`).
+    /// `None` falls back to the 1×1 neutral texture with `has_transmission =
+    /// 0`, so the shader passes `I` through. Rebuilds only the cached view —
+    /// NEVER the pipeline (CLAUDE.md GPU rule). A no-op when `tex` is already
+    /// the currently-bound texture (`Arc` pointer equality), so the owning
+    /// pipeline can call this unconditionally every evaluate.
+    pub(crate) fn set_shared_transmission(&self, tex: Option<Arc<wgpu::Texture>>) {
+        let next = tex.unwrap_or_else(|| self.neutral_tex.clone());
+        if Arc::ptr_eq(&self.shared_tex.borrow(), &next) {
+            return;
+        }
+        let view = next.create_view(&wgpu::TextureViewDescriptor::default());
+        self.has_transmission
+            .set(!Arc::ptr_eq(&next, &self.neutral_tex));
+        *self.shared_view.borrow_mut() = view;
+        *self.shared_tex.borrow_mut() = next;
+    }
+
+    /// Set the output→source geometry mapping (`m`/`off`/`src_dims` from the
+    /// full `GeometryUniform` — `out_dims`/`out_origin` are ignored, since this
+    /// node gets its own output-space origin from the shared `TileFrame`
+    /// instead). Stored OUTSIDE the pipeline-visible `RecoveryParams` cell (see
+    /// that struct's doc) so a `set_stack`-driven `RecoveryParams::from_op`
+    /// reseed can never clobber it.
+    pub(crate) fn set_geometry(&self, g: GeometryUniform) {
+        self.geometry.set(RecoveryGeometry {
+            m: g.m,
+            off: g.off,
+            src_dims: g.src_dims,
+        });
     }
 
     fn ensure_out(&self, w: u32, h: u32) -> PipelineImage {
@@ -1199,20 +1343,36 @@ impl DehazeRecoveryNode {
 impl Node<PipelineImage> for DehazeRecoveryNode {
     fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
         let img = inputs[0];
-        let trans = inputs[1];
         let (w, h) = (img.width, img.height);
         let out = self.ensure_out(w, h);
 
+        // Merge the amount/t0/atmos base (dirty-tracked, from the pipeline) with
+        // this node's own geometry/frame/has_transmission state (see
+        // `RecoveryParams`'s doc) into a fresh, evaluate-local uniform.
+        let base = self.params.get();
+        let geo = self.geometry.get();
+        let frame = self.frame.get();
+        let uniform = RecoveryParams {
+            amount: base.amount,
+            t0: base.t0,
+            pad0: 0.0,
+            pad1: 0.0,
+            atmos: base.atmos,
+            geo_m: geo.m,
+            geo_off: geo.off,
+            src_dims: geo.src_dims,
+            frame_origin: frame.origin,
+            has_transmission: u32::from(self.has_transmission.get()),
+            pad2: 0,
+        };
         self.ctx
             .queue
-            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&self.params.get()));
+            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
 
         let img_view = img
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let trans_view = trans
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let trans_view = self.shared_view.borrow();
         let out_view = out
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -1508,8 +1668,14 @@ mod tests {
         out
     }
 
+    /// ST-Task 2 Step 1 (TDD): a recovery node with a small constant-`q` shared
+    /// transmission + identity `GeometryUniform` + a `TileFrame { origin: [0,0],
+    /// full_dims: [w,h] }` must reproduce `recovery_node_matches_dehaze_recover`'s
+    /// old two-graph-input behavior exactly — identity geometry means source UV
+    /// == output UV == local UV, so a constant `q` yields the same result as
+    /// before (within the same 2e-3 tolerance).
     #[test]
-    fn recovery_node_matches_dehaze_recover() {
+    fn recovery_samples_shared_transmission_identity_geometry() {
         let Some(ctx) = GpuContext::headless() else {
             eprintln!("no GPU adapter; skipping (expected in headless CI)");
             return;
@@ -1537,6 +1703,12 @@ mod tests {
         const DEHAZE_T0: f32 = 0.1;
         use crate::dehaze::dehaze_recover;
 
+        let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
+        let frame = Rc::new(Cell::new(TileFrame {
+            origin: [0.0, 0.0],
+            full_dims: [w as f32, h as f32],
+        }));
+
         for (q_val, case_name) in test_cases {
             // Create constant transmission texture.
             let mut trans_pixels = Vec::with_capacity((w * h * 4) as usize);
@@ -1548,16 +1720,23 @@ mod tests {
 
             // Test amount = 0 (identity), positive, and negative.
             for amount in [0.0f32, 0.5, -0.5] {
-                let params = Rc::new(Cell::new(RecoveryParams {
-                    amount,
+                let params = Rc::new(Cell::new(RecoveryParams::from_op(
+                    Some(crate::op::Dehaze { amount, radius: 0 }),
+                    a,
+                )));
+                // `from_op` derives `t0` from `DEHAZE_T0`'s crate constant, not the
+                // test-local shadow above; overwrite it to match this test's
+                // reference computation exactly (both currently equal 0.1, but stay
+                // explicit rather than relying on that coincidence).
+                params.set(RecoveryParams {
                     t0: DEHAZE_T0,
-                    pad0: 0.0,
-                    pad1: 0.0,
-                    atmos: [a[0], a[1], a[2], 0.0],
-                }));
+                    ..params.get()
+                });
 
-                let node = DehazeRecoveryNode::new(ctx.clone(), params);
-                let gpu_out = node.evaluate(&[&gpu_img, &gpu_trans]);
+                let node = DehazeRecoveryNode::new(ctx.clone(), params, frame.clone());
+                node.set_geometry(identity_geo);
+                node.set_shared_transmission(Some(gpu_trans.texture.clone()));
+                let gpu_out = node.evaluate(&[&gpu_img]);
 
                 let gpu_result = read_rgba_channels(&ctx, &gpu_out);
 
@@ -1575,7 +1754,7 @@ mod tests {
                         let diff = (gpu_rgb[c] - expected[c]).abs();
                         assert!(
                             diff < 2e-3,
-                            "recovery_node_matches_dehaze_recover ({}, amount={}, pixel {}, channel {}):\n\
+                            "recovery_samples_shared_transmission_identity_geometry ({}, amount={}, pixel {}, channel {}):\n\
                              GPU={:.6}, CPU={:.6}, diff={:.6}",
                             case_name, amount, i, c, gpu_rgb[c], expected[c], diff
                         );
@@ -1588,10 +1767,64 @@ mod tests {
                     );
                 }
                 eprintln!(
-                    "recovery_node_matches_dehaze_recover: {} amount={} PASS",
+                    "recovery_samples_shared_transmission_identity_geometry: {} amount={} PASS",
                     case_name, amount
                 );
             }
+        }
+    }
+
+    /// Regression guard for the ST-Task 2 rework: with NO shared transmission
+    /// ever bound (`set_shared_transmission` never called — the node stays on
+    /// its default 1×1 neutral texture), `has_transmission` must be 0 and the
+    /// shader must pass `I` through unchanged, even with a nonzero `amount`.
+    #[test]
+    fn recovery_passthrough_when_no_shared_transmission_bound() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let (w, h) = (8u32, 8u32);
+        let mut img_pixels = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            img_pixels.extend_from_slice(&[0.4f32, 0.6, 0.2, 1.0]);
+        }
+        let img = LinearRgbaF32::new(w, h, img_pixels).expect("test image");
+        let gpu_img = upload_source(&ctx, &img);
+
+        let frame = Rc::new(Cell::new(TileFrame::default()));
+        let params = Rc::new(Cell::new(RecoveryParams::from_op(
+            Some(crate::op::Dehaze {
+                amount: 0.7,
+                radius: 0,
+            }),
+            [0.9, 0.9, 0.9],
+        )));
+        let node = DehazeRecoveryNode::new(ctx.clone(), params, frame);
+        // No `set_shared_transmission` call: stays at the default 1x1 neutral
+        // texture, `has_transmission` stays false.
+        let out = node.evaluate(&[&gpu_img]);
+        let result = read_rgba_channels(&ctx, &out);
+        // Tolerance loosened to absorb the rgba16float storage round-trip (not
+        // exact for arbitrary f32 inputs), same order as this module's other
+        // GPU-vs-reference tolerances (2e-3).
+        for &px in &result {
+            assert!(
+                (px[0] - 0.4).abs() < 2e-3,
+                "must pass through unchanged: R (got {})",
+                px[0]
+            );
+            assert!(
+                (px[1] - 0.6).abs() < 2e-3,
+                "must pass through unchanged: G (got {})",
+                px[1]
+            );
+            assert!(
+                (px[2] - 0.2).abs() < 2e-3,
+                "must pass through unchanged: B (got {})",
+                px[2]
+            );
         }
     }
 }

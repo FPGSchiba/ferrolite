@@ -97,6 +97,13 @@ pub fn set_component(
     write(stack, la)
 }
 
+/// Thin `mask_edit`-API counterpart to `OpStack::with_layer_adjustments`
+/// (parallels `set_visible`/`set_invert`/`rename` above). Its only production
+/// call site was the duplicate slider block in `mask_panel::selected_section`,
+/// deleted in Task 6 now that the shared scoped base tabs write through
+/// `ScopedEdit::write` directly; kept + tested for API symmetry and in case a
+/// future non-slider mask-adjustment write path wants it.
+#[allow(dead_code)]
 pub fn set_adjustments(stack: &OpStack, idx: usize, a: AdjustmentSet) -> OpStack {
     stack.with_layer_adjustments(idx, a)
 }

@@ -386,6 +386,24 @@ pub struct Settings {
     pub color_grading_open: bool,
     #[serde(default = "default_true")]
     pub optics_open: bool,
+    // per-scope disclosure state (spec §3 / V2 README): Mask scope remembers
+    // its own open/closed sections independently of Adjust's flags above.
+    #[serde(default = "default_true")]
+    pub mask_basic_sliders_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_tone_curve_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_color_hsl_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_color_mix_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_color_grading_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_sharpening_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_noise_reduction_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_dehaze_open: bool,
 }
 
 impl Default for Settings {
@@ -417,6 +435,14 @@ impl Default for Settings {
             tone_curve_open: true,
             color_grading_open: true,
             optics_open: true,
+            mask_basic_sliders_open: true,
+            mask_tone_curve_open: true,
+            mask_color_hsl_open: true,
+            mask_color_mix_open: true,
+            mask_color_grading_open: true,
+            mask_sharpening_open: true,
+            mask_noise_reduction_open: true,
+            mask_dehaze_open: true,
         }
     }
 }
@@ -594,6 +620,14 @@ mod tests {
         assert!(default_settings.tone_curve_open);
         assert!(default_settings.color_grading_open);
         assert!(default_settings.optics_open);
+        assert!(default_settings.mask_basic_sliders_open);
+        assert!(default_settings.mask_tone_curve_open);
+        assert!(default_settings.mask_color_hsl_open);
+        assert!(default_settings.mask_color_mix_open);
+        assert!(default_settings.mask_color_grading_open);
+        assert!(default_settings.mask_sharpening_open);
+        assert!(default_settings.mask_noise_reduction_open);
+        assert!(default_settings.mask_dehaze_open);
 
         let empty_json = "{}";
         let parsed: Settings = serde_json::from_str(empty_json).expect("deserialize empty json");
@@ -613,6 +647,14 @@ mod tests {
             tone_curve_open: false,
             color_grading_open: false,
             optics_open: false,
+            mask_basic_sliders_open: false,
+            mask_tone_curve_open: false,
+            mask_color_hsl_open: false,
+            mask_color_mix_open: false,
+            mask_color_grading_open: false,
+            mask_sharpening_open: false,
+            mask_noise_reduction_open: false,
+            mask_dehaze_open: false,
             ..Settings::default()
         };
 

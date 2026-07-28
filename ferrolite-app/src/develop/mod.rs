@@ -38,11 +38,14 @@ pub mod meta_read;
 pub mod ops_edit;
 pub mod ops_persist;
 pub mod preview_cache;
-// `ScopedEdit::interactive` is still unused outside tests — Task 5's Effects
-// tab (like Light/Color before it) gates readiness entirely through
-// `scoped_slider`'s own check; no base tab needs an explicit interactive-only
-// probe yet. Kept for Task 6, which may.
-#[allow(dead_code)] // consumed by Task 6
+// `ScopedEdit::interactive` is still unused outside tests. Task 6's mask
+// header/banner (tool_panel.rs) and the eight per-scope section-open sites
+// (base_tabs.rs) all gate on `scope::current`/`readiness` directly rather
+// than this probe — no base tab or the new banner needed an
+// interactive-only check distinct from `scoped_slider`'s own gating. Kept in
+// case a future control needs "is this scope even live" without a spec to
+// hang readiness off of.
+#[allow(dead_code)]
 pub mod scope;
 pub mod split;
 pub mod thumb_regen;

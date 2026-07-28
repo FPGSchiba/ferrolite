@@ -191,5 +191,9 @@ mod tests {
             reg.get(ToolId::Heal).unwrap().tabs().is_empty(),
             "Heal has no tabs"
         );
+        assert!(
+            reg.get(ToolId::Mask).unwrap().tabs().is_empty(),
+            "Mask injects no tabs — shared base tabs only"
+        );
     }
 }

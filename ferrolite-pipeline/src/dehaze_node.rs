@@ -577,6 +577,20 @@ impl DehazeTransmissionNode {
         self.rebuilds.get()
     }
 
+    /// The current whole-image dehaze transmission texture (source space, bounded
+    /// to DEHAZE_MAX_TRANSMISSION_DIM), or None when dehaze is inactive. The cached
+    /// `out` texture's `Arc` is returned when the last evaluate ran the passes
+    /// (dehaze active, `active == 1`); when inactive (early-return path), returns
+    /// `None` to reflect that the cached `out` was never populated.
+    pub(crate) fn current_output_texture(&self) -> Option<Arc<wgpu::Texture>> {
+        let params = self.params.get();
+        if params.active != 0 {
+            self.out.borrow().as_ref().map(|p| p.texture.clone())
+        } else {
+            None
+        }
+    }
+
     fn ensure_intermediates(&self, w: u32, h: u32) {
         let mut cur = self.intermediates.borrow_mut();
         let needs_alloc = match cur.as_ref() {

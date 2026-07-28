@@ -833,4 +833,86 @@ mod edit_pipeline_tests {
         let _ = ep.evaluate();
         assert!(ep.transmission_texture().is_some());
     }
+
+    /// ST-Task 2 review fix (round 1): a pixel-level regression proving the
+    /// out-of-band transmission→recovery hand-off (`set_shared_transmission` +
+    /// the explicit `mark_dirty(dehaze_recovery_id)` in `set_stack`) actually
+    /// propagates into the RECOVERED OUTPUT of a LIVE pipeline, not just that
+    /// `transmission_rebuild_count()` incremented or `transmission_texture()`
+    /// is present. Every existing dehaze test either discards `evaluate()`'s
+    /// output (`let _ = ep.evaluate();`) or does a single fresh-evaluate golden
+    /// — neither exercises "change the transmission on an already-evaluated,
+    /// LIVE pipeline via `set_stack`, then read back different pixels", which
+    /// is exactly the class of stale-hand-off bug this rework risks (recovery
+    /// silently keeps sampling the OLD shared texture after a radius change).
+    ///
+    /// Fixture mirrors the golden `dehaze_no_halo_on_dark_edge`/
+    /// `dehaze_positive_increases_contrast_on_hazy_image` fixtures: a thin sky
+    /// band (seeds a realistic atmospheric light `A`) over a dark/bright edge
+    /// field — enough spatial structure that the guided-filter radius change
+    /// (4 -> 16) measurably moves the refined transmission map, unlike a flat
+    /// fixture where every radius produces the same trivial (constant)
+    /// transmission.
+    #[test]
+    fn radius_change_propagates_to_recovered_output() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+
+        let (w, h) = (128usize, 32usize);
+        let sky_rows = 4usize;
+        let edge = 64usize;
+        let (sky, field, dark) = (1.0f32, 0.4f32, 0.05f32);
+        let mut px = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for x in 0..w {
+                let v = if y < sky_rows {
+                    sky
+                } else if x < edge {
+                    dark
+                } else {
+                    field
+                };
+                px.extend_from_slice(&[v, v, v, 1.0]);
+            }
+        }
+        let src = LinearRgbaF32::new(w as u32, h as u32, px).expect("hazy edge fixture");
+
+        let small_radius = OpStack::default().set_op(Op::Dehaze(crate::op::Dehaze {
+            amount: 1.0,
+            radius: 4,
+        }));
+        let mut ep = EditPipeline::new(ctx.clone(), &src, small_radius, IDENTITY);
+        let a = ep.render_to_image();
+
+        // Live `set_stack` on the SAME pipeline instance — this is the path that
+        // relies on `set_shared_transmission`/the explicit
+        // `mark_dirty(dehaze_recovery_id)` to propagate the new transmission
+        // into recovery's output, rather than constructing a fresh pipeline.
+        let large_radius = OpStack::default().set_op(Op::Dehaze(crate::op::Dehaze {
+            amount: 1.0,
+            radius: 16,
+        }));
+        ep.set_stack(large_radius);
+        let b = ep.render_to_image();
+
+        assert_eq!(a.len(), b.len());
+        let mut max_diff = 0i32;
+        for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+            for c in 0..3 {
+                let d = (pa[c] as i32 - pb[c] as i32).abs();
+                max_diff = max_diff.max(d);
+            }
+        }
+        eprintln!("radius_change_propagates_to_recovered_output: max abs u8 diff = {max_diff}");
+        assert!(
+            max_diff > 3,
+            "a live radius change (4 -> 16) via set_stack on the SAME EditPipeline \
+             must propagate through set_shared_transmission into different recovered \
+             pixels; max abs diff (u8) = {max_diff}, expected > 3 — a stale hand-off \
+             would leave this at 0"
+        );
+    }
 }

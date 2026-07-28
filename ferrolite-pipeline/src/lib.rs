@@ -32,6 +32,7 @@ pub use lens_bake::bake_products;
 pub use lens_gpu::{VignetteTexture, WarpGridTexture};
 pub use local::{
     AdjustmentSet, ColorControl, ColorSwatch, LightControl, LocalAdjustments, MaskLayer,
+    NoiseReduction,
 };
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};

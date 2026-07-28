@@ -1276,9 +1276,6 @@ mod tests {
         let a = AdjustmentSet {
             texture: 1.0,
             clarity: 1.0,
-            dehaze: 1.0,
-            sharpness: 1.0,
-            noise: 1.0,
             ..Default::default()
         };
         assert_eq!(light_color_apply([0.3, 0.4, 0.5], &a), [0.3, 0.4, 0.5]);

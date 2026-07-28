@@ -51,6 +51,18 @@ impl Dehaze {
     }
 }
 
+impl Default for Dehaze {
+    /// Identity amount but the CANONICAL default radius, so a set that only
+    /// ever touches `amount` still shapes the transmission the way the UI's
+    /// radius slider default does.
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            radius: crate::DEHAZE_DEFAULT_RADIUS,
+        }
+    }
+}
+
 /// Interpolation between tone-curve control points.
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub enum CurveMode {
@@ -160,7 +172,7 @@ impl ToneCurve {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct HslBand {
     /// Hue shift, normalized [-1, 1]. 0 = identity.
     pub hue: f32,
@@ -170,14 +182,14 @@ pub struct HslBand {
     pub lum: f32,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Hsl {
     /// Per-band deltas; bands = red, orange, yellow, green, aqua, blue,
     /// purple, magenta (the canonical 8-band order). All-zero = identity.
     pub bands: [HslBand; 8],
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Sharpen {
     /// Unsharp-mask amount (>= 0). 0 = identity.
     pub amount: f32,

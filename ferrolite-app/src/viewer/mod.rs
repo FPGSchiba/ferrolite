@@ -86,6 +86,14 @@ pub struct ViewerState {
     /// compares against THIS (not the previous frame) so a dehaze on/off or radius
     /// change across the drag still triggers the right rebuild on release.
     pub full_stack: OpStack,
+    /// True while a slider edit is being DRAGGED (`commit == false`). While set,
+    /// `drive_viewer` PAUSES full-res tile production: the fit view already shows
+    /// the live preview tier during a drag (the full tier is off-screen while the
+    /// version bumps), and re-producing the heavy full-res tiles (dehaze's
+    /// multi-pass transmission per tile) every drag frame churned GPU memory to OOM
+    /// on constrained/integrated GPUs. Cleared on commit (drag release), when
+    /// production resumes and refreshes the 1:1 detail once.
+    pub edit_in_progress: bool,
     /// Plan 3: the full-res edit producer (built on full-decode when the stack is
     /// non-identity). `!Send`/`!Sync`, so it lives here, never in callback_resources.
     pub edit_producer: Option<edit_producer::EditTileProducer>,
@@ -317,6 +325,7 @@ impl ViewerState {
             kind,
             op_stack: OpStack::default(),
             full_stack: OpStack::default(),
+            edit_in_progress: false,
             edit_producer: None,
             view: ViewTransform {
                 zoom: 1.0,

@@ -1692,8 +1692,14 @@ impl FerroliteApp {
         // `v.op_stack`, so a lens-key comparison below sees the real old/new.
         let old_stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
         // Mid-drag (`commit == false`): preview-only, defer the full-res tier to
-        // release. On commit: sync + re-produce the full-res tier too.
+        // release. On commit: sync + re-produce the full-res tier too. Also flag
+        // the drag so `drive_viewer` PAUSES per-frame full-res tile production
+        // while dragging (the OOM lever — the drive loop produces independently of
+        // this method); production resumes on commit.
         self.set_preview_and_full(frame, stack.clone(), commit);
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.edit_in_progress = !commit;
+        }
         if !commit {
             return;
         }
@@ -2307,15 +2313,28 @@ impl FerroliteApp {
                         // the neighbours a pan/zoom will need, and the visible tiles
                         // converge first.
                         if let Some(v) = self.state.viewer.as_mut() {
-                            if let Some(producer) = v.edit_producer.as_mut() {
-                                let needed =
-                                    full.needed_prefetched(&cur_view, cur_viewport, PREFETCH_RING);
-                                produced_this_frame = full.produce_view(
-                                    &g.ctx,
-                                    producer,
-                                    &needed,
-                                    MAX_PRODUCE_PER_FRAME,
-                                );
+                            // PAUSE full-res production while a slider edit is being
+                            // dragged: the fit view shows the live preview tier
+                            // during the drag (the full tier is off-screen while the
+                            // op version bumps), so re-producing the heavy dehaze
+                            // full-res tiles every frame is pure waste — and on
+                            // constrained/integrated GPUs that per-frame churn
+                            // exhausts memory (OOM in `produce_tile`). Production
+                            // resumes on commit (drag release), refreshing 1:1 once.
+                            if !v.edit_in_progress {
+                                if let Some(producer) = v.edit_producer.as_mut() {
+                                    let needed = full.needed_prefetched(
+                                        &cur_view,
+                                        cur_viewport,
+                                        PREFETCH_RING,
+                                    );
+                                    produced_this_frame = full.produce_view(
+                                        &g.ctx,
+                                        producer,
+                                        &needed,
+                                        MAX_PRODUCE_PER_FRAME,
+                                    );
+                                }
                             }
                         }
                         tiles_pending = full.sparse_pending();
@@ -2837,6 +2856,29 @@ fn downscale_linear(
 
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // One-time GPU-budget diagnostic (root-cause confirmation for the dehaze
+        // OOM on constrained GPUs): log the adapter + the memory-relevant limits
+        // once. `device_type: IntegratedGpu` + a small `max_buffer_size` /
+        // `max_storage_buffer_binding_size` confirm a shared-memory budget that a
+        // full-res edit chain can exhaust.
+        static GPU_INFO_ONCE: std::sync::Once = std::sync::Once::new();
+        GPU_INFO_ONCE.call_once(|| {
+            if let Some(rs) = frame.wgpu_render_state() {
+                let info = rs.adapter.get_info();
+                let lim = rs.device.limits();
+                eprintln!(
+                    "[ferrolite gpu] adapter={:?} backend={:?} device_type={:?} driver={:?}",
+                    info.name, info.backend, info.device_type, info.driver
+                );
+                eprintln!(
+                    "[ferrolite gpu] max_texture_dim_2d={} max_buffer_size={} MiB \
+                     max_storage_buffer_binding_size={} MiB",
+                    lim.max_texture_dimension_2d,
+                    lim.max_buffer_size / (1024 * 1024),
+                    lim.max_storage_buffer_binding_size / (1024 * 1024),
+                );
+            }
+        });
         // Free textures retired last frame BEFORE anything paints this frame (see
         // TextureCache::begin_frame): prevents destroying a texture still referenced by
         // this frame's paint jobs.

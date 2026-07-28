@@ -76,7 +76,7 @@ fn local_adjustments_round_trips_through_serialize() {
 
 #[test]
 fn missing_local_adjustments_op_loads_as_none() {
-    let json = r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}}]}"#;
+    let json = r#"{"version":2,"global":{"exposure":0.5},"layers":[]}"#;
     let s = deserialize(json).unwrap();
     assert!(s.local_adjustments().is_none());
 }
@@ -84,9 +84,9 @@ fn missing_local_adjustments_op_loads_as_none() {
 #[test]
 fn adjustment_set_missing_fields_load_as_identity() {
     // A future/older payload with only some fields present.
-    let json = r#"{"version":1,"ops":[{"LocalAdjustments":{"layers":[
+    let json = r#"{"version":2,"layers":[
         {"name":"m","visible":true,"mask":{"components":[],"invert":false},
-         "adjustments":{"exposure":1.0}}]}}]}"#;
+         "adjustments":{"exposure":1.0}}]}"#;
     let s = deserialize(json).unwrap();
     let la = s.local_adjustments().unwrap();
     let a = &la.layers[0].adjustments;
@@ -116,11 +116,11 @@ fn xmp_write_read_round_trips_local_adjustments_and_preserves_foreign_nodes() {
 #[test]
 fn legacy_shapes_only_local_adjustments_still_loads() {
     // A LocalAdjustments payload authored before the Imported variant existed.
-    let json = r#"{"version":1,"ops":[{"LocalAdjustments":{"layers":[
+    let json = r#"{"version":2,"layers":[
         {"name":"sky","visible":true,
          "mask":{"components":[[{"LinearGradient":{"start":{"x":0.0,"y":0.0},"end":{"x":0.0,"y":1.0}}},"Add"]],"invert":false},
-         "adjustments":{"exposure":-0.4}}]}}]}"#;
-    let s = deserialize(json).expect("legacy frl:ops decodes");
+         "adjustments":{"exposure":-0.4}}]}"#;
+    let s = deserialize(json).expect("v2 frl:ops decodes");
     let la = s.local_adjustments().expect("has local adjustments");
     assert_eq!(la.layers.len(), 1);
     assert_eq!(la.layers[0].mask.components.len(), 1);
@@ -131,13 +131,13 @@ fn legacy_shapes_only_local_adjustments_still_loads() {
 fn imported_provenance_unknown_field_tolerated_in_frl_ops() {
     // A future frl:ops with an extra provenance field must load on today's build,
     // proving A2 can extend MaskProvenance without a sidecar schema break.
-    let json = r#"{"version":1,"ops":[{"LocalAdjustments":{"layers":[
+    let json = r#"{"version":2,"layers":[
         {"name":"subject","visible":true,
          "mask":{"components":[
             [{"Imported":{"handle":7,"provenance":{"model_id":"sam2.1","model_version":"1","prompt":"click:0.5,0.5","future_score":0.9}}},"Add"]
          ],"invert":false},
-         "adjustments":{"exposure":0.2}}]}}]}"#;
-    let s = deserialize(json).expect("future frl:ops with extra provenance field decodes");
+         "adjustments":{"exposure":0.2}}]}"#;
+    let s = deserialize(json).expect("v2 frl:ops with extra provenance field decodes");
     let la = s.local_adjustments().unwrap();
     match &la.layers[0].mask.components[0].0 {
         MaskComponent::Imported { handle, provenance } => {

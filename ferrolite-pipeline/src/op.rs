@@ -1,7 +1,9 @@
-//! The edit document model: an ordered `OpStack` of point/parametric ops. Pure
-//! data — no GPU. This is the unit of undo/redo (later plan) and the payload
-//! persisted to the `.xmp` sidecar (Plan 4). Apply order is the fixed canonical
-//! op order (the `OpKind` discriminant order); the `Vec` is kept sorted by it.
+//! The edit document model (v2): a struct `EditDoc` with a global `AdjustmentSet`,
+//! a stack of `MaskLayer`s (each pairing a mask with local adjustments), and
+//! global-only fields `lens` + `geometry`. Pure data — no GPU. This is the unit
+//! of undo/redo (later plan) and the payload persisted to the `.xmp` sidecar
+//! (Plan 4). `Op`/`OpKind` survive as the edit-message vocabulary for rebuild
+//! decisions and the `set_op`/`reset` interface (retired in Phase 2).
 
 use serde::{Deserialize, Serialize};
 

@@ -12,8 +12,23 @@ use ferrolite_mask::{MaskBuffer, MaskCompositor, RasterStore, TileTransform};
 use wgpu::util::DeviceExt;
 
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
-use crate::local::LocalAdjustments;
+use crate::local::{AdjustmentSet, LocalAdjustments};
 use crate::uniforms::{local_adjust_uniform, local_layer_lut, LocalAdjustUniform};
+
+/// Which fused-engine pass this node instance is. `Light` runs once, at the
+/// exposure position (before dehaze), applying only the global set's
+/// `light_segment()` in global order with full coverage — no mask compositing
+/// at all. `Color` runs at the old tone-curve…local-adjust position: first the
+/// global set's `color_segment()` (global order, full coverage) as a pseudo-
+/// layer, then the existing per-mask-layer loop unchanged. Not yet wired into
+/// `EditPipeline`/`TileEditPipeline` (Task 3's scope) — the plain `new`
+/// constructor below defaults to `Color` + an identity global set, so today's
+/// callers keep their exact pre-Phase-3 behavior.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EngineStage {
+    Light,
+    Color,
+}
 
 struct CachedMasks {
     // Keyed on the mask DEFINITIONS only (not the adjustments) so an
@@ -27,6 +42,16 @@ struct CachedMasks {
 pub(crate) struct LocalAdjustmentsNode {
     ctx: Arc<GpuContext>,
     layers: Rc<RefCell<LocalAdjustments>>,
+    // Phase 3 (fused layer engine): which pass this node instance runs, and the
+    // shared global `AdjustmentSet` its pseudo-layer(s) apply from. See
+    // `EngineStage`'s doc for the per-stage dispatch shape.
+    stage: EngineStage,
+    global_set: Rc<RefCell<AdjustmentSet>>,
+    // A 1x1 mask bound for full-coverage (pseudo-layer) dispatches. Its CONTENT
+    // is irrelevant — the shader's coverage flag skips the mask fetch entirely
+    // for these dispatches (see `local_adjust.wgsl`'s `main`) — it exists only
+    // so the bind group has a structurally valid binding 1.
+    full_coverage_mask: MaskBuffer,
     // build-once mask compositing (shared source of truth w/ the UI overlay)
     compositor: MaskCompositor,
     // apply pass
@@ -60,7 +85,31 @@ pub(crate) struct LocalAdjustmentsNode {
 }
 
 impl LocalAdjustmentsNode {
+    /// Thin back-compat wrapper: `Stage::Color` + a fresh identity global set,
+    /// so every pre-Phase-3 call site (today: `pipeline.rs`, `tile_edit.rs`,
+    /// and this module's own tests) keeps its exact existing behavior — an
+    /// identity global set's `color_segment()` is itself identity, so
+    /// `evaluate` skips the pseudo-layer dispatch entirely and falls straight
+    /// through to the unchanged per-mask-layer loop. Task 3 (the pipeline
+    /// swap) is expected to move callers onto `new_engine` directly.
     pub(crate) fn new(ctx: Arc<GpuContext>, layers: Rc<RefCell<LocalAdjustments>>) -> Self {
+        Self::new_engine(
+            ctx,
+            layers,
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        )
+    }
+
+    /// Full constructor: which fused-engine `stage` this node instance runs,
+    /// plus the shared `global_set` its pseudo-layer(s) read from (see
+    /// `EngineStage`'s doc for the per-stage dispatch shape).
+    pub(crate) fn new_engine(
+        ctx: Arc<GpuContext>,
+        layers: Rc<RefCell<LocalAdjustments>>,
+        stage: EngineStage,
+        global_set: Rc<RefCell<AdjustmentSet>>,
+    ) -> Self {
         let apply_bgl = ctx
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -142,6 +191,7 @@ impl LocalAdjustmentsNode {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        let full_coverage_mask = Self::alloc_full_coverage_mask(&ctx);
         Self {
             compositor: MaskCompositor::new(ctx.clone()),
             apply_bgl,
@@ -150,9 +200,40 @@ impl LocalAdjustmentsNode {
             tile: RefCell::new(None),
             cache: RefCell::new(None),
             rebuilds: std::cell::Cell::new(0),
+            stage,
+            global_set,
+            full_coverage_mask,
             ctx,
             layers,
         }
+    }
+
+    /// Allocate the 1x1 mask bound (but never sampled — see the field doc) for
+    /// full-coverage pseudo-layer dispatches. Written to 1.0 for documentation/
+    /// debug-inspection purposes only; the shader's coverage flag bypasses the
+    /// `textureLoad` entirely for these dispatches, so the content is inert.
+    fn alloc_full_coverage_mask(ctx: &GpuContext) -> MaskBuffer {
+        let buf = MaskBuffer::alloc(ctx, 1, 1);
+        ctx.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &buf.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&[1.0f32]),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        buf
     }
 
     /// Number of times the composited-mask cache has been rebuilt (test hook).
@@ -308,13 +389,57 @@ impl LocalAdjustmentsNode {
 impl Node<PipelineImage> for LocalAdjustmentsNode {
     fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
         let input = inputs[0];
-        let layers = self.layers.borrow();
-        if layers.is_identity() {
+        match self.stage {
+            EngineStage::Light => self.evaluate_light(input),
+            EngineStage::Color => self.evaluate_color(input),
+        }
+    }
+}
+
+impl LocalAdjustmentsNode {
+    /// `Stage::Light`: exactly one dispatch (or zero, if the global set's
+    /// light segment is identity) — the global set's `light_segment()`, global
+    /// order, full coverage. No mask compositing at all.
+    fn evaluate_light(&self, input: &PipelineImage) -> PipelineImage {
+        let seg = self.global_set.borrow().light_segment();
+        if seg.is_identity() {
             return input.clone();
         }
+        let u = local_adjust_uniform(&seg, true, true);
+        let lut = local_layer_lut(&seg);
+        self.apply(input, &self.full_coverage_mask, u, &lut)
+    }
+
+    /// `Stage::Color`: dispatch 1 (skipped when identity) is the global set's
+    /// `color_segment()` pseudo-layer (global order, full coverage), then the
+    /// existing per-mask-layer loop — UNCHANGED — continues from whatever
+    /// `current` the pseudo-layer left behind.
+    fn evaluate_color(&self, input: &PipelineImage) -> PipelineImage {
+        let global_seg = self.global_set.borrow().color_segment();
+        let layers = self.layers.borrow();
+
+        if global_seg.is_identity() && layers.is_identity() {
+            return input.clone();
+        }
+
+        let mut current = input.clone();
+        if !global_seg.is_identity() {
+            let u = local_adjust_uniform(&global_seg, true, true);
+            let lut = local_layer_lut(&global_seg);
+            current = self.apply(&current, &self.full_coverage_mask, u, &lut);
+        }
+
+        if layers.is_identity() {
+            return current;
+        }
+
         // Composite the mask at the INPUT resolution: whole image for preview,
         // one (haloed) tile for the tiled tier. Range components read this exact
         // content; the tile placement maps spatial components to full-image uv.
+        // Unchanged from pre-Phase-3: masks composite off the node's original
+        // `input`, not the (possibly global-color-adjusted) `current` — the
+        // global pseudo-layer only affects the point-op CHAIN, not what mask
+        // range components sample.
         let (mw, mh) = (input.width, input.height);
         let tile = self.tile.borrow();
         let placement = tile.unwrap_or_else(|| TileTransform::whole_image(mw, mh));
@@ -366,9 +491,8 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
             composite_all()
         };
 
-        let mut current = input.clone();
         for (layer, mask) in layers.visible_layers().zip(masks.iter()) {
-            let u = local_adjust_uniform(&layer.adjustments);
+            let u = local_adjust_uniform(&layer.adjustments, false, false);
             let lut = local_layer_lut(&layer.adjustments);
             current = self.apply(&current, mask, u, &lut);
         }
@@ -473,7 +597,7 @@ mod tests {
             for x in 0..w {
                 let mut rgb = [x as f32 / w as f32, y as f32 / h as f32, 0.25];
                 for l in la.visible_layers() {
-                    rgb = crate::uniforms::light_color_apply(rgb, &l.adjustments);
+                    rgb = crate::uniforms::light_color_apply(rgb, &l.adjustments, false);
                 }
                 out.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 1.0]);
             }
@@ -710,5 +834,156 @@ mod tests {
                 "pixel mismatch: got {got}, want {want}"
             );
         }
+    }
+
+    /// Phase 3: a `Stage::Light` node dispatches exactly the global set's
+    /// `light_segment()` in global order (WB before contrast) with full
+    /// coverage — matched against the CPU reference called the same way.
+    #[test]
+    fn light_stage_node_matches_cpu_reference_with_global_order() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+
+        // `light_trio`-style params (design doc fixture 2): exercises the
+        // WB<->contrast order directly.
+        let global = AdjustmentSet {
+            exposure: 0.8,
+            contrast: 0.35,
+            temp: 0.4,
+            tint: -0.2,
+            ..Default::default()
+        };
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(LocalAdjustments::default())),
+            EngineStage::Light,
+            Rc::new(RefCell::new(global.clone())),
+        );
+
+        let out = node.evaluate(&[&src]);
+        let out_px = read_pixels(&ctx, &out);
+
+        let (w, h) = (8u32, 8u32);
+        let seg = global.light_segment();
+        let mut expected = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let rgb = [x as f32 / w as f32, y as f32 / h as f32, 0.25];
+                let out_rgb = crate::uniforms::light_color_apply(rgb, &seg, true);
+                expected.extend_from_slice(&[out_rgb[0], out_rgb[1], out_rgb[2], 1.0]);
+            }
+        }
+        for (got, want) in out_px.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 5e-3,
+                "pixel mismatch: got {got}, want {want}"
+            );
+        }
+    }
+
+    /// Phase 3: a `Stage::Color` node with a non-identity global set and one
+    /// mask layer must dispatch the global color-segment pseudo-layer FIRST
+    /// (global order, full coverage), then the mask layer (mask order,
+    /// composited mask) — matched against the CPU composition applied in the
+    /// same sequence.
+    #[test]
+    fn color_stage_node_composes_global_segment_then_mask_layer() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+
+        let global = AdjustmentSet {
+            saturation: 0.4,
+            hue: 0.1,
+            ..Default::default()
+        };
+        let la = LocalAdjustments {
+            layers: vec![layer("m", 0.3, 0.2)],
+        };
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(la.clone())),
+            EngineStage::Color,
+            Rc::new(RefCell::new(global.clone())),
+        );
+
+        let out = node.evaluate(&[&src]);
+        let out_px = read_pixels(&ctx, &out);
+
+        let (w, h) = (8u32, 8u32);
+        let seg = global.color_segment();
+        let mut expected = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let mut rgb = [x as f32 / w as f32, y as f32 / h as f32, 0.25];
+                rgb = crate::uniforms::light_color_apply(rgb, &seg, true);
+                for l in la.visible_layers() {
+                    rgb = crate::uniforms::light_color_apply(rgb, &l.adjustments, false);
+                }
+                expected.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 1.0]);
+            }
+        }
+        for (got, want) in out_px.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 5e-3,
+                "pixel mismatch: got {got}, want {want}"
+            );
+        }
+    }
+
+    /// A default (identity) global set must add ZERO dispatches: `evaluate`
+    /// returns a clone of the exact input texture (proven via `Arc::ptr_eq`),
+    /// not merely a pixel-identical copy — this is what keeps the `mask_only`
+    /// parity fixture (Task 1) trivially exact once the engine is wired in.
+    #[test]
+    fn default_global_set_adds_no_dispatch_for_color_stage() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(LocalAdjustments::default())),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        );
+        let out = node.evaluate(&[&src]);
+        assert!(
+            Arc::ptr_eq(&out.texture, &src.texture),
+            "default global set + no layers must add zero dispatches"
+        );
+    }
+
+    /// Same guarantee as above, for the `Light` stage.
+    #[test]
+    fn default_global_set_adds_no_dispatch_for_light_stage() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(LocalAdjustments::default())),
+            EngineStage::Light,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        );
+        let out = node.evaluate(&[&src]);
+        assert!(
+            Arc::ptr_eq(&out.texture, &src.texture),
+            "default global set must add zero dispatches for the Light stage too"
+        );
     }
 }

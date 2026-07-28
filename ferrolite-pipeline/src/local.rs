@@ -175,6 +175,43 @@ impl AdjustmentSet {
         }
         s
     }
+
+    /// Copy carrying ONLY the fused engine's Light-stage fields (exposure,
+    /// highlights/shadows/whites/blacks, temp/tint, contrast); every other
+    /// field is reset to its identity `Default`. The exact complement of
+    /// `color_segment` — together they partition every `AdjustmentSet` field
+    /// exactly once (fields belonging to neither engine segment, e.g. sharpen/
+    /// dehaze/noise_reduction/texture/clarity, are identity in both).
+    pub fn light_segment(&self) -> Self {
+        Self {
+            exposure: self.exposure,
+            contrast: self.contrast,
+            highlights: self.highlights,
+            shadows: self.shadows,
+            whites: self.whites,
+            blacks: self.blacks,
+            temp: self.temp,
+            tint: self.tint,
+            ..Self::default()
+        }
+    }
+
+    /// Copy carrying ONLY the fused engine's Color-stage fields (saturation,
+    /// hue, vibrance, color swatch, tone curve, HSL, color grade); every other
+    /// field is reset to its identity `Default`. The exact complement of
+    /// `light_segment`.
+    pub fn color_segment(&self) -> Self {
+        Self {
+            saturation: self.saturation,
+            hue: self.hue,
+            color: self.color,
+            vibrance: self.vibrance,
+            tone_curve: self.tone_curve.clone(),
+            hsl: self.hsl,
+            color_grade: self.color_grade,
+            ..Self::default()
+        }
+    }
 }
 
 /// One mask + its adjustments. `MaskDefinition` is the engine-tier parametric mask

@@ -34,6 +34,11 @@ pub use local::{
     AdjustmentSet, ColorControl, ColorSwatch, LightControl, LocalAdjustments, MaskLayer,
     NoiseReduction,
 };
+// `EngineStage` is the fused layer-engine node's stage discriminant (Task 3
+// wires two `LocalAdjustmentsNode` instances, one per stage, into the
+// pipelines) — re-exported from the otherwise crate-private `local_node`
+// module.
+pub use local_node::EngineStage;
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{

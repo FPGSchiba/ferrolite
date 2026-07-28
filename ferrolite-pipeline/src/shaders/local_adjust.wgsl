@@ -21,6 +21,11 @@ struct P {
     grade_params: vec4<f32>,
     // x = curve active, y = hsl active, z = grade active, w = pad.
     active_flags: vec4<f32>,
+    // Phase 3 (fused layer engine): x = 1.0 global order (WB before contrast),
+    // 0.0 mask order (contrast before WB, the historical default); y = 1.0
+    // force full coverage (skip the mask sample entirely, m = 1.0); z =
+    // vibrance amount (0 = identity); w = pad.
+    order_and_coverage: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> p: P;
 // Phase 2b: per-layer 3x256 tone-curve LUT (R,G,B rows), same packing + binding
@@ -147,14 +152,32 @@ fn adjust(rgb: vec3<f32>) -> vec3<f32> {
     let region = (1.0 + p.highlights * hi) * (1.0 + p.shadows * sh)
         * (1.0 + p.whites * wh) * (1.0 + p.blacks * bl);
     c = c * region;
-    c = (c - vec3<f32>(p.contrast_pivot)) * p.contrast_gain + vec3<f32>(p.contrast_pivot);
-    c = c * p.wb_mul;
+    // Phase 3: the WB↔contrast order is stage-selected. Global (light-engine /
+    // color-pseudo-layer) order applies WB before contrast; the mask order
+    // (historical, unchanged) applies contrast before WB — the two do not
+    // commute, so each stage keeps its own order for parity.
+    if (p.order_and_coverage.x != 0.0) {
+        c = c * p.wb_mul;
+        c = (c - vec3<f32>(p.contrast_pivot)) * p.contrast_gain + vec3<f32>(p.contrast_pivot);
+    } else {
+        c = (c - vec3<f32>(p.contrast_pivot)) * p.contrast_gain + vec3<f32>(p.contrast_pivot);
+        c = c * p.wb_mul;
+    }
     let y2 = luma709(c);
     c = vec3<f32>(y2) + (c - vec3<f32>(y2)) * p.saturation;
     if (p.hue_deg != 0.0) {
         var hsl = rgb2hsl(max(c, vec3<f32>(0.0)));
         hsl.x = hsl.x + p.hue_deg;
         hsl.x = hsl.x - floor(hsl.x / 360.0) * 360.0;
+        c = hsl2rgb(hsl);
+    }
+    // Vibrance (Phase 3, new — both scopes): fades out as a pixel approaches
+    // full saturation. Slots after hue, before the tone curve; gated on
+    // non-zero so a zero-vibrance layer never enters the round trip.
+    if (p.order_and_coverage.z != 0.0) {
+        var hsl = rgb2hsl(max(c, vec3<f32>(0.0)));
+        let v = p.order_and_coverage.z;
+        hsl.y = clamp(hsl.y * (1.0 + v * (1.0 - hsl.y)), 0.0, 1.0);
         c = hsl2rgb(hsl);
     }
     // Phase 2b: per-layer tone curve (LUT), HSL bands, color grade — ported from
@@ -172,7 +195,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
     let c = textureLoad(src, xy, 0);
-    let m = textureLoad(mask, xy, 0).r;
+    // Phase 3: a full-coverage pseudo-layer (the global light/color segments)
+    // skips the mask fetch ENTIRELY rather than sampling then overriding —
+    // the bound mask texture for these dispatches may be a small placeholder,
+    // and an out-of-bounds `textureLoad` at larger `xy` must never be reached.
+    var m = 1.0;
+    if (p.order_and_coverage.y == 0.0) {
+        m = textureLoad(mask, xy, 0).r;
+    }
     let out = mix(c.rgb, adjust(c.rgb), clamp(m, 0.0, 1.0));
     textureStore(dst, xy, vec4<f32>(out, c.a));
 }

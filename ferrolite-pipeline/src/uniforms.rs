@@ -617,11 +617,28 @@ pub struct LocalAdjustUniform {
     /// x = curve active (LUT differs from the linear ramp), y = hsl active,
     /// z = grade active, w = pad. Skip flags so identity layers pay no extra math.
     pub active_flags: [f32; 4],
+    // ── Phase 3 (fused layer engine): stage order + coverage flags + vibrance.
+    /// x: 1.0 = global order (WB applied before contrast), 0.0 = mask order
+    /// (contrast before WB — the historical/existing per-mask order, kept as
+    /// the default so an untouched call site stays byte-identical). y: 1.0 =
+    /// force full coverage (the shader skips the mask sample entirely and uses
+    /// m = 1.0 — NOT merely a post-hoc override, so an out-of-bounds/degenerate
+    /// mask texture bound for a global pseudo-layer is never read). z: vibrance
+    /// amount (rides in this vec4 rather than growing the struct again). w: pad.
+    pub order_and_coverage: [f32; 4],
 }
 
 /// `light_color_apply` (below) is still test-only; `local_adjust_uniform` is now
-/// consumed by `LocalAdjustmentsNode`.
-pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUniform {
+/// consumed by `LocalAdjustmentsNode`. `global_order` selects the WB↔contrast
+/// application order (true = global/light-engine order: WB before contrast;
+/// false = mask order: contrast before WB — the pre-Phase-3 default, so mask
+/// layers stay byte-identical). `full_coverage` forces the shader's mask sample
+/// to 1.0 (used by the global pseudo-layers, which composite no mask at all).
+pub fn local_adjust_uniform(
+    a: &crate::local::AdjustmentSet,
+    global_order: bool,
+    full_coverage: bool,
+) -> LocalAdjustUniform {
     let hsl_bands = hsl_uniform(Some(a.hsl)).bands;
     let grade = color_grade_uniform(Some(a.color_grade));
     LocalAdjustUniform {
@@ -655,6 +672,12 @@ pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUnifo
             } else {
                 0.0
             },
+            0.0,
+        ],
+        order_and_coverage: [
+            if global_order { 1.0 } else { 0.0 },
+            if full_coverage { 1.0 } else { 0.0 },
+            a.vibrance,
             0.0,
         ],
     }
@@ -786,10 +809,20 @@ fn hsl_bands_apply(c: [f32; 3], bands: &[[f32; 4]; 8]) -> [f32; 3] {
 
 /// CPU reference for the Light+Color point op. `local_adjust.wgsl` mirrors this
 /// exactly (golden tolerance absorbs f16/driver drift). Order: exposure → tonal
-/// region gains → contrast → wb → saturation → hue → color swatch. Output clamped ≥0.
+/// region gains → {contrast, wb} in the order `global_order` selects → saturation
+/// → hue → vibrance → curve/HSL/grade → color swatch. Output clamped ≥0.
+///
+/// `global_order`: true = the light-engine/global-pseudo-layer order (WB before
+/// contrast); false = the per-mask order (contrast before WB — the historical
+/// default, unchanged by Phase 3). The two do not commute, so each call site
+/// must pass the flag matching its stage (see `local_node.rs`).
 #[allow(dead_code)]
-pub fn light_color_apply(rgb: [f32; 3], a: &crate::local::AdjustmentSet) -> [f32; 3] {
-    let u = local_adjust_uniform(a);
+pub fn light_color_apply(
+    rgb: [f32; 3],
+    a: &crate::local::AdjustmentSet,
+    global_order: bool,
+) -> [f32; 3] {
+    let u = local_adjust_uniform(a, global_order, false);
     let mut c = [
         rgb[0] * u.exposure_gain,
         rgb[1] * u.exposure_gain,
@@ -807,11 +840,22 @@ pub fn light_color_apply(rgb: [f32; 3], a: &crate::local::AdjustmentSet) -> [f32
     for v in &mut c {
         *v *= region;
     }
-    for v in &mut c {
-        *v = (*v - u.contrast_pivot) * u.contrast_gain + u.contrast_pivot;
-    }
-    for (v, m) in c.iter_mut().zip(u.wb_mul) {
-        *v *= m;
+    if global_order {
+        // Global order: WB before contrast.
+        for (v, m) in c.iter_mut().zip(u.wb_mul) {
+            *v *= m;
+        }
+        for v in &mut c {
+            *v = (*v - u.contrast_pivot) * u.contrast_gain + u.contrast_pivot;
+        }
+    } else {
+        // Mask order (historical, unchanged): contrast before WB.
+        for v in &mut c {
+            *v = (*v - u.contrast_pivot) * u.contrast_gain + u.contrast_pivot;
+        }
+        for (v, m) in c.iter_mut().zip(u.wb_mul) {
+            *v *= m;
+        }
     }
     let y2 = luma709(c);
     for v in &mut c {
@@ -820,6 +864,16 @@ pub fn light_color_apply(rgb: [f32; 3], a: &crate::local::AdjustmentSet) -> [f32
     if u.hue_deg != 0.0 {
         let mut hsl = rgb_to_hsl([c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]);
         hsl[0] = (hsl[0] + u.hue_deg).rem_euclid(360.0);
+        c = hsl_to_rgb(hsl);
+    }
+    // Vibrance (Phase 3, new — both scopes): a saturation boost that fades as a
+    // pixel approaches full saturation; `s' = s * (1 + vibrance * (1 - s))`,
+    // clamped to [0,1]. Slots after hue, before the tone curve. Gated on
+    // non-zero (like the hue step above) so a zero-vibrance AdjustmentSet stays
+    // bit-exact through the rgb2hsl/hsl2rgb round trip.
+    if a.vibrance != 0.0 {
+        let mut hsl = rgb_to_hsl([c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]);
+        hsl[1] = (hsl[1] * (1.0 + a.vibrance * (1.0 - hsl[1]))).clamp(0.0, 1.0);
         c = hsl_to_rgb(hsl);
     }
     // ── Phase 2b: per-layer curve → HSL bands → grade, mirroring the WGSL Task 2
@@ -1312,7 +1366,7 @@ mod tests {
     #[test]
     fn light_color_identity_is_a_no_op() {
         use crate::local::AdjustmentSet;
-        let c = light_color_apply([0.4, 0.5, 0.6], &AdjustmentSet::default());
+        let c = light_color_apply([0.4, 0.5, 0.6], &AdjustmentSet::default(), false);
         assert!(
             (c[0] - 0.4).abs() < 1e-6 && (c[1] - 0.5).abs() < 1e-6 && (c[2] - 0.6).abs() < 1e-6
         );
@@ -1327,6 +1381,7 @@ mod tests {
                 exposure: 1.0,
                 ..Default::default()
             },
+            false,
         );
         assert!((c[0] - 0.4).abs() < 1e-4, "got {}", c[0]);
     }
@@ -1341,6 +1396,7 @@ mod tests {
                 contrast: 0.5,
                 ..Default::default()
             },
+            false,
         );
         assert!(c[0] > 0.5, "above-pivot value brightened: {}", c[0]);
     }
@@ -1354,6 +1410,7 @@ mod tests {
                 saturation: -1.0,
                 ..Default::default()
             },
+            false,
         );
         assert!(
             (c[0] - c[1]).abs() < 1e-4 && (c[1] - c[2]).abs() < 1e-4,
@@ -1370,6 +1427,7 @@ mod tests {
                 temp: 0.8,
                 ..Default::default()
             },
+            false,
         );
         assert!(c[0] > c[2], "warm temp: r={} b={}", c[0], c[2]);
     }
@@ -1377,10 +1435,11 @@ mod tests {
     #[test]
     fn local_adjust_uniform_is_identity_when_default() {
         use crate::local::AdjustmentSet;
-        let u = local_adjust_uniform(&AdjustmentSet::default());
+        let u = local_adjust_uniform(&AdjustmentSet::default(), false, false);
         assert_eq!(u.exposure_gain, 1.0);
         assert_eq!(u.contrast_gain, 1.0);
         assert_eq!(u.wb_mul, [1.0, 1.0, 1.0]);
+        assert_eq!(u.order_and_coverage, [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(std::mem::size_of::<LocalAdjustUniform>() % 16, 0);
     }
 
@@ -1388,7 +1447,7 @@ mod tests {
     fn extended_local_uniform_is_identity_safe() {
         use crate::local::AdjustmentSet;
         let a = AdjustmentSet::default();
-        let u = local_adjust_uniform(&a);
+        let u = local_adjust_uniform(&a, false, false);
         assert_eq!(u.active_flags, [0.0; 4]);
         assert_eq!(u.hsl_bands, [[0.0; 4]; 8]);
         // Identity LUT is the linear ramp.
@@ -1398,14 +1457,211 @@ mod tests {
     }
 
     #[test]
+    fn order_and_coverage_flags_pack_global_order_and_full_coverage() {
+        use crate::local::AdjustmentSet;
+        let a = AdjustmentSet {
+            vibrance: 0.3,
+            ..Default::default()
+        };
+        let u_mask = local_adjust_uniform(&a, false, false);
+        assert_eq!(u_mask.order_and_coverage, [0.0, 0.0, 0.3, 0.0]);
+        let u_global = local_adjust_uniform(&a, true, true);
+        assert_eq!(u_global.order_and_coverage, [1.0, 1.0, 0.3, 0.0]);
+    }
+
+    /// `AdjustmentSet::light_segment()` and `color_segment()` must partition the
+    /// point-op fields exactly once each: every Light-stage field appears ONLY
+    /// in `light_segment`, every Color-stage field ONLY in `color_segment`, and
+    /// fields belonging to NEITHER stage (sharpen/dehaze/NR/texture/clarity —
+    /// Phase 4's territory) are identity in BOTH.
+    #[test]
+    fn light_and_color_segments_partition_the_set() {
+        use crate::local::{AdjustmentSet, ColorSwatch, NoiseReduction};
+
+        let a = AdjustmentSet {
+            exposure: 0.1,
+            contrast: 0.2,
+            highlights: 0.3,
+            shadows: 0.4,
+            whites: 0.5,
+            blacks: 0.6,
+            temp: 0.7,
+            tint: 0.8,
+            saturation: 0.9,
+            hue: 0.11,
+            color: ColorSwatch {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                amount: 0.5,
+            },
+            vibrance: 0.12,
+            tone_curve: crate::op::ToneCurve {
+                points: vec![(0.0, 0.1), (1.0, 1.0)],
+                ..Default::default()
+            },
+            hsl: {
+                let mut h = crate::op::Hsl::default();
+                h.bands[0].sat = 0.3;
+                h
+            },
+            color_grade: {
+                let mut g = crate::op::ColorGrade::default();
+                g.shadows.sat = 0.4;
+                g
+            },
+            sharpen: crate::op::Sharpen {
+                amount: 0.5,
+                radius: 2,
+            },
+            dehaze: crate::op::Dehaze {
+                amount: 0.2,
+                ..Default::default()
+            },
+            noise_reduction: NoiseReduction {
+                luminance: 0.5,
+                ..Default::default()
+            },
+            texture: 0.3,
+            clarity: 0.4,
+        };
+
+        let light = a.light_segment();
+        let color = a.color_segment();
+
+        // Light-owned fields: present in `light`, identity in `color`.
+        assert_eq!(light.exposure, 0.1);
+        assert_eq!(color.exposure, 0.0);
+        assert_eq!(light.contrast, 0.2);
+        assert_eq!(color.contrast, 0.0);
+        assert_eq!(light.highlights, 0.3);
+        assert_eq!(color.highlights, 0.0);
+        assert_eq!(light.shadows, 0.4);
+        assert_eq!(color.shadows, 0.0);
+        assert_eq!(light.whites, 0.5);
+        assert_eq!(color.whites, 0.0);
+        assert_eq!(light.blacks, 0.6);
+        assert_eq!(color.blacks, 0.0);
+        assert_eq!(light.temp, 0.7);
+        assert_eq!(color.temp, 0.0);
+        assert_eq!(light.tint, 0.8);
+        assert_eq!(color.tint, 0.0);
+
+        // Color-owned fields: present in `color`, identity in `light`.
+        assert_eq!(color.saturation, 0.9);
+        assert_eq!(light.saturation, 0.0);
+        assert_eq!(color.hue, 0.11);
+        assert_eq!(light.hue, 0.0);
+        assert_eq!(color.vibrance, 0.12);
+        assert_eq!(light.vibrance, 0.0);
+        assert_eq!(color.color.amount, 0.5);
+        assert_eq!(light.color.amount, 0.0);
+        assert!(!color.tone_curve.is_identity());
+        assert!(light.tone_curve.is_identity());
+        assert!(!color.hsl.is_identity());
+        assert!(light.hsl.is_identity());
+        assert!(!color.color_grade.is_identity());
+        assert!(light.color_grade.is_identity());
+
+        // Fields owned by NEITHER stage: identity in both.
+        assert_eq!(light.sharpen.amount, 0.0);
+        assert_eq!(color.sharpen.amount, 0.0);
+        assert!(light.dehaze.is_identity());
+        assert!(color.dehaze.is_identity());
+        assert_eq!(light.noise_reduction, NoiseReduction::default());
+        assert_eq!(color.noise_reduction, NoiseReduction::default());
+        assert_eq!(light.texture, 0.0);
+        assert_eq!(color.texture, 0.0);
+        assert_eq!(light.clarity, 0.0);
+        assert_eq!(color.clarity, 0.0);
+    }
+
+    /// Order flag: with temp + contrast both set, the global order (WB before
+    /// contrast) and the mask order (contrast before WB) must diverge, and the
+    /// global-order result must equal a hand-composed "wb then pivot-contrast".
+    #[test]
+    fn cpu_reference_order_flag_swaps_wb_contrast() {
+        use crate::local::AdjustmentSet;
+        let a = AdjustmentSet {
+            temp: 0.5,
+            contrast: 0.5,
+            ..Default::default()
+        };
+        let c = [0.5, 0.5, 0.5];
+        let global = light_color_apply(c, &a, true);
+        let mask = light_color_apply(c, &a, false);
+        assert_ne!(
+            global, mask,
+            "order flag must change output when temp+contrast are both set"
+        );
+
+        // Hand-compose the global order: wb, then pivot-contrast (everything
+        // else in `a` is identity, so no other step contributes).
+        let mul = wb_multipliers(0.5, 0.0);
+        let mut manual = [c[0] * mul[0], c[1] * mul[1], c[2] * mul[2]];
+        for v in &mut manual {
+            *v = (*v - CONTRAST_PIVOT) * 1.5 + CONTRAST_PIVOT;
+        }
+        for (g, m) in global.iter().zip(manual.iter()) {
+            assert!(
+                (g - m).abs() < 1e-5,
+                "global order must equal wb-then-pivot-contrast: {g} vs {m}"
+            );
+        }
+    }
+
+    /// Vibrance: a low-saturation pixel must gain relatively more saturation
+    /// than a high-saturation pixel at the same vibrance amount (the formula
+    /// fades toward full saturation); vibrance 0 must stay bit-exact identity.
+    #[test]
+    fn vibrance_boosts_low_sat_more_than_high_sat() {
+        use crate::local::AdjustmentSet;
+
+        let low_sat = [0.55, 0.5, 0.45];
+        let high_sat = [0.9, 0.1, 0.1];
+
+        let a = AdjustmentSet {
+            vibrance: 0.5,
+            ..Default::default()
+        };
+        let low_before = rgb_to_hsl(low_sat)[1];
+        let high_before = rgb_to_hsl(high_sat)[1];
+
+        let low_after = rgb_to_hsl(light_color_apply(low_sat, &a, false))[1];
+        let high_after = rgb_to_hsl(light_color_apply(high_sat, &a, false))[1];
+
+        let low_gain = (low_after - low_before) / low_before.max(1e-6);
+        let high_gain = (high_after - high_before) / high_before.max(1e-6);
+        assert!(
+            low_gain > high_gain,
+            "low-sat pixel must gain more relative saturation: low={low_gain} high={high_gain}"
+        );
+
+        // Vibrance 0 is a no-op: the step is flag-gated (not merely a no-op
+        // formula), so it never enters the rgb2hsl/hsl2rgb round trip. Compared
+        // with the same tolerance as `light_color_identity_is_a_no_op` (the
+        // pivot-contrast subtract/add at identity params is not itself
+        // bit-exact under float rounding, independent of vibrance).
+        let a0 = AdjustmentSet::default();
+        let c = [0.3, 0.6, 0.2];
+        let out = light_color_apply(c, &a0, false);
+        for (o, want) in out.iter().zip(c.iter()) {
+            assert!(
+                (o - want).abs() < 1e-6,
+                "vibrance 0 must be a no-op: {out:?}"
+            );
+        }
+    }
+
+    #[test]
     fn cpu_reference_applies_curve_hsl_grade() {
         use crate::local::AdjustmentSet;
 
         // Curve: a strong lift must brighten the reference output.
         let mut a = AdjustmentSet::default();
         a.tone_curve.points = vec![(0.0, 0.3), (1.0, 1.0)];
-        let lifted = light_color_apply([0.2, 0.2, 0.2], &a);
-        let base = light_color_apply([0.2, 0.2, 0.2], &AdjustmentSet::default());
+        let lifted = light_color_apply([0.2, 0.2, 0.2], &a, false);
+        let base = light_color_apply([0.2, 0.2, 0.2], &AdjustmentSet::default(), false);
         assert!(lifted[0] > base[0], "curve lift raises output");
 
         // Grade: a saturated shadows tint must move channel balance.
@@ -1415,11 +1671,11 @@ mod tests {
             sat: 0.5,
             lum: 0.0,
         };
-        let graded = light_color_apply([0.1, 0.1, 0.1], &a);
+        let graded = light_color_apply([0.1, 0.1, 0.1], &a, false);
         assert_ne!(graded, [0.1, 0.1, 0.1]);
 
         // Identity set stays a pure pass-through (bit-stable vs the old reference).
-        let id = light_color_apply([0.4, 0.5, 0.6], &AdjustmentSet::default());
+        let id = light_color_apply([0.4, 0.5, 0.6], &AdjustmentSet::default(), false);
         let old = {
             // exposure-only path unchanged: 0 EV ⇒ input unchanged through the whole chain
             [0.4, 0.5, 0.6]
@@ -1435,7 +1691,10 @@ mod tests {
             clarity: 1.0,
             ..Default::default()
         };
-        assert_eq!(light_color_apply([0.3, 0.4, 0.5], &a), [0.3, 0.4, 0.5]);
+        assert_eq!(
+            light_color_apply([0.3, 0.4, 0.5], &a, false),
+            [0.3, 0.4, 0.5]
+        );
     }
 
     #[test]

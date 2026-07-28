@@ -1,7 +1,7 @@
 //! `TileEditPipeline` — the per-tile, full-res GPU edit producer. For each
 //! requested tile it runs geometry-at-the-head (resampling the GPU-resident
 //! source for the haloed output tile) then the color chain (exposure→WB→contrast
-//! →tone-curve→HSL→LocalAdjustments→sharpen) over the haloed buffer, and returns
+//! →dehaze→tone-curve→HSL→LocalAdjustments→sharpen) over the haloed buffer, and returns
 //! the interior `TILE_SIZE`² as an `Rgba16Float` `COPY_SRC` texture for the VT to
 //! copy into a pool slot. No CPU readback (spec §5.2).
 //!
@@ -10,6 +10,29 @@
 //! and to a whole-image render — this is what the tile-seam golden asserts. For
 //! non-identity geometry, Sharpen operates in output space rather than source
 //! space, an accepted pragmatic difference (architecture map §2).
+//!
+//! **Dehaze (ST-Task 3): shared whole-image transmission, no per-tile cost, no
+//! halo.** Unlike Sharpen, dehaze does NOT compute its own per-tile
+//! neighbourhood map. The guided-filter-refined transmission (design §5.2, the
+//! ~14-dispatch dark-channel + guided filter) is computed exactly ONCE by the
+//! whole-image `EditPipeline` (source space, bounded to
+//! `DEHAZE_MAX_TRANSMISSION_DIM`) and handed to this pipeline via
+//! `set_shared_transmission` (the app re-wires it whenever the preview
+//! re-evaluates). `DehazeRecoveryNode` — the ONLY dehaze node here — just
+//! SAMPLES that shared texture at each output pixel's SOURCE UV (the same
+//! `m·out+off` mapping `GeometryHeadNode` uses, via `set_geometry` + the head's
+//! shared `TileFrame`), a cheap single per-pixel pass. This is what fixed the
+//! integrated-GPU OOM: the old per-tile `DehazeTransmissionNode` (removed) ran
+//! its full multi-pass guided filter, haloed `7r` px, for every tile streamed
+//! across a full-res image — exhausting a memory-constrained GPU's buffer
+//! budget. A per-pixel sample has no neighbourhood to over-fetch, so
+//! `dehaze_halo` is always 0 (see that fn's doc) and an amount/radius drag is a
+//! cheap uniform-only update, same as any other color op. Under identity
+//! geometry, source UV == output UV, so tiled == whole-image within
+//! `SEAM_TOL` (the parity golden); under crop/rotate, sampling at the source
+//! coordinate keeps the transmission aligned to the same source content the
+//! geometry head resampled (correct-by-construction, not an accepted
+//! difference like Sharpen's).
 //!
 //! **LocalAdjustments — per-tile mask, output space:** because geometry runs at
 //! the head, the entire color chain (including `LocalAdjustments`) operates in
@@ -32,6 +55,8 @@ use ferrolite_gpu::{GpuContext, Graph, NodeId};
 use ferrolite_image::{haloed_tile_origin, level_size, TileCoord, TILE_SIZE};
 use ferrolite_mask::TileTransform;
 
+use crate::dehaze::{DEHAZE_ATMOS_MIN, DEHAZE_ATMOS_NEUTRAL};
+use crate::dehaze_node::{DehazeRecoveryNode, RecoveryParams};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
@@ -42,10 +67,10 @@ use crate::nodes::{
 };
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
-    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform, hsl_uniform,
-    lens_halo_px, sharpen_halo, sharpen_uniform, tone_curve_luts, ColorGradeUniform,
-    ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform, LensUniform, SharpenUniform,
-    VignetteUniform, WbUniform,
+    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform,
+    geometry_uniform, hsl_uniform, lens_halo_px, sharpen_halo, sharpen_uniform, tone_curve_luts,
+    ColorGradeUniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform,
+    LensUniform, SharpenUniform, VignetteUniform, WbUniform,
 };
 use ferrolite_lens::{VignetteMap, WarpGrid};
 
@@ -64,10 +89,29 @@ pub struct TileEditPipeline {
     halo: u32,
     out_w: u32,
     out_h: u32,
+    src_w: u32,
+    src_h: u32,
     // Param cells (set from the stack; Plan 4 mutates via set_stack).
     exposure: Rc<Cell<ExposureUniform>>,
     wb: Rc<Cell<WbUniform>>,
     contrast: Rc<Cell<ContrastUniform>>,
+    // Halo-free dehaze (ST-Task 3): no per-tile transmission node here anymore
+    // — `DehazeRecoveryNode` is the ONLY dehaze node, sampling a shared
+    // whole-image transmission set via `set_shared_transmission` (see the
+    // module doc). `dehaze_recovery_id`'s only graph input is `contrast_id`.
+    dehaze_recovery_id: NodeId,
+    recovery_params: Rc<Cell<RecoveryParams>>,
+    // Handle to the recovery node, retained for `set_shared_transmission` /
+    // `set_dehaze_atmos`. Constructed with the head's SHARED `TileFrame`
+    // (`frame`, same `Rc` the head writes and the vignette node reads) so its
+    // `frame_origin` tracks each produced tile's real output-space origin.
+    dehaze_recovery_node: Rc<DehazeRecoveryNode>,
+    /// Whole-image atmospheric light (design §5.3). Unlike `EditPipeline`,
+    /// `TileEditPipeline` has no CPU source to estimate this from directly — it
+    /// starts at `DEHAZE_ATMOS_NEUTRAL` and the app hands it the real estimate
+    /// (computed once from the preview-resolution image) via `set_dehaze_atmos`
+    /// right after construction.
+    dehaze_atmos: [f32; 3],
     tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
     hsl: Rc<Cell<HslUniform>>,
     color_grade: Rc<Cell<ColorGradeUniform>>,
@@ -97,6 +141,9 @@ impl TileEditPipeline {
     ) -> Self {
         let (src_w, src_h) = source.level_size(0);
         let lc: Option<LensCorrection> = stack.lens_correction();
+        // Dehaze contributes NO halo (ST-Task 3, `dehaze_halo` always 0): the
+        // recovery is a per-pixel sample of a shared whole-image transmission,
+        // not a per-tile neighbourhood filter. Halo is just sharpen + lens-warp.
         let halo = sharpen_halo(stack.sharpen()).max(lens_halo_px(lc.as_ref(), warp_grid));
         let geometry = stack.geometry().unwrap_or(Geometry {
             crop: CropRect::full(),
@@ -109,9 +156,12 @@ impl TileEditPipeline {
         }));
 
         // Shared output-space frame: the geometry head WRITES the current tile's
-        // origin + full output dims each evaluate; the vignette node READS it so its
-        // radius is measured in full-image space (seamless, not per-tile). The graph
-        // runs head → vignette in the same evaluate, so the frame is always current.
+        // origin + full output dims each evaluate; the vignette node and the
+        // dehaze recovery node (ST-Task 3) both READ it — the vignette so its
+        // radius is measured in full-image space (seamless, not per-tile), the
+        // recovery so its shared-transmission source-UV sample uses this tile's
+        // real output-space origin. The graph runs head → (vignette, recovery)
+        // in the same evaluate, so the frame is always current.
         let frame = Rc::new(Cell::new(TileFrame::default()));
 
         let mut graph = Graph::new();
@@ -142,7 +192,7 @@ impl TileEditPipeline {
         let vignette_node = Rc::new(VignetteNode::new(
             ctx.clone(),
             vignette.clone(),
-            Some(frame),
+            Some(frame.clone()),
         ));
         let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
 
@@ -178,10 +228,32 @@ impl TileEditPipeline {
             )),
             vec![wb_id],
         );
+        let dehaze_atmos = DEHAZE_ATMOS_NEUTRAL;
+        let recovery_params = Rc::new(Cell::new(RecoveryParams::from_op(
+            stack.dehaze(),
+            dehaze_atmos,
+        )));
+        // ST-Task 3: no per-tile `DehazeTransmissionNode` anymore — the
+        // recovery's only graph input is `I` (contrast_id); its shared
+        // transmission is set out-of-band via `set_shared_transmission` (see
+        // that fn + `produce_tile`). Constructed with the SAME shared `frame`
+        // the head writes/vignette reads, so `frame_origin` is this tile's
+        // real output-space origin (not a local per-tile identity origin) —
+        // required for the source-UV mapping to be correct across tiles.
+        let dehaze_recovery_node = Rc::new(DehazeRecoveryNode::new(
+            ctx.clone(),
+            recovery_params.clone(),
+            frame.clone(),
+        ));
+        let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
+        dehaze_recovery_node.set_geometry(geo_uniform);
+        let dehaze_recovery_id =
+            graph.add_node(Box::new(dehaze_recovery_node.clone()), vec![contrast_id]);
+
         let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
         let tone_curve_id = graph.add_node(
             Box::new(CurveNode::new(ctx.clone(), tone_curve.clone())),
-            vec![contrast_id],
+            vec![dehaze_recovery_id],
         );
         let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
         let hsl_id = graph.add_node(
@@ -254,9 +326,15 @@ impl TileEditPipeline {
             halo,
             out_w,
             out_h,
+            src_w,
+            src_h,
             exposure,
             wb,
             contrast,
+            dehaze_recovery_id,
+            recovery_params,
+            dehaze_recovery_node,
+            dehaze_atmos,
             tone_curve,
             hsl,
             color_grade,
@@ -289,11 +367,25 @@ impl TileEditPipeline {
     /// geometry at construction time and fixed thereafter — a geometry/output-dims
     /// change requires the same full rebuild, not just a `set_stack` call. The
     /// per-tile mask placement is set per `produce_tile` via `set_tile_transform`.
+    /// `dehaze_recovery_node.set_geometry` is re-derived here too (ST-Task 3):
+    /// this pipeline's geometry never actually changes across `set_stack` calls
+    /// (see the LIMITATION above — a real geometry change needs a full rebuild),
+    /// so this is a no-op in practice, but keeps the recovery's source-UV mapping
+    /// explicitly in sync with the head's rather than relying on that invariant.
     pub fn set_stack(&mut self, stack: OpStack) {
         self.exposure.set(exposure_uniform(stack.exposure()));
         self.wb
             .set(crate::uniforms::wb_uniform(stack.white_balance()));
         self.contrast.set(contrast_uniform(stack.contrast()));
+        // ST-Task 3: no transmission node here anymore — only `amount`/`atmos`
+        // feed the (single) recovery node, a cheap uniform-only update.
+        let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        if r != self.recovery_params.get() {
+            self.recovery_params.set(r);
+            self.graph.mark_dirty(self.dehaze_recovery_id);
+        }
+        let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), self.src_w, self.src_h);
+        self.dehaze_recovery_node.set_geometry(geo_uniform);
         self.tone_curve
             .set(tone_curve_luts(stack.tone_curve().as_ref()));
         self.hsl.set(hsl_uniform(stack.hsl()));
@@ -369,9 +461,55 @@ impl TileEditPipeline {
         }
     }
 
+    /// Set the whole-image atmospheric light `A` for the dehaze pass (design
+    /// §5.3). Computed ONCE by the caller from the preview-resolution image and
+    /// handed to every tile as a uniform — never estimated per tile. Buffer write
+    /// only (no rebuild); re-derives the dehaze uniform from the current stack's
+    /// amount + this `A`. Call right after construction (like `set_vig_amount`).
+    pub fn set_dehaze_atmos(&mut self, atmos: [f32; 3]) {
+        if atmos != self.dehaze_atmos {
+            self.dehaze_atmos = atmos;
+            let floored = [
+                atmos[0].max(DEHAZE_ATMOS_MIN),
+                atmos[1].max(DEHAZE_ATMOS_MIN),
+                atmos[2].max(DEHAZE_ATMOS_MIN),
+                0.0,
+            ];
+            // ST-Task 3: only the recovery pass needs `A` (for its
+            // `(I-A)/t + A` recovery) — there is no transmission node here
+            // anymore to also update.
+            let r = RecoveryParams {
+                atmos: floored,
+                ..self.recovery_params.get()
+            };
+            self.recovery_params.set(r);
+            self.graph.mark_dirty(self.dehaze_recovery_id);
+        }
+    }
+
+    /// Bind (or clear) the externally-computed shared whole-image dehaze
+    /// transmission (source space, bounded to `DEHAZE_MAX_TRANSMISSION_DIM`) —
+    /// e.g. `EditPipeline::transmission_texture()`. ST-Task 3: this pipeline no
+    /// longer computes its own per-tile transmission; `produce_tile` samples
+    /// whatever was last bound here. `None` (or never called) falls back to a
+    /// passthrough (identity) recovery, same as `amount == 0`. Buffer/view
+    /// update only — never a pipeline rebuild (CLAUDE.md GPU rule); a no-op
+    /// when `tex` is already the bound texture, so the caller (the app, after
+    /// every preview re-evaluate) can call this unconditionally.
+    pub fn set_shared_transmission(&mut self, tex: Option<Arc<wgpu::Texture>>) {
+        self.dehaze_recovery_node.set_shared_transmission(tex);
+    }
+
     /// Render the edited interior `TILE_SIZE`² for `coord` as an `Rgba16Float`
     /// `COPY_SRC` texture. Re-runs the whole per-tile chain (the geometry head is
     /// dirtied each call because the tile coord changed).
+    ///
+    /// ST-Task 3: there is no per-tile transmission to force-evaluate anymore —
+    /// `dehaze_recovery_node` just samples whatever shared transmission was
+    /// last bound via `set_shared_transmission`, at this tile's real
+    /// output-space origin (the shared `frame` the head writes just above, in
+    /// the SAME evaluate). A single `graph.evaluate(output_id)` runs the whole
+    /// chain, head through the (now halo-free) dehaze recovery to sharpen.
     pub fn produce_tile(&mut self, coord: TileCoord) -> wgpu::Texture {
         self.request.set(TileRequest {
             coord,

@@ -377,6 +377,8 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub noise_reduction_open: bool,
     #[serde(default = "default_true")]
+    pub dehaze_open: bool,
+    #[serde(default = "default_true")]
     pub tone_curve_open: bool,
     #[serde(default = "default_true")]
     pub color_grading_open: bool,
@@ -408,6 +410,7 @@ impl Default for Settings {
             color_hsl_open: true,
             sharpening_open: true,
             noise_reduction_open: true,
+            dehaze_open: true,
             tone_curve_open: true,
             color_grading_open: true,
             optics_open: true,
@@ -583,6 +586,7 @@ mod tests {
         assert!(default_settings.color_hsl_open);
         assert!(default_settings.sharpening_open);
         assert!(default_settings.noise_reduction_open);
+        assert!(default_settings.dehaze_open);
         assert!(default_settings.tone_curve_open);
         assert!(default_settings.color_grading_open);
         assert!(default_settings.optics_open);
@@ -600,6 +604,7 @@ mod tests {
             color_hsl_open: false,
             sharpening_open: false,
             noise_reduction_open: false,
+            dehaze_open: false,
             tone_curve_open: false,
             color_grading_open: false,
             optics_open: false,

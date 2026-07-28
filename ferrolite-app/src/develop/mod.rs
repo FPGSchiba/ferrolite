@@ -3,6 +3,7 @@
 
 pub mod adjustment_panel;
 pub mod base_tabs;
+pub mod cache;
 pub mod canvas;
 pub mod coverage;
 pub mod crop_math;
@@ -40,3 +41,4 @@ pub mod tool_panel;
 pub mod tool_state;
 pub mod tools;
 pub mod vignette_mode;
+pub mod warm_prefetch;

@@ -22,6 +22,12 @@ use ferrolite_vt::ViewTransform;
 /// long enough to avoid a hard pop.
 pub const CROSSFADE_SECS: f32 = 0.15;
 
+/// The Tier-0 grid-thumbnail placeholder is shown only once an open has been
+/// unrevealed for this long — so fast/warm reveals show no placeholder at all
+/// (no flash), while a genuinely slow cold decode still gets instant-ish
+/// feedback. Tunable.
+pub const TIER0_GRACE_SECS: f32 = 0.12;
+
 /// Debounce (seconds) between a preview recompute and the histogram dispatch, so
 /// a slider drag coalesces into one compute rather than one per frame.
 pub const HIST_DEBOUNCE: f32 = 0.10;
@@ -79,6 +85,21 @@ pub struct ViewerState {
     pub path: PathBuf,
     pub kind: FileKind,
     pub op_stack: OpStack,
+    /// The op-stack the full-res `edit_producer` currently reflects. During a
+    /// slider DRAG the full-res tier is deferred (only the live preview updates
+    /// per frame), so `op_stack` moves ahead of what the producer was last synced
+    /// to. This is that last-synced baseline: `needs_full_rebuild` on commit
+    /// compares against THIS (not the previous frame) so a dehaze on/off or radius
+    /// change across the drag still triggers the right rebuild on release.
+    pub full_stack: OpStack,
+    /// True while a slider edit is being DRAGGED (`commit == false`). While set,
+    /// `drive_viewer` PAUSES full-res tile production: the fit view already shows
+    /// the live preview tier during a drag (the full tier is off-screen while the
+    /// version bumps), and re-producing the heavy full-res tiles (dehaze's
+    /// multi-pass transmission per tile) every drag frame churned GPU memory to OOM
+    /// on constrained/integrated GPUs. Cleared on commit (drag release), when
+    /// production resumes and refreshes the 1:1 detail once.
+    pub edit_in_progress: bool,
     /// Plan 3: the full-res edit producer (built on full-decode when the stack is
     /// non-identity). `!Send`/`!Sync`, so it lives here, never in callback_resources.
     pub edit_producer: Option<edit_producer::EditTileProducer>,
@@ -144,6 +165,15 @@ pub struct ViewerState {
     /// upload doesn't keep running after its result would be discarded anyway
     /// by the `image_id` staleness guard in `apply_pyramid_ready`.
     pub pyramid_handle: Option<JobHandle>,
+    /// One-shot deferral flag (perf fix D): set by `apply_full_decoded` when
+    /// the tier-2 pyramid build was ready to submit but no
+    /// `try_acquire_pyramid_permit` slot was free (`PYRAMID_BUILD_CONCURRENCY`
+    /// concurrent builds already in flight). `drive_viewer` retries the submit
+    /// each frame while this is `true`. Because the flag lives on THIS viewer
+    /// (reset to `false` by every `ViewerState::open`), a superseded image's
+    /// deferred pyramid is never retried after navigation — the new viewer has
+    /// its own flag, starting `false`.
+    pub needs_pyramid: bool,
 
     // ── Preview-cache read gating (Task 6) ─────────────────────────────────
     /// Handle for the in-flight preview-cache read job; cancelled on navigation
@@ -177,6 +207,14 @@ pub struct ViewerState {
     /// sharpness-only ramp with no color/tone shift. `None` for Standard images
     /// and for RAW before the full decode arrives.
     pub raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+    /// Whole-image dehaze atmospheric light `A` (design §5.3), estimated once
+    /// per image and cached here. `A` is an image-invariant statistic, so it
+    /// must NOT be re-estimated on every full-res producer rebuild (those also
+    /// fire on radius/geometry/lens drags, on the UI thread) — see
+    /// `dehaze_atmos()`. `None` until first requested; always `None` on a
+    /// fresh `open()` (a new `ViewerState` is constructed per image, never
+    /// reused in place, so no explicit invalidation on image switch is needed).
+    dehaze_atmos: Option<[f32; 3]>,
     /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
     /// `edit_producer`). Rebuilt when geometry / halo radius changes.
     pub preview_edit: Option<EditPipeline>,
@@ -235,6 +273,16 @@ pub struct ViewerState {
     /// leave stale background decodes racing the newly-opened one.
     pub prefetch_handles: Vec<JobHandle>,
 
+    // ── Warm-source neighbor prefetch (Task 7) ─────────────────────────────
+    /// True once the forward-biased warm-source prefetch pass
+    /// (`develop::warm_prefetch::spawn_warm_sources`) has been submitted for
+    /// this open (one-shot — fires only after `loaded`, never re-fires).
+    pub warm_prefetch_requested: bool,
+    /// Handle for the single serialized warm-source prefetch job; cancelled on
+    /// navigation alongside the other load handles for the same reason as
+    /// `prefetch_handles`.
+    pub warm_prefetch_handles: Vec<JobHandle>,
+
     /// True once any edit is applied to this image THIS session (including a
     /// reset-to-identity, which is also a change). Drives auto-regeneration of
     /// the Library thumbnail when leaving Develop. Set only in the app's
@@ -288,6 +336,21 @@ pub struct ViewerState {
     /// not it found a candidate) — a one-shot guard so it re-runs at most once
     /// per open, not every frame while `meta`/`ops_loaded` are both `Some`.
     pub lens_auto_match_attempted: bool,
+
+    /// `true` once `try_warm_reveal` has installed a cached render for this
+    /// open (a warm-cache hit). Gates the normal Tier-0/1/decode submission in
+    /// the open-flow drive loop so a warm hit does not also kick off a
+    /// redundant decode — the reveal is already on screen from RAM.
+    pub warm_revealed: bool,
+    /// `true` once the deferred warm-reveal attempt (`try_warm_reveal`) has run
+    /// for this open — a one-shot guard mirroring `lens_auto_match_attempted`.
+    /// The attempt is deferred until `ops_loaded` (the warm cache is keyed by
+    /// `op_stack_hash()`, which is only correct once the real op stack has
+    /// loaded — a fresh viewer starts at `OpStack::default()`), so this must
+    /// stay `false` across the frames spent waiting on the ops-sidecar read,
+    /// then flip `true` the first frame `ops_loaded` is `true` regardless of
+    /// hit or miss (a miss must not be retried every frame).
+    pub warm_reveal_attempted: bool,
 }
 
 impl ViewerState {
@@ -299,6 +362,8 @@ impl ViewerState {
             path,
             kind,
             op_stack: OpStack::default(),
+            full_stack: OpStack::default(),
+            edit_in_progress: false,
             edit_producer: None,
             view: ViewTransform {
                 zoom: 1.0,
@@ -319,12 +384,14 @@ impl ViewerState {
             preview_handle: None,
             full_handle: None,
             pyramid_handle: None,
+            needs_pyramid: false,
             cache_read_handle: None,
             cache_read_requested: false,
             cache_resolved: false,
             cache_write_back: true,
             preview_source: None,
             raw_preview_source: None,
+            dehaze_atmos: None,
             preview_edit: None,
             pyramid: None,
             color_profile: ferrolite_decode::ColorProfile::srgb_fallback(),
@@ -344,6 +411,8 @@ impl ViewerState {
             histogram: HistogramState::new(),
             prefetch_requested: false,
             prefetch_handles: Vec::new(),
+            warm_prefetch_requested: false,
+            warm_prefetch_handles: Vec::new(),
             edits_dirty: false,
             lens_warp: None,
             lens_vignette: None,
@@ -356,6 +425,8 @@ impl ViewerState {
             meta_read_handle: None,
             lens_auto_match: None,
             lens_auto_match_attempted: false,
+            warm_revealed: false,
+            warm_reveal_attempted: false,
         }
     }
 
@@ -408,6 +479,22 @@ impl ViewerState {
         }
     }
 
+    /// Whole-image dehaze atmospheric light (design §5.3), estimated once from
+    /// the decoded preview source and cached — it is image-invariant, so
+    /// producer rebuilds (radius/geometry/lens drags) must NOT re-estimate it
+    /// on the UI thread (CLAUDE.md responsiveness rule 1). Returns `None` only
+    /// before any preview source has decoded yet.
+    pub fn dehaze_atmos(&mut self) -> Option<[f32; 3]> {
+        if self.dehaze_atmos.is_none() {
+            let src = self
+                .raw_preview_source
+                .as_ref()
+                .or(self.preview_source.as_ref())?;
+            self.dehaze_atmos = Some(ferrolite_pipeline::estimate_atmospheric_light(src));
+        }
+        self.dehaze_atmos
+    }
+
     /// Cancel the in-flight decode jobs for this viewer. The sparse tile jobs
     /// are cancelled separately (they live in the `ViewerGpu` holder, owned by
     /// `callback_resources`) when that holder is dropped/replaced.
@@ -430,12 +517,22 @@ impl ViewerState {
         for h in &self.prefetch_handles {
             h.cancel();
         }
+        for h in &self.warm_prefetch_handles {
+            h.cancel();
+        }
         if let Some(h) = self.lens_bake_handle.as_ref() {
             h.cancel();
         }
         if let Some(h) = self.meta_read_handle.as_ref() {
             h.cancel();
         }
+    }
+
+    /// Stable hash of this viewer's current op stack, for warm-cache keying.
+    /// Uses the same `hash_serde` the disk preview cache keys with, so identical
+    /// stacks collide intentionally and any edit changes the hash.
+    pub fn op_stack_hash(&self) -> u64 {
+        ferrolite_previews::hash_serde(&self.op_stack)
     }
 }
 
@@ -519,6 +616,7 @@ pub fn paint(
     front_valid: bool,
     crossfade: f32,
     interactive: bool,
+    tier0_thumb: Option<&egui::TextureHandle>,
 ) -> (bool, PresentSource) {
     let rect = ui.available_rect_before_wrap();
     // Scope the painter so it drops before any `ui.put` / mutable-borrow calls
@@ -599,25 +697,54 @@ pub fn paint(
                 which: crate::viewer::PreviewWhich::After,
             },
         ));
+
         (false, source)
-    } else {
-        // First pixel not ready yet: show a spinner + "Loading…" so the decode
-        // wait reads as working, and keep animating so it spins + we pick up the
-        // preview as soon as it arrives.
+    } else if state.open_elapsed >= TIER0_GRACE_SECS {
+        // Grace elapsed without a reveal: this is a genuinely slow cold decode,
+        // so show the grid thumbnail (if decoded) upscaled-to-fit plus a spinner
+        // so the wait reads as working. A fast/warm reveal never reaches this
+        // branch — see the `state.open_elapsed < TIER0_GRACE_SECS` no-op case
+        // below, which keeps the open silent (just the black background already
+        // painted above) so there is no placeholder flash before a hard cut to
+        // the real reveal.
+        if let Some(thumb) = tier0_thumb {
+            let sz = thumb.size();
+            let dst = fit_rect(rect, (sz[0] as f32, sz[1] as f32));
+            ui.painter().image(
+                thumb.id(),
+                dst,
+                egui::Rect::from_min_max(
+                    egui::pos2(0.0_f32, 0.0_f32),
+                    egui::pos2(1.0_f32, 1.0_f32),
+                ),
+                egui::Color32::WHITE,
+            );
+        }
+        // First pixel not ready yet: keep a spinner + "Loading…" so the wait reads
+        // as working, and keep animating so we pick up the reveal as soon as it
+        // arrives. Over a thumbnail the spinner is a subtle "sharpening" hint.
         let center = rect.center();
-        let spinner_size = 32.0;
+        let spinner_size = 32.0_f32;
         let spinner_rect = egui::Rect::from_center_size(
-            center - egui::vec2(0.0, 10.0),
+            center - egui::vec2(0.0_f32, 10.0_f32),
             egui::vec2(spinner_size, spinner_size),
         );
         ui.put(spinner_rect, egui::Spinner::new().size(spinner_size));
         ui.painter().text(
-            center + egui::vec2(0.0, 22.0),
+            center + egui::vec2(0.0_f32, 22.0_f32),
             egui::Align2::CENTER_CENTER,
             "Loading\u{2026}",
             egui::FontId::proportional(12.0),
             crate::theme::TEXT_DIM,
         );
+        (true, source)
+    } else {
+        // Still within the grace window: show nothing extra beyond the black
+        // background painted at the top of `paint` — no placeholder flash for
+        // fast/warm reveals. `loading_preview` stays `true` so the caller keeps
+        // requesting repaints and this branch re-evaluates every frame until
+        // either the reveal lands (`state.loaded` flips true above) or the grace
+        // elapses (the branch above takes over).
         (true, source)
     }
 }
@@ -660,6 +787,17 @@ pub fn image_screen_rect(
     egui::Rect::from_min_max(egui::pos2(left, top), egui::pos2(right, bottom))
 }
 
+/// Aspect-preserving, centered sub-rect of `canvas` that a `content`-sized image
+/// occupies when fit (letterboxed) — the same framing `ViewTransform::fit`
+/// produces, but computed directly from sizes for the Tier-0 placeholder shown
+/// before the real `image_dims` are known. Pure (no GPU/egui state).
+pub fn fit_rect(canvas: egui::Rect, content: (f32, f32)) -> egui::Rect {
+    let (cw, ch) = (content.0.max(1.0), content.1.max(1.0));
+    let scale = (canvas.width() / cw).min(canvas.height() / ch);
+    let (w, h) = (cw * scale, ch * scale);
+    egui::Rect::from_center_size(canvas.center(), egui::vec2(w, h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +822,20 @@ mod tests {
         assert!(
             !v.edits_dirty,
             "a freshly opened viewer has no session edits"
+        );
+    }
+
+    #[test]
+    fn op_stack_hash_changes_with_edits() {
+        let mut v = ViewerState::open(1, std::path::PathBuf::from("x.raw"), FileKind::Raw);
+        let h0 = v.op_stack_hash();
+        v.op_stack = v.op_stack.set_op(ferrolite_pipeline::Op::Exposure(
+            ferrolite_pipeline::Exposure { ev: 1.0 },
+        ));
+        assert_ne!(
+            h0,
+            v.op_stack_hash(),
+            "an edit must change the warm-cache hash"
         );
     }
 
@@ -828,6 +980,28 @@ mod tests {
             "bottom should be 75, got {}",
             r.bottom()
         );
+    }
+
+    #[test]
+    fn fit_rect_letterboxes_wide_image_in_tall_canvas() {
+        // 200x100 canvas, 200x200 content -> width-limited, centered vertically.
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let r = fit_rect(canvas, (200.0, 200.0));
+        // Square content in a 2:1 canvas fits to height 100 -> 100x100, centered.
+        assert!((r.width() - 100.0).abs() < 1e-3, "w={}", r.width());
+        assert!((r.height() - 100.0).abs() < 1e-3, "h={}", r.height());
+        assert!((r.center().x - 100.0).abs() < 1e-3, "centered x");
+        assert!((r.center().y - 50.0).abs() < 1e-3, "centered y");
+    }
+
+    #[test]
+    fn fit_rect_letterboxes_tall_image_in_wide_canvas() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        // 100x200 content in 200x100 canvas -> height-limited to 100 -> 50x100.
+        let r = fit_rect(canvas, (100.0, 200.0));
+        assert!((r.width() - 50.0).abs() < 1e-3, "w={}", r.width());
+        assert!((r.height() - 100.0).abs() < 1e-3, "h={}", r.height());
+        assert!((r.center().x - 100.0).abs() < 1e-3, "centered x");
     }
 
     #[test]

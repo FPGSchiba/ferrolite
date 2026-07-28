@@ -23,6 +23,8 @@ pub const GRADE: &str = p::CIRCLES_THREE;
 // dead_code doesn't fire there) — each is reserved for a later, not-yet-landed UI
 // task. Scoped `#[allow(dead_code)]` per item (not a blanket module allow) so new
 // aliases stay covered by the lint by default; remove the annotation once wired up.
+#[allow(dead_code)]
+pub const EFFECTS: &str = p::SPARKLE; // Generic "effects" mark for enhancement tabs
 pub const EYEDROPPER: &str = p::EYEDROPPER;
 pub const UNDO: &str = p::ARROW_COUNTER_CLOCKWISE;
 pub const REDO: &str = p::ARROW_CLOCKWISE;
@@ -72,6 +74,7 @@ mod tests {
             ("LUMA", LUMA),
             ("COLOR", COLOR),
             ("GRADE", GRADE),
+            ("EFFECTS", EFFECTS),
             ("EYEDROPPER", EYEDROPPER),
             ("UNDO", UNDO),
             ("REDO", REDO),

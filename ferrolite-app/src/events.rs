@@ -102,6 +102,21 @@ pub enum AppEvent {
     /// decode error). Handled in `app.rs`: the full-decode path then runs and
     /// (Task 5) caches its result. Not folded by `apply`.
     PreviewCacheMiss { image_id: i64 },
+    /// A warm-neighbor SOURCE finished decoding off-thread
+    /// (`develop::warm_prefetch::spawn_warm_sources`, Task 7): the demosaiced
+    /// RAW / decoded Standard pixel source for a forward-biased filmstrip
+    /// neighbor, its persisted op stack, and enough context (`kind`,
+    /// `color_profile`) to render it exactly like a real open. `apply` queues
+    /// this as a `WarmSourcePayload` onto `AppState.warm_render_queue`;
+    /// `FerroliteApp::drain_one_warm_render` (Task 8) pops one per frame on
+    /// the render thread and turns it into a cached display texture.
+    WarmSourceReady {
+        image_id: i64,
+        source: std::sync::Arc<ferrolite_image::LinearRgbaF32>,
+        op_stack: ferrolite_pipeline::OpStack,
+        kind: ferrolite_image::FileKind,
+        color_profile: ferrolite_decode::ColorProfile,
+    },
     /// Tile progress for the running single-file export.
     ExportProgress {
         // The single active `ExportActivity` (there is only ever one running
@@ -172,6 +187,17 @@ pub enum AppEvent {
         level: crate::notifications::Level,
         message: String,
     },
+}
+
+/// Owned fields of a delivered `AppEvent::WarmSourceReady`, queued onto
+/// `AppState.warm_render_queue` by `apply` and drained one-per-frame by
+/// `FerroliteApp::drain_one_warm_render` (Task 8) on the render thread.
+pub struct WarmSourcePayload {
+    pub image_id: i64,
+    pub source: std::sync::Arc<ferrolite_image::LinearRgbaF32>,
+    pub op_stack: ferrolite_pipeline::OpStack,
+    pub kind: ferrolite_image::FileKind,
+    pub color_profile: ferrolite_decode::ColorProfile,
 }
 
 // Manual `Debug`: `AppEvent::PyramidReady` carries an `Arc<dyn TileSource + Send +
@@ -253,6 +279,10 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("PreviewCacheMiss")
                 .field("image_id", image_id)
                 .finish(),
+            AppEvent::WarmSourceReady { image_id, .. } => f
+                .debug_struct("WarmSourceReady")
+                .field("image_id", image_id)
+                .finish_non_exhaustive(),
             AppEvent::ExportProgress {
                 image_id,
                 done,
@@ -405,6 +435,32 @@ impl AppState {
             // decode); nothing to fold here.
             AppEvent::PreviewCacheHit { .. } => None,
             AppEvent::PreviewCacheMiss { .. } => None,
+            // Queue the decoded source for the render-thread warm-render
+            // (`FerroliteApp::drain_one_warm_render`, Task 8). Bounded so a fast
+            // filmstrip scrub cannot pile up unbounded GPU work: an overflow
+            // drops the OLDEST queued payload, since a fast scrub has already
+            // moved past the neighbors it would have warmed.
+            AppEvent::WarmSourceReady {
+                image_id,
+                source,
+                op_stack,
+                kind,
+                color_profile,
+            } => {
+                const CAP: usize = crate::develop::cache::WARM_WINDOW_FORWARD
+                    + crate::develop::cache::WARM_WINDOW_BACK;
+                if self.warm_render_queue.len() >= CAP {
+                    self.warm_render_queue.pop_front();
+                }
+                self.warm_render_queue.push_back(WarmSourcePayload {
+                    image_id,
+                    source,
+                    op_stack,
+                    kind,
+                    color_profile,
+                });
+                None
+            }
             // Handled in `app.rs` (needs GPU-independent status-bar update, but
             // routed there alongside the other viewer-scoped events); nothing to
             // fold here.

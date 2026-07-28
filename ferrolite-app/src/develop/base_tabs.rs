@@ -376,6 +376,55 @@ impl PanelTab for EffectsTab {
             });
         }
 
+        // Dehaze (amount + dark-channel patch radius). Per-control reset is the
+        // EguiSlider reset column (CLAUDE.md — load-bearing).
+        ui.separator();
+        section_header(ui, "DEHAZE", &mut state.settings.dehaze_open);
+        if state.settings.dehaze_open {
+            let d = stack.dehaze();
+            let mut amount = d.map(|d| d.amount).unwrap_or(0.0);
+            let mut radius = d
+                .map(|d| d.radius as f32)
+                .unwrap_or(ferrolite_pipeline::DEHAZE_DEFAULT_RADIUS as f32);
+
+            // Dehaze amount (bipolar): >0 removes haze, <0 adds haze.
+            let ra = ui.add(EguiSlider {
+                label: "Dehaze",
+                value: &mut amount,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                step: 0.01,
+                decimals: 2,
+                unit: "",
+                bipolar: true,
+                signed: true,
+                custom_label_w: None,
+            });
+            // Radius (px) of the dark-channel patch (unipolar; drives the halo).
+            let rr = ui.add(EguiSlider {
+                label: "Radius",
+                value: &mut radius,
+                min: 1.0,
+                max: 24.0,
+                default: ferrolite_pipeline::DEHAZE_DEFAULT_RADIUS as f32,
+                step: 1.0,
+                decimals: 0,
+                unit: " px",
+                bipolar: false,
+                signed: false,
+                custom_label_w: None,
+            });
+            if ra.changed() || rr.changed() {
+                out = Some(EditOutcome {
+                    stack: ops_edit::set_dehaze(&stack, amount, radius.round() as u32),
+                    kind: OpKind::Dehaze,
+                    commit: (ra.drag_stopped() || rr.drag_stopped())
+                        || !(ra.dragged() || rr.dragged()),
+                });
+            }
+        }
+
         // Optics (lens picker, Distortion, Vignette, etc.)
         ui.separator();
         section_header(ui, "OPTICS", &mut state.settings.optics_open);
@@ -791,6 +840,7 @@ mod tests {
         let mut state = AppState::new().unwrap();
         state.settings.sharpening_open = false;
         state.settings.noise_reduction_open = false;
+        state.settings.dehaze_open = false;
         state.settings.optics_open = false;
 
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
@@ -802,11 +852,12 @@ mod tests {
         });
         assert!(!state.settings.sharpening_open);
         assert!(!state.settings.noise_reduction_open);
+        assert!(!state.settings.dehaze_open);
         assert!(!state.settings.optics_open);
     }
 
     #[test]
-    fn test_all_seven_section_headers_bound_and_persist() {
+    fn test_all_eight_section_headers_bound_and_persist() {
         let mut state = AppState::new().unwrap();
 
         // Defaults should all be open (true)
@@ -816,6 +867,7 @@ mod tests {
         assert!(state.settings.color_grading_open);
         assert!(state.settings.sharpening_open);
         assert!(state.settings.noise_reduction_open);
+        assert!(state.settings.dehaze_open);
         assert!(state.settings.optics_open);
 
         // Toggle state settings fields
@@ -825,6 +877,7 @@ mod tests {
         state.settings.color_grading_open = false;
         state.settings.sharpening_open = false;
         state.settings.noise_reduction_open = false;
+        state.settings.dehaze_open = false;
         state.settings.optics_open = false;
 
         let ctx = egui::Context::default();
@@ -843,6 +896,7 @@ mod tests {
         assert!(!state.settings.color_grading_open);
         assert!(!state.settings.sharpening_open);
         assert!(!state.settings.noise_reduction_open);
+        assert!(!state.settings.dehaze_open);
         assert!(!state.settings.optics_open);
     }
 }

@@ -231,7 +231,7 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
                 v.before_after = hold_before;
             }
             let stack = app.state.viewer.as_ref().unwrap().op_stack.clone();
-            crate::app::controller::AppController::set_preview_and_full(app, frame, stack);
+            crate::app::controller::AppController::set_preview_and_full(app, frame, stack, true);
             // re-evaluates with before_after
         }
 

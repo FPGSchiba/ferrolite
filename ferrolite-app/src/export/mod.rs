@@ -86,6 +86,19 @@ pub fn spawn_export(
     source_path: PathBuf,
     dest: PathBuf,
     image_id: i64,
+    // Whole-image dehaze atmospheric light (design §5.3), estimated once by the
+    // caller from the CPU preview source (the app owns the CPU image; this fn
+    // only has a `GpuPyramidSource` for the RAW/`Pyramid` variant, which has no
+    // CPU buffer to estimate from — see `App::confirm_export`).
+    atmospheric_light: [f32; 3],
+    // CPU preview-resolution source to build this export's OWN bounded
+    // whole-image dehaze transmission from (ST-Task 5), or `None` when the
+    // stack has no active dehaze. This is a SNAPSHOT — export must not sample
+    // the live preview `EditPipeline`'s transmission texture, since this job
+    // runs on a worker thread while the user may keep editing (that texture's
+    // contents get overwritten on the next preview evaluate, a race). A cheap
+    // `Arc` clone; the caller (`App::confirm_export`) already owns it.
+    transmission_source: Option<Arc<LinearRgbaF32>>,
 ) -> ferrolite_jobs::JobHandle {
     let tx = state.tx.clone();
     let egui_ctx = egui_ctx.clone();
@@ -122,6 +135,8 @@ pub fn spawn_export(
             options: &options,
             dest: &dest,
             source_path: &source_path,
+            atmospheric_light,
+            transmission_source: transmission_source.as_deref(),
         };
         let (ok, message) = match run_export(req, cancel, &mut progress) {
             Ok(outcome) => {

@@ -10,7 +10,10 @@ use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_jobs::CancelToken;
 use ferrolite_lens::{load_bundled, LensDb};
-use ferrolite_pipeline::{Correction, EditPipeline, GpuPyramidSource, LensCorrection, Op, OpStack};
+use ferrolite_pipeline::{
+    estimate_atmospheric_light, Correction, Dehaze, EditPipeline, GpuPyramidSource, LensCorrection,
+    Op, OpStack,
+};
 
 const TOL: i32 = 6; // absorbs f16 + tile-edge resample (Spec 2 SEAM_TOL rationale)
 
@@ -55,6 +58,8 @@ fn tiled_render_matches_whole_image_reference() {
         WorkingSpace::Srgb,
         None,
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+        None,
         &cancel,
         &mut |d, t| seen = (d, t),
     )
@@ -100,6 +105,8 @@ fn cancellation_stops_render() {
         WorkingSpace::Srgb,
         None,
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+        None,
         &cancel,
         &mut |_, _| {},
     );
@@ -173,6 +180,8 @@ fn export_renders_lens_corrections() {
         WorkingSpace::Srgb,
         Some(&db),
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+        None,
         &cancel,
         &mut |_, _| {},
     )
@@ -190,6 +199,8 @@ fn export_renders_lens_corrections() {
         WorkingSpace::Srgb,
         None,
         BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+        None,
         &cancel,
         &mut |_, _| {},
     )
@@ -228,6 +239,109 @@ fn export_renders_lens_corrections() {
     assert!(
         changed > a.len() / 10,
         "the correction should affect a substantial region ({changed}/{} bytes)",
+        a.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ST-Task 5 golden: the export path actually RENDERS dehaze. Before this fix,
+// `render_tiled` never called `TileEditPipeline::set_shared_transmission`, so
+// an exported dehaze stack rendered as an identity passthrough — the amount
+// slider would have zero effect on the exported file even though it visibly
+// changed the on-screen preview. Proves `transmission_source: Some(&img)`
+// makes a real difference vs. `None` (the passthrough) for the SAME active
+// dehaze stack + atmospheric light.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn export_renders_dehaze() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let (w, h) = (600u32, 500u32);
+    let img = probe(w, h);
+    let ctx = Arc::new(ctx);
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &img));
+    let cancel = CancelToken::new();
+
+    // `amount: 2.0` keeps the recovery's dependence on the transmission `t`
+    // strong (mirrors the pipeline tile-seam golden), so a dropped/passthrough
+    // transmission is not masked by a small amount.
+    let stack = OpStack::default().set_op(Op::Dehaze(Dehaze {
+        amount: 2.0,
+        radius: 12,
+    }));
+    // Estimated once from the same CPU source `render_tiled` builds its bounded
+    // transmission from, exactly as `App::confirm_export` does via `ViewerState::
+    // dehaze_atmos`.
+    let atmos = estimate_atmospheric_light(&img);
+
+    let dehazed = render_tiled(
+        &ctx,
+        &pyramid,
+        &stack,
+        IDENTITY,
+        WorkingSpace::Srgb,
+        WorkingSpace::Srgb,
+        None,
+        BitDepth::Eight,
+        atmos,
+        Some(&img),
+        &cancel,
+        &mut |_, _| {},
+    )
+    .expect("dehazed render");
+
+    // Same stack/atmos but `transmission_source: None` — the pre-fix behavior:
+    // no shared transmission is ever bound, so the tiled recovery passes `I`
+    // through unchanged regardless of `amount`/`radius`.
+    let passthrough = render_tiled(
+        &ctx,
+        &pyramid,
+        &stack,
+        IDENTITY,
+        WorkingSpace::Srgb,
+        WorkingSpace::Srgb,
+        None,
+        BitDepth::Eight,
+        atmos,
+        None,
+        &cancel,
+        &mut |_, _| {},
+    )
+    .expect("passthrough render");
+
+    assert_eq!(
+        (dehazed.width, dehazed.height),
+        (passthrough.width, passthrough.height)
+    );
+    let PixelData::Eight(a) = dehazed.data else {
+        panic!("expected 8-bit dehazed")
+    };
+    let PixelData::Eight(b) = passthrough.data else {
+        panic!("expected 8-bit passthrough")
+    };
+    assert_eq!(a.len(), b.len());
+
+    let mut max_diff = 0i32;
+    let mut changed = 0usize;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let d = (*x as i32 - *y as i32).abs();
+        max_diff = max_diff.max(d);
+        if d > 0 {
+            changed += 1;
+        }
+    }
+    eprintln!("export dehazed-vs-passthrough max diff = {max_diff}, changed bytes = {changed}");
+    assert!(
+        max_diff > 2,
+        "an active dehaze stack must visibly change the exported render (max diff \
+         {max_diff}) — did render_tiled drop the shared transmission wiring?"
+    );
+    assert!(
+        changed > a.len() / 10,
+        "dehaze should affect a substantial region ({changed}/{} bytes)",
         a.len()
     );
 }

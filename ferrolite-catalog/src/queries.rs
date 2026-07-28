@@ -213,9 +213,8 @@ pub(crate) fn collection_image_counts(
     conn: &Connection,
 ) -> Result<std::collections::HashMap<i64, usize>, CatalogError> {
     let mut map: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
-    let mut stmt = conn.prepare(
-        "SELECT collection_id, COUNT(*) FROM collection_images GROUP BY collection_id",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT collection_id, COUNT(*) FROM collection_images GROUP BY collection_id")?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, i64>(0)?, row.get::<_, usize>(1)?))
     })?;
@@ -259,7 +258,6 @@ pub(crate) fn update_collection_parent(
     )?;
     Ok(())
 }
-
 
 pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>, CatalogError> {
     let mut stmt = conn.prepare(

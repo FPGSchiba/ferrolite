@@ -2,9 +2,10 @@
 //!
 //! Task 5 wires the pure `ferrolite-previews` crate into the app: it builds a
 //! [`PreviewKey`] from the open RAW's file identity + edit stack + color
-//! pipeline, and — on a qualifying RAW open — spawns a `Background` job that
-//! encodes the identity (unedited) color-managed render to a 2048px sRGB JPEG
-//! and stores it under that key, then trims the cache to its cap.
+//! pipeline, and — on a qualifying open (RAW or Standard) — spawns a
+//! `Background` job that encodes the identity (unedited) color-managed render
+//! to a 2048px sRGB JPEG and stores it under that key, then trims the cache to
+//! its cap.
 //!
 //! ## Correctness guard (load-bearing)
 //!
@@ -87,16 +88,30 @@ pub fn key_for(
 
 /// Whether an open should write its render back to the preview cache.
 ///
-/// Three conditions must all hold:
-/// * **RAW** — Standard images never reach the RAW reveal path.
-/// * **default op stack** — Task 5 caches the identity render but keys by the
-///   actual stack, so caching under an edited key would later reveal the wrong
-///   image (see the module-level correctness guard).
+/// Two conditions must both hold (format-agnostic — RAW and Standard/JPG are
+/// treated equally, per the tiered-cache design: JPGs are first-class camera
+/// originals, not quick looks):
+/// * **default op stack** — the payload encoded is the *identity* render but the
+///   key hashes the *actual* stack, so caching under an edited key would later
+///   reveal the wrong image (see the module-level correctness guard).
 /// * **cache miss** (`is_cache_miss`) — a cache *hit* already has the entry on
-///   disk, so re-encoding + re-writing it would be pure waste. Task 6 threads
-///   the real miss flag here from the read path (`v.cache_write_back`).
-pub fn should_write_back(is_raw: bool, op_stack: &OpStack, is_cache_miss: bool) -> bool {
-    is_raw && *op_stack == OpStack::default() && is_cache_miss
+///   disk, so re-encoding it would be pure waste. The read path threads the real
+///   miss flag here (`v.cache_write_back`).
+pub fn should_write_back(op_stack: &OpStack, is_cache_miss: bool) -> bool {
+    *op_stack == OpStack::default() && is_cache_miss
+}
+
+/// The display matrix for a Standard (JPG/PNG/…) preview-cache write-back.
+///
+/// A Standard image's retained `preview_source` is produced by
+/// [`crate::viewer::load::preview_to_linear`], which decodes 8-bit sRGB to
+/// **display-linear sRGB**. [`encode_srgb_jpeg`] applies its `display_matrix`
+/// and *then* the sRGB OETF, so to reproduce the source as an sRGB JPEG the
+/// matrix must be the **identity** (the working→display step the RAW path needs
+/// is already baked into `preview_source`). Confirmed by
+/// `standard_writeback_round_trips_srgb`.
+pub fn standard_writeback_matrix() -> Mat3 {
+    ferrolite_color::identity()
 }
 
 /// Look up `key` in `store`; on a hit decode the cached JPEG and convert it from
@@ -456,22 +471,22 @@ mod tests {
     }
 
     #[test]
-    fn write_back_only_for_raw_default_stack_on_miss() {
+    fn write_back_gated_on_default_stack_and_miss_for_any_kind() {
         let default_stack = OpStack::default();
         let edited_stack = default_stack.set_op(ferrolite_pipeline::Op::Exposure(
             ferrolite_pipeline::Exposure { ev: 0.5 },
         ));
 
-        // RAW + default stack + cache MISS → write back (the only qualifying case).
-        assert!(should_write_back(true, &default_stack, true));
-        // RAW + default stack + cache HIT → SKIP: the entry already exists on
-        // disk, so re-encoding it is pure waste.
-        assert!(!should_write_back(true, &default_stack, false));
-        // RAW + edited stack → SKIP (guard: identity render under an edited key
+        // Default stack + cache MISS -> write back (the only qualifying case).
+        // Now format-agnostic: JPGs are first-class originals and cache the same
+        // way RAWs do (spec: JPG Tier-1 write-back).
+        assert!(should_write_back(&default_stack, true));
+        // Default stack + cache HIT -> SKIP: the entry already exists on disk, so
+        // re-encoding it is pure waste.
+        assert!(!should_write_back(&default_stack, false));
+        // Edited stack -> SKIP (guard: an identity render under an edited key
         // would reveal the wrong image), regardless of the miss flag.
-        assert!(!should_write_back(true, &edited_stack, true));
-        // Non-RAW → never (standard images do not reach the RAW reveal path).
-        assert!(!should_write_back(false, &default_stack, true));
+        assert!(!should_write_back(&edited_stack, true));
     }
 
     #[test]
@@ -573,5 +588,56 @@ mod tests {
             !targets.contains(&30),
             "current id must never be its own neighbor"
         );
+    }
+
+    #[test]
+    fn standard_writeback_matrix_is_identity() {
+        // preview_source is already display-linear sRGB, so the write-back matrix
+        // must be identity (encode applies matrix then sRGB OETF).
+        assert_eq!(
+            standard_writeback_matrix(),
+            ferrolite_color::identity(),
+            "Standard write-back must not re-apply a working->display transform"
+        );
+    }
+
+    #[test]
+    fn standard_writeback_round_trips_srgb() {
+        // Known sRGB 8-bit -> display-linear (as the Standard preview path does),
+        // encode with the Standard matrix, decode, back to linear: the round trip
+        // must land close to the original linear values (JPEG q90 + 8-bit tolerance).
+        use ferrolite_image::{ImageBuffer, PixelFormat};
+        // A 8x8 solid CHROMATIC patch (distinct R,G,B) — NOT neutral gray. A gray
+        // triple is a scalar multiple of white, which every `working_to_display`
+        // matrix maps to itself, so a gray round trip could not distinguish the
+        // correct `identity()` from a wrong `working_to_display(...)` matrix (the
+        // one thing this test exists to confirm). A saturated color shifts under
+        // any non-identity matrix, so the round trip only closes when the matrix
+        // is truly identity. Solid block => JPEG q90 rings nothing, tolerance stays tight.
+        let mut px = Vec::with_capacity(8 * 8 * 3);
+        for _ in 0..(8 * 8) {
+            px.extend_from_slice(&[200u8, 90u8, 40u8]);
+        }
+        let src8 = ImageBuffer::new(8, 8, PixelFormat::Rgb8, px).expect("valid rgb8 patch");
+        let linear = crate::viewer::load::preview_to_linear(&src8); // display-linear sRGB
+        let jpeg = encode_srgb_jpeg(
+            &linear,
+            standard_writeback_matrix(),
+            PREVIEW_LONG_EDGE,
+            PREVIEW_JPEG_QUALITY,
+        )
+        .expect("encode succeeds");
+        let decoded = decode_srgb_jpeg(&jpeg).expect("decode succeeds");
+        let round = crate::viewer::load::preview_to_linear(&decoded);
+        assert_eq!((round.width, round.height), (8, 8));
+        // Compare all three channels of the first pixel (every pixel is identical
+        // in a solid block) so a channel-mixing matrix would be caught too.
+        for c in 0..3 {
+            let (o, r) = (linear.pixels[c], round.pixels[c]);
+            assert!(
+                (o - r).abs() < 0.02,
+                "sRGB round-trip channel {c} within tolerance: {o} vs {r}"
+            );
+        }
     }
 }

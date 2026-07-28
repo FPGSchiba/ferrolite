@@ -37,6 +37,47 @@ impl Viewer {
     ) -> Option<ViewerAction> {
         let mut action_outcome = None;
 
+        // Perf fix D: retry a pyramid build `apply_full_decoded` deferred
+        // because no `PYRAMID_BUILD_CONCURRENCY` permit was free at the time.
+        // `needs_pyramid` lives on the CURRENT viewer (reset to `false` by
+        // every `ViewerState::open`), so this only ever retries for the image
+        // the user is actually looking at now — a superseded image's deferred
+        // pyramid is simply never revisited once navigation replaces the
+        // viewer. Only RAW builds a pyramid at all, and `raw_preview_source`
+        // (retained by `apply_full_decoded`) is the full-res `Arc` the build
+        // needs, so gate on both being present.
+        let deferred_pyramid = app.state.viewer.as_ref().and_then(|v| {
+            (v.needs_pyramid && v.kind == ferrolite_image::FileKind::Raw)
+                .then(|| v.raw_preview_source.clone())
+                .flatten()
+                .map(|image_full| (v.image_id, image_full))
+        });
+        if let Some((image_id, image_full)) = deferred_pyramid {
+            match crate::develop::cache::try_acquire_pyramid_permit() {
+                Some(permit) => {
+                    crate::app::controller::AppController::submit_pyramid_build(
+                        app,
+                        frame,
+                        ui.ctx(),
+                        image_id,
+                        image_full,
+                        permit,
+                    );
+                    if let Some(v) = app.state.viewer.as_mut() {
+                        if v.image_id == image_id {
+                            v.needs_pyramid = false;
+                        }
+                    }
+                }
+                None => {
+                    // Still no free permit: keep the drive loop alive so the
+                    // retry runs again next frame instead of stalling until
+                    // unrelated input requests a repaint.
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+
         // Verify that the viewer has the matching image open.
         let v = match app.state.viewer.as_mut() {
             Some(v) if v.image_id == self.image_id => v,
@@ -119,11 +160,25 @@ impl Viewer {
                     {
                         let full = g.full.as_mut().expect("checked is_some");
                         full.request_view_feedback(&g.ctx);
-                        if let Some(producer) = v.edit_producer.as_mut() {
-                            let needed =
-                                full.needed_prefetched(&cur_view, cur_viewport, PREFETCH_RING);
-                            produced_this_frame =
-                                full.produce_view(&g.ctx, producer, &needed, MAX_PRODUCE_PER_FRAME);
+                        // PAUSE full-res production while a slider edit is being
+                        // dragged: the fit view shows the live preview tier
+                        // during the drag (the full tier is off-screen while the
+                        // op version bumps), so re-producing the heavy dehaze
+                        // full-res tiles every frame is pure waste — and on
+                        // constrained/integrated GPUs that per-frame churn
+                        // exhausts memory (OOM in `produce_tile`). Production
+                        // resumes on commit (drag release), refreshing 1:1 once.
+                        if !v.edit_in_progress {
+                            if let Some(producer) = v.edit_producer.as_mut() {
+                                let needed =
+                                    full.needed_prefetched(&cur_view, cur_viewport, PREFETCH_RING);
+                                produced_this_frame = full.produce_view(
+                                    &g.ctx,
+                                    producer,
+                                    &needed,
+                                    MAX_PRODUCE_PER_FRAME,
+                                );
+                            }
                         }
                         tiles_pending = full.sparse_pending();
                         produce_pending = full.produce_pending();
@@ -196,8 +251,21 @@ impl Viewer {
         let split_active = v.split_compare && !show_full;
         let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
 
-        let (loading_preview, present_source) =
-            crate::viewer::paint(ui, v, full_ready, front_valid, factor, interactive);
+        // Tier-0 placeholder: the resident grid thumbnail for this image (if any),
+        // cloned out of the texture cache BEFORE the `viewer::paint` borrow of `v`
+        // so the `app.state.textures` borrow is released first. A `TextureHandle`
+        // clone is a cheap refcount bump (no pixel copy).
+        let tier0_thumb = app.state.textures.get(image_id).cloned();
+
+        let (loading_preview, present_source) = crate::viewer::paint(
+            ui,
+            v,
+            full_ready,
+            front_valid,
+            factor,
+            interactive,
+            tier0_thumb.as_ref(),
+        );
         let idle = v.idle;
         let crossfading_present =
             matches!(present_source, crate::viewer::PresentSource::Crossfade(_));

@@ -60,17 +60,13 @@ use crate::dehaze_node::{DehazeRecoveryNode, RecoveryParams};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
-use crate::local::LocalAdjustments;
-use crate::local_node::LocalAdjustmentsNode;
-use crate::nodes::{
-    CurveNode, GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode,
-};
+use crate::local::{AdjustmentSet, LocalAdjustments};
+use crate::local_node::{EngineStage, LocalAdjustmentsNode};
+use crate::nodes::{GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode};
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::uniforms::{
-    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform,
-    geometry_uniform, hsl_uniform, lens_halo_px, sharpen_halo, sharpen_uniform, tone_curve_luts,
-    ColorGradeUniform, ColorMatrixUniform, ContrastUniform, ExposureUniform, HslUniform,
-    LensUniform, SharpenUniform, VignetteUniform, WbUniform,
+    color_matrix_uniform, geometry_uniform, lens_halo_px, sharpen_halo, sharpen_uniform,
+    ColorMatrixUniform, LensUniform, SharpenUniform, VignetteUniform,
 };
 use ferrolite_lens::{VignetteMap, WarpGrid};
 
@@ -91,14 +87,19 @@ pub struct TileEditPipeline {
     out_h: u32,
     src_w: u32,
     src_h: u32,
-    // Param cells (set from the stack; Plan 4 mutates via set_stack).
-    exposure: Rc<Cell<ExposureUniform>>,
-    wb: Rc<Cell<WbUniform>>,
-    contrast: Rc<Cell<ContrastUniform>>,
+    // Phase 3 (fused layer engine): the shared global two-segment `AdjustmentSet`
+    // both engine-stage nodes below read from — mirrors `EditPipeline`'s field
+    // of the same name exactly.
+    global_set: Rc<RefCell<AdjustmentSet>>,
+    light_engine_id: NodeId,
+    // Handle to the Light-stage engine node (mirrors `EditPipeline`'s handle;
+    // no test hook here today, but retained for parity/future use).
+    #[allow(dead_code)]
+    light_engine_node: Rc<LocalAdjustmentsNode>,
     // Halo-free dehaze (ST-Task 3): no per-tile transmission node here anymore
     // — `DehazeRecoveryNode` is the ONLY dehaze node, sampling a shared
     // whole-image transmission set via `set_shared_transmission` (see the
-    // module doc). `dehaze_recovery_id`'s only graph input is `contrast_id`.
+    // module doc). `dehaze_recovery_id`'s only graph input is `light_engine_id`.
     dehaze_recovery_id: NodeId,
     recovery_params: Rc<Cell<RecoveryParams>>,
     // Handle to the recovery node, retained for `set_shared_transmission` /
@@ -112,9 +113,6 @@ pub struct TileEditPipeline {
     /// (computed once from the preview-resolution image) via `set_dehaze_atmos`
     /// right after construction.
     dehaze_atmos: [f32; 3],
-    tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
-    hsl: Rc<Cell<HslUniform>>,
-    color_grade: Rc<Cell<ColorGradeUniform>>,
     local_adjust_id: NodeId,
     local_layers: Rc<RefCell<LocalAdjustments>>,
     local_node: Rc<LocalAdjustmentsNode>,
@@ -196,50 +194,32 @@ impl TileEditPipeline {
         ));
         let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
 
-        let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
-        let exposure_id = graph.add_node(
-            Box::new(PointOpNode::new(
-                ctx.clone(),
-                include_str!("shaders/exposure.wgsl"),
-                "exposure",
-                exposure.clone(),
-            )),
-            vec![vignette_id],
-        );
-        let wb = Rc::new(Cell::new(crate::uniforms::wb_uniform(
-            stack.white_balance(),
-        )));
-        let wb_id = graph.add_node(
-            Box::new(PointOpNode::new(
-                ctx.clone(),
-                include_str!("shaders/white_balance.wgsl"),
-                "white-balance",
-                wb.clone(),
-            )),
-            vec![exposure_id],
-        );
-        let contrast = Rc::new(Cell::new(contrast_uniform(stack.contrast())));
-        let contrast_id = graph.add_node(
-            Box::new(PointOpNode::new(
-                ctx.clone(),
-                include_str!("shaders/contrast.wgsl"),
-                "contrast",
-                contrast.clone(),
-            )),
-            vec![wb_id],
-        );
+        // Phase 3 (fused layer engine): the Light-stage engine node replaces the
+        // old exposure/white-balance/contrast `PointOpNode` trio at this exact
+        // graph position — mirrors `EditPipeline::new`'s wiring exactly.
+        let global_set = Rc::new(RefCell::new(stack.global.clone()));
+        let light_engine_node = Rc::new(LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(LocalAdjustments::default())),
+            EngineStage::Light,
+            global_set.clone(),
+        ));
+        let light_engine_id =
+            graph.add_node(Box::new(light_engine_node.clone()), vec![vignette_id]);
+
         let dehaze_atmos = DEHAZE_ATMOS_NEUTRAL;
         let recovery_params = Rc::new(Cell::new(RecoveryParams::from_op(
             stack.dehaze(),
             dehaze_atmos,
         )));
         // ST-Task 3: no per-tile `DehazeTransmissionNode` anymore — the
-        // recovery's only graph input is `I` (contrast_id); its shared
-        // transmission is set out-of-band via `set_shared_transmission` (see
-        // that fn + `produce_tile`). Constructed with the SAME shared `frame`
-        // the head writes/vignette reads, so `frame_origin` is this tile's
-        // real output-space origin (not a local per-tile identity origin) —
-        // required for the source-UV mapping to be correct across tiles.
+        // recovery's only graph input is `I` (now `light_engine_id`); its
+        // shared transmission is set out-of-band via `set_shared_transmission`
+        // (see that fn + `produce_tile`). Constructed with the SAME shared
+        // `frame` the head writes/vignette reads, so `frame_origin` is this
+        // tile's real output-space origin (not a local per-tile identity
+        // origin) — required for the source-UV mapping to be correct across
+        // tiles.
         let dehaze_recovery_node = Rc::new(DehazeRecoveryNode::new(
             ctx.clone(),
             recovery_params.clone(),
@@ -247,38 +227,27 @@ impl TileEditPipeline {
         ));
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
         dehaze_recovery_node.set_geometry(geo_uniform);
-        let dehaze_recovery_id =
-            graph.add_node(Box::new(dehaze_recovery_node.clone()), vec![contrast_id]);
+        let dehaze_recovery_id = graph.add_node(
+            Box::new(dehaze_recovery_node.clone()),
+            vec![light_engine_id],
+        );
 
-        let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
-        let tone_curve_id = graph.add_node(
-            Box::new(CurveNode::new(ctx.clone(), tone_curve.clone())),
-            vec![dehaze_recovery_id],
-        );
-        let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
-        let hsl_id = graph.add_node(
-            Box::new(PointOpNode::new(
-                ctx.clone(),
-                include_str!("shaders/hsl.wgsl"),
-                "hsl",
-                hsl.clone(),
-            )),
-            vec![tone_curve_id],
-        );
-        let color_grade = Rc::new(Cell::new(color_grade_uniform(stack.color_grade())));
-        let color_grade_id = graph.add_node(
-            Box::new(PointOpNode::new(
-                ctx.clone(),
-                include_str!("shaders/color_grade.wgsl"),
-                "color-grade",
-                color_grade.clone(),
-            )),
-            vec![hsl_id],
-        );
+        // Phase 3: the Color-stage engine node replaces the old tone-curve →
+        // hsl → color-grade → local-adjust chain in one node at this exact
+        // graph position — mirrors `EditPipeline::new`'s wiring exactly. Its
+        // per-tile mask compositing gets the same post-global-color-segment
+        // treatment as the whole-image node (see `evaluate_color`'s doc);
+        // `set_tile_transform` (called per `produce_tile`, below) is unchanged.
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
-        let local_node = Rc::new(LocalAdjustmentsNode::new(ctx.clone(), local_layers.clone()));
+        let local_node = Rc::new(LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            local_layers.clone(),
+            EngineStage::Color,
+            global_set.clone(),
+        ));
         let (out_w, out_h) = crate::edited_output_dims(&stack, src_w, src_h);
-        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![color_grade_id]);
+        let local_adjust_id =
+            graph.add_node(Box::new(local_node.clone()), vec![dehaze_recovery_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_id = graph.add_node(
@@ -328,16 +297,13 @@ impl TileEditPipeline {
             out_h,
             src_w,
             src_h,
-            exposure,
-            wb,
-            contrast,
+            global_set,
+            light_engine_id,
+            light_engine_node,
             dehaze_recovery_id,
             recovery_params,
             dehaze_recovery_node,
             dehaze_atmos,
-            tone_curve,
-            hsl,
-            color_grade,
             local_adjust_id,
             local_layers,
             local_node,
@@ -373,10 +339,21 @@ impl TileEditPipeline {
     /// so this is a no-op in practice, but keeps the recovery's source-UV mapping
     /// explicitly in sync with the head's rather than relying on that invariant.
     pub fn set_stack(&mut self, stack: OpStack) {
-        self.exposure.set(exposure_uniform(stack.exposure()));
-        self.wb
-            .set(crate::uniforms::wb_uniform(stack.white_balance()));
-        self.contrast.set(contrast_uniform(stack.contrast()));
+        // Phase 3 (fused layer engine): same segment-wise dirty routing as
+        // `EditPipeline::set_stack` (see its doc) — a light-segment change
+        // dirties only `light_engine_id`, a color-segment change only
+        // `local_adjust_id`. In THIS pipeline both are subsumed by the
+        // unconditional `mark_dirty(self.head_id)` below (every `produce_tile`
+        // call re-renders the whole per-tile chain regardless), but the
+        // explicit routing is kept for parity with `EditPipeline` and so it
+        // stays correct if that unconditional dirty is ever narrowed.
+        if stack.global.light_segment() != self.global_set.borrow().light_segment() {
+            self.graph.mark_dirty(self.light_engine_id);
+        }
+        if stack.global.color_segment() != self.global_set.borrow().color_segment() {
+            self.graph.mark_dirty(self.local_adjust_id);
+        }
+        *self.global_set.borrow_mut() = stack.global.clone();
         // ST-Task 3: no transmission node here anymore — only `amount`/`atmos`
         // feed the (single) recovery node, a cheap uniform-only update.
         let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
@@ -386,11 +363,6 @@ impl TileEditPipeline {
         }
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), self.src_w, self.src_h);
         self.dehaze_recovery_node.set_geometry(geo_uniform);
-        self.tone_curve
-            .set(tone_curve_luts(stack.tone_curve().as_ref()));
-        self.hsl.set(hsl_uniform(stack.hsl()));
-        self.color_grade
-            .set(color_grade_uniform(stack.color_grade()));
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {
             *self.local_layers.borrow_mut() = la;

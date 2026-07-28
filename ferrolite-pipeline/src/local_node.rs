@@ -1,7 +1,9 @@
-//! `LocalAdjustmentsNode` — the whole masked-adjustment stage as one
-//! `Node<PipelineImage>`. Per visible layer: (engine) composite the
-//! `MaskDefinition` into a single `MaskBuffer`, then (photo) apply the Light+Color
-//! point op blended by the mask. Inserted after `Hsl`, before `Sharpen`.
+//! `LocalAdjustmentsNode` — the fused Light/Color engine, one instance per
+//! `EngineStage` (see that type's doc). Per visible layer: (engine) composite
+//! the `MaskDefinition` into a single `MaskBuffer`, then (photo) apply the
+//! Light+Color point op blended by the mask. The `Light`-stage instance sits at
+//! the old exposure position (before dehaze); the `Color`-stage instance sits
+//! at the old tone-curve…local-adjust position (before `Sharpen`).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,10 +22,11 @@ use crate::uniforms::{local_adjust_uniform, local_layer_lut, LocalAdjustUniform}
 /// `light_segment()` in global order with full coverage — no mask compositing
 /// at all. `Color` runs at the old tone-curve…local-adjust position: first the
 /// global set's `color_segment()` (global order, full coverage) as a pseudo-
-/// layer, then the existing per-mask-layer loop unchanged. Not yet wired into
-/// `EditPipeline`/`TileEditPipeline` (Task 3's scope) — the plain `new`
-/// constructor below defaults to `Color` + an identity global set, so today's
-/// callers keep their exact pre-Phase-3 behavior.
+/// layer, then the existing per-mask-layer loop (its mask compositing keys off
+/// the pseudo-layer's output — see `evaluate_color`'s doc). `EditPipeline` and
+/// `TileEditPipeline` each construct one `Light`-stage and one `Color`-stage
+/// instance via `new_engine`, sharing one `Rc<RefCell<AdjustmentSet>>` between
+/// them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EngineStage {
     Light,
@@ -36,7 +39,36 @@ struct CachedMasks {
     // composited masks instead of re-compositing at full resolution.
     mask_defs: Vec<ferrolite_mask::MaskDefinition>,
     dims: (u32, u32),
+    // Phase 3 (Task 3 binding ruling): masks now composite against `current`
+    // (post-global-color-segment), not the node's raw `input` — a content-
+    // dependent range component (Luma/Color) can therefore select different
+    // pixels when the global color segment changes even though no mask
+    // DEFINITION did. `Some(seg)` pins the color-segment params the cache was
+    // built against, and is only populated when at least one visible layer's
+    // mask actually has a content-dependent component (see
+    // `has_content_dependent_component`) — purely spatial masks (gradient/
+    // radial/brush) don't care what color the pixels are, so they keep the
+    // original defs+dims-only cache key (and its adjustment-only-change reuse
+    // guarantee) untouched.
+    color_seg_key: Option<AdjustmentSet>,
     masks: Vec<MaskBuffer>, // one per visible layer, in visible order
+}
+
+/// True when any component of `def` samples the underlying pixel content
+/// (`LumaRange`/`ColorRange`) rather than being purely spatial (gradient/
+/// radial/brush/imported). Content-dependent components composite against
+/// whatever image they're given — see `evaluate_color`'s doc for why that
+/// image is `current` (post-global-color-segment), and `CachedMasks::
+/// color_seg_key` for why the compositing cache must key on the color segment
+/// too when this is true.
+fn has_content_dependent_component(def: &ferrolite_mask::MaskDefinition) -> bool {
+    def.components.iter().any(|(c, _)| {
+        matches!(
+            c,
+            ferrolite_mask::MaskComponent::LumaRange { .. }
+                | ferrolite_mask::MaskComponent::ColorRange { .. }
+        )
+    })
 }
 
 pub(crate) struct LocalAdjustmentsNode {
@@ -82,25 +114,13 @@ pub(crate) struct LocalAdjustmentsNode {
     // Test hook: counts mask-composite rebuilds (proves adjustment-only
     // changes reuse the cache instead of re-compositing).
     rebuilds: std::cell::Cell<u32>,
+    // Test hook: counts `evaluate` calls (proves the graph's dirty-tracking
+    // skips a stage whose relevant segment/layers didn't change — e.g. a
+    // color-segment-only edit must not tick the Light-stage node's counter).
+    evals: std::cell::Cell<u32>,
 }
 
 impl LocalAdjustmentsNode {
-    /// Thin back-compat wrapper: `Stage::Color` + a fresh identity global set,
-    /// so every pre-Phase-3 call site (today: `pipeline.rs`, `tile_edit.rs`,
-    /// and this module's own tests) keeps its exact existing behavior — an
-    /// identity global set's `color_segment()` is itself identity, so
-    /// `evaluate` skips the pseudo-layer dispatch entirely and falls straight
-    /// through to the unchanged per-mask-layer loop. Task 3 (the pipeline
-    /// swap) is expected to move callers onto `new_engine` directly.
-    pub(crate) fn new(ctx: Arc<GpuContext>, layers: Rc<RefCell<LocalAdjustments>>) -> Self {
-        Self::new_engine(
-            ctx,
-            layers,
-            EngineStage::Color,
-            Rc::new(RefCell::new(AdjustmentSet::default())),
-        )
-    }
-
     /// Full constructor: which fused-engine `stage` this node instance runs,
     /// plus the shared `global_set` its pseudo-layer(s) read from (see
     /// `EngineStage`'s doc for the per-stage dispatch shape).
@@ -200,6 +220,7 @@ impl LocalAdjustmentsNode {
             tile: RefCell::new(None),
             cache: RefCell::new(None),
             rebuilds: std::cell::Cell::new(0),
+            evals: std::cell::Cell::new(0),
             stage,
             global_set,
             full_coverage_mask,
@@ -240,6 +261,14 @@ impl LocalAdjustmentsNode {
     #[cfg(test)]
     pub(crate) fn rebuild_count(&self) -> u32 {
         self.rebuilds.get()
+    }
+
+    /// Number of times this node's `evaluate` has run (test hook): proves the
+    /// graph's dirty-tracking skips a stage whose relevant segment/layers are
+    /// unchanged (see `pipeline.rs`'s `set_stack` dirty-routing tests).
+    #[cfg(test)]
+    pub(crate) fn eval_count(&self) -> u32 {
+        self.evals.get()
     }
 
     /// Set the tile-tier placement. `None` = whole-image (identity, cached);
@@ -388,6 +417,7 @@ impl LocalAdjustmentsNode {
 
 impl Node<PipelineImage> for LocalAdjustmentsNode {
     fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
+        self.evals.set(self.evals.get() + 1);
         let input = inputs[0];
         match self.stage {
             EngineStage::Light => self.evaluate_light(input),
@@ -412,8 +442,18 @@ impl LocalAdjustmentsNode {
 
     /// `Stage::Color`: dispatch 1 (skipped when identity) is the global set's
     /// `color_segment()` pseudo-layer (global order, full coverage), then the
-    /// existing per-mask-layer loop — UNCHANGED — continues from whatever
-    /// `current` the pseudo-layer left behind.
+    /// existing per-mask-layer loop continues from whatever `current` the
+    /// pseudo-layer left behind.
+    ///
+    /// **Task 3 binding ruling:** mask compositing keys off `current` (post-
+    /// global-color-segment), NOT the node's raw `input`. Pre-fusion, the
+    /// standalone tone-curve/HSL/color-grade nodes ran UPSTREAM of this node in
+    /// the graph, so this node's raw `input` was already post-color-segment —
+    /// that's what the committed `luma_range_mask`/`color_range_mask` parity
+    /// goldens were rendered against (see their fixture doc comments). Now that
+    /// those ops run INSIDE this node as the pseudo-layer dispatch below,
+    /// reproducing that same content means sampling `current` after it runs,
+    /// not the node's now-pre-color-segment `input`.
     fn evaluate_color(&self, input: &PipelineImage) -> PipelineImage {
         let global_seg = self.global_set.borrow().color_segment();
         let layers = self.layers.borrow();
@@ -433,24 +473,34 @@ impl LocalAdjustmentsNode {
             return current;
         }
 
-        // Composite the mask at the INPUT resolution: whole image for preview,
-        // one (haloed) tile for the tiled tier. Range components read this exact
-        // content; the tile placement maps spatial components to full-image uv.
-        // Unchanged from pre-Phase-3: masks composite off the node's original
-        // `input`, not the (possibly global-color-adjusted) `current` — the
-        // global pseudo-layer only affects the point-op CHAIN, not what mask
-        // range components sample.
-        let (mw, mh) = (input.width, input.height);
+        // Composite the mask at CURRENT's resolution (identical to input's —
+        // the pseudo-layer apply pass never changes dims): whole image for
+        // preview, one (haloed) tile for the tiled tier. Range components read
+        // this exact (post-global-color-segment) content; the tile placement
+        // maps spatial components to full-image uv.
+        let (mw, mh) = (current.width, current.height);
         let tile = self.tile.borrow();
         let placement = tile.unwrap_or_else(|| TileTransform::whole_image(mw, mh));
-        let input_view = input
+        let current_view = current
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let cur_defs: Vec<ferrolite_mask::MaskDefinition> =
             layers.visible_layers().map(|l| l.mask.clone()).collect();
 
-        // The whole-image path caches masks (keyed on defs+dims) so an
+        // The compositing cache is keyed on mask DEFINITIONS + dims (so an
+        // adjustment-only change reuses it), but a content-dependent range
+        // component now samples `current`, whose pixels depend on the global
+        // color segment — a grade/curve/HSL/saturation/hue/vibrance change can
+        // shift what such a component selects even with identical mask defs.
+        // Fold the color segment into the key ONLY when at least one visible
+        // layer's mask actually has a content-dependent component, so a purely
+        // spatial mask set (gradient/radial/brush) keeps the original
+        // adjustment-only-change reuse guarantee untouched.
+        let content_dependent = cur_defs.iter().any(has_content_dependent_component);
+        let color_seg_key = content_dependent.then(|| global_seg.clone());
+
+        // The whole-image path caches masks (keyed on defs+dims+color-seg) so an
         // adjustment-only change reuses them. The tiled path composites fresh
         // every evaluate: each produced tile has different content/placement,
         // and content-dependent components would otherwise go stale across
@@ -463,7 +513,7 @@ impl LocalAdjustmentsNode {
                 .map(|l| {
                     self.compositor.composite(
                         &l.mask,
-                        &input_view,
+                        &current_view,
                         mw,
                         mh,
                         &RasterStore::default(),
@@ -476,13 +526,16 @@ impl LocalAdjustmentsNode {
         let masks: Vec<MaskBuffer> = if use_cache {
             let hit = {
                 let c = self.cache.borrow();
-                matches!(&*c, Some(cm) if cm.mask_defs == cur_defs && cm.dims == (mw, mh))
+                matches!(&*c, Some(cm) if cm.mask_defs == cur_defs
+                    && cm.dims == (mw, mh)
+                    && cm.color_seg_key == color_seg_key)
             };
             if !hit {
                 let masks = composite_all();
                 *self.cache.borrow_mut() = Some(CachedMasks {
                     mask_defs: cur_defs.clone(),
                     dims: (mw, mh),
+                    color_seg_key,
                     masks,
                 });
             }
@@ -637,7 +690,12 @@ mod tests {
         let la = LocalAdjustments {
             layers: vec![layer("layer1", 0.5, 0.0), layer("layer2", -0.3, 0.4)],
         };
-        let node = LocalAdjustmentsNode::new(ctx.clone(), Rc::new(RefCell::new(la)));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(la)),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        );
 
         // Reaching this line without a wgpu validation panic already proves the
         // aliasing fix; the pixel-value assertion below is a bonus check. (The
@@ -673,7 +731,12 @@ mod tests {
         let la = LocalAdjustments {
             layers: vec![layer("layer1", 0.5, 0.0), layer("layer2", -0.3, 0.4)],
         };
-        let node = LocalAdjustmentsNode::new(ctx.clone(), Rc::new(RefCell::new(la)));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(la)),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        );
 
         let out1 = node.evaluate(&[&src]);
         let px1 = read_pixels(&ctx, &out1);
@@ -718,7 +781,12 @@ mod tests {
             }],
         };
         let layers_rc = Rc::new(RefCell::new(la.clone()));
-        let node = LocalAdjustmentsNode::new(ctx.clone(), layers_rc.clone());
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            layers_rc.clone(),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        );
 
         let _ = node.evaluate(&[&src]);
         assert_eq!(
@@ -790,7 +858,12 @@ mod tests {
                 adjustments,
             }],
         };
-        let node = LocalAdjustmentsNode::new(ctx.clone(), Rc::new(RefCell::new(la)));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(la)),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        );
 
         let out = node.evaluate(&[&src]);
         let out_px = read_pixels(&ctx, &out);
@@ -822,7 +895,12 @@ mod tests {
         let la = LocalAdjustments {
             layers: vec![layer("legacy", 0.35, -0.2)],
         };
-        let node = LocalAdjustmentsNode::new(ctx.clone(), Rc::new(RefCell::new(la)));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(la)),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+        );
 
         let out = node.evaluate(&[&src]);
         let out_px = read_pixels(&ctx, &out);

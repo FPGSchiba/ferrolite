@@ -55,20 +55,27 @@ pub use tile_edit::TileEditPipeline;
 // reusable transforms (`color_grade_px`, `curve_lut`, `parametric_curve_lut`, `tone_curve_luts`)
 // are public per design §2.5 so the future per-mask path reuses them with no rework.
 // `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
+// `ExposureUniform`/`WbUniform`/`ContrastUniform` retired with Task 3 (Phase 3
+// fused layer engine): the standalone exposure/white-balance/contrast passes
+// they backed are gone — `local_adjust_uniform`/`LocalAdjustUniform` cover the
+// same math for both the Light-stage engine node and per-mask layers now.
 pub use uniforms::{
     color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform,
     parametric_curve_lut, sharpen_halo, tone_curve_luts, vignette_amount, ColorGradeUniform,
-    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
-    SharpenUniform, VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
+    MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Covers the original color/tone/
-/// geometry passes, the two lens passes (geometry now carries the warp;
-/// `vignette` is the radial-gain pass), `local-adjust` (the masked Light+Color
-/// point op), `color-grade` (the three-way + global grading wheels point op),
-/// and the dehaze passes: `dehaze-dark-channel`/`-min-h`/`-min-v`/`-products`/
+/// alongside the display-pipeline pre-warm. Covers `color-matrix`/`sharpen`/
+/// `geometry`/`vignette` (the surviving standalone point/geometry passes),
+/// `local-adjust` (the fused Light+Color engine — one shader now covers what
+/// used to be six standalone passes: exposure/white-balance/contrast/
+/// tone-curve/hsl/color-grade, retired as graph nodes by the Phase 3 fused
+/// layer engine; their `.wgsl` files stay in-tree as reference math for
+/// `local_adjust.wgsl`'s per-op ports, just no longer compiled here), and the
+/// dehaze passes: `dehaze-dark-channel`/`-min-h`/`-min-v`/`-products`/
 /// `-box-h`/`-box-v`/`-guided-ab`/`-guided-q` (the multi-pass guided-filter
 /// transmission map, `DehazeTransmissionNode`) — plus `dehaze-transmission-mip`
 /// (its mip-chain downsample for LOD-aware sampling) — plus `dehaze-recovery` (the
@@ -77,9 +84,6 @@ pub use uniforms::{
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
-        ("exposure", include_str!("shaders/exposure.wgsl")),
-        ("white-balance", include_str!("shaders/white_balance.wgsl")),
-        ("contrast", include_str!("shaders/contrast.wgsl")),
         (
             "dehaze-dark-channel",
             include_str!("shaders/dehaze_dark_channel.wgsl"),
@@ -108,9 +112,6 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "dehaze-recovery",
             include_str!("shaders/dehaze_recovery.wgsl"),
         ),
-        ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
-        ("hsl", include_str!("shaders/hsl.wgsl")),
-        ("color-grade", include_str!("shaders/color_grade.wgsl")),
         ("sharpen", include_str!("shaders/sharpen.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),

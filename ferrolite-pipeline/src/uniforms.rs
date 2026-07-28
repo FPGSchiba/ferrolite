@@ -3,9 +3,7 @@
 //! shader). Display-linear space; the sRGB OETF lives only in the display/blit
 //! shader. No GPU here — fully unit-tested.
 
-use crate::op::{
-    Aspect, Contrast, CropRect, Exposure, Geometry, Hsl, LensCorrection, Sharpen, WhiteBalance,
-};
+use crate::op::{Aspect, CropRect, Geometry, Hsl, LensCorrection, Sharpen};
 use ferrolite_lens::{lens_halo, WarpGrid};
 
 /// Mid-grey pivot (display-linear) about which contrast scales. Placeholder
@@ -29,11 +27,6 @@ pub fn wb_multipliers(temp: f32, tint: f32) -> [f32; 3] {
     let b = (1.0 - 0.5 * temp).max(0.0);
     let g = (1.0 - 0.5 * tint).max(0.0);
     [r, g, b]
-}
-
-/// Bipolar amount -> (gain, pivot). amount=0 -> gain 1.0 (identity).
-pub fn contrast_gain_pivot(amount: f32) -> (f32, f32) {
-    (1.0 + amount, CONTRAST_PIVOT)
 }
 
 /// Bake tone-curve control points into a 256-entry display-linear LUT.
@@ -289,28 +282,6 @@ fn curve_interp_smooth(pts: &[(f32, f32)], m: &[f32], x: f32) -> f32 {
 
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ExposureUniform {
-    pub gain: f32,
-    pub pad: [f32; 3],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct WbUniform {
-    pub mul: [f32; 3],
-    pub pad: f32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct ContrastUniform {
-    pub gain: f32,
-    pub pivot: f32,
-    pub pad: [f32; 2],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct HslUniform {
     /// 8 bands × (hue, sat, lum, pad). Mirrors WGSL `array<vec4<f32>, 8>`.
     pub bands: [[f32; 4]; 8],
@@ -324,22 +295,6 @@ pub fn hsl_uniform(op: Option<Hsl>) -> HslUniform {
         }
     }
     HslUniform { bands }
-}
-
-pub fn exposure_uniform(op: Option<Exposure>) -> ExposureUniform {
-    let ev = op.map(|e| e.ev).unwrap_or(0.0);
-    ExposureUniform {
-        gain: exposure_gain(ev),
-        pad: [0.0; 3],
-    }
-}
-
-pub fn wb_uniform(op: Option<WhiteBalance>) -> WbUniform {
-    let (t, ti) = op.map(|w| (w.temp, w.tint)).unwrap_or((0.0, 0.0));
-    WbUniform {
-        mul: wb_multipliers(t, ti),
-        pad: 0.0,
-    }
 }
 
 #[repr(C)]
@@ -569,16 +524,6 @@ pub fn lens_halo_px(lc: Option<&LensCorrection>, grid: Option<&WarpGrid>) -> u32
     match (lc, grid) {
         (Some(l), Some(g)) if l.distortion.enabled || l.tca.enabled => lens_halo(g),
         _ => 0,
-    }
-}
-
-pub fn contrast_uniform(op: Option<Contrast>) -> ContrastUniform {
-    let a = op.map(|c| c.amount).unwrap_or(0.0);
-    let (gain, pivot) = contrast_gain_pivot(a);
-    ContrastUniform {
-        gain,
-        pivot,
-        pad: [0.0; 2],
     }
 }
 
@@ -899,7 +844,17 @@ pub fn light_color_apply(
             *v += (cr - *v) * u.color_amount;
         }
     }
-    [c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]
+    // Phase 3 (Task 3 parity fix): mirrors `local_adjust.wgsl`'s `adjust()` —
+    // the floor clamp is per-mask (mask-order) behavior only; the global-order
+    // (pseudo-layer) path must NOT clamp, or the committed `light_trio`/
+    // `curve_hsl_grade`/`wb_contrast_both` parity goldens (which legitimately
+    // carry pixels down to ~-0.09 in scene-linear space) regress. See the WGSL
+    // comment at the same spot for the full rationale.
+    if global_order {
+        c
+    } else {
+        [c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]
+    }
 }
 
 /// Chroma strength added per unit (sat × weight). Pragmatic constant (image
@@ -1036,19 +991,6 @@ mod tests {
     #[test]
     fn wb_magenta_tint_cuts_green() {
         assert_eq!(wb_multipliers(0.0, 1.0), [1.0, 0.5, 1.0]);
-    }
-
-    #[test]
-    fn contrast_identity_and_gain() {
-        assert_eq!(contrast_gain_pivot(0.0), (1.0, CONTRAST_PIVOT));
-        assert_eq!(contrast_gain_pivot(1.0), (2.0, CONTRAST_PIVOT));
-    }
-
-    #[test]
-    fn uniform_constructors_use_identity_when_absent() {
-        assert_eq!(exposure_uniform(None).gain, 1.0);
-        assert_eq!(wb_uniform(None).mul, [1.0, 1.0, 1.0]);
-        assert_eq!(contrast_uniform(None).gain, 1.0);
     }
 
     #[test]

@@ -186,6 +186,23 @@ fn adjust(rgb: vec3<f32>) -> vec3<f32> {
     if (p.active_flags.y != 0.0) { c = hsl_bands_apply(c); }
     if (p.active_flags.z != 0.0) { c = grade_apply(c); }
     if (p.color_amount != 0.0) { c = c + (p.color_rgb - c) * p.color_amount; }
+    // Phase 3 (Task 3 parity fix): the floor clamp below is pre-Phase-3 per-mask
+    // (mask-order) behavior, kept for every real mask layer. The global-order
+    // (pseudo-layer) dispatches now sharing this function did NOT exist before
+    // Phase 3 as a single fused pass — their pre-fusion equivalents were the
+    // standalone exposure/white-balance/contrast/tone-curve/hsl/color-grade
+    // passes, none of which ever clamped (each is a pure, unclamped transform;
+    // see `light_trio`/`curve_hsl_grade`/`wb_contrast_both`'s committed parity
+    // goldens, which legitimately carry pixels down to ~-0.09 in scene-linear
+    // space). Clamping here for `order_and_coverage.x != 0.0` (global order)
+    // would silently floor those excursions and break parity. `global_order`
+    // and `full_coverage` are always equal at every real call site (both true
+    // for the two pseudo-layer dispatches, both false for every per-mask
+    // layer), so gating on either is equivalent; `global_order` is used here
+    // since it's the flag this function already branches on just above.
+    if (p.order_and_coverage.x != 0.0) {
+        return c;
+    }
     return max(c, vec3<f32>(0.0));
 }
 

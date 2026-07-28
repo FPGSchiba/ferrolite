@@ -14,15 +14,13 @@ use crate::dehaze_node::{
 };
 use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
-use crate::local::LocalAdjustments;
-use crate::local_node::LocalAdjustmentsNode;
-use crate::nodes::{CurveNode, GeometryNode, PointOpNode, SourceNode, TileFrame, VignetteNode};
+use crate::local::{AdjustmentSet, LocalAdjustments};
+use crate::local_node::{EngineStage, LocalAdjustmentsNode};
+use crate::nodes::{GeometryNode, PointOpNode, SourceNode, TileFrame, VignetteNode};
 use crate::op::OpStack;
 use crate::uniforms::{
-    color_grade_uniform, color_matrix_uniform, contrast_uniform, exposure_uniform,
-    geometry_uniform, hsl_uniform, sharpen_uniform, tone_curve_luts, wb_uniform, ColorGradeUniform,
-    ColorMatrixUniform, ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform,
-    SharpenUniform, VignetteUniform, WbUniform,
+    color_matrix_uniform, geometry_uniform, sharpen_uniform, ColorMatrixUniform, GeometryUniform,
+    LensUniform, SharpenUniform, VignetteUniform,
 };
 
 /// The retained photo edit pipeline: a `Graph<PipelineImage>` of a source node
@@ -37,12 +35,19 @@ pub struct EditPipeline {
     vignette_id: NodeId,
     vignette: Rc<Cell<VignetteUniform>>,
     vignette_node: Rc<VignetteNode>,
-    exposure_id: NodeId,
-    exposure: Rc<Cell<ExposureUniform>>,
-    wb_id: NodeId,
-    wb: Rc<Cell<WbUniform>>,
-    contrast_id: NodeId,
-    contrast: Rc<Cell<ContrastUniform>>,
+    // Phase 3 (fused layer engine): the shared global two-segment `AdjustmentSet`
+    // both engine-stage nodes below read from (`light_engine_node`'s
+    // `light_segment()` and `local_node`'s `color_segment()` pseudo-layer) — one
+    // `Rc<RefCell<_>>` so a `set_stack` write is visible to both without any
+    // extra plumbing.
+    global_set: Rc<RefCell<AdjustmentSet>>,
+    light_engine_id: NodeId,
+    // Handle to the Light-stage engine node, retained for the
+    // `light_engine_eval_count` test hook (dirty-routing regression: a
+    // color-segment-only or layers-only `set_stack` must NOT tick this). The
+    // graph owns its own `Rc` clone for evaluation.
+    #[cfg_attr(not(test), allow(dead_code))]
+    light_engine_node: Rc<LocalAdjustmentsNode>,
     dehaze_transmission_id: NodeId,
     transmission_params: Rc<Cell<TransmissionParams>>,
     // Handle to the transmission node, retained only for the
@@ -62,18 +67,15 @@ pub struct EditPipeline {
     /// construction (design §5.3) and reused by every `set_stack` (it is an image
     /// property, independent of the edit stack).
     dehaze_atmos: [f32; 3],
-    tone_curve_id: NodeId,
-    tone_curve: Rc<Cell<[[f32; 256]; 3]>>,
-    hsl_id: NodeId,
-    hsl: Rc<Cell<HslUniform>>,
-    color_grade_id: NodeId,
-    color_grade: Rc<Cell<ColorGradeUniform>>,
     local_adjust_id: NodeId,
     local_layers: Rc<RefCell<LocalAdjustments>>,
-    // Handle to the local-adjustments node. The graph owns its own `Rc` clone for
-    // evaluation; this handle is retained for the `local_rebuild_count` test hook
-    // (and parity with `TileEditPipeline`, which drives the node's tile controls).
-    // Read only under `cfg(test)` now that `set_stack` no longer invalidates it.
+    // Handle to the Color-stage engine node (the old tone-curve…local-adjust
+    // position, fused): the global set's `color_segment()` pseudo-layer, then
+    // the per-mask-layer loop. The graph owns its own `Rc` clone for
+    // evaluation; this handle is retained for the `local_rebuild_count` test
+    // hook (and parity with `TileEditPipeline`, which drives the node's tile
+    // controls). Read only under `cfg(test)` now that `set_stack` no longer
+    // invalidates it.
     #[cfg_attr(not(test), allow(dead_code))]
     local_node: Rc<LocalAdjustmentsNode>,
     sharpen_id: NodeId,
@@ -116,32 +118,21 @@ impl EditPipeline {
         let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone(), None));
         let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
 
-        let exposure = Rc::new(Cell::new(exposure_uniform(stack.exposure())));
-        let exposure_node = PointOpNode::new(
+        // Phase 3 (fused layer engine): the Light-stage engine node replaces the
+        // old exposure/white-balance/contrast `PointOpNode` trio at this exact
+        // graph position. One shared `global_set` feeds both this node's
+        // `light_segment()` and the Color-stage node's `color_segment()` below.
+        let global_set = Rc::new(RefCell::new(stack.global.clone()));
+        let light_engine_node = Rc::new(LocalAdjustmentsNode::new_engine(
             ctx.clone(),
-            include_str!("shaders/exposure.wgsl"),
-            "exposure",
-            exposure.clone(),
-        );
-        let exposure_id = graph.add_node(Box::new(exposure_node), vec![vignette_id]);
-
-        let wb = Rc::new(Cell::new(wb_uniform(stack.white_balance())));
-        let wb_node = PointOpNode::new(
-            ctx.clone(),
-            include_str!("shaders/white_balance.wgsl"),
-            "white-balance",
-            wb.clone(),
-        );
-        let wb_id = graph.add_node(Box::new(wb_node), vec![exposure_id]);
-
-        let contrast = Rc::new(Cell::new(contrast_uniform(stack.contrast())));
-        let contrast_node = PointOpNode::new(
-            ctx.clone(),
-            include_str!("shaders/contrast.wgsl"),
-            "contrast",
-            contrast.clone(),
-        );
-        let contrast_id = graph.add_node(Box::new(contrast_node), vec![wb_id]);
+            // The Light stage never reads `layers` (see `evaluate_light`) — a
+            // fresh, never-mutated `LocalAdjustments` is a valid placeholder.
+            Rc::new(RefCell::new(LocalAdjustments::default())),
+            EngineStage::Light,
+            global_set.clone(),
+        ));
+        let light_engine_id =
+            graph.add_node(Box::new(light_engine_node.clone()), vec![vignette_id]);
 
         // Halo-free dehaze (QS-Task 4): the refined transmission map (guided
         // filter, expensive multi-pass) and the amount/atmos recovery+blend
@@ -160,15 +151,15 @@ impl EditPipeline {
         ));
         let dehaze_transmission_id = graph.add_node(
             Box::new(dehaze_transmission_node.clone()),
-            vec![contrast_id],
+            vec![light_engine_id],
         );
 
         let recovery_params = Rc::new(Cell::new(RecoveryParams::from_op(
             stack.dehaze(),
             dehaze_atmos,
         )));
-        // ST-Task 2: the recovery node takes only `I` (contrast_id) as a graph
-        // input now — the transmission is bound out-of-band via
+        // ST-Task 2: the recovery node takes only `I` (now `light_engine_id`) as
+        // a graph input — the transmission is bound out-of-band via
         // `set_shared_transmission` (see `evaluate`), not a graph edge, so the
         // shared texture can later also serve the tiled tier. No tiling here, so
         // a dedicated frame — but NOT `TileFrame::default()` (`full_dims =
@@ -189,34 +180,25 @@ impl EditPipeline {
         // exactly matching the pre-ST-Task-2 `(xy+0.5)/dims(img)` sampling.
         let (identity_geo, _, _) = geometry_uniform(None, src_w, src_h);
         dehaze_recovery_node.set_geometry(identity_geo);
-        let dehaze_recovery_id =
-            graph.add_node(Box::new(dehaze_recovery_node.clone()), vec![contrast_id]);
-
-        let tone_curve = Rc::new(Cell::new(tone_curve_luts(stack.tone_curve().as_ref())));
-        let tone_curve_node = CurveNode::new(ctx.clone(), tone_curve.clone());
-        let tone_curve_id = graph.add_node(Box::new(tone_curve_node), vec![dehaze_recovery_id]);
-
-        let hsl = Rc::new(Cell::new(hsl_uniform(stack.hsl())));
-        let hsl_node = PointOpNode::new(
-            ctx.clone(),
-            include_str!("shaders/hsl.wgsl"),
-            "hsl",
-            hsl.clone(),
+        let dehaze_recovery_id = graph.add_node(
+            Box::new(dehaze_recovery_node.clone()),
+            vec![light_engine_id],
         );
-        let hsl_id = graph.add_node(Box::new(hsl_node), vec![tone_curve_id]);
 
-        let color_grade = Rc::new(Cell::new(color_grade_uniform(stack.color_grade())));
-        let color_grade_node = PointOpNode::new(
-            ctx.clone(),
-            include_str!("shaders/color_grade.wgsl"),
-            "color-grade",
-            color_grade.clone(),
-        );
-        let color_grade_id = graph.add_node(Box::new(color_grade_node), vec![hsl_id]);
-
+        // Phase 3: the Color-stage engine node replaces the old tone-curve → hsl
+        // → color-grade → local-adjust chain in one node at this exact graph
+        // position: the global set's `color_segment()` pseudo-layer first, then
+        // the per-mask-layer loop (unchanged mask-compositing math, now keyed
+        // off this node's post-pseudo-layer `current` — see `evaluate_color`).
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
-        let local_node = Rc::new(LocalAdjustmentsNode::new(ctx.clone(), local_layers.clone()));
-        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![color_grade_id]);
+        let local_node = Rc::new(LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            local_layers.clone(),
+            EngineStage::Color,
+            global_set.clone(),
+        ));
+        let local_adjust_id =
+            graph.add_node(Box::new(local_node.clone()), vec![dehaze_recovery_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_node = PointOpNode::new(
@@ -241,12 +223,9 @@ impl EditPipeline {
             vignette_id,
             vignette,
             vignette_node,
-            exposure_id,
-            exposure,
-            wb_id,
-            wb,
-            contrast_id,
-            contrast,
+            global_set,
+            light_engine_id,
+            light_engine_node,
             dehaze_transmission_id,
             transmission_params,
             dehaze_transmission_node,
@@ -254,12 +233,6 @@ impl EditPipeline {
             recovery_params,
             dehaze_recovery_node,
             dehaze_atmos,
-            tone_curve_id,
-            tone_curve,
-            hsl_id,
-            hsl,
-            color_grade_id,
-            color_grade,
             local_adjust_id,
             local_layers,
             local_node,
@@ -270,7 +243,9 @@ impl EditPipeline {
             geometry_node,
             src_w,
             src_h,
-            node_count: 14,
+            // source, color-matrix, vignette, light-engine, dehaze-transmission,
+            // dehaze-recovery, color-engine, sharpen, geometry.
+            node_count: 9,
             stack,
         }
     }
@@ -335,22 +310,25 @@ impl EditPipeline {
     }
 
     /// Apply a new op stack, dirtying only the nodes whose params changed.
+    ///
+    /// Phase 3 (fused layer engine) dirty routing: `stack.global` is compared
+    /// segment-wise against `self.stack.global` (the doc BEFORE this call) —
+    /// a light-segment change dirties only `light_engine_id` (+ its
+    /// downstream dehaze/color-engine/sharpen/geometry via the graph's own
+    /// dependent-propagation); a color-segment change dirties only
+    /// `local_adjust_id` (the Color-stage engine node) — a grade-only drag
+    /// must NOT re-run the Light engine or the dehaze transmission node. Both
+    /// comparisons happen before `global_set` is overwritten, and `global_set`
+    /// is written UNCONDITIONALLY (even when neither segment changed) so it
+    /// always mirrors `self.stack.global` for the next call's comparison.
     pub fn set_stack(&mut self, stack: OpStack) {
-        let e = exposure_uniform(stack.exposure());
-        if e != self.exposure.get() {
-            self.exposure.set(e);
-            self.graph.mark_dirty(self.exposure_id);
+        if stack.global.light_segment() != self.stack.global.light_segment() {
+            self.graph.mark_dirty(self.light_engine_id);
         }
-        let w = wb_uniform(stack.white_balance());
-        if w != self.wb.get() {
-            self.wb.set(w);
-            self.graph.mark_dirty(self.wb_id);
+        if stack.global.color_segment() != self.stack.global.color_segment() {
+            self.graph.mark_dirty(self.local_adjust_id);
         }
-        let c = contrast_uniform(stack.contrast());
-        if c != self.contrast.get() {
-            self.contrast.set(c);
-            self.graph.mark_dirty(self.contrast_id);
-        }
+        *self.global_set.borrow_mut() = stack.global.clone();
         // Route `radius`/`atmos` to the transmission node (dirtying it only when
         // one of those actually changed) and `amount`/`atmos` to the recovery
         // node, independently — an amount-only change leaves `t` unchanged, so
@@ -372,21 +350,6 @@ impl EditPipeline {
         if r != self.recovery_params.get() {
             self.recovery_params.set(r);
             self.graph.mark_dirty(self.dehaze_recovery_id);
-        }
-        let luts = tone_curve_luts(stack.tone_curve().as_ref());
-        if luts != self.tone_curve.get() {
-            self.tone_curve.set(luts);
-            self.graph.mark_dirty(self.tone_curve_id);
-        }
-        let h = hsl_uniform(stack.hsl());
-        if h != self.hsl.get() {
-            self.hsl.set(h);
-            self.graph.mark_dirty(self.hsl_id);
-        }
-        let cg = color_grade_uniform(stack.color_grade());
-        if cg != self.color_grade.get() {
-            self.color_grade.set(cg);
-            self.graph.mark_dirty(self.color_grade_id);
         }
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {
@@ -452,6 +415,22 @@ impl EditPipeline {
     #[cfg(test)]
     pub(crate) fn local_rebuild_count(&self) -> u32 {
         self.local_node.rebuild_count()
+    }
+
+    /// Number of times the Light-stage engine node's `evaluate` has run (test
+    /// hook; Phase 3 dirty-routing regression): a color-segment-only or
+    /// layers-only `set_stack` must NOT tick this.
+    #[cfg(test)]
+    pub(crate) fn light_engine_eval_count(&self) -> u32 {
+        self.light_engine_node.eval_count()
+    }
+
+    /// Number of times the Color-stage engine node's `evaluate` has run (test
+    /// hook; Phase 3 dirty-routing regression): a light-segment-only
+    /// `set_stack` must NOT tick this.
+    #[cfg(test)]
+    pub(crate) fn color_engine_eval_count(&self) -> u32 {
+        self.local_node.eval_count()
     }
 
     /// Number of times `DehazeTransmissionNode` has run its full multi-pass
@@ -913,6 +892,100 @@ mod edit_pipeline_tests {
              must propagate through set_shared_transmission into different recovered \
              pixels; max abs diff (u8) = {max_diff}, expected > 3 — a stale hand-off \
              would leave this at 0"
+        );
+    }
+
+    /// Phase 3 (fused layer engine) dirty-routing regression, Light-engine
+    /// side: a light-segment-only `set_stack` (Exposure) re-runs the
+    /// Light-stage engine node AND (correctly — its input texture changed)
+    /// the downstream Color-stage engine node, but must NOT force the Color
+    /// engine to re-composite its masks — an unrelated upstream light-segment
+    /// change is exactly the "mask-adjustment-only" case the compositing
+    /// cache (keyed on mask defs [+ color segment, see `local_node.rs`'s
+    /// `CachedMasks`]) already guards; this proves the graph-level downstream
+    /// re-run doesn't defeat that cache.
+    #[test]
+    fn light_segment_only_change_reruns_color_engine_without_recompositing_masks() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = LinearRgbaF32::new(8, 8, vec![0.5; 8 * 8 * 4]).unwrap();
+        let base = masked_stack(0.2).set_op(Op::Exposure(crate::op::Exposure { ev: 0.2 }));
+        let mut ep = EditPipeline::new(ctx, &src, base, IDENTITY);
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.local_rebuild_count(),
+            1,
+            "first evaluate composites the mask once"
+        );
+        let (light_before, color_before) =
+            (ep.light_engine_eval_count(), ep.color_engine_eval_count());
+
+        // Change ONLY the global (light-segment) exposure; the masked layer's
+        // own adjustments and mask definition are untouched.
+        ep.set_stack(masked_stack(0.2).set_op(Op::Exposure(crate::op::Exposure { ev: 0.9 })));
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.light_engine_eval_count(),
+            light_before + 1,
+            "a light-segment change must re-run the Light engine"
+        );
+        assert_eq!(
+            ep.color_engine_eval_count(),
+            color_before + 1,
+            "the downstream Color engine also re-runs (its input texture changed)"
+        );
+        assert_eq!(
+            ep.local_rebuild_count(),
+            1,
+            "an unrelated upstream light-segment change must NOT recomposite masks"
+        );
+    }
+
+    /// Phase 3 dirty-routing regression: a color-segment-only `set_stack`
+    /// (ToneCurve) must re-run the Color-stage engine node but NOT the
+    /// Light-stage engine node — the "grade-only drag must not re-run the
+    /// Light engine or dehaze transmission" guarantee the plan requires,
+    /// checked from the Color-engine side (the transmission-side half is
+    /// already covered by `no_dehaze_op_skips_transmission_passes` /
+    /// `amount_change_does_not_recompute_transmission`, both unaffected by
+    /// this task since the Light engine still feeds the transmission node the
+    /// same way the old `contrast_id` did).
+    #[test]
+    fn color_segment_only_change_does_not_dirty_light_engine() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = LinearRgbaF32::new(8, 8, vec![0.5; 8 * 8 * 4]).unwrap();
+        let base = OpStack::default().set_op(Op::ToneCurve(crate::op::ToneCurve {
+            points: vec![(0.0, 0.0), (0.5, 0.4), (1.0, 1.0)],
+            ..Default::default()
+        }));
+        let mut ep = EditPipeline::new(ctx, &src, base, IDENTITY);
+        let _ = ep.evaluate();
+        let (light_before, color_before) =
+            (ep.light_engine_eval_count(), ep.color_engine_eval_count());
+
+        ep.set_stack(
+            OpStack::default().set_op(Op::ToneCurve(crate::op::ToneCurve {
+                points: vec![(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)],
+                ..Default::default()
+            })),
+        );
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.color_engine_eval_count(),
+            color_before + 1,
+            "a color-segment-only change must re-run the Color engine"
+        );
+        assert_eq!(
+            ep.light_engine_eval_count(),
+            light_before,
+            "a color-segment-only change must NOT re-run the Light engine"
         );
     }
 }

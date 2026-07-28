@@ -150,6 +150,15 @@ pub struct ViewerState {
     /// upload doesn't keep running after its result would be discarded anyway
     /// by the `image_id` staleness guard in `apply_pyramid_ready`.
     pub pyramid_handle: Option<JobHandle>,
+    /// One-shot deferral flag (perf fix D): set by `apply_full_decoded` when
+    /// the tier-2 pyramid build was ready to submit but no
+    /// `try_acquire_pyramid_permit` slot was free (`PYRAMID_BUILD_CONCURRENCY`
+    /// concurrent builds already in flight). `drive_viewer` retries the submit
+    /// each frame while this is `true`. Because the flag lives on THIS viewer
+    /// (reset to `false` by every `ViewerState::open`), a superseded image's
+    /// deferred pyramid is never retried after navigation — the new viewer has
+    /// its own flag, starting `false`.
+    pub needs_pyramid: bool,
 
     // ── Preview-cache read gating (Task 6) ─────────────────────────────────
     /// Handle for the in-flight preview-cache read job; cancelled on navigation
@@ -350,6 +359,7 @@ impl ViewerState {
             preview_handle: None,
             full_handle: None,
             pyramid_handle: None,
+            needs_pyramid: false,
             cache_read_handle: None,
             cache_read_requested: false,
             cache_resolved: false,

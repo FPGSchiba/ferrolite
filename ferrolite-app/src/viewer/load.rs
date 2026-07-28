@@ -134,6 +134,14 @@ pub fn spawn_full(
                     QuadBin.to_linear_rgba_f32(&raw)
                 };
                 let image = ferrolite_decode::apply_orientation_linear(demosaiced, raw.orientation);
+                // The demosaic itself can't be interrupted mid-call, but check here
+                // (post-demosaic, pre-dispatch) so a superseded full decode — one
+                // whose image the user has already navigated away from — doesn't
+                // dispatch a stale `FullDecoded` that `apply_full_decoded` would
+                // otherwise have to unwind via its own `image_id` staleness guard.
+                if cancel.is_cancelled() {
+                    return;
+                }
                 let _ = tx.send(AppEvent::FullDecoded {
                     image_id,
                     image,

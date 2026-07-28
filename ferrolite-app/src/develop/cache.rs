@@ -5,6 +5,7 @@
 //! docs/superpowers/specs/2026-07-20-develop-warm-navigation-cache-design.md.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use ferrolite_pipeline::GpuPyramidSource;
@@ -21,6 +22,58 @@ pub const WARM_FULL_COUNT: usize = 2;
 /// prefetched — so fast filmstrip scrubbing doesn't flood the job system with
 /// neighbor decodes it will immediately supersede. Tunable.
 pub const WARM_SETTLE_SECS: f32 = 0.4;
+
+/// Max number of `Background`-priority pyramid builds (`PyramidTileSource::new`
+/// and `GpuPyramidSource::new`, ~1.2 s / ~1 GB CPU combined per RAW image)
+/// allowed to run concurrently across the whole app. Cancellation of a
+/// superseded build is cooperative and only checked BETWEEN the two
+/// monolithic steps, so with no cap, fast filmstrip navigation piles up
+/// remnant builds that monopolize the `ferrolite-jobs` worker pool and starve
+/// the settled image's `Visible` full decode. Bounding concurrency here
+/// (rather than only cancelling) keeps a free worker available for that
+/// decode even while older builds are still winding down.
+pub const PYRAMID_BUILD_CONCURRENCY: usize = 2;
+
+/// Process-global count of in-flight pyramid builds currently holding a
+/// permit. Only ever touched through `try_acquire_pyramid_permit` and
+/// `PyramidPermit::drop`.
+static PYRAMID_BUILDS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII permit for one in-flight pyramid build. Move it into the build job's
+/// closure so it is released (via `Drop`) exactly when that closure ends —
+/// whether the build ran to completion, returned early on cancellation, or
+/// (in principle) panicked — so a slot can never leak.
+pub struct PyramidPermit {
+    _private: (),
+}
+
+impl Drop for PyramidPermit {
+    fn drop(&mut self) {
+        PYRAMID_BUILDS_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Try to reserve one of `PYRAMID_BUILD_CONCURRENCY` concurrent pyramid-build
+/// slots, returning a releasing guard on success. Race-free: a
+/// compare-exchange loop (not a separate load-then-store) so two callers
+/// racing for the last slot cannot both observe success.
+pub fn try_acquire_pyramid_permit() -> Option<PyramidPermit> {
+    let mut current = PYRAMID_BUILDS_IN_FLIGHT.load(Ordering::Acquire);
+    loop {
+        if current >= PYRAMID_BUILD_CONCURRENCY {
+            return None;
+        }
+        match PYRAMID_BUILDS_IN_FLIGHT.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return Some(PyramidPermit { _private: () }),
+            Err(observed) => current = observed,
+        }
+    }
+}
 
 /// Forward-biased neighbor selection for warm prefetch: up to `forward` ids ahead
 /// of `current` (the culling direction, listed first) then up to `back` behind,
@@ -377,5 +430,29 @@ mod tests {
         // Full without display degrades to nothing (full needs its display too).
         c.insert_full(key(2, 0), full_e(10));
         assert!(matches!(c.get(key(2, 0)), WarmHit::Miss));
+    }
+
+    // `try_acquire_pyramid_permit`/`PyramidPermit` share a process-global
+    // counter (`PYRAMID_BUILDS_IN_FLIGHT`). No other test in this crate
+    // exercises it, so this test owns it exclusively; it explicitly drops
+    // every permit it acquires so the counter is back at 0 when it returns,
+    // leaving no cross-test residue.
+    #[test]
+    fn pyramid_permit_bounds_concurrency_and_releases_on_drop() {
+        let mut held = Vec::new();
+        for _ in 0..PYRAMID_BUILD_CONCURRENCY {
+            held.push(try_acquire_pyramid_permit().expect("under cap must succeed"));
+        }
+        assert!(
+            try_acquire_pyramid_permit().is_none(),
+            "CAP+1 acquire must fail while all permits are held"
+        );
+        // Dropping one held permit must free exactly one slot.
+        held.pop();
+        let freed = try_acquire_pyramid_permit();
+        assert!(freed.is_some(), "dropping a guard must free a slot");
+        // Clean up: release everything so the global counter returns to 0.
+        drop(freed);
+        drop(held);
     }
 }

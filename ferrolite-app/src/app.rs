@@ -1416,56 +1416,33 @@ impl FerroliteApp {
             // than the UI thread (CLAUDE.md rule 1; this was the open freeze). They
             // need the FULL-res `image`; reuse the single shared `image_arc`
             // (an `Arc` refcount bump, NOT a second ~400 MB clone) built above.
-            // `GpuContext` is `Send + Sync`
-            // (Arc device/queue handles), as are `PyramidTileSource` and
-            // `GpuPyramidSource`, so both build off-thread and are delivered over
-            // the channel; `apply_pyramid_ready` installs them + starts producing.
-            let image_full = std::sync::Arc::clone(&image_arc);
-            let gpu_job = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-            let tx = self.state.tx.clone();
-            let repaint = ctx.clone();
-            let pyramid_handle =
-                self.state
-                    .jobs
-                    .submit(ferrolite_jobs::Priority::Background, move |cancel| {
-                        if cancel.is_cancelled() {
-                            return;
+            //
+            // Perf fix D: cancellation of a superseded build is cooperative and
+            // only checked BETWEEN the two monolithic steps inside the job, so
+            // fast filmstrip navigation could otherwise pile up remnant builds
+            // that monopolize the worker pool and starve the settled image's
+            // `Visible` full decode. Bound concurrency with a process-global
+            // permit (`develop::cache::try_acquire_pyramid_permit`): if a slot is
+            // free, submit now; otherwise defer via `needs_pyramid` and let
+            // `drive_viewer` retry once a permit frees, for the CURRENT viewer
+            // only (a superseded image's flag is simply never revisited — see
+            // `ViewerState::needs_pyramid`).
+            match crate::develop::cache::try_acquire_pyramid_permit() {
+                Some(permit) => {
+                    self.submit_pyramid_build(
+                        frame,
+                        ctx,
+                        image_id,
+                        std::sync::Arc::clone(&image_arc),
+                        permit,
+                    );
+                }
+                None => {
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == image_id {
+                            v.needs_pyramid = true;
                         }
-                        // Attribute this job's large in-flight buffer (full-res linear f32) to
-                        // the memory overlay for its lifetime. Gated: zero cost when off.
-                        let _inflight = crate::diag::enabled().then(|| {
-                            crate::diag_mem::track_inflight_pyramid(crate::diag_mem::linear_bytes(
-                                image_full.width,
-                                image_full.height,
-                            ))
-                        });
-                        let tile_source: std::sync::Arc<
-                            dyn ferrolite_vt::TileSource + Send + Sync,
-                        > = std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(
-                            (*image_full).clone(),
-                        ));
-                        if cancel.is_cancelled() {
-                            return;
-                        }
-                        let gpu_pyramid = std::sync::Arc::new(
-                            ferrolite_pipeline::GpuPyramidSource::new(&gpu_job, &image_full),
-                        );
-                        if cancel.is_cancelled() {
-                            return;
-                        }
-                        let _ = tx.send(crate::events::AppEvent::PyramidReady {
-                            image_id,
-                            tile_source,
-                            gpu_pyramid,
-                        });
-                        repaint.request_repaint();
-                    });
-            // Store the handle so a later navigation (`cancel_loads`) can cancel
-            // this Background pyramid build. Guard on `image_id` matching in case
-            // a newer image already superseded this one between submit and now.
-            if let Some(v) = self.state.viewer.as_mut() {
-                if v.image_id == image_id {
-                    v.pyramid_handle = Some(pyramid_handle);
+                    }
                 }
             }
         }
@@ -1542,6 +1519,86 @@ impl FerroliteApp {
             self.warm_insert_display(frame, image_id, true);
         }
         self.mark_histogram_dirty();
+    }
+
+    /// Submit the off-thread build of both full-res pyramids (the sparse-VT
+    /// CPU tile source and the GPU-resident edit pyramid) for `image_id` on a
+    /// `ferrolite-jobs` Background worker — CPU box-downsample heavy (~1.2 s
+    /// combined), so this must never run on the UI thread (CLAUDE.md rule 1;
+    /// this was the original open freeze). `GpuContext` is `Send + Sync` (Arc
+    /// device/queue handles), as are `PyramidTileSource` and
+    /// `GpuPyramidSource`, so both build off-thread and are delivered over the
+    /// channel as `AppEvent::PyramidReady`, which `apply_pyramid_ready`
+    /// installs + starts producing.
+    ///
+    /// `permit` (perf fix D) is MOVED into the job closure so it is released,
+    /// via its `Drop` impl, exactly when the closure ends — on normal
+    /// completion, on an early return at a `cancel.is_cancelled()` checkpoint,
+    /// or (in principle) on panic — so a `PYRAMID_BUILD_CONCURRENCY` slot can
+    /// never leak. Two call sites feed this: the immediate submit in
+    /// `apply_full_decoded` (when a permit is free at full-decode time), and
+    /// `drive_viewer`'s per-frame retry (when it was deferred via
+    /// `v.needs_pyramid` because none was).
+    fn submit_pyramid_build(
+        &mut self,
+        frame: &eframe::Frame,
+        ctx: &egui::Context,
+        image_id: i64,
+        image_full: std::sync::Arc<ferrolite_image::LinearRgbaF32>,
+        permit: crate::develop::cache::PyramidPermit,
+    ) {
+        let Some(rs) = frame.wgpu_render_state() else {
+            return;
+        };
+        let gpu_job = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let tx = self.state.tx.clone();
+        let repaint = ctx.clone();
+        let pyramid_handle =
+            self.state
+                .jobs
+                .submit(ferrolite_jobs::Priority::Background, move |cancel| {
+                    // Held for the lifetime of this closure; dropped (releasing the
+                    // permit) on every exit path below, including the early returns.
+                    let _permit = permit;
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    // Attribute this job's large in-flight buffer (full-res linear f32) to
+                    // the memory overlay for its lifetime. Gated: zero cost when off.
+                    let _inflight = crate::diag::enabled().then(|| {
+                        crate::diag_mem::track_inflight_pyramid(crate::diag_mem::linear_bytes(
+                            image_full.width,
+                            image_full.height,
+                        ))
+                    });
+                    let tile_source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
+                        std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(
+                            (*image_full).clone(),
+                        ));
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let gpu_pyramid = std::sync::Arc::new(
+                        ferrolite_pipeline::GpuPyramidSource::new(&gpu_job, &image_full),
+                    );
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                    let _ = tx.send(crate::events::AppEvent::PyramidReady {
+                        image_id,
+                        tile_source,
+                        gpu_pyramid,
+                    });
+                    repaint.request_repaint();
+                });
+        // Store the handle so a later navigation (`cancel_loads`) can cancel
+        // this Background pyramid build. Guard on `image_id` matching in case
+        // a newer image already superseded this one between submit and now.
+        if let Some(v) = self.state.viewer.as_mut() {
+            if v.image_id == image_id {
+                v.pyramid_handle = Some(pyramid_handle);
+            }
+        }
     }
 
     /// Build the sparse full `VirtualTexture` (needs the render state) plus the
@@ -2629,6 +2686,40 @@ impl FerroliteApp {
     /// 4b avoids that cost and reads as instant at the 150 ms ramp.
     fn drive_viewer(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let dt = ui.ctx().input(|i| i.stable_dt);
+
+        // Perf fix D: retry a pyramid build `apply_full_decoded` deferred
+        // because no `PYRAMID_BUILD_CONCURRENCY` permit was free at the time.
+        // `needs_pyramid` lives on the CURRENT viewer (reset to `false` by
+        // every `ViewerState::open`), so this only ever retries for the image
+        // the user is actually looking at now — a superseded image's deferred
+        // pyramid is simply never revisited once navigation replaces the
+        // viewer. Only RAW builds a pyramid at all, and `raw_preview_source`
+        // (retained by `apply_full_decoded`) is the full-res `Arc` the build
+        // needs, so gate on both being present.
+        let deferred_pyramid = self.state.viewer.as_ref().and_then(|v| {
+            (v.needs_pyramid && v.kind == ferrolite_image::FileKind::Raw)
+                .then(|| v.raw_preview_source.clone())
+                .flatten()
+                .map(|image_full| (v.image_id, image_full))
+        });
+        if let Some((image_id, image_full)) = deferred_pyramid {
+            match crate::develop::cache::try_acquire_pyramid_permit() {
+                Some(permit) => {
+                    self.submit_pyramid_build(frame, ui.ctx(), image_id, image_full, permit);
+                    if let Some(v) = self.state.viewer.as_mut() {
+                        if v.image_id == image_id {
+                            v.needs_pyramid = false;
+                        }
+                    }
+                }
+                None => {
+                    // Still no free permit: keep the drive loop alive so the
+                    // retry runs again next frame instead of stalling until
+                    // unrelated input requests a repaint.
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
 
         // First, reconcile any stale GPU holder: if the holder belongs to an
         // image other than the open viewer (navigation happened), cancel its

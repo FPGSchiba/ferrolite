@@ -142,16 +142,17 @@ impl TransmissionParams {
 /// `struct P` in `dehaze_recovery.wgsl` exactly (both must be 16-byte aligned).
 ///
 /// ST-Task 2: this struct also carries the geometry (`geo_m`/`geo_off`/
-/// `src_dims`), `frame_origin`, and `has_transmission` fields the shader needs
-/// for source-UV sampling of the externally-set shared transmission — but on
-/// THIS shared/pipeline-visible `Cell<RecoveryParams>` those fields are inert
-/// placeholders, always the zeroed default `from_op` produces. `set_geometry`/
-/// `set_shared_transmission` (on `DehazeRecoveryNode`) store the real values in
-/// node-private `Cell`s instead, and `evaluate` merges them into a FRESH,
-/// evaluate-local `RecoveryParams` (base amount/t0/atmos from this Cell + the
-/// real geo/frame/has_transmission from the node-private state) before
-/// uploading it — mirroring `VignetteNode::evaluate`'s merge of its `params`
-/// Cell with the separate `TileFrame`. This keeps a `set_stack`-driven
+/// `src_dims`), `frame_origin`/`full_dims`, `out_dims`, and `has_transmission`
+/// fields the shader needs for its LOD-independent source-UV sampling of the
+/// externally-set shared transmission — but on THIS shared/pipeline-visible
+/// `Cell<RecoveryParams>` those fields are inert placeholders, always the
+/// zeroed default `from_op` produces. `set_geometry`/`set_shared_transmission`
+/// (on `DehazeRecoveryNode`) store the real values in node-private `Cell`s
+/// instead, and `evaluate` merges them into a FRESH, evaluate-local
+/// `RecoveryParams` (base amount/t0/atmos from this Cell + the real
+/// geo/frame/has_transmission from the node-private state) before uploading
+/// it — mirroring `VignetteNode::evaluate`'s merge of its `params` Cell with
+/// the separate `TileFrame`. This keeps a `set_stack`-driven
 /// `self.recovery_params.set(RecoveryParams::from_op(..))` reseed (amount/t0/
 /// atmos only) from ever clobbering the geometry/transmission-binding state.
 #[repr(C)]
@@ -173,6 +174,17 @@ pub(crate) struct RecoveryParams {
     /// This pass's output-space frame origin (from the shared `TileFrame`).
     /// Inert here — refreshed from `DehazeRecoveryNode::frame` every evaluate.
     pub frame_origin: [f32; 2],
+    /// The full output image size AT THIS LOD (from the shared `TileFrame`) —
+    /// makes `frame_origin + gid` LOD-independent when normalized against it
+    /// (see the shader's file doc for the near-black-when-zoomed-out fix).
+    /// Inert here — refreshed from `DehazeRecoveryNode::frame` every evaluate.
+    pub full_dims: [f32; 2],
+    /// The LEVEL-0 output image dims (mirrors `GeometryUniform::out_dims`,
+    /// from `set_geometry`) — re-expands the LOD-independent normalized pixel
+    /// back to the level-0 output-pixel space `geo_m`/`geo_off` expect. Inert
+    /// on the shared Cell — real value lives in `DehazeRecoveryNode`'s private
+    /// `geometry` Cell.
+    pub out_dims: [f32; 2],
     /// 1 when a real shared transmission is bound (`set_shared_transmission`),
     /// else 0 (default 1×1 neutral texture) — gates the shader's sample.
     /// Inert here — refreshed from `DehazeRecoveryNode::has_transmission`.
@@ -180,7 +192,7 @@ pub(crate) struct RecoveryParams {
     pub pad2: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<RecoveryParams>() == 80);
+const _: () = assert!(std::mem::size_of::<RecoveryParams>() == 96);
 const _: () = assert!(std::mem::size_of::<RecoveryParams>().is_multiple_of(16));
 
 impl RecoveryParams {
@@ -208,6 +220,8 @@ impl RecoveryParams {
             geo_off: [0.0; 2],
             src_dims: [0.0; 2],
             frame_origin: [0.0; 2],
+            full_dims: [0.0; 2],
+            out_dims: [0.0; 2],
             has_transmission: 0,
             pad2: 0,
         }
@@ -218,11 +232,15 @@ impl RecoveryParams {
 /// (set via `set_geometry`, merged into the uniform at each `evaluate`). Kept
 /// OUT of the pipeline-visible `RecoveryParams` cell (see that struct's doc) so
 /// a `set_stack`-driven `RecoveryParams::from_op` reseed can never clobber it.
+/// `out_dims` is the LEVEL-0 output dims (`GeometryUniform::out_dims`) — see
+/// `RecoveryParams::out_dims`'s doc for why the LOD-independent source-UV
+/// mapping needs it alongside the shared `TileFrame`'s `full_dims`.
 #[derive(Clone, Copy)]
 struct RecoveryGeometry {
     m: [f32; 4],
     off: [f32; 2],
     src_dims: [f32; 2],
+    out_dims: [f32; 2],
 }
 
 impl Default for RecoveryGeometry {
@@ -235,6 +253,7 @@ impl Default for RecoveryGeometry {
             m: [1.0, 0.0, 0.0, 1.0],
             off: [0.0, 0.0],
             src_dims: [1.0, 1.0],
+            out_dims: [1.0, 1.0],
         }
     }
 }
@@ -1297,17 +1316,22 @@ impl DehazeRecoveryNode {
         *self.shared_tex.borrow_mut() = next;
     }
 
-    /// Set the output→source geometry mapping (`m`/`off`/`src_dims` from the
-    /// full `GeometryUniform` — `out_dims`/`out_origin` are ignored, since this
+    /// Set the output→source geometry mapping (`m`/`off`/`src_dims`/`out_dims`
+    /// from the full `GeometryUniform` — `out_origin` is ignored, since this
     /// node gets its own output-space origin from the shared `TileFrame`
-    /// instead). Stored OUTSIDE the pipeline-visible `RecoveryParams` cell (see
-    /// that struct's doc) so a `set_stack`-driven `RecoveryParams::from_op`
+    /// instead). `out_dims` is the LEVEL-0 output dims and, together with the
+    /// `TileFrame`'s per-LOD `full_dims`, makes the shader's source-UV mapping
+    /// LOD-independent (see `RecoveryParams::out_dims`'s doc) — it used to be
+    /// dropped here, which was the near-black-when-zoomed-out-past-fit bug's
+    /// root cause. Stored OUTSIDE the pipeline-visible `RecoveryParams` cell
+    /// (see that struct's doc) so a `set_stack`-driven `RecoveryParams::from_op`
     /// reseed can never clobber it.
     pub(crate) fn set_geometry(&self, g: GeometryUniform) {
         self.geometry.set(RecoveryGeometry {
             m: g.m,
             off: g.off,
             src_dims: g.src_dims,
+            out_dims: g.out_dims,
         });
     }
 
@@ -1362,6 +1386,8 @@ impl Node<PipelineImage> for DehazeRecoveryNode {
             geo_off: geo.off,
             src_dims: geo.src_dims,
             frame_origin: frame.origin,
+            full_dims: frame.full_dims,
+            out_dims: geo.out_dims,
             has_transmission: u32::from(self.has_transmission.get()),
             pad2: 0,
         };

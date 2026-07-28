@@ -694,3 +694,106 @@ fn dehaze_tiled_matches_whole_image() {
         "per-tile dehaze diverged from whole-image (diff {max_diff}) at {max_loc:?} — shared transmission wiring broken?"
     );
 }
+
+// Regression golden for the "dehaze goes near-black when zoomed OUT beyond
+// fit" bug: `dehaze_recovery.wgsl` mapped the source-UV as
+// `uv = (frame_origin + gid) / src_dims`, where `src_dims` is the LEVEL-0
+// source dims but `frame_origin + gid` are in the CURRENT LOD's (downscaled)
+// output-pixel space. At LOD 0 that's correct (`frame_origin + gid` IS a
+// level-0 pixel), but at a coarser LOD (e.g. LOD 1, half-res) it silently
+// samples only a QUARTER of the transmission map's UV space (everything
+// collapses toward the top-left corner) instead of the full [0,1] range —
+// `dehaze_tiled_matches_whole_image` above only ever produces LOD-0 tiles, so
+// it never caught this. The fix normalizes by the per-LOD `TileFrame::
+// full_dims` first (LOD-independent), then re-expands by the level-0
+// `GeometryUniform::out_dims` before applying the geometry mapping.
+//
+// This fixture is a diagonal grey ramp (not the sawtooth used above): value
+// increases monotonically with `x + y`, so a wrong (quadrant-collapsed) UV
+// samples a systematically different — and narrower — slice of the
+// transmission map than the correct mapping, which pulls the MEAN recovered
+// luminance of the coarse-LOD tile far away from the whole-image mean (the
+// reported near-black symptom). A periodic/high-frequency fixture (like the
+// seam test's sawtooth) would not reliably expose this, since a repeating
+// pattern looks statistically similar whichever sub-range of it you sample —
+// the monotonic ramp cannot hide that.
+//
+// MANDATORY sensitivity check (recorded in the report): reverting the
+// `dehaze_recovery.wgsl`/`RecoveryParams`/`set_geometry` fix (`git stash` back
+// to the pre-fix source-UV mapping) must make this test's assertion FAIL —
+// confirmed: pre-fix mean diverges far outside `MEAN_LUMA_TOL`; post-fix it is
+// well within it. See the report for the exact recorded numbers.
+#[test]
+fn dehaze_coarse_lod_matches_whole_image_mean_luminance() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+
+    // 512x512 -> pyramid has exactly 2 levels: LOD 0 (512x512) and LOD 1
+    // (256x256 == TILE_SIZE, a single whole-image tile, no halo needed).
+    let (iw, ih) = (512u32, 512u32);
+    let src = {
+        let mut px = Vec::with_capacity((iw * ih * 4) as usize);
+        let denom = (iw + ih - 2) as f32;
+        for y in 0..ih {
+            for x in 0..iw {
+                // Monotonic grey ramp in [0.05, 0.90] driven by x+y.
+                let v = 0.05 + ((x + y) as f32 / denom) * 0.85;
+                px.extend_from_slice(&[v, v, v, 1.0]);
+            }
+        }
+        LinearRgbaF32::new(iw, ih, px).expect("diagonal ramp fixture length")
+    };
+
+    let radius = 12u32;
+    let amount = 2.0f32; // aggressive push (see the seam test's rationale)
+    let stack = OpStack::default().set_op(Op::Dehaze(Dehaze { amount, radius }));
+    let atmos = estimate_atmospheric_light(&src);
+
+    // Whole-image reference (LOD 0).
+    let mut whole = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+    let shared_transmission = whole.transmission_texture();
+    assert!(
+        shared_transmission.is_some(),
+        "dehaze is active (amount != 0) -> a shared transmission texture must exist"
+    );
+    let whole_mean: f32 = whole_lin
+        .chunks_exact(4)
+        .flat_map(|px| px[..3].iter().copied())
+        .sum::<f32>()
+        / (iw * ih * 3) as f32;
+
+    // Coarse-LOD (zoomed-out-past-fit) tiled render, LOD 1.
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    assert_eq!(
+        pyramid.level_count(),
+        2,
+        "fixture must have exactly a LOD-0/LOD-1 pyramid for this test's assumptions to hold"
+    );
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    tep.set_dehaze_atmos(atmos);
+    tep.set_shared_transmission(shared_transmission);
+
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let tile = tep.produce_tile(TileCoord { lod: 1, x: 0, y: 0 });
+    let tile_lin = common::read_tile_linear(&ctx, &tile);
+    let lod1_mean: f32 = tile_lin
+        .chunks_exact(4)
+        .flat_map(|px| px[..3].iter().copied())
+        .sum::<f32>()
+        / (TILE_SIZE * TILE_SIZE * 3) as f32;
+
+    let rel_diff = (lod1_mean - whole_mean).abs() / whole_mean.abs().max(1e-6);
+    eprintln!(
+        "dehaze_coarse_lod_matches_whole_image_mean_luminance: whole_mean={whole_mean:.6} lod1_mean={lod1_mean:.6} rel_diff={rel_diff:.4}"
+    );
+    const MEAN_LUMA_TOL: f32 = 0.15; // 15% relative — generous but catches a quadrant-collapsed UV
+    assert!(
+        rel_diff <= MEAN_LUMA_TOL,
+        "coarse-LOD dehaze mean luminance ({lod1_mean:.6}) diverged from whole-image mean \
+         ({whole_mean:.6}, rel diff {rel_diff:.4}) — LOD-independent source-UV mapping broken?"
+    );
+}

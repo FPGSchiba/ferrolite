@@ -171,11 +171,17 @@ impl EditPipeline {
         // input now — the transmission is bound out-of-band via
         // `set_shared_transmission` (see `evaluate`), not a graph edge, so the
         // shared texture can later also serve the tiled tier. No tiling here, so
-        // a dedicated default-origin frame (not shared with anything else).
+        // a dedicated frame — but NOT `TileFrame::default()` (`full_dims =
+        // [0,0]`, which the shader's LOD-independent mapping would divide by
+        // zero on): the whole-image tier has no LOD tiers, so its "full output
+        // dims" is simply the source dims, origin `[0,0]`.
         let dehaze_recovery_node = Rc::new(DehazeRecoveryNode::new(
             ctx.clone(),
             recovery_params.clone(),
-            Rc::new(Cell::new(TileFrame::default())),
+            Rc::new(Cell::new(TileFrame {
+                origin: [0.0, 0.0],
+                full_dims: [src_w as f32, src_h as f32],
+            })),
         ));
         // Geometry (crop/rotate) runs downstream of dehaze in this graph (at
         // `geometry_id`, the very end), so recovery always sees the FULL source

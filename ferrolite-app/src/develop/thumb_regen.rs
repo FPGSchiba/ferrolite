@@ -129,7 +129,7 @@ pub fn regenerate_edited_thumbnail_blocking(
 /// Where the job obtains the edit stack.
 pub enum RegenStackSource {
     /// From the just-closed viewer (auto-on-leave) — no sidecar read.
-    InMemory(OpStack),
+    InMemory(Box<OpStack>),
     /// Read the `.xmp` sidecar inside the job (on-demand catch-up); missing or
     /// malformed → identity.
     Sidecar,
@@ -160,7 +160,7 @@ pub fn spawn_regen_edited_thumbnail(
             return;
         }
         let stack = match stack_source {
-            RegenStackSource::InMemory(s) => s,
+            RegenStackSource::InMemory(s) => *s,
             RegenStackSource::Sidecar => resolve_regen_stack(read_ops(&sidecar_path(&path))),
         };
         match regenerate_edited_thumbnail_blocking(
@@ -212,8 +212,7 @@ mod tests {
 
     #[test]
     fn valid_sidecar_payload_round_trips() {
-        let mut stack = OpStack::default();
-        stack.ops.push(ferrolite_pipeline::Op::Exposure(
+        let stack = OpStack::default().set_op(ferrolite_pipeline::Op::Exposure(
             ferrolite_pipeline::Exposure { ev: 1.0 },
         ));
         let payload = serialize(&stack);

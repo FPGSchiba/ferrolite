@@ -808,7 +808,7 @@ impl FerroliteApp {
             path,
             kind,
             cam,
-            crate::develop::thumb_regen::RegenStackSource::InMemory(stack),
+            crate::develop::thumb_regen::RegenStackSource::InMemory(Box::new(stack)),
         );
     }
 

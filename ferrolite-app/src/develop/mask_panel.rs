@@ -205,7 +205,7 @@ pub(crate) fn selected_section(
     ui.separator();
 
     // ── Light + Color adjustments (each slider carries its own reset column) ──
-    let mut a = layer.adjustments;
+    let mut a = layer.adjustments.clone();
     let mut changed = false;
     let mut commit_now = false;
     let mut adjusting = false;

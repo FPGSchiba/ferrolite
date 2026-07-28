@@ -95,11 +95,6 @@ impl<'a> ScopedEdit<'a> {
             EditScope::MaskNone => None,
         }
     }
-
-    /// True when controls should render enabled at all (false for `MaskNone`).
-    pub fn interactive(&self) -> bool {
-        !matches!(self.scope, EditScope::MaskNone)
-    }
 }
 
 #[cfg(test)]
@@ -152,7 +147,6 @@ mod tests {
         // MaskNone writes nothing.
         let s = ScopedEdit::new(EditScope::MaskNone, &doc);
         assert!(s.set().is_none());
-        assert!(!s.interactive());
     }
 
     #[test]

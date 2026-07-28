@@ -867,17 +867,66 @@ mod tests {
         let mut state = AppState::new().unwrap();
         state.settings.basic_sliders_open = true;
         state.settings.mask_basic_sliders_open = false;
+
+        // A real viewer with a mask layer selected (no GPU needed —
+        // `ViewerState::open` only sets up CPU-side state) so `scope::current`
+        // resolves to `EditScope::Mask(0)`, not `MaskNone`. `MaskNone` would
+        // take the exact same `scope_is_mask` branch as a real mask selection,
+        // so without a real viewer + selection this test can't actually tell
+        // the mask-flag path apart from the "no viewer at all" early return.
+        let mut viewer = crate::viewer::ViewerState::open(
+            1,
+            std::path::PathBuf::from("x"),
+            ferrolite_image::FileKind::Raw,
+        );
+        viewer.op_stack = crate::develop::mask_edit::create_mask(&viewer.op_stack, "M".into());
+        viewer.mask.selected = Some(0);
+        state.viewer = Some(viewer);
         state.tool_state.active = crate::develop::tool::ToolId::Mask;
-        // Render LightTab with no viewer: returns early, flags untouched — the
-        // meaningful assertion is the flag WIRING, covered by reading the flag
-        // selection helper/inline sites; assert both flags survive a render pass.
+
+        // Click the BASIC SLIDERS header (same synthetic-click pattern as
+        // `widgets::mod`'s `section_header` test, which also renders once
+        // before the click pass) to actually exercise which flag
+        // `LightTab::show` reads AND writes for a mask scope.
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let _ = LightTab.show(ui, &mut state);
             });
         });
-        assert!(state.settings.basic_sliders_open);
-        assert!(!state.settings.mask_basic_sliders_open);
+
+        let click_pos = egui::pos2(50.0, 10.0);
+        let mut input = egui::RawInput::default();
+        input.events.push(egui::Event::PointerButton {
+            pos: click_pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos: click_pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let _ = LightTab.show(ui, &mut state);
+            });
+        });
+
+        // The click toggled the header's own flag: for a mask scope that must
+        // be `mask_basic_sliders_open` (false -> true), while the GLOBAL
+        // `basic_sliders_open` stays untouched. A wrong flag-selection branch
+        // would flip `basic_sliders_open` (true -> false) instead and leave
+        // `mask_basic_sliders_open` at false.
+        assert!(
+            state.settings.mask_basic_sliders_open,
+            "mask scope must toggle its OWN section flag"
+        );
+        assert!(
+            state.settings.basic_sliders_open,
+            "the global section flag must stay untouched while in mask scope"
+        );
     }
 }

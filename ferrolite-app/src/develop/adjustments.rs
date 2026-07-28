@@ -686,4 +686,75 @@ mod tests {
             .filter(|s| s.id.0.starts_with("sharpen") || s.id.0.starts_with("dehaze"))
             .all(|s| s.global_ready && !s.mask_ready));
     }
+
+    /// Registry invariant (design 2026-07-28 §6.2): every `AdjustmentId` across
+    /// the three tabs is unique. `scoped_slider`/callers key controls by id, so
+    /// a duplicate would make two rows indistinguishable to any id-based lookup.
+    #[test]
+    fn all_registry_ids_are_unique_across_the_three_tabs() {
+        let ids: Vec<&str> = light_sliders()
+            .iter()
+            .chain(color_sliders())
+            .chain(effects_sliders())
+            .map(|s| s.id.0)
+            .collect();
+        let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "duplicate AdjustmentId(s) found across the registry: {ids:?}"
+        );
+    }
+
+    /// Registry invariant (design 2026-07-28 §6.2): a spec that is not ready in
+    /// a scope must carry a non-empty reason for that scope, since `readiness`
+    /// surfaces `*_reason` verbatim as the disabled control's hover tooltip —
+    /// an empty reason would silently show a blank tooltip.
+    #[test]
+    fn every_not_ready_spec_carries_a_reason() {
+        for spec in light_sliders()
+            .iter()
+            .chain(color_sliders())
+            .chain(effects_sliders())
+        {
+            if !spec.global_ready {
+                assert!(
+                    !spec.global_reason.is_empty(),
+                    "{}: global_ready=false must carry a non-empty global_reason",
+                    spec.id.0
+                );
+            }
+            if !spec.mask_ready {
+                assert!(
+                    !spec.mask_reason.is_empty(),
+                    "{}: mask_ready=false must carry a non-empty mask_reason",
+                    spec.id.0
+                );
+            }
+        }
+    }
+
+    /// Registry invariant (design 2026-07-28 §6.2): every spec's `default` is
+    /// the identity value for the field(s) it writes — applying it to a fresh
+    /// `AdjustmentSet::default()` and normalizing must round-trip back to
+    /// `AdjustmentSet::default()`. This is what makes the per-control reset
+    /// affordance (which writes `spec.default`) an actual reset to identity.
+    #[test]
+    fn resetting_every_spec_to_its_default_yields_the_identity_set() {
+        for spec in light_sliders()
+            .iter()
+            .chain(color_sliders())
+            .chain(effects_sliders())
+        {
+            let mut set = AdjustmentSet::default();
+            (spec.set)(&mut set, spec.default);
+            let normalized = set.normalized();
+            assert_eq!(
+                normalized,
+                AdjustmentSet::default(),
+                "{}: applying its own default should normalize back to the identity set",
+                spec.id.0
+            );
+        }
+    }
 }

@@ -8,7 +8,7 @@
 //! wheel (its own reset → neutral) and each `EguiSlider` (its reset column).
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::scope::ScopedEdit;
+use crate::develop::scope::{ScopedEdit, MASK_NONE_HINT};
 use crate::icons;
 use crate::theme;
 use crate::widgets::color_wheel;
@@ -22,15 +22,16 @@ pub(crate) fn grade_changed(a: &ColorGrade, b: &ColorGrade) -> bool {
 }
 
 /// Draw one wheel + its Lum slider; mutate `wheel` in place. Returns
-/// `(changed, commit)`.
+/// `(changed, commit, dragged)`.
 fn wheel_row(
     ui: &mut egui::Ui,
     id_source: &'static str,
     label: &str,
     wheel: &mut GradeWheel,
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
     let mut changed = false;
     let mut commit = false;
+    let mut dragged = false;
     ui.vertical_centered(|ui| {
         ui.label(egui::RichText::new(label).color(theme::TEXT_FAINT));
         let edit: Option<WheelEdit> = color_wheel(ui, id_source, wheel.hue, wheel.sat);
@@ -39,6 +40,9 @@ fn wheel_row(
             wheel.sat = e.sat;
             changed = true;
             commit |= e.commit;
+            if !e.commit {
+                dragged = true;
+            }
         }
     });
     let mut lum = wheel.lum;
@@ -61,14 +65,17 @@ fn wheel_row(
     if r.changed() {
         wheel.lum = lum;
         changed = true;
+        if r.dragged() {
+            dragged = true;
+        }
         commit |= r.drag_stopped() || !r.dragged();
     }
-    (changed, commit)
+    (changed, commit, dragged)
 }
 
 pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
     let Some(set) = scoped.set() else {
-        ui.label(egui::RichText::new("Create or select a mask first").color(theme::TEXT_FAINT));
+        ui.label(egui::RichText::new(MASK_NONE_HINT).color(theme::TEXT_FAINT));
         return None;
     };
     let mut cg = set.color_grade;
@@ -81,14 +88,16 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
 
     let mut changed = false;
     let mut commit = false;
+    let mut any_dragged = false;
     let cols = color_wheel::color_grading_grid_columns(ui.available_width());
 
     if cols == 2 {
         ui.columns(2, |columns| {
-            let (c, m) = wheel_row(&mut columns[0], "grade_shadows", "Shadows", &mut cg.shadows);
+            let (c, m, d) = wheel_row(&mut columns[0], "grade_shadows", "Shadows", &mut cg.shadows);
             changed |= c;
             commit |= m;
-            let (c, m) = wheel_row(
+            any_dragged |= d;
+            let (c, m, d) = wheel_row(
                 &mut columns[1],
                 "grade_midtones",
                 "Midtones",
@@ -96,10 +105,11 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
             );
             changed |= c;
             commit |= m;
+            any_dragged |= d;
         });
         ui.add_space(8.0);
         ui.columns(2, |columns| {
-            let (c, m) = wheel_row(
+            let (c, m, d) = wheel_row(
                 &mut columns[0],
                 "grade_highlights",
                 "Highlights",
@@ -107,9 +117,11 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
             );
             changed |= c;
             commit |= m;
-            let (c, m) = wheel_row(&mut columns[1], "grade_global", "Global", &mut cg.global);
+            any_dragged |= d;
+            let (c, m, d) = wheel_row(&mut columns[1], "grade_global", "Global", &mut cg.global);
             changed |= c;
             commit |= m;
+            any_dragged |= d;
         });
     } else {
         let wheels = [
@@ -119,9 +131,10 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
             ("grade_global", "Global", &mut cg.global),
         ];
         for (id, label, wheel) in wheels {
-            let (c, m) = wheel_row(ui, id, label, wheel);
+            let (c, m, d) = wheel_row(ui, id, label, wheel);
             changed |= c;
             commit |= m;
+            any_dragged |= d;
         }
     }
 
@@ -143,6 +156,9 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
     if rb.changed() {
         cg.blending = blending;
         changed = true;
+        if rb.dragged() {
+            any_dragged = true;
+        }
         commit |= rb.drag_stopped() || !rb.dragged();
     }
     let mut balance = cg.balance;
@@ -162,6 +178,9 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
     if rbal.changed() {
         cg.balance = balance;
         changed = true;
+        if rbal.dragged() {
+            any_dragged = true;
+        }
         commit |= rbal.drag_stopped() || !rbal.dragged();
     }
 
@@ -170,15 +189,12 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
     }
     let mut new_set = set.clone();
     new_set.color_grade = cg;
-    let out = scoped.write(new_set, OpKind::ColorGrade, commit);
-    if let Some(o) = &out {
-        if !o.commit {
-            // Mid-drag on a wheel/slider: suppress the mask overlay the same
-            // way a dragged `scoped_slider` does.
-            scoped.adjusting.set(true);
-        }
+    // Set adjusting whenever any wheel or slider is being dragged,
+    // to suppress the mask overlay during mid-drag pauses.
+    if any_dragged {
+        scoped.adjusting.set(true);
     }
-    out
+    scoped.write(new_set, OpKind::ColorGrade, commit)
 }
 
 #[cfg(test)]

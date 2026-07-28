@@ -5,7 +5,7 @@
 //! `EguiSlider` + `ops_edit` calls per control.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::scope::{EditScope, ScopedEdit};
+use crate::develop::scope::{EditScope, ScopedEdit, MASK_NONE_HINT};
 use crate::widgets::slider::EguiSlider;
 
 /// Stable identifier for a registered adjustment control (e.g.
@@ -45,7 +45,7 @@ pub struct SliderSpec {
 /// readiness rule is unit-testable without an egui context.
 fn readiness(scope: EditScope, spec: &SliderSpec) -> (bool, &'static str) {
     match scope {
-        EditScope::MaskNone => (false, "Create or select a mask first"),
+        EditScope::MaskNone => (false, MASK_NONE_HINT),
         EditScope::Mask(_) => (spec.mask_ready, spec.mask_reason),
         EditScope::Global => (spec.global_ready, spec.global_reason),
     }

@@ -8,6 +8,9 @@
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::state::AppState;
 
+/// Hint shown when a mask-scoped control is inaccessible due to no mask selection.
+pub const MASK_NONE_HINT: &str = "Create or select a mask first";
+
 /// Which `AdjustmentSet` the currently active controls read/write.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EditScope {

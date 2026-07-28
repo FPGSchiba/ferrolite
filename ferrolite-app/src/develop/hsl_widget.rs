@@ -6,7 +6,7 @@
 //! faint hint and returns `None`.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::scope::ScopedEdit;
+use crate::develop::scope::{ScopedEdit, MASK_NONE_HINT};
 use crate::theme;
 use crate::widgets::slider::EguiSlider;
 use ferrolite_pipeline::{HslBand, OpKind};
@@ -24,7 +24,7 @@ const SWATCHES: [(u8, u8, u8); 8] = [
 
 pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit, band: &mut usize) -> Option<EditOutcome> {
     let Some(set) = scoped.set() else {
-        ui.label(egui::RichText::new("Create or select a mask first").color(theme::TEXT_FAINT));
+        ui.label(egui::RichText::new(MASK_NONE_HINT).color(theme::TEXT_FAINT));
         return None;
     };
     let mut hsl = set.hsl;

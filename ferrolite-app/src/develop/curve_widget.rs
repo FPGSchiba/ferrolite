@@ -9,7 +9,7 @@
 //! Active channel is UI-only state.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::scope::ScopedEdit;
+use crate::develop::scope::{ScopedEdit, MASK_NONE_HINT};
 use crate::develop::{curve_math, curve_widget_parametric};
 use crate::theme;
 use crate::widgets::curve::{curve_editor, CurveStyle};
@@ -97,7 +97,7 @@ fn with_channel(
 
 pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
     let Some(set) = scoped.set() else {
-        ui.label(egui::RichText::new("Create or select a mask first").color(theme::TEXT_FAINT));
+        ui.label(egui::RichText::new(MASK_NONE_HINT).color(theme::TEXT_FAINT));
         return None;
     };
     let tc = set.tone_curve.clone();
@@ -138,6 +138,12 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
         display_mode,
         &channel_style(channel),
     ) {
+        // Set adjusting whenever a curve point is being dragged (not committed),
+        // before checking for identity to ensure we suppress the mask overlay
+        // during mid-drag pauses.
+        if !edit.commit {
+            scoped.adjusting.set(true);
+        }
         // Reset OR an edit that lands on identity → clear this channel.
         let new_points = if edit.reset || curve_math::is_identity(&edit.points) {
             Vec::new()
@@ -148,11 +154,6 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
         let mut new_set = set.clone();
         new_set.tone_curve = new_tc;
         if let Some(o) = scoped.write(new_set, OpKind::ToneCurve, edit.commit) {
-            if !o.commit {
-                // Mid-drag on a curve point: suppress the mask overlay the
-                // same way a dragged `scoped_slider` does.
-                scoped.adjusting.set(true);
-            }
             out = Some(o);
         }
     }

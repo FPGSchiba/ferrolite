@@ -173,6 +173,11 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit, tc: &ToneCurve) -> Option<Ed
     let set = scoped.set()?;
     let mut new_set = set.clone();
     new_set.tone_curve = new_tc;
+    // Set adjusting whenever any parametric slider is being dragged,
+    // to suppress the mask overlay during mid-drag pauses.
+    if dragged {
+        scoped.adjusting.set(true);
+    }
     scoped.write(new_set, OpKind::ToneCurve, drag_stopped || !dragged)
 }
 

@@ -133,7 +133,7 @@ impl FerroliteApp {
             }
         });
         if let Some(stack) = result {
-            self.set_preview_and_full(frame, stack.clone());
+            self.set_preview_and_full(frame, stack.clone(), true);
             if let Some(v) = self.state.viewer.as_mut() {
                 v.edits_dirty = true;
                 // A stale in-progress gesture or cached overlay must not carry over
@@ -929,7 +929,7 @@ impl FerroliteApp {
         // since `camera_to_working()` itself immutably borrows `self`.
         let camera_to_working = self.camera_to_working(self.current_wb_temp());
 
-        let Some(v) = self.state.viewer.as_ref() else {
+        let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
         // Pick the full-res source: RAW uses its tier-2 GPU pyramid; a Standard
@@ -955,9 +955,31 @@ impl FerroliteApp {
             );
             return;
         };
+        // Whole-image dehaze atmospheric light (design §5.3), via the same
+        // per-image cache the producer rebuilds use (`ViewerState::dehaze_atmos`)
+        // — regardless of which `source` variant above was chosen, so a RAW
+        // export (which only carries a GPU `Pyramid`, no CPU buffer, into
+        // `spawn_export`) still gets the real estimate rather than the neutral
+        // fallback. Falls back to neutral only if no preview source has decoded
+        // yet, which can't happen here since `source` above already required one
+        // (Pyramid or FullResCpu).
+        let atmospheric_light = v
+            .dehaze_atmos()
+            .unwrap_or(ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL);
         let source_path = v.path.clone();
         let image_id = v.image_id;
         let stack = v.op_stack.clone();
+        // Only when dehaze is actually active does export need a transmission
+        // source: the same CPU preview-tier selection `preview_tier_source` uses
+        // (RAW: `raw_preview_source`; Standard: `preview_source`), passed as a
+        // SNAPSHOT `Arc` — export builds its own bounded transmission from it on
+        // the worker thread rather than sampling the live preview pipeline's
+        // texture (see `spawn_export`'s `transmission_source` doc).
+        let transmission_source = stack.dehaze().filter(|d| d.amount != 0.0).and_then(|_| {
+            v.raw_preview_source
+                .clone()
+                .or_else(|| v.preview_source.clone())
+        });
 
         // Default filename: source basename + new extension.
         let stem = source_path
@@ -1000,6 +1022,8 @@ impl FerroliteApp {
             source_path,
             dest,
             image_id,
+            atmospheric_light,
+            transmission_source,
         );
         let mut activity = crate::export::ExportActivity::new_single(current_name);
         activity.handles = vec![handle];
@@ -1688,7 +1712,39 @@ impl FerroliteApp {
             let mut producer = viewer::EditTileProducer::new(tep);
             producer.set_vig_amount(vig_amount);
             producer.set_vig_manual(vig_manual);
+            // Whole-image atmospheric light for dehaze (design §5.3): cached and
+            // estimated at most once per image (`ViewerState::dehaze_atmos`), not
+            // re-estimated on every producer rebuild — this rebuild also fires on
+            // radius/geometry/lens drags, and `A` is image-invariant, so redoing
+            // the O(n log n) sort here would be UI-thread work per drag tick
+            // (CLAUDE.md responsiveness rule 1). Same fn + same source the preview
+            // EditPipeline uses internally, so the two tiers agree.
+            //
+            // `if let` rather than `.unwrap_or(NEUTRAL)`: a decoded source is
+            // guaranteed present here (this branch only runs once the full-res
+            // pyramid + preview source exist), so `None` is a can't-happen guard,
+            // not a silent-wrong fallback — leaving `producer` on its constructor
+            // default (`DEHAZE_ATMOS_NEUTRAL`) would silently diverge from the
+            // preview tier if it were ever hit.
+            if let Some(a) = v.dehaze_atmos() {
+                producer.set_dehaze_atmos(a);
+            }
+            // Seed the shared dehaze transmission (ST-Task 4) from the preview
+            // `EditPipeline` if it already exists and has evaluated (it's built +
+            // evaluated in `apply_full_decoded`, which runs before this pyramid-
+            // ready handler) — so a producer built outside an edit still starts
+            // with the current map instead of a stale passthrough. `producer` is a
+            // local here (not yet stored on `v`), so this doesn't conflict with
+            // the immutable `v.preview_edit` borrow.
+            producer.set_shared_transmission(
+                v.preview_edit
+                    .as_ref()
+                    .and_then(|ep| ep.transmission_texture()),
+            );
             v.edit_producer = Some(producer);
+            // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
+            // this producer was built from `v.op_stack`.
+            v.full_stack = v.op_stack.clone();
             v.full_ready = true;
             version = v.opstack_version.max(1);
         }
@@ -1920,7 +1976,7 @@ impl FerroliteApp {
             let tep = ferrolite_pipeline::TileEditPipeline::new(
                 ctx_arc.clone(),
                 pyr,
-                shown,
+                shown.clone(),
                 cam,
                 v.lens_warp.as_ref(),
                 v.lens_vignette.as_ref(),
@@ -1928,7 +1984,30 @@ impl FerroliteApp {
             let mut producer = viewer::EditTileProducer::new(tep);
             producer.set_vig_amount(vig_amount);
             producer.set_vig_manual(vig_manual);
+            // Whole-image atmospheric light for dehaze (design §5.3): cached and
+            // estimated at most once per image (`ViewerState::dehaze_atmos`) — see
+            // the full rationale at the first `set_dehaze_atmos` call site in
+            // `apply_pyramid_ready`. `if let` (not `.unwrap_or(NEUTRAL)`): a
+            // decoded source is guaranteed present on this rebuild path, so
+            // `None` is a can't-happen guard, not a silent-wrong fallback.
+            if let Some(a) = v.dehaze_atmos() {
+                producer.set_dehaze_atmos(a);
+            }
+            // Re-seed the shared dehaze transmission (ST-Task 4): this rebuild
+            // discards the previous producer, so the fresh one needs the current
+            // map from the preview `EditPipeline` (already built + evaluated by
+            // now — see the preview-tier branch above in this same handler, or
+            // `apply_full_decoded` at open). `producer` is a local (not yet on
+            // `v`), so no borrow conflict with the immutable `v.preview_edit` read.
+            producer.set_shared_transmission(
+                v.preview_edit
+                    .as_ref()
+                    .and_then(|ep| ep.transmission_texture()),
+            );
             v.edit_producer = Some(producer);
+            // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
+            // this producer was rebuilt from `shown`.
+            v.full_stack = shown.clone();
             v.opstack_version = v.opstack_version.wrapping_add(1);
             let version = v.opstack_version;
             let mut renderer = rs.renderer.write();
@@ -1950,7 +2029,20 @@ impl FerroliteApp {
     /// Preview tier: build the EditPipeline once, reuse via set_stack; evaluate
     /// and swap the displayed single texture. Full-res tier: set_stack (color) or
     /// rebuild (geometry/halo), bump the opstack version to invalidate cached tiles.
-    fn set_preview_and_full(&mut self, frame: &eframe::Frame, stack: ferrolite_pipeline::OpStack) {
+    /// Update the render tiers for `stack`. The live PREVIEW tier is always
+    /// updated (that is what the fit-zoom view shows). The full-res tiled tier is
+    /// only (re)synced + re-produced when `produce_full` is true — passed as the
+    /// edit's `commit` flag, so a slider DRAG updates only the cheap preview each
+    /// frame and the expensive full-res producer refreshes once on release. This
+    /// keeps the VT from re-running `produce_tile` for every tile every drag frame
+    /// (which exhausted GPU memory on integrated GPUs once a heavy op like dehaze's
+    /// multi-pass transmission was active). Non-drag callers pass `true`.
+    fn set_preview_and_full(
+        &mut self,
+        frame: &eframe::Frame,
+        stack: ferrolite_pipeline::OpStack,
+        produce_full: bool,
+    ) {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -1965,7 +2057,6 @@ impl FerroliteApp {
         let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
-        let old = v.op_stack.clone();
         v.op_stack = stack.clone();
         v.opstack_version = v.opstack_version.wrapping_add(1);
 
@@ -2068,9 +2159,19 @@ impl FerroliteApp {
         // working space — never the raw camera-native CPU path. The
         // opstack_version bump above invalidates stale produced tiles so the new
         // (edited or unedited) tiles are re-produced on toggle.
-        if v.full_ready {
+        // Full-res tier: DEFERRED to commit (`produce_full`). Mid-drag
+        // (`produce_full == false`) only the live preview above is refreshed each
+        // frame; the producer is left untouched and NOT re-produced, so the VT does
+        // not re-run `produce_tile` for every tile every frame — that per-frame
+        // full-res churn is what exhausted GPU memory on integrated GPUs with a
+        // heavy op (dehaze's multi-pass transmission) active. On commit the producer
+        // syncs once and re-produces (the load the app already handled per edit).
+        // `needs_full_rebuild` compares against `v.full_stack` — the stack the
+        // producer ACTUALLY reflects — not the previous frame, so a dehaze on/off or
+        // radius change made across the deferred drag still rebuilds here on release.
+        if produce_full && v.full_ready {
             let rebuild = v.edit_producer.is_none()
-                || crate::develop::ops_edit::needs_full_rebuild(&old, &shown);
+                || crate::develop::ops_edit::needs_full_rebuild(&v.full_stack, &shown);
             if rebuild {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
@@ -2100,6 +2201,18 @@ impl FerroliteApp {
                     let mut producer = viewer::EditTileProducer::new(tep);
                     producer.set_vig_amount(vig_amount);
                     producer.set_vig_manual(vig_manual);
+                    // Whole-image atmospheric light for dehaze (design §5.3): cached
+                    // and estimated at most once per image
+                    // (`ViewerState::dehaze_atmos`) — see the full rationale at the
+                    // first `set_dehaze_atmos` call site in `apply_pyramid_ready`.
+                    // This rebuild is exactly the radius/geometry/lens-drag path
+                    // `needs_full_rebuild` fires on, so this is the call site the
+                    // caching matters most for. `if let` (not `.unwrap_or(NEUTRAL)`):
+                    // a decoded source is guaranteed present once `full_ready`, so
+                    // `None` is a can't-happen guard, not a silent-wrong fallback.
+                    if let Some(a) = v.dehaze_atmos() {
+                        producer.set_dehaze_atmos(a);
+                    }
                     v.edit_producer = Some(producer);
                 }
             } else if let Some(producer) = v.edit_producer.as_mut() {
@@ -2121,6 +2234,27 @@ impl FerroliteApp {
                 producer.set_vig_amount(vig_amount);
                 producer.set_vig_manual(vig_manual);
             }
+            // Hand the tiled producer the shared dehaze transmission (ST-Task 4):
+            // the preview `EditPipeline` above (`v.preview_edit`) is the SOLE place
+            // the transmission is computed — evaluated earlier in this same call,
+            // just above (line ~1569) — so it is current here. The tiled recovery
+            // only samples it (no per-tile recompute). Fetch the `Arc` (cheap
+            // clone) into a local BEFORE mutably borrowing `v.edit_producer`: both
+            // are fields of `v`, so the immutable fetch must finish before the
+            // mutable borrow starts, or this doesn't compile. Runs unconditionally
+            // whenever a producer exists — both the just-rebuilt producer and the
+            // updated-in-place (color-only / amount-only) producer above need the
+            // current map; `None` (dehaze inactive) sets a passthrough.
+            let shared_transmission = v
+                .preview_edit
+                .as_ref()
+                .and_then(|ep| ep.transmission_texture());
+            if let Some(producer) = v.edit_producer.as_mut() {
+                producer.set_shared_transmission(shared_transmission);
+            }
+            // Record the stack the producer now reflects — the rebuild baseline for
+            // the next commit (see the `full_stack` field doc + the block comment).
+            v.full_stack = shown.clone();
             let version = v.opstack_version;
             let image_id = v.image_id;
             let mut renderer = rs.renderer.write();
@@ -2150,7 +2284,15 @@ impl FerroliteApp {
         // Snapshot the pre-edit stack BEFORE `set_preview_and_full` overwrites
         // `v.op_stack`, so a lens-key comparison below sees the real old/new.
         let old_stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
-        self.set_preview_and_full(frame, stack.clone());
+        // Mid-drag (`commit == false`): preview-only, defer the full-res tier to
+        // release. On commit: sync + re-produce the full-res tier too. Also flag
+        // the drag so `drive_viewer` PAUSES per-frame full-res tile production
+        // while dragging (the OOM lever — the drive loop produces independently of
+        // this method); production resumes on commit.
+        self.set_preview_and_full(frame, stack.clone(), commit);
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.edit_in_progress = !commit;
+        }
         if !commit {
             return;
         }
@@ -2798,15 +2940,28 @@ impl FerroliteApp {
                         // the neighbours a pan/zoom will need, and the visible tiles
                         // converge first.
                         if let Some(v) = self.state.viewer.as_mut() {
-                            if let Some(producer) = v.edit_producer.as_mut() {
-                                let needed =
-                                    full.needed_prefetched(&cur_view, cur_viewport, PREFETCH_RING);
-                                produced_this_frame = full.produce_view(
-                                    &g.ctx,
-                                    producer,
-                                    &needed,
-                                    MAX_PRODUCE_PER_FRAME,
-                                );
+                            // PAUSE full-res production while a slider edit is being
+                            // dragged: the fit view shows the live preview tier
+                            // during the drag (the full tier is off-screen while the
+                            // op version bumps), so re-producing the heavy dehaze
+                            // full-res tiles every frame is pure waste — and on
+                            // constrained/integrated GPUs that per-frame churn
+                            // exhausts memory (OOM in `produce_tile`). Production
+                            // resumes on commit (drag release), refreshing 1:1 once.
+                            if !v.edit_in_progress {
+                                if let Some(producer) = v.edit_producer.as_mut() {
+                                    let needed = full.needed_prefetched(
+                                        &cur_view,
+                                        cur_viewport,
+                                        PREFETCH_RING,
+                                    );
+                                    produced_this_frame = full.produce_view(
+                                        &g.ctx,
+                                        producer,
+                                        &needed,
+                                        MAX_PRODUCE_PER_FRAME,
+                                    );
+                                }
                             }
                         }
                         tiles_pending = full.sparse_pending();
@@ -3435,6 +3590,29 @@ fn downscale_linear(
 
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // One-time GPU-budget diagnostic (root-cause confirmation for the dehaze
+        // OOM on constrained GPUs): log the adapter + the memory-relevant limits
+        // once. `device_type: IntegratedGpu` + a small `max_buffer_size` /
+        // `max_storage_buffer_binding_size` confirm a shared-memory budget that a
+        // full-res edit chain can exhaust.
+        static GPU_INFO_ONCE: std::sync::Once = std::sync::Once::new();
+        GPU_INFO_ONCE.call_once(|| {
+            if let Some(rs) = frame.wgpu_render_state() {
+                let info = rs.adapter.get_info();
+                let lim = rs.device.limits();
+                eprintln!(
+                    "[ferrolite gpu] adapter={:?} backend={:?} device_type={:?} driver={:?}",
+                    info.name, info.backend, info.device_type, info.driver
+                );
+                eprintln!(
+                    "[ferrolite gpu] max_texture_dim_2d={} max_buffer_size={} MiB \
+                     max_storage_buffer_binding_size={} MiB",
+                    lim.max_texture_dimension_2d,
+                    lim.max_buffer_size / (1024 * 1024),
+                    lim.max_storage_buffer_binding_size / (1024 * 1024),
+                );
+            }
+        });
         // Free textures retired last frame BEFORE anything paints this frame (see
         // TextureCache::begin_frame): prevents destroying a texture still referenced by
         // this frame's paint jobs.
@@ -3630,7 +3808,7 @@ impl eframe::App for FerroliteApp {
                             if !stack.is_identity() {
                                 v.history =
                                     crate::develop::history::History::new(stack.clone(), 100);
-                                self.set_preview_and_full(frame, stack.clone());
+                                self.set_preview_and_full(frame, stack.clone(), true);
                             }
                             // Spec 4.4 (U9) Step 2: a persisted correction (any
                             // toggle enabled, with a resolvable lens key) needs
@@ -4364,7 +4542,7 @@ impl eframe::App for FerroliteApp {
                         v.before_after = hold_before;
                     }
                     let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
-                    self.set_preview_and_full(frame, stack); // re-evaluates with before_after
+                    self.set_preview_and_full(frame, stack, true); // re-evaluates with before_after
                 }
 
                 // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
@@ -4957,7 +5135,7 @@ impl eframe::App for FerroliteApp {
                         if crop_active != self.crop_active_prev {
                             let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
                             if let Some(stack) = stack {
-                                self.set_preview_and_full(frame, stack);
+                                self.set_preview_and_full(frame, stack, true);
                             }
                             self.crop_active_prev = crop_active;
                         }

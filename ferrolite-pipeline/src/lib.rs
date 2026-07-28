@@ -2,6 +2,8 @@
 //! and a retained GPU pipeline built on `ferrolite-gpu`'s generic executor; WGSL
 //! compute passes implement the edits. Photo tier (GPL-OK).
 mod coord;
+mod dehaze;
+mod dehaze_node;
 mod gpu_pyramid;
 mod image;
 mod lens_bake;
@@ -18,6 +20,12 @@ mod tile_edit;
 mod uniforms;
 
 pub use coord::{display_to_source, source_to_display};
+pub use dehaze::{
+    dehaze_halo, dehaze_recover, estimate_atmospheric_light, guided_radius, transmission_map,
+    transmission_mip_level_count, transmission_sample_lod, transmission_working_dims,
+    DEHAZE_ATMOS_NEUTRAL, DEHAZE_DEFAULT_RADIUS, DEHAZE_GUIDED_EPS, DEHAZE_MAX_TRANSMISSION_DIM,
+    MAX_DEHAZE_RADIUS,
+};
 pub use gpu_pyramid::{live_gpu_pyramid_bytes, live_gpu_pyramids, GpuPyramidSource};
 pub use image::PipelineImage;
 pub use lens_bake::bake_products;
@@ -28,9 +36,9 @@ pub use local::{
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{
-    Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry, GradeWheel,
-    Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve, PointCurve, Sharpen,
-    ToneCurve, WhiteBalance, STACK_VERSION,
+    Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Dehaze, Exposure, Geometry,
+    GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve, PointCurve,
+    Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, blit_to_rgba8_with_matrix, EditPipeline};
 pub use rcd_gpu::{demosaic_rcd_gpu, CfaInput};
@@ -50,17 +58,50 @@ pub use uniforms::{
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Eleven passes: the seven original
-/// color/tone/geometry passes, the two lens passes (geometry now carries the
-/// warp; `vignette` is the radial-gain pass), `local-adjust` (the masked
-/// Light+Color point op), plus `color-grade` (the three-way + global grading
-/// wheels point op).
+/// alongside the display-pipeline pre-warm. Covers the original color/tone/
+/// geometry passes, the two lens passes (geometry now carries the warp;
+/// `vignette` is the radial-gain pass), `local-adjust` (the masked Light+Color
+/// point op), `color-grade` (the three-way + global grading wheels point op),
+/// and the dehaze passes: `dehaze-dark-channel`/`-min-h`/`-min-v`/`-products`/
+/// `-box-h`/`-box-v`/`-guided-ab`/`-guided-q` (the multi-pass guided-filter
+/// transmission map, `DehazeTransmissionNode`) — plus `dehaze-transmission-mip`
+/// (its mip-chain downsample for LOD-aware sampling) — plus `dehaze-recovery` (the
+/// amount/atmos blend, `DehazeRecoveryNode`) — both nodes shared by
+/// `EditPipeline` and `TileEditPipeline` (QS-Task 4/5).
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
         ("exposure", include_str!("shaders/exposure.wgsl")),
         ("white-balance", include_str!("shaders/white_balance.wgsl")),
         ("contrast", include_str!("shaders/contrast.wgsl")),
+        (
+            "dehaze-dark-channel",
+            include_str!("shaders/dehaze_dark_channel.wgsl"),
+        ),
+        ("dehaze-min-h", include_str!("shaders/dehaze_min_h.wgsl")),
+        ("dehaze-min-v", include_str!("shaders/dehaze_min_v.wgsl")),
+        (
+            "dehaze-products",
+            include_str!("shaders/dehaze_products.wgsl"),
+        ),
+        ("dehaze-box-h", include_str!("shaders/dehaze_box_h.wgsl")),
+        ("dehaze-box-v", include_str!("shaders/dehaze_box_v.wgsl")),
+        (
+            "dehaze-guided-ab",
+            include_str!("shaders/dehaze_guided_ab.wgsl"),
+        ),
+        (
+            "dehaze-guided-q",
+            include_str!("shaders/dehaze_guided_q.wgsl"),
+        ),
+        (
+            "dehaze-transmission-mip",
+            include_str!("shaders/dehaze_transmission_mip.wgsl"),
+        ),
+        (
+            "dehaze-recovery",
+            include_str!("shaders/dehaze_recovery.wgsl"),
+        ),
         ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
         ("hsl", include_str!("shaders/hsl.wgsl")),
         ("color-grade", include_str!("shaders/color_grade.wgsl")),

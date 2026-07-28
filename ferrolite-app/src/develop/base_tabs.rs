@@ -191,6 +191,65 @@ impl PanelTab for CurveTab {
     }
 }
 
+pub struct EffectsTab;
+impl PanelTab for EffectsTab {
+    fn id(&self) -> TabId {
+        TabId("effects")
+    }
+    fn label(&self) -> &str {
+        "Effects"
+    }
+    fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
+        let stack = state.viewer.as_ref()?.op_stack.clone();
+        let mut out: Option<EditOutcome> = None;
+
+        // Seed both controls from the op; a brand-new op uses the default radius
+        // (mirrors DetailTab's Sharpen amount+radius seeding). Per-control reset is
+        // the EguiSlider reset column (CLAUDE.md — load-bearing).
+        let d = stack.dehaze();
+        let mut amount = d.map(|d| d.amount).unwrap_or(0.0);
+        let mut radius = d
+            .map(|d| d.radius as f32)
+            .unwrap_or(ferrolite_pipeline::DEHAZE_DEFAULT_RADIUS as f32);
+
+        // Dehaze amount (bipolar): >0 removes haze, <0 adds haze.
+        let ra = ui.add(EguiSlider {
+            label: "Dehaze",
+            value: &mut amount,
+            min: -1.0,
+            max: 1.0,
+            default: 0.0,
+            step: 0.01,
+            decimals: 2,
+            unit: "",
+            bipolar: true,
+            signed: true,
+        });
+        // Radius (px) of the dark-channel patch (unipolar; drives the halo).
+        let rr = ui.add(EguiSlider {
+            label: "Radius",
+            value: &mut radius,
+            min: 1.0,
+            max: 24.0,
+            default: ferrolite_pipeline::DEHAZE_DEFAULT_RADIUS as f32,
+            step: 1.0,
+            decimals: 0,
+            unit: " px",
+            bipolar: false,
+            signed: false,
+        });
+        if ra.changed() || rr.changed() {
+            out = Some(EditOutcome {
+                stack: ops_edit::set_dehaze(&stack, amount, radius.round() as u32),
+                kind: OpKind::Dehaze,
+                commit: (ra.drag_stopped() || rr.drag_stopped()) || !(ra.dragged() || rr.dragged()),
+            });
+        }
+
+        out
+    }
+}
+
 pub struct DetailTab;
 impl PanelTab for DetailTab {
     fn id(&self) -> TabId {
@@ -752,6 +811,7 @@ pub fn base_tabs() -> Vec<Box<dyn PanelTab>> {
         Box::new(ColorTab),
         Box::new(GradeTab),
         Box::new(CurveTab),
+        Box::new(EffectsTab),
         Box::new(DetailTab),
         Box::new(OpticsTab),
         Box::new(InfoTab),

@@ -85,6 +85,21 @@ pub struct ViewerState {
     pub path: PathBuf,
     pub kind: FileKind,
     pub op_stack: OpStack,
+    /// The op-stack the full-res `edit_producer` currently reflects. During a
+    /// slider DRAG the full-res tier is deferred (only the live preview updates
+    /// per frame), so `op_stack` moves ahead of what the producer was last synced
+    /// to. This is that last-synced baseline: `needs_full_rebuild` on commit
+    /// compares against THIS (not the previous frame) so a dehaze on/off or radius
+    /// change across the drag still triggers the right rebuild on release.
+    pub full_stack: OpStack,
+    /// True while a slider edit is being DRAGGED (`commit == false`). While set,
+    /// `drive_viewer` PAUSES full-res tile production: the fit view already shows
+    /// the live preview tier during a drag (the full tier is off-screen while the
+    /// version bumps), and re-producing the heavy full-res tiles (dehaze's
+    /// multi-pass transmission per tile) every drag frame churned GPU memory to OOM
+    /// on constrained/integrated GPUs. Cleared on commit (drag release), when
+    /// production resumes and refreshes the 1:1 detail once.
+    pub edit_in_progress: bool,
     /// Plan 3: the full-res edit producer (built on full-decode when the stack is
     /// non-identity). `!Send`/`!Sync`, so it lives here, never in callback_resources.
     pub edit_producer: Option<edit_producer::EditTileProducer>,
@@ -192,6 +207,14 @@ pub struct ViewerState {
     /// sharpness-only ramp with no color/tone shift. `None` for Standard images
     /// and for RAW before the full decode arrives.
     pub raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>>,
+    /// Whole-image dehaze atmospheric light `A` (design §5.3), estimated once
+    /// per image and cached here. `A` is an image-invariant statistic, so it
+    /// must NOT be re-estimated on every full-res producer rebuild (those also
+    /// fire on radius/geometry/lens drags, on the UI thread) — see
+    /// `dehaze_atmos()`. `None` until first requested; always `None` on a
+    /// fresh `open()` (a new `ViewerState` is constructed per image, never
+    /// reused in place, so no explicit invalidation on image switch is needed).
+    dehaze_atmos: Option<[f32; 3]>,
     /// The retained GPU edit pipeline (`!Send`/`!Sync`, lives here like
     /// `edit_producer`). Rebuilt when geometry / halo radius changes.
     pub preview_edit: Option<EditPipeline>,
@@ -339,6 +362,8 @@ impl ViewerState {
             path,
             kind,
             op_stack: OpStack::default(),
+            full_stack: OpStack::default(),
+            edit_in_progress: false,
             edit_producer: None,
             view: ViewTransform {
                 zoom: 1.0,
@@ -366,6 +391,7 @@ impl ViewerState {
             cache_write_back: true,
             preview_source: None,
             raw_preview_source: None,
+            dehaze_atmos: None,
             preview_edit: None,
             pyramid: None,
             color_profile: ferrolite_decode::ColorProfile::srgb_fallback(),
@@ -451,6 +477,22 @@ impl ViewerState {
             FileKind::Raw => (self.raw_preview_source.clone(), cam),
             FileKind::Standard => (self.preview_source.clone(), pw),
         }
+    }
+
+    /// Whole-image dehaze atmospheric light (design §5.3), estimated once from
+    /// the decoded preview source and cached — it is image-invariant, so
+    /// producer rebuilds (radius/geometry/lens drags) must NOT re-estimate it
+    /// on the UI thread (CLAUDE.md responsiveness rule 1). Returns `None` only
+    /// before any preview source has decoded yet.
+    pub fn dehaze_atmos(&mut self) -> Option<[f32; 3]> {
+        if self.dehaze_atmos.is_none() {
+            let src = self
+                .raw_preview_source
+                .as_ref()
+                .or(self.preview_source.as_ref())?;
+            self.dehaze_atmos = Some(ferrolite_pipeline::estimate_atmospheric_light(src));
+        }
+        self.dehaze_atmos
     }
 
     /// Cancel the in-flight decode jobs for this viewer. The sparse tile jobs

@@ -56,6 +56,21 @@ impl EditTileProducer {
     pub fn set_vig_manual(&mut self, manual: f32) {
         self.pipeline.set_vig_manual(manual);
     }
+
+    /// Set the dehaze atmospheric light on the underlying tiled pipeline (design
+    /// §5.3). Called once per image after the producer is built.
+    pub fn set_dehaze_atmos(&mut self, atmos: [f32; 3]) {
+        self.pipeline.set_dehaze_atmos(atmos);
+    }
+
+    /// Hand the tiled pipeline the whole-image dehaze transmission computed by
+    /// the preview `EditPipeline` (ST-Task 4 / shared-transmission plan). The
+    /// tiled recovery samples this shared, source-space map instead of
+    /// recomputing its own per-tile transmission — `None` when dehaze is
+    /// inactive, which makes the recovery a passthrough.
+    pub fn set_shared_transmission(&mut self, tex: Option<std::sync::Arc<wgpu::Texture>>) {
+        self.pipeline.set_shared_transmission(tex);
+    }
 }
 
 impl TileProducer for EditTileProducer {

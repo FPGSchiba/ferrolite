@@ -2,8 +2,8 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    sharpen_halo, ColorGrade, Contrast, Exposure, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
-    WhiteBalance,
+    sharpen_halo, ColorGrade, Contrast, Dehaze, Exposure, LensCorrection, Op, OpStack, Sharpen,
+    ToneCurve, WhiteBalance,
 };
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
@@ -35,6 +35,14 @@ pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
         s.reset(ferrolite_pipeline::OpKind::Sharpen)
     } else {
         s.set_op(Op::Sharpen(Sharpen { amount, radius }))
+    }
+}
+
+pub fn set_dehaze(s: &OpStack, amount: f32, radius: u32) -> OpStack {
+    if amount == 0.0 {
+        s.reset(ferrolite_pipeline::OpKind::Dehaze)
+    } else {
+        s.set_op(Op::Dehaze(Dehaze { amount, radius }))
     }
 }
 
@@ -123,6 +131,12 @@ pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32
 /// or the rebuild-relevant lens key requires discarding + rebuilding it.
 /// Color-only changes (and lens/vignette Amount-only changes) are applied via
 /// `TileEditPipeline::set_stack` / the lens-uniform setters without a rebuild.
+///
+/// Dehaze does NOT force a rebuild (ST-Task 3): `dehaze_halo` is now always 0
+/// (the tiled dehaze recovery samples a shared whole-image transmission, no
+/// per-tile neighbourhood), so an amount/radius change is a `set_stack`
+/// uniform update + a re-wired shared transmission (see `EditTileProducer`),
+/// same as any other color op — never a `TileEditPipeline` rebuild.
 pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
     old.geometry() != new.geometry()
         || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
@@ -440,5 +454,45 @@ mod tests {
             s.color_grade().is_some(),
             "a lum-only grade is not identity"
         );
+    }
+
+    #[test]
+    fn set_dehaze_identity_when_amount_zero() {
+        // Radius alone (amount 0) creates no op.
+        let s = set_dehaze(&OpStack::default(), 0.0, 8);
+        assert!(s.dehaze().is_none(), "zero amount = no dehaze op");
+        let s = set_dehaze(&OpStack::default(), 0.5, 8);
+        assert_eq!(
+            s.dehaze(),
+            Some(ferrolite_pipeline::Dehaze {
+                amount: 0.5,
+                radius: 8
+            })
+        );
+        // Negative (add-haze) is a real edit too.
+        let s = set_dehaze(&OpStack::default(), -0.3, 12);
+        assert_eq!(
+            s.dehaze(),
+            Some(ferrolite_pipeline::Dehaze {
+                amount: -0.3,
+                radius: 12
+            })
+        );
+    }
+
+    #[test]
+    fn dehaze_changes_never_force_a_rebuild() {
+        // ST-Task 3: `dehaze_halo` is always 0 — the tiled dehaze recovery
+        // samples a shared whole-image transmission (no per-tile
+        // neighbourhood), so enabling/disabling dehaze, an amount-only change,
+        // and a radius change are all `set_stack`-only, same as a color op.
+        let base = OpStack::default();
+        let on = set_dehaze(&base, 0.5, 8);
+        assert!(!needs_full_rebuild(&base, &on), "dehaze on: no rebuild");
+        let on2 = set_dehaze(&base, 0.9, 8);
+        assert!(!needs_full_rebuild(&on, &on2), "amount-only: no rebuild");
+        let on3 = set_dehaze(&base, 0.9, 16);
+        assert!(!needs_full_rebuild(&on2, &on3), "radius change: no rebuild");
+        assert!(!needs_full_rebuild(&on, &base), "dehaze off: no rebuild");
     }
 }

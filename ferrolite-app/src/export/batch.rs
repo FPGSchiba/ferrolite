@@ -171,6 +171,14 @@ fn run_one(
         options,
         dest: &item.dest,
         source_path: &item.path,
+        // Whole-image dehaze atmospheric light (design §5.3): the batch export
+        // always has the decoded CPU `linear` in scope (it built the pyramid
+        // from it above), so it can estimate the real value here — no fallback
+        // needed for this path.
+        atmospheric_light: ferrolite_pipeline::estimate_atmospheric_light(&linear),
+        // Batch export always renders `OpStack::default()` (no per-image edits),
+        // so dehaze can never be active — no transmission to build.
+        transmission_source: None,
     };
     match run_export(req, cancel, progress) {
         Ok(outcome) => {

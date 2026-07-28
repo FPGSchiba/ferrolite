@@ -51,6 +51,26 @@ fn readiness(scope: EditScope, spec: &SliderSpec) -> (bool, &'static str) {
     }
 }
 
+/// Build the `EguiSlider` widget for `spec`, bound to `value`, exactly as
+/// both the disabled and enabled paths of `scoped_slider` need it. Pulled
+/// into one place so the "must match base_tabs exactly" layout invariant
+/// can't drift between the two paths.
+fn slider_widget<'a>(spec: &SliderSpec, value: &'a mut f32) -> EguiSlider<'a> {
+    EguiSlider {
+        label: spec.label,
+        value,
+        min: spec.min,
+        max: spec.max,
+        default: spec.default,
+        step: spec.step,
+        decimals: spec.decimals,
+        unit: spec.unit,
+        bipolar: spec.bipolar,
+        signed: spec.bipolar,
+        custom_label_w: None,
+    }
+}
+
 /// Render one scoped slider and, if it produced an edit this frame, the
 /// resulting `EditOutcome`.
 ///
@@ -77,41 +97,17 @@ pub fn scoped_slider(
     if !ready {
         let mut value = current.map(|s| (spec.get)(s)).unwrap_or(spec.default);
         ui.add_enabled_ui(false, |ui| {
-            ui.add(EguiSlider {
-                label: spec.label,
-                value: &mut value,
-                min: spec.min,
-                max: spec.max,
-                default: spec.default,
-                step: spec.step,
-                decimals: spec.decimals,
-                unit: spec.unit,
-                bipolar: spec.bipolar,
-                signed: spec.bipolar,
-                custom_label_w: None,
-            });
+            ui.add(slider_widget(spec, &mut value));
         })
         .response
         .on_hover_text(reason);
         return None;
     }
 
-    // SAFETY of the unwrap: `ready` above is only true when `current` is `Some`.
+    // Invariant: `ready` above is only true when `current` is `Some`.
     let set = current.expect("ready implies a set to read");
     let mut value = (spec.get)(set);
-    let r = ui.add(EguiSlider {
-        label: spec.label,
-        value: &mut value,
-        min: spec.min,
-        max: spec.max,
-        default: spec.default,
-        step: spec.step,
-        decimals: spec.decimals,
-        unit: spec.unit,
-        bipolar: spec.bipolar,
-        signed: spec.bipolar,
-        custom_label_w: None,
-    });
+    let r = ui.add(slider_widget(spec, &mut value));
 
     if r.dragged() {
         scoped.adjusting.set(true);

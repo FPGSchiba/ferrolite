@@ -11,8 +11,21 @@ struct P {
     whites: f32, blacks: f32, saturation: f32, hue_deg: f32,
     wb_mul: vec3<f32>, color_amount: f32,
     color_rgb: vec3<f32>, contrast_pivot: f32,
+    // Phase 2b: per-layer curve/HSL/grade (identity when the layer leaves them
+    // default). Field order MIRRORS `uniforms::LocalAdjustUniform` exactly.
+    hsl_bands: array<vec4<f32>, 8>,
+    grade_shadows: vec4<f32>,
+    grade_midtones: vec4<f32>,
+    grade_highlights: vec4<f32>,
+    grade_global: vec4<f32>,
+    grade_params: vec4<f32>,
+    // x = curve active, y = hsl active, z = grade active, w = pad.
+    active_flags: vec4<f32>,
 };
 @group(0) @binding(3) var<uniform> p: P;
+// Phase 2b: per-layer 3x256 tone-curve LUT (R,G,B rows), same packing + binding
+// style as `tone_curve.wgsl`'s LUT (a fresh small storage buffer per layer).
+@group(0) @binding(4) var<storage, read> lut: array<f32, 768>;
 
 fn luma709(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
 
@@ -44,6 +57,86 @@ fn hsl2rgb(hsl: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(hue2rgb(pp, q, h + 1.0 / 3.0), hue2rgb(pp, q, h), hue2rgb(pp, q, h - 1.0 / 3.0));
 }
 
+// ── Phase 2b: per-layer tone curve, ported verbatim from tone_curve.wgsl's
+// `apply_lut` (same clamping/extrapolation), reading THIS pass's per-layer LUT.
+fn apply_lut(v: f32, ch: u32) -> f32 {
+    let base = ch * 256u;
+    if (v < 0.0) { return lut[base] + v; }
+    if (v > 1.0) { return lut[base + 255u] + (v - 1.0); }
+    let x = v * 255.0;
+    let i0 = u32(floor(x));
+    let i1 = min(i0 + 1u, 255u);
+    let f = x - floor(x);
+    return mix(lut[base + i0], lut[base + i1], f);
+}
+
+fn curve_sample(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(apply_lut(c.r, 0u), apply_lut(c.g, 1u), apply_lut(c.b, 2u));
+}
+
+// ── Phase 2b: per-layer 8-band HSL, ported verbatim from hsl.wgsl (same
+// constants/falloff/out-of-gamut excess bypass), reading `p.hsl_bands`.
+const MAX_HUE_SHIFT: f32 = 30.0; // degrees per unit band.hue
+
+fn band_center(i: u32) -> f32 {
+    var centers = array<f32, 8>(0.0, 30.0, 60.0, 120.0, 180.0, 240.0, 270.0, 300.0);
+    return centers[i];
+}
+
+fn band_weight(hue: f32, center: f32) -> f32 {
+    var d = abs(hue - center);
+    if (d > 180.0) { d = 360.0 - d; }
+    return max(0.0, 1.0 - d / 60.0);
+}
+
+fn hsl_bands_apply(c: vec3<f32>) -> vec3<f32> {
+    let in_gamut = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let excess = c - in_gamut;
+    let hsl = rgb2hsl(in_gamut);
+
+    var hue_acc = 0.0;
+    var sat_acc = 0.0;
+    var lum_acc = 0.0;
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let w = band_weight(hsl.x, band_center(i));
+        hue_acc = hue_acc + w * p.hsl_bands[i].x;
+        sat_acc = sat_acc + w * p.hsl_bands[i].y;
+        lum_acc = lum_acc + w * p.hsl_bands[i].z;
+    }
+
+    var out_hsl = hsl;
+    out_hsl.x = hsl.x + hue_acc * MAX_HUE_SHIFT;
+    if (out_hsl.x < 0.0) { out_hsl.x = out_hsl.x + 360.0; }
+    if (out_hsl.x >= 360.0) { out_hsl.x = out_hsl.x - 360.0; }
+    out_hsl.y = clamp(hsl.y * (1.0 + sat_acc), 0.0, 1.0);
+    out_hsl.z = clamp(hsl.z * (1.0 + lum_acc), 0.0, 1.0);
+
+    return hsl2rgb(out_hsl) + excess;
+}
+
+// ── Phase 2b: per-layer color grade, ported verbatim from color_grade.wgsl's
+// per-pixel kernel, reading `p.grade_*` (tints/lum pre-scaled on the CPU).
+fn smoothstep_f(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn grade_apply(c: vec3<f32>) -> vec3<f32> {
+    let y = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let pivot = 0.5 + 0.5 * p.grade_params.y;   // balance
+    let width = 0.15 + 0.35 * p.grade_params.x; // blending
+    let w_hi = smoothstep_f(pivot - width, pivot + width, y);
+    let w_sh = 1.0 - w_hi;
+    let w_mid = 4.0 * w_sh * w_hi;
+
+    let tint = w_sh * p.grade_shadows.xyz + w_mid * p.grade_midtones.xyz
+             + w_hi * p.grade_highlights.xyz + p.grade_global.xyz;
+    let lum = w_sh * p.grade_shadows.w + w_mid * p.grade_midtones.w
+            + w_hi * p.grade_highlights.w + p.grade_global.w;
+
+    return c + tint + vec3<f32>(lum);
+}
+
 fn adjust(rgb: vec3<f32>) -> vec3<f32> {
     var c = rgb * p.exposure_gain;
     let y = luma709(c);
@@ -64,6 +157,11 @@ fn adjust(rgb: vec3<f32>) -> vec3<f32> {
         hsl.x = hsl.x - floor(hsl.x / 360.0) * 360.0;
         c = hsl2rgb(hsl);
     }
+    // Phase 2b: per-layer tone curve (LUT), HSL bands, color grade — ported from
+    // the global curve/hsl/color_grade passes; identity-skipped via flags.
+    if (p.active_flags.x != 0.0) { c = curve_sample(c); }
+    if (p.active_flags.y != 0.0) { c = hsl_bands_apply(c); }
+    if (p.active_flags.z != 0.0) { c = grade_apply(c); }
     if (p.color_amount != 0.0) { c = c + (p.color_rgb - c) * p.color_amount; }
     return max(c, vec3<f32>(0.0));
 }

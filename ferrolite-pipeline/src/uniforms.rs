@@ -660,11 +660,8 @@ pub fn local_adjust_uniform(a: &crate::local::AdjustmentSet) -> LocalAdjustUnifo
     }
 }
 
-/// Thin wrapper over `tone_curve_luts` giving Task 2's local-adjust node one
-/// named entry point for a mask layer's baked per-channel curve LUTs. Not yet
-/// wired into `LocalAdjustmentsNode` (Task 2 owns that); test-only for now,
-/// like `light_color_apply` below.
-#[allow(dead_code)]
+/// Thin wrapper over `tone_curve_luts` giving `LocalAdjustmentsNode` one named
+/// entry point for a mask layer's baked per-channel curve LUTs.
 pub fn local_layer_lut(a: &crate::local::AdjustmentSet) -> [[f32; 256]; 3] {
     tone_curve_luts(Some(&a.tone_curve))
 }

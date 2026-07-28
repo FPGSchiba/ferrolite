@@ -13,7 +13,7 @@ use wgpu::util::DeviceExt;
 
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::local::LocalAdjustments;
-use crate::uniforms::{local_adjust_uniform, LocalAdjustUniform};
+use crate::uniforms::{local_adjust_uniform, local_layer_lut, LocalAdjustUniform};
 
 struct CachedMasks {
     // Keyed on the mask DEFINITIONS only (not the adjustments) so an
@@ -105,6 +105,18 @@ impl LocalAdjustmentsNode {
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // 4: per-layer 3x256 tone-curve LUT (R,G,B rows), read-only storage
+                    // buffer — same binding style as `CurveNode`'s global LUT.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -215,6 +227,7 @@ impl LocalAdjustmentsNode {
         input: &PipelineImage,
         mask: &MaskBuffer,
         u: LocalAdjustUniform,
+        lut: &[[f32; 256]; 3],
     ) -> PipelineImage {
         let dst = self.ensure_out(input, input.width, input.height);
         let ubuf = self
@@ -224,6 +237,17 @@ impl LocalAdjustmentsNode {
                 label: Some("local-adjust-uniform"),
                 contents: bytemuck::bytes_of(&u),
                 usage: wgpu::BufferUsages::UNIFORM,
+            });
+        // Fresh small storage buffer per dispatch, matching the uniform buffer's
+        // style — layer counts are small, so no caching is needed here (the
+        // mask-def cache above already handles the expensive part).
+        let lut_buf = self
+            .ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("local-adjust-lut"),
+                contents: bytemuck::bytes_of(lut),
+                usage: wgpu::BufferUsages::STORAGE,
             });
         let src_view = input
             .texture
@@ -256,6 +280,10 @@ impl LocalAdjustmentsNode {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: ubuf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: lut_buf.as_entire_binding(),
                     },
                 ],
             });
@@ -341,7 +369,8 @@ impl Node<PipelineImage> for LocalAdjustmentsNode {
         let mut current = input.clone();
         for (layer, mask) in layers.visible_layers().zip(masks.iter()) {
             let u = local_adjust_uniform(&layer.adjustments);
-            current = self.apply(&current, mask, u);
+            let lut = local_layer_lut(&layer.adjustments);
+            current = self.apply(&current, mask, u, &lut);
         }
         current
     }
@@ -358,6 +387,7 @@ mod tests {
     use super::*;
     use crate::local::{AdjustmentSet, MaskLayer};
     use crate::nodes::upload_source;
+    use crate::op::{ColorGrade, GradeWheel, Hsl, ToneCurve};
     use ferrolite_image::LinearRgbaF32;
     use ferrolite_mask::MaskDefinition;
 
@@ -594,5 +624,91 @@ mod tests {
         *layers_rc.borrow_mut() = la.clone();
         let _ = node.evaluate(&[&src]);
         assert_eq!(node.rebuild_count(), 2, "mask change recomposites");
+    }
+
+    /// Phase 2b parity: a layer with a non-identity tone curve, one non-identity
+    /// HSL band, and a non-identity color grade must match the CPU reference
+    /// `light_color_apply`, which composes curve -> HSL bands -> grade in the
+    /// same order the WGSL now does (right after hue, before the color swatch).
+    #[test]
+    fn curve_hsl_grade_layer_matches_cpu_reference() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+
+        let mut hsl = Hsl::default();
+        hsl.bands[0].sat = 0.4;
+        let grade = ColorGrade {
+            shadows: GradeWheel {
+                hue: 210.0,
+                sat: 0.5,
+                lum: 0.0,
+            },
+            ..Default::default()
+        };
+        let adjustments = AdjustmentSet {
+            tone_curve: ToneCurve {
+                points: vec![(0.0, 0.2), (1.0, 1.0)],
+                ..Default::default()
+            },
+            hsl,
+            color_grade: grade,
+            ..Default::default()
+        };
+        let la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "curve-hsl-grade".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments,
+            }],
+        };
+        let node = LocalAdjustmentsNode::new(ctx.clone(), Rc::new(RefCell::new(la)));
+
+        let out = node.evaluate(&[&src]);
+        let out_px = read_pixels(&ctx, &out);
+        let la = node.layers.borrow();
+        let expected = expected_pixels(&la);
+        for (got, want) in out_px.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 5e-3,
+                "pixel mismatch: got {got}, want {want}"
+            );
+        }
+    }
+
+    /// Identity-extension guard: a layer using ONLY the pre-Phase-2b Light+Color
+    /// fields (curve/hsl/grade left at their default identity) must produce the
+    /// same output as before this task added the curve/HSL/grade fields to the
+    /// uniform + shader — asserted against `light_color_apply`, which Task 1 kept
+    /// bit-stable for identity curve/hsl/grade. Guards against the new
+    /// `active_flags`-gated branches leaking into layers that don't use them.
+    #[test]
+    fn light_color_only_layer_is_unaffected_by_phase_2b_fields() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+
+        let la = LocalAdjustments {
+            layers: vec![layer("legacy", 0.35, -0.2)],
+        };
+        let node = LocalAdjustmentsNode::new(ctx.clone(), Rc::new(RefCell::new(la)));
+
+        let out = node.evaluate(&[&src]);
+        let out_px = read_pixels(&ctx, &out);
+        let la = node.layers.borrow();
+        let expected = expected_pixels(&la);
+        for (got, want) in out_px.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 5e-3,
+                "pixel mismatch: got {got}, want {want}"
+            );
+        }
     }
 }

@@ -37,9 +37,9 @@ pub use local::{
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{
-    Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Dehaze, Exposure, Geometry,
-    GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve, PointCurve,
-    Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
+    Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Dehaze, EditDoc, Exposure,
+    Geometry, GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve,
+    PointCurve, Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, blit_to_rgba8_with_matrix, EditPipeline};
 pub use rcd_gpu::{demosaic_rcd_gpu, CfaInput};

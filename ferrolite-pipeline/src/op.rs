@@ -5,10 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::local::LocalAdjustments;
+use crate::local::{AdjustmentSet, LocalAdjustments, MaskLayer};
 
 /// Current on-stack schema version. Bumped if `Op`'s shape changes incompatibly.
-pub const STACK_VERSION: u32 = 1;
+pub const STACK_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Exposure {
@@ -375,129 +375,140 @@ impl Op {
     }
 }
 
-/// An ordered, immutable stack of edits. `set_op`/`reset` return new stacks.
+/// The edit document (design 2026-07-28 §2): geometry ops global-only, one
+/// global `AdjustmentSet` ("the layer with no mask"), and mask layers stacked
+/// on top. Immutable editing: `set_op`/`reset` return new docs. The old
+/// `Vec<Op>` stack is gone; `Op`/`OpKind` survive as the edit-message
+/// vocabulary (`EditOutcome.kind`, rebuild decisions) until Phase 2.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct OpStack {
+pub struct EditDoc {
     pub version: u32,
-    pub ops: Vec<Op>,
+    #[serde(default)]
+    pub global: AdjustmentSet,
+    #[serde(default)]
+    pub layers: Vec<MaskLayer>,
+    #[serde(default)]
+    pub lens: Option<LensCorrection>,
+    #[serde(default)]
+    pub geometry: Option<Geometry>,
 }
 
-impl Default for OpStack {
+/// Compatibility alias: the rest of the workspace still says `OpStack`.
+/// Retired in Phase 2 alongside `Op`/`OpKind`.
+pub type OpStack = EditDoc;
+
+impl Default for EditDoc {
     fn default() -> Self {
         Self {
             version: STACK_VERSION,
-            ops: Vec::new(),
+            global: AdjustmentSet::default(),
+            layers: Vec::new(),
+            lens: None,
+            geometry: None,
         }
     }
 }
 
-impl OpStack {
-    /// No ops = unedited (renders identically to the source).
+impl EditDoc {
+    /// Unedited: identity global set, no mask layers, no geometry/lens.
     pub fn is_identity(&self) -> bool {
-        self.ops.is_empty()
+        self.global.is_identity()
+            && self.layers.is_empty()
+            && self.lens.is_none()
+            && self.geometry.is_none()
     }
 
-    /// Return a new stack with `op` set: replaces any existing op of the same
-    /// kind, keeps the `Vec` sorted in canonical (`OpKind`) order.
-    pub fn set_op(&self, op: Op) -> OpStack {
-        let k = op.kind();
-        let mut ops: Vec<Op> = self.ops.iter().filter(|o| o.kind() != k).cloned().collect();
-        ops.push(op);
-        ops.sort_by_key(|o| o.kind() as u8);
-        OpStack {
-            version: self.version,
-            ops,
+    /// Return a new doc with `op`'s parameters written into their unified home
+    /// (global set field, the layer list, or a geometry/lens global).
+    pub fn set_op(&self, op: Op) -> EditDoc {
+        let mut d = self.clone();
+        match op {
+            Op::Exposure(e) => d.global.exposure = e.ev,
+            Op::WhiteBalance(w) => {
+                d.global.temp = w.temp;
+                d.global.tint = w.tint;
+            }
+            Op::Contrast(c) => d.global.contrast = c.amount,
+            Op::Dehaze(x) => d.global.dehaze = x,
+            Op::ToneCurve(t) => d.global.tone_curve = t,
+            Op::Hsl(h) => d.global.hsl = h,
+            Op::ColorGrade(g) => d.global.color_grade = g,
+            Op::LocalAdjustments(la) => d.layers = la.layers,
+            Op::Sharpen(s) => d.global.sharpen = s,
+            Op::LensCorrection(l) => d.lens = Some(l),
+            Op::Geometry(g) => d.geometry = Some(g),
         }
+        d
     }
 
-    /// Return a new stack with any op of `kind` removed (per-op reset).
-    pub fn reset(&self, kind: OpKind) -> OpStack {
-        OpStack {
-            version: self.version,
-            ops: self
-                .ops
-                .iter()
-                .filter(|o| o.kind() != kind)
-                .cloned()
-                .collect(),
+    /// Return a new doc with `kind`'s parameters reset to identity.
+    pub fn reset(&self, kind: OpKind) -> EditDoc {
+        let mut d = self.clone();
+        match kind {
+            OpKind::Exposure => d.global.exposure = 0.0,
+            OpKind::WhiteBalance => {
+                d.global.temp = 0.0;
+                d.global.tint = 0.0;
+            }
+            OpKind::Contrast => d.global.contrast = 0.0,
+            OpKind::Dehaze => d.global.dehaze = Dehaze::default(),
+            OpKind::ToneCurve => d.global.tone_curve = ToneCurve::default(),
+            OpKind::Hsl => d.global.hsl = Hsl::default(),
+            OpKind::ColorGrade => d.global.color_grade = ColorGrade::default(),
+            OpKind::LocalAdjustments => d.layers = Vec::new(),
+            OpKind::Sharpen => d.global.sharpen = Sharpen::default(),
+            OpKind::LensCorrection => d.lens = None,
+            OpKind::Geometry => d.geometry = None,
         }
+        d
     }
 
     pub fn exposure(&self) -> Option<Exposure> {
-        self.ops.iter().find_map(|o| match o {
-            Op::Exposure(e) => Some(*e),
-            _ => None,
+        (self.global.exposure != 0.0).then_some(Exposure {
+            ev: self.global.exposure,
         })
     }
-
     pub fn white_balance(&self) -> Option<WhiteBalance> {
-        self.ops.iter().find_map(|o| match o {
-            Op::WhiteBalance(w) => Some(*w),
-            _ => None,
+        (self.global.temp != 0.0 || self.global.tint != 0.0).then_some(WhiteBalance {
+            temp: self.global.temp,
+            tint: self.global.tint,
         })
     }
-
     pub fn contrast(&self) -> Option<Contrast> {
-        self.ops.iter().find_map(|o| match o {
-            Op::Contrast(c) => Some(*c),
-            _ => None,
+        (self.global.contrast != 0.0).then_some(Contrast {
+            amount: self.global.contrast,
         })
     }
-
     pub fn dehaze(&self) -> Option<Dehaze> {
-        self.ops.iter().find_map(|o| match o {
-            Op::Dehaze(d) => Some(*d),
-            _ => None,
-        })
+        (!self.global.dehaze.is_identity()).then_some(self.global.dehaze)
     }
-
     pub fn tone_curve(&self) -> Option<ToneCurve> {
-        self.ops.iter().find_map(|o| match o {
-            Op::ToneCurve(t) => Some(t.clone()),
-            _ => None,
-        })
+        (!self.global.tone_curve.is_identity()).then(|| self.global.tone_curve.clone())
     }
-
     pub fn hsl(&self) -> Option<Hsl> {
-        self.ops.iter().find_map(|o| match o {
-            Op::Hsl(h) => Some(*h),
-            _ => None,
-        })
+        self.global
+            .hsl
+            .bands
+            .iter()
+            .any(|b| b.hue != 0.0 || b.sat != 0.0 || b.lum != 0.0)
+            .then_some(self.global.hsl)
     }
-
     pub fn color_grade(&self) -> Option<ColorGrade> {
-        self.ops.iter().find_map(|o| match o {
-            Op::ColorGrade(c) => Some(*c),
-            _ => None,
-        })
+        (!self.global.color_grade.is_identity()).then_some(self.global.color_grade)
     }
-
     pub fn local_adjustments(&self) -> Option<LocalAdjustments> {
-        self.ops.iter().find_map(|o| match o {
-            Op::LocalAdjustments(l) => Some(l.clone()),
-            _ => None,
+        (!self.layers.is_empty()).then(|| LocalAdjustments {
+            layers: self.layers.clone(),
         })
     }
-
     pub fn sharpen(&self) -> Option<Sharpen> {
-        self.ops.iter().find_map(|o| match o {
-            Op::Sharpen(s) => Some(*s),
-            _ => None,
-        })
+        (self.global.sharpen.amount != 0.0).then_some(self.global.sharpen)
     }
-
     pub fn geometry(&self) -> Option<Geometry> {
-        self.ops.iter().find_map(|o| match o {
-            Op::Geometry(g) => Some(*g),
-            _ => None,
-        })
+        self.geometry
     }
-
     pub fn lens_correction(&self) -> Option<LensCorrection> {
-        self.ops.iter().find_map(|o| match o {
-            Op::LensCorrection(l) => Some(l.clone()),
-            _ => None,
-        })
+        self.lens.clone()
     }
 }
 
@@ -506,62 +517,118 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_identity_and_empty() {
-        let s = OpStack::default();
-        assert_eq!(s.version, STACK_VERSION);
-        assert!(s.is_identity());
-        assert!(s.ops.is_empty());
+    fn default_doc_is_identity_at_version_2() {
+        let d = EditDoc::default();
+        assert_eq!(d.version, STACK_VERSION);
+        assert_eq!(STACK_VERSION, 2);
+        assert!(d.is_identity());
+        assert!(d.exposure().is_none());
+        assert!(d.local_adjustments().is_none());
     }
 
     #[test]
-    fn set_op_is_immutable_and_adds() {
-        let base = OpStack::default();
-        let next = base.set_op(Op::Exposure(Exposure { ev: 0.5 }));
-        assert!(base.is_identity(), "original stack unchanged (immutable)");
-        assert_eq!(next.exposure(), Some(Exposure { ev: 0.5 }));
-        assert_eq!(next.ops.len(), 1);
-    }
-
-    #[test]
-    fn set_op_same_kind_replaces() {
-        let s = OpStack::default()
-            .set_op(Op::Exposure(Exposure { ev: 0.5 }))
-            .set_op(Op::Exposure(Exposure { ev: -1.0 }));
-        assert_eq!(s.ops.len(), 1, "same kind replaced, not appended");
-        assert_eq!(s.exposure(), Some(Exposure { ev: -1.0 }));
-    }
-
-    #[test]
-    fn ops_stay_in_canonical_order() {
-        let s = OpStack::default()
-            .set_op(Op::Contrast(Contrast { amount: 0.2 }))
-            .set_op(Op::Exposure(Exposure { ev: 0.1 }))
+    fn set_op_and_getters_round_trip_every_op_kind() {
+        let d = EditDoc::default()
+            .set_op(Op::Exposure(Exposure { ev: 0.75 }))
             .set_op(Op::WhiteBalance(WhiteBalance {
-                temp: 0.0,
-                tint: 0.0,
+                temp: 0.2,
+                tint: -0.1,
+            }))
+            .set_op(Op::Contrast(Contrast { amount: 0.3 }))
+            .set_op(Op::Dehaze(Dehaze {
+                amount: 0.4,
+                radius: 9,
+            }))
+            .set_op(Op::Sharpen(Sharpen {
+                amount: 0.6,
+                radius: 3,
             }));
-        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
+        assert_eq!(d.exposure(), Some(Exposure { ev: 0.75 }));
         assert_eq!(
-            kinds,
-            vec![OpKind::Exposure, OpKind::WhiteBalance, OpKind::Contrast]
+            d.white_balance(),
+            Some(WhiteBalance {
+                temp: 0.2,
+                tint: -0.1
+            })
         );
+        assert_eq!(d.contrast(), Some(Contrast { amount: 0.3 }));
+        assert_eq!(
+            d.dehaze(),
+            Some(Dehaze {
+                amount: 0.4,
+                radius: 9
+            })
+        );
+        assert_eq!(
+            d.sharpen(),
+            Some(Sharpen {
+                amount: 0.6,
+                radius: 3
+            })
+        );
+        assert!(!d.is_identity());
     }
 
     #[test]
-    fn reset_removes_one_kind() {
-        let s = OpStack::default()
+    fn getters_are_none_at_identity_values() {
+        // Setting an identity-valued op is equivalent to reset (mirrors the old
+        // "op absent" semantics the whole app keys has_edits on).
+        let d = EditDoc::default()
             .set_op(Op::Exposure(Exposure { ev: 0.5 }))
-            .set_op(Op::Contrast(Contrast { amount: 0.2 }))
-            .reset(OpKind::Exposure);
-        assert_eq!(s.exposure(), None);
-        assert_eq!(s.contrast(), Some(Contrast { amount: 0.2 }));
+            .set_op(Op::Exposure(Exposure { ev: 0.0 }));
+        assert!(d.exposure().is_none());
+        assert!(d.is_identity());
+    }
+
+    #[test]
+    fn reset_clears_exactly_one_kind() {
+        let d = EditDoc::default()
+            .set_op(Op::Exposure(Exposure { ev: 0.5 }))
+            .set_op(Op::Contrast(Contrast { amount: 0.3 }));
+        let d = d.reset(OpKind::Exposure);
+        assert!(d.exposure().is_none());
+        assert_eq!(d.contrast(), Some(Contrast { amount: 0.3 }));
+    }
+
+    #[test]
+    fn local_adjustments_map_to_layers() {
+        let la = LocalAdjustments {
+            layers: vec![crate::local::MaskLayer {
+                name: "Mask 1".into(),
+                visible: true,
+                mask: Default::default(),
+                adjustments: Default::default(),
+            }],
+        };
+        let d = EditDoc::default().set_op(Op::LocalAdjustments(la.clone()));
+        assert_eq!(d.layers.len(), 1);
+        assert_eq!(d.local_adjustments(), Some(la));
+        // A created (even identity-valued) mask counts as an edit, as today.
+        assert!(!d.is_identity());
+        let d = d.reset(OpKind::LocalAdjustments);
+        assert!(d.local_adjustments().is_none());
+    }
+
+    #[test]
+    fn geometry_and_lens_are_globals_not_layers() {
+        let g = Geometry {
+            crop: CropRect::full(),
+            angle_deg: 2.0,
+            aspect: Aspect::Original,
+        };
+        let d = EditDoc::default().set_op(Op::Geometry(g));
+        assert_eq!(d.geometry(), Some(g));
+        assert!(d.layers.is_empty());
+        assert!(!d.is_identity());
     }
 
     #[test]
     fn new_ops_round_through_set_and_accessors() {
-        let s = OpStack::default()
+        let d = EditDoc::default()
             .set_op(Op::ToneCurve(ToneCurve {
-                points: vec![(0.0, 0.0), (1.0, 1.0)],
+                // A non-identity ramp so the getter (None at identity values)
+                // returns Some, per the "op absent" semantics.
+                points: vec![(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)],
                 mode: CurveMode::Linear,
                 ..Default::default()
             }))
@@ -586,66 +653,16 @@ mod tests {
                 angle_deg: 5.0,
                 aspect: Aspect::Free,
             }));
-        assert_eq!(s.tone_curve().unwrap().points.len(), 2);
-        assert_eq!(s.hsl().unwrap().bands[0].hue, 0.1);
+        assert_eq!(d.tone_curve().unwrap().points.len(), 3);
+        assert_eq!(d.hsl().unwrap().bands[0].hue, 0.1);
         assert_eq!(
-            s.sharpen(),
+            d.sharpen(),
             Some(Sharpen {
                 amount: 0.5,
                 radius: 2
             })
         );
-        assert_eq!(s.geometry().unwrap().angle_deg, 5.0);
-    }
-
-    #[test]
-    fn full_seven_op_stack_is_in_canonical_order() {
-        let s = OpStack::default()
-            .set_op(Op::Geometry(Geometry {
-                crop: CropRect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: 1.0,
-                    h: 1.0,
-                },
-                angle_deg: 0.0,
-                aspect: Aspect::Original,
-            }))
-            .set_op(Op::Sharpen(Sharpen {
-                amount: 0.3,
-                radius: 1,
-            }))
-            .set_op(Op::Hsl(Hsl {
-                bands: [HslBand {
-                    hue: 0.0,
-                    sat: 0.0,
-                    lum: 0.0,
-                }; 8],
-            }))
-            .set_op(Op::ToneCurve(ToneCurve {
-                points: vec![],
-                mode: CurveMode::Linear,
-                ..Default::default()
-            }))
-            .set_op(Op::Contrast(Contrast { amount: 0.1 }))
-            .set_op(Op::WhiteBalance(WhiteBalance {
-                temp: 0.0,
-                tint: 0.0,
-            }))
-            .set_op(Op::Exposure(Exposure { ev: 0.1 }));
-        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                OpKind::Exposure,
-                OpKind::WhiteBalance,
-                OpKind::Contrast,
-                OpKind::ToneCurve,
-                OpKind::Hsl,
-                OpKind::Sharpen,
-                OpKind::Geometry,
-            ]
-        );
+        assert_eq!(d.geometry().unwrap().angle_deg, 5.0);
     }
 
     #[test]
@@ -668,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn lens_correction_sits_before_geometry_in_canonical_order() {
+    fn lens_correction_and_geometry_are_independent_globals() {
         let lc = LensCorrection {
             lens_id: Some("Canon EF 24-70mm f/2.8L II USM".into()),
             focal_len: 50.0,
@@ -681,16 +698,16 @@ mod tests {
             tca: Correction::default(),
             vignetting: Correction::default(),
         };
-        let s = OpStack::default()
-            .set_op(Op::Geometry(Geometry {
-                crop: CropRect::full(),
-                angle_deg: 0.0,
-                aspect: Aspect::Original,
-            }))
+        let g = Geometry {
+            crop: CropRect::full(),
+            angle_deg: 3.0,
+            aspect: Aspect::Original,
+        };
+        let d = EditDoc::default()
+            .set_op(Op::Geometry(g))
             .set_op(Op::LensCorrection(lc.clone()));
-        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
-        assert_eq!(kinds, vec![OpKind::LensCorrection, OpKind::Geometry]);
-        assert_eq!(s.lens_correction(), Some(lc));
+        assert_eq!(d.lens_correction(), Some(lc));
+        assert_eq!(d.geometry(), Some(g));
     }
 
     #[test]
@@ -705,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn local_adjustments_sorts_between_hsl_and_sharpen() {
+    fn local_adjustments_sharpen_and_hsl_coexist() {
         use crate::local::{AdjustmentSet, LocalAdjustments, MaskLayer};
         use ferrolite_mask::MaskDefinition;
         let la = LocalAdjustments {
@@ -719,7 +736,7 @@ mod tests {
                 },
             }],
         };
-        let s = OpStack::default()
+        let d = EditDoc::default()
             .set_op(Op::Sharpen(Sharpen {
                 amount: 0.3,
                 radius: 1,
@@ -727,17 +744,20 @@ mod tests {
             .set_op(Op::LocalAdjustments(la.clone()))
             .set_op(Op::Hsl(Hsl {
                 bands: [HslBand {
-                    hue: 0.0,
+                    hue: 0.1,
                     sat: 0.0,
                     lum: 0.0,
                 }; 8],
             }));
-        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
         assert_eq!(
-            kinds,
-            vec![OpKind::Hsl, OpKind::LocalAdjustments, OpKind::Sharpen]
+            d.sharpen(),
+            Some(Sharpen {
+                amount: 0.3,
+                radius: 1
+            })
         );
-        assert_eq!(s.local_adjustments(), Some(la));
+        assert_eq!(d.local_adjustments(), Some(la));
+        assert_eq!(d.hsl().unwrap().bands[0].hue, 0.1);
     }
 
     #[test]
@@ -799,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn color_grade_sorts_between_hsl_and_local_adjustments() {
+    fn color_grade_sharpen_and_hsl_coexist() {
         let cg = Op::ColorGrade(ColorGrade {
             midtones: GradeWheel {
                 hue: 120.0,
@@ -808,7 +828,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let s = OpStack::default()
+        let d = EditDoc::default()
             .set_op(Op::Sharpen(Sharpen {
                 amount: 0.3,
                 radius: 1,
@@ -816,17 +836,20 @@ mod tests {
             .set_op(cg.clone())
             .set_op(Op::Hsl(Hsl {
                 bands: [HslBand {
-                    hue: 0.0,
+                    hue: 0.1,
                     sat: 0.0,
                     lum: 0.0,
                 }; 8],
             }));
-        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
+        assert_eq!(d.color_grade().unwrap().midtones.hue, 120.0);
         assert_eq!(
-            kinds,
-            vec![OpKind::Hsl, OpKind::ColorGrade, OpKind::Sharpen]
+            d.sharpen(),
+            Some(Sharpen {
+                amount: 0.3,
+                radius: 1
+            })
         );
-        assert_eq!(s.color_grade().unwrap().midtones.hue, 120.0);
+        assert_eq!(d.hsl().unwrap().bands[0].hue, 0.1);
     }
 
     #[test]
@@ -991,26 +1014,26 @@ mod tests {
     }
 
     #[test]
-    fn dehaze_sorts_between_contrast_and_tone_curve() {
-        let s = OpStack::default()
-            .set_op(Op::ToneCurve(ToneCurve::default()))
+    fn dehaze_contrast_and_tone_curve_coexist() {
+        let d = EditDoc::default()
+            .set_op(Op::ToneCurve(ToneCurve {
+                points: vec![(0.0, 0.0), (0.5, 0.6), (1.0, 1.0)],
+                ..Default::default()
+            }))
             .set_op(Op::Dehaze(Dehaze {
                 amount: 0.4,
                 radius: 8,
             }))
             .set_op(Op::Contrast(Contrast { amount: 0.1 }));
-        let kinds: Vec<OpKind> = s.ops.iter().map(|o| o.kind()).collect();
         assert_eq!(
-            kinds,
-            vec![OpKind::Contrast, OpKind::Dehaze, OpKind::ToneCurve]
-        );
-        assert_eq!(
-            s.dehaze(),
+            d.dehaze(),
             Some(Dehaze {
                 amount: 0.4,
                 radius: 8
             })
         );
+        assert_eq!(d.contrast(), Some(Contrast { amount: 0.1 }));
+        assert!(d.tone_curve().is_some());
     }
 
     #[test]
@@ -1027,10 +1050,11 @@ mod tests {
     }
 
     #[test]
-    fn dehaze_roundtrips_and_renumber_is_serde_stable() {
-        // OpKind is a sort key, never serialized; Op serializes by variant name,
-        // so inserting Dehaze must not perturb the JSON of other ops.
-        let s = OpStack::default()
+    fn doc_roundtrips_through_json() {
+        // `EditDoc`'s JSON shape (global/layers) replaces the old ordered
+        // `Vec<Op>` wire format; Task 3 owns migrating the on-disk fixtures.
+        // Here we only assert the new shape roundtrips.
+        let d = EditDoc::default()
             .set_op(Op::Exposure(Exposure { ev: 0.5 }))
             .set_op(Op::Dehaze(Dehaze {
                 amount: -0.25,
@@ -1040,28 +1064,7 @@ mod tests {
                 amount: 0.6,
                 radius: 3,
             }));
-        let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(
-            json,
-            r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}},{"Dehaze":{"amount":-0.25,"radius":8}},{"Sharpen":{"amount":0.6,"radius":3}}]}"#
-        );
-        assert_eq!(serde_json::from_str::<OpStack>(&json).unwrap(), s);
-    }
-
-    #[test]
-    fn opkind_renumber_does_not_change_serde_output() {
-        // OpKind is a sort key, never serialized; Op serializes by variant name.
-        // This exact JSON must be stable across the renumber.
-        let s = OpStack::default()
-            .set_op(Op::Exposure(Exposure { ev: 0.5 }))
-            .set_op(Op::Sharpen(Sharpen {
-                amount: 0.6,
-                radius: 3,
-            }));
-        let json = serde_json::to_string(&s).unwrap();
-        assert_eq!(
-            json,
-            r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}},{"Sharpen":{"amount":0.6,"radius":3}}]}"#
-        );
+        let json = serde_json::to_string(&d).unwrap();
+        assert_eq!(serde_json::from_str::<EditDoc>(&json).unwrap(), d);
     }
 }

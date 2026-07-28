@@ -12,7 +12,7 @@
 #![allow(dead_code)]
 
 use ferrolite_image::LinearRgbaF32;
-use ferrolite_mask::MaskDefinition;
+use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Rgb};
 use ferrolite_pipeline::{
     AdjustmentSet, ColorGrade, ColorSwatch, Contrast, Dehaze, Exposure, GradeWheel, Hsl,
     LocalAdjustments, MaskLayer, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
@@ -145,6 +145,75 @@ fn masked_layer_light_trio_variant() -> MaskLayer {
     }
 }
 
+/// The masked layer for `luma_range_mask`: a real LUMINANCE RANGE mask
+/// component (mid-tones [0.3, 0.7], softness 0.1) driving a strong, clearly
+/// visible exposure -1.5.
+///
+/// Why this exists: a later fused-layer-engine task moves the stack's global
+/// color ops (tone curve, HSL, color grade, ...) INSIDE the per-mask node.
+/// `LumaRange` (and `ColorRange`) composite against the node's *input* image
+/// (`luma_range.wgsl`/`color_range.wgsl` both `textureLoad(src, ...)` the
+/// node's input texture directly) — so what the input contains at the point
+/// the mask samples it is behavior-defining. Today, with global color ops
+/// applied to the whole stack before `LocalAdjustments` runs, a range mask
+/// keys off *post-color-grade* content. If the rewiring moves color grading
+/// inside the mask node without preserving that ordering, the same mask
+/// definition would key off different (pre-grade) content and silently
+/// select different pixels. This fixture — global grade/curve on top of a
+/// range-masked layer, rendered through the CURRENT chain and pinned as a
+/// golden — exists so that regression is caught by parity comparison rather
+/// than discovered visually later.
+fn masked_layer_luma_range() -> MaskLayer {
+    MaskLayer {
+        name: "luma-range".into(),
+        visible: true,
+        mask: MaskDefinition {
+            components: vec![(
+                MaskComponent::LumaRange {
+                    lo: 0.3,
+                    hi: 0.7,
+                    softness: 0.1,
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        },
+        adjustments: AdjustmentSet {
+            exposure: -1.5,
+            ..Default::default()
+        },
+    }
+}
+
+/// The masked layer for `color_range_mask`: same pin as
+/// `masked_layer_luma_range` (see its doc comment for the gist), but using a
+/// COLOR RANGE component instead of luminance — selection around pure red
+/// (tolerance 0.3, softness 0.1), again driving a strong exposure -1.5.
+/// `color_range.wgsl` reads the node's input the same way `luma_range.wgsl`
+/// does, so it's equally cheap to pin and equally exposed to the same
+/// input-content regression.
+fn masked_layer_color_range() -> MaskLayer {
+    MaskLayer {
+        name: "color-range".into(),
+        visible: true,
+        mask: MaskDefinition {
+            components: vec![(
+                MaskComponent::ColorRange {
+                    samples: vec![Rgb::new(1.0, 0.0, 0.0)],
+                    tolerance: 0.3,
+                    softness: 0.1,
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        },
+        adjustments: AdjustmentSet {
+            exposure: -1.5,
+            ..Default::default()
+        },
+    }
+}
+
 /// The second masked layer added by `two_masks`: full-coverage mask,
 /// saturation +0.5, hue +0.2, color-swatch blend (amount 0.4, pure red).
 fn masked_layer_saturation_swatch() -> MaskLayer {
@@ -217,6 +286,27 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                     tint: 0.0,
                 }))
                 .set_op(Op::Contrast(Contrast { amount: 0.5 })),
+        ),
+        // `luma_range_mask` / `color_range_mask`: `curve_hsl_grade`'s global
+        // grade + tone curve on top of a range-masked local layer. See
+        // `masked_layer_luma_range`'s doc comment for why these pin
+        // range-mask-vs-input-content semantics ahead of the fused-layer
+        // rewiring.
+        (
+            "luma_range_mask",
+            with_curve_hsl_grade(OpStack::default()).set_op(Op::LocalAdjustments(
+                LocalAdjustments {
+                    layers: vec![masked_layer_luma_range()],
+                },
+            )),
+        ),
+        (
+            "color_range_mask",
+            with_curve_hsl_grade(OpStack::default()).set_op(Op::LocalAdjustments(
+                LocalAdjustments {
+                    layers: vec![masked_layer_color_range()],
+                },
+            )),
         ),
     ]
 }

@@ -62,12 +62,15 @@ fn wheel_row(
         }
         .label_width(38.0),
     );
+    // Collected unconditionally (not gated by `changed()`) so a held-but-
+    // stationary drag frame — which reports `dragged()` but emits no value
+    // change — still suppresses the mask overlay.
+    if r.dragged() {
+        dragged = true;
+    }
     if r.changed() {
         wheel.lum = lum;
         changed = true;
-        if r.dragged() {
-            dragged = true;
-        }
         commit |= r.drag_stopped() || !r.dragged();
     }
     (changed, commit, dragged)
@@ -153,12 +156,14 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
         signed: false,
         custom_label_w: None,
     });
+    // Collected unconditionally (not gated by `changed()`) so a held-but-
+    // stationary drag frame still suppresses the mask overlay.
+    if rb.dragged() {
+        any_dragged = true;
+    }
     if rb.changed() {
         cg.blending = blending;
         changed = true;
-        if rb.dragged() {
-            any_dragged = true;
-        }
         commit |= rb.drag_stopped() || !rb.dragged();
     }
     let mut balance = cg.balance;
@@ -175,25 +180,28 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
         signed: true,
         custom_label_w: None,
     });
+    // Collected unconditionally (not gated by `changed()`) so a held-but-
+    // stationary drag frame still suppresses the mask overlay.
+    if rbal.dragged() {
+        any_dragged = true;
+    }
     if rbal.changed() {
         cg.balance = balance;
         changed = true;
-        if rbal.dragged() {
-            any_dragged = true;
-        }
         commit |= rbal.drag_stopped() || !rbal.dragged();
     }
 
+    // Set adjusting whenever any wheel or slider is being dragged, BEFORE the
+    // no-value-change early return below, so a held-but-stationary drag frame
+    // (no grade delta this frame) still suppresses the mask overlay.
+    if any_dragged {
+        scoped.adjusting.set(true);
+    }
     if !changed || !grade_changed(&before, &cg) {
         return None;
     }
     let mut new_set = set.clone();
     new_set.color_grade = cg;
-    // Set adjusting whenever any wheel or slider is being dragged,
-    // to suppress the mask overlay during mid-drag pauses.
-    if any_dragged {
-        scoped.adjusting.set(true);
-    }
     scoped.write(new_set, OpKind::ColorGrade, commit)
 }
 

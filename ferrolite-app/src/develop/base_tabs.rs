@@ -177,7 +177,6 @@ fn show_color_swatch(
 ) {
     const GLOBAL_REASON: &str =
         "Global color overlay arrives with the unified layer engine (Phase 3)";
-    const NO_MASK_REASON: &str = "Create or select a mask first";
 
     let set = scoped.set();
     let mut rgb = set
@@ -200,7 +199,7 @@ fn show_color_swatch(
 
     let reason = match scope {
         EditScope::Global => GLOBAL_REASON,
-        EditScope::Mask(_) | EditScope::MaskNone => NO_MASK_REASON,
+        EditScope::Mask(_) | EditScope::MaskNone => scope::MASK_NONE_HINT,
     };
     ui.add_enabled_ui(false, |ui| {
         ui.color_edit_button_rgb(&mut rgb);

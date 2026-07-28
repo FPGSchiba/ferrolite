@@ -36,12 +36,16 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit, tc: &ToneCurve) -> Option<Ed
     // built at the call site and moved in.
     let mut add = |ui: &mut egui::Ui, s: EguiSlider| {
         let r = ui.add(s);
+        // Collected unconditionally (not gated by `changed()`) so a
+        // held-but-stationary drag frame — which reports `dragged()` but emits
+        // no value change — still suppresses the mask overlay.
+        if r.dragged() {
+            dragged = true;
+        }
         if r.changed() {
             if r.drag_stopped() {
                 drag_stopped = true;
-            } else if r.dragged() {
-                dragged = true;
-            } else {
+            } else if !r.dragged() {
                 drag_stopped = true; // click / typed / double-click-reset commits now
             }
         }
@@ -163,6 +167,12 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit, tc: &ToneCurve) -> Option<Ed
         },
     );
 
+    // Set adjusting whenever any parametric slider is being dragged, BEFORE the
+    // no-value-change early return below, so a held-but-stationary drag frame
+    // (no param delta this frame) still suppresses the mask overlay.
+    if dragged {
+        scoped.adjusting.set(true);
+    }
     if !param_changed(&before, &p) {
         return None;
     }
@@ -173,11 +183,6 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit, tc: &ToneCurve) -> Option<Ed
     let set = scoped.set()?;
     let mut new_set = set.clone();
     new_set.tone_curve = new_tc;
-    // Set adjusting whenever any parametric slider is being dragged,
-    // to suppress the mask overlay during mid-drag pauses.
-    if dragged {
-        scoped.adjusting.set(true);
-    }
     scoped.write(new_set, OpKind::ToneCurve, drag_stopped || !dragged)
 }
 

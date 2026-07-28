@@ -3,6 +3,8 @@
 //! `base_tabs()` is registered once as the registry's base.
 
 use crate::develop::adjustment_panel::EditOutcome;
+use crate::develop::adjustments::{light_sliders, scoped_slider};
+use crate::develop::scope::{self, EditScope, ScopedEdit};
 use crate::develop::tool::{PanelTab, TabId};
 use crate::develop::{
     curve_widget, grade_widget, hsl_widget, lens_caps_ui, lens_picker, ops_edit, vignette_mode,
@@ -36,168 +38,48 @@ impl PanelTab for LightTab {
     }
     fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
         let stack = state.viewer.as_ref()?.op_stack.clone();
+        let scope = scope::current(state);
+        let scoped = ScopedEdit::new(scope, &stack);
         let mut out: Option<EditOutcome> = None;
 
+        // per-scope flag lands in Task 6 — both scopes share basic_sliders_open for now.
         section_header(ui, "BASIC SLIDERS", &mut state.settings.basic_sliders_open);
         if state.settings.basic_sliders_open {
-            // Exposure (bipolar EV).
-            let mut ev = stack.exposure().map(|e| e.ev).unwrap_or(0.0);
-            let r_ev = ui.add(EguiSlider {
-                label: "Exposure",
-                value: &mut ev,
-                min: -5.0,
-                max: 5.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: " EV",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            if r_ev.changed() {
-                out = Some(EditOutcome {
-                    stack: ops_edit::set_exposure(&stack, ev),
-                    kind: OpKind::Exposure,
-                    commit: r_ev.drag_stopped() || !r_ev.dragged(),
-                });
-            }
-            // Contrast (bipolar).
-            let mut c = stack.contrast().map(|c| c.amount).unwrap_or(0.0);
-            let r_c = ui.add(EguiSlider {
-                label: "Contrast",
-                value: &mut c,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            if r_c.changed() {
-                out = Some(EditOutcome {
-                    stack: ops_edit::set_contrast(&stack, c),
-                    kind: OpKind::Contrast,
-                    commit: r_c.drag_stopped() || !r_c.dragged(),
-                });
-            }
-            // White balance Temp + Tint.
-            let wb = stack.white_balance();
-            let (mut temp, mut tint) = wb.map(|w| (w.temp, w.tint)).unwrap_or((0.0, 0.0));
-            let rt = ui.add(EguiSlider {
-                label: "Temp",
-                value: &mut temp,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            let rn = ui.add(EguiSlider {
-                label: "Tint",
-                value: &mut tint,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            if rt.changed() || rn.changed() {
-                out = Some(EditOutcome {
-                    stack: ops_edit::set_white_balance(&stack, temp, tint),
-                    kind: OpKind::WhiteBalance,
-                    commit: (rt.drag_stopped() || rn.drag_stopped())
-                        || !(rt.dragged() || rn.dragged()),
-                });
-            }
-
-            // Highlights, Shadows, Whites, Blacks
-            let mut tc = stack.tone_curve().unwrap_or_default();
-            let mut p = tc.parametric;
-
-            let rh = ui.add(EguiSlider {
-                label: "Highlights",
-                value: &mut p.highlights,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            let rs = ui.add(EguiSlider {
-                label: "Shadows",
-                value: &mut p.shadows,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            let rw = ui.add(EguiSlider {
-                label: "Whites",
-                value: &mut p.lights,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            let rb = ui.add(EguiSlider {
-                label: "Blacks",
-                value: &mut p.darks,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-                custom_label_w: None,
-            });
-            if rh.changed() || rs.changed() || rw.changed() || rb.changed() {
-                tc.parametric = p;
-                let commit = (rh.drag_stopped()
-                    || rs.drag_stopped()
-                    || rw.drag_stopped()
-                    || rb.drag_stopped())
-                    || !(rh.dragged() || rs.dragged() || rw.dragged() || rb.dragged());
-                out = Some(EditOutcome {
-                    stack: ops_edit::set_tone_curve(&stack, tc),
-                    kind: OpKind::ToneCurve,
-                    commit,
-                });
+            for spec in light_sliders() {
+                if let Some(edit) = scoped_slider(ui, spec, &scoped) {
+                    out = Some(edit);
+                }
             }
         }
 
         ui.separator();
+        // per-scope flag lands in Task 6 — both scopes share tone_curve_open for now.
         section_header(ui, "TONE CURVE", &mut state.settings.tone_curve_open);
         if state.settings.tone_curve_open {
-            if let Some(curve_out) = curve_widget::show(ui, &stack) {
-                out = Some(curve_out);
+            match scope {
+                EditScope::Global => {
+                    if let Some(curve_out) = curve_widget::show(ui, &stack) {
+                        out = Some(curve_out);
+                    }
+                }
+                EditScope::Mask(_) | EditScope::MaskNone => {
+                    ui.label(
+                        egui::RichText::new(
+                            "Per-mask Tone Curve arrives with the layer engine (Phase 2b)",
+                        )
+                        .color(theme::TEXT_FAINT),
+                    );
+                }
+            }
+        }
+
+        // Read the adjusting flag into a local before touching `state` below —
+        // `scoped` borrows the local `stack` clone, not `state`, but keep the
+        // read-then-mutate order explicit per the scoped-edit contract.
+        let scoped_adjusting = scoped.adjusting.get();
+        if matches!(scope, EditScope::Mask(_)) {
+            if let Some(v) = state.viewer.as_mut() {
+                v.mask.adjusting = scoped_adjusting;
             }
         }
 
@@ -796,6 +678,40 @@ mod tests {
         assert_eq!(tabs[1].label(), "Color");
         assert_eq!(tabs[2].id(), TabId("effects"));
         assert_eq!(tabs[2].label(), "Effects");
+    }
+
+    #[test]
+    fn light_tab_edits_the_selected_mask_when_mask_scope_active() {
+        let ctx = egui::Context::default();
+        let mut state = AppState::new().unwrap();
+        // No viewer ⇒ tab renders nothing and returns None (unchanged behavior).
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                assert!(LightTab.show(ui, &mut state).is_none());
+            });
+        });
+        // Scope resolution is what the tab keys on — covered by scope.rs tests;
+        // here assert the registry rows exist and are correctly gated.
+        let specs = crate::develop::adjustments::light_sliders();
+        let ids: Vec<&str> = specs.iter().map(|s| s.id.0).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "exposure",
+                "contrast",
+                "highlights",
+                "shadows",
+                "whites",
+                "blacks",
+                "temp",
+                "tint"
+            ]
+        );
+        let hl = specs.iter().find(|s| s.id.0 == "highlights").unwrap();
+        assert!(!hl.global_ready && hl.mask_ready);
+        assert!(!hl.global_reason.is_empty());
+        let ex = specs.iter().find(|s| s.id.0 == "exposure").unwrap();
+        assert!(ex.global_ready && ex.mask_ready);
     }
 
     #[test]

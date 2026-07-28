@@ -2,33 +2,8 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    sharpen_halo, ColorGrade, Contrast, Dehaze, Exposure, LensCorrection, Op, OpStack, Sharpen,
-    ToneCurve, WhiteBalance,
+    sharpen_halo, ColorGrade, Dehaze, LensCorrection, Op, OpStack, Sharpen, ToneCurve,
 };
-
-pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
-    if ev == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Exposure)
-    } else {
-        s.set_op(Op::Exposure(Exposure { ev }))
-    }
-}
-
-pub fn set_white_balance(s: &OpStack, temp: f32, tint: f32) -> OpStack {
-    if temp == 0.0 && tint == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::WhiteBalance)
-    } else {
-        s.set_op(Op::WhiteBalance(WhiteBalance { temp, tint }))
-    }
-}
-
-pub fn set_contrast(s: &OpStack, amount: f32) -> OpStack {
-    if amount == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Contrast)
-    } else {
-        s.set_op(Op::Contrast(Contrast { amount }))
-    }
-}
 
 pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
     if amount == 0.0 {
@@ -179,21 +154,6 @@ mod tests {
     }
 
     #[test]
-    fn set_exposure_adds_then_identity_removes() {
-        let s = set_exposure(&OpStack::default(), 0.5);
-        assert_eq!(s.exposure().unwrap().ev, 0.5);
-        let s2 = set_exposure(&s, 0.0);
-        assert!(s2.exposure().is_none(), "identity ev removes the op");
-        assert!(s2.is_identity());
-    }
-
-    #[test]
-    fn set_white_balance_identity_when_both_zero() {
-        let s = set_white_balance(&OpStack::default(), 0.0, 0.0);
-        assert!(s.white_balance().is_none());
-    }
-
-    #[test]
     fn set_sharpen_identity_when_amount_zero() {
         let s = set_sharpen(&OpStack::default(), 0.0, 3);
         assert!(s.sharpen().is_none(), "zero amount = no sharpen");
@@ -270,8 +230,9 @@ mod tests {
 
     #[test]
     fn needs_full_rebuild_on_geometry_and_halo_only() {
-        let base = set_exposure(&OpStack::default(), 0.5);
-        let color_only = set_contrast(&base, 0.3);
+        use ferrolite_pipeline::{Contrast, Exposure};
+        let base = OpStack::default().set_op(Op::Exposure(Exposure { ev: 0.5 }));
+        let color_only = base.set_op(Op::Contrast(Contrast { amount: 0.3 }));
         assert!(
             !needs_full_rebuild(&base, &color_only),
             "color ops: no rebuild"

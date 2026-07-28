@@ -469,11 +469,6 @@ impl EditPipeline {
     pub fn transmission_texture(&self) -> Option<std::sync::Arc<wgpu::Texture>> {
         self.dehaze_transmission_node.current_output_texture()
     }
-
-    /// The source dims the transmission is aligned to (the preview source size).
-    pub fn transmission_src_dims(&self) -> [f32; 2] {
-        [self.src_w as f32, self.src_h as f32]
-    }
 }
 
 #[repr(C)]
@@ -823,7 +818,6 @@ mod edit_pipeline_tests {
         let mut ep = EditPipeline::new(ctx.clone(), &src, OpStack::default(), IDENTITY);
         let _ = ep.evaluate();
         assert!(ep.transmission_texture().is_none());
-        assert_eq!(ep.transmission_src_dims(), [32.0, 24.0]);
         // Dehaze active → a transmission texture exists.
         let stack = OpStack::default().set_op(crate::op::Op::Dehaze(crate::op::Dehaze {
             amount: 0.6,

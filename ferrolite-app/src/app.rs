@@ -600,13 +600,11 @@ impl FerroliteApp {
         // SNAPSHOT `Arc` — export builds its own bounded transmission from it on
         // the worker thread rather than sampling the live preview pipeline's
         // texture (see `spawn_export`'s `transmission_source` doc).
-        let transmission_source = stack
-            .dehaze()
-            .filter(|d| d.amount != 0.0)
-            .and_then(|_| match v.kind {
-                ferrolite_image::FileKind::Raw => v.raw_preview_source.clone(),
-                ferrolite_image::FileKind::Standard => v.preview_source.clone(),
-            });
+        let transmission_source = stack.dehaze().filter(|d| d.amount != 0.0).and_then(|_| {
+            v.raw_preview_source
+                .clone()
+                .or_else(|| v.preview_source.clone())
+        });
 
         // Default filename: source basename + new extension.
         let stem = source_path

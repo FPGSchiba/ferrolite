@@ -133,7 +133,7 @@ impl FerroliteApp {
             }
         });
         if let Some(stack) = result {
-            self.set_preview_and_full(frame, stack.clone());
+            self.set_preview_and_full(frame, stack.clone(), true);
             if let Some(v) = self.state.viewer.as_mut() {
                 v.edits_dirty = true;
                 // A stale in-progress gesture or cached overlay must not carry over
@@ -1250,6 +1250,9 @@ impl FerroliteApp {
                 producer.set_dehaze_atmos(a);
             }
             v.edit_producer = Some(producer);
+            // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
+            // this producer was built from `v.op_stack`.
+            v.full_stack = v.op_stack.clone();
             v.full_ready = true;
             version = v.opstack_version.max(1);
         }
@@ -1409,7 +1412,7 @@ impl FerroliteApp {
             let tep = ferrolite_pipeline::TileEditPipeline::new(
                 ctx_arc.clone(),
                 pyr,
-                shown,
+                shown.clone(),
                 cam,
                 v.lens_warp.as_ref(),
                 v.lens_vignette.as_ref(),
@@ -1427,6 +1430,9 @@ impl FerroliteApp {
                 producer.set_dehaze_atmos(a);
             }
             v.edit_producer = Some(producer);
+            // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
+            // this producer was rebuilt from `shown`.
+            v.full_stack = shown.clone();
             v.opstack_version = v.opstack_version.wrapping_add(1);
             let version = v.opstack_version;
             let mut renderer = rs.renderer.write();
@@ -1448,7 +1454,20 @@ impl FerroliteApp {
     /// Preview tier: build the EditPipeline once, reuse via set_stack; evaluate
     /// and swap the displayed single texture. Full-res tier: set_stack (color) or
     /// rebuild (geometry/halo), bump the opstack version to invalidate cached tiles.
-    fn set_preview_and_full(&mut self, frame: &eframe::Frame, stack: ferrolite_pipeline::OpStack) {
+    /// Update the render tiers for `stack`. The live PREVIEW tier is always
+    /// updated (that is what the fit-zoom view shows). The full-res tiled tier is
+    /// only (re)synced + re-produced when `produce_full` is true — passed as the
+    /// edit's `commit` flag, so a slider DRAG updates only the cheap preview each
+    /// frame and the expensive full-res producer refreshes once on release. This
+    /// keeps the VT from re-running `produce_tile` for every tile every drag frame
+    /// (which exhausted GPU memory on integrated GPUs once a heavy op like dehaze's
+    /// multi-pass transmission was active). Non-drag callers pass `true`.
+    fn set_preview_and_full(
+        &mut self,
+        frame: &eframe::Frame,
+        stack: ferrolite_pipeline::OpStack,
+        produce_full: bool,
+    ) {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -1463,7 +1482,6 @@ impl FerroliteApp {
         let Some(v) = self.state.viewer.as_mut() else {
             return;
         };
-        let old = v.op_stack.clone();
         v.op_stack = stack.clone();
         v.opstack_version = v.opstack_version.wrapping_add(1);
 
@@ -1566,9 +1584,19 @@ impl FerroliteApp {
         // working space — never the raw camera-native CPU path. The
         // opstack_version bump above invalidates stale produced tiles so the new
         // (edited or unedited) tiles are re-produced on toggle.
-        if v.full_ready {
+        // Full-res tier: DEFERRED to commit (`produce_full`). Mid-drag
+        // (`produce_full == false`) only the live preview above is refreshed each
+        // frame; the producer is left untouched and NOT re-produced, so the VT does
+        // not re-run `produce_tile` for every tile every frame — that per-frame
+        // full-res churn is what exhausted GPU memory on integrated GPUs with a
+        // heavy op (dehaze's multi-pass transmission) active. On commit the producer
+        // syncs once and re-produces (the load the app already handled per edit).
+        // `needs_full_rebuild` compares against `v.full_stack` — the stack the
+        // producer ACTUALLY reflects — not the previous frame, so a dehaze on/off or
+        // radius change made across the deferred drag still rebuilds here on release.
+        if produce_full && v.full_ready {
             let rebuild = v.edit_producer.is_none()
-                || crate::develop::ops_edit::needs_full_rebuild(&old, &shown);
+                || crate::develop::ops_edit::needs_full_rebuild(&v.full_stack, &shown);
             if rebuild {
                 if let Some(pyr) = v.pyramid.clone() {
                     let ctx_arc =
@@ -1631,6 +1659,9 @@ impl FerroliteApp {
                 producer.set_vig_amount(vig_amount);
                 producer.set_vig_manual(vig_manual);
             }
+            // Record the stack the producer now reflects — the rebuild baseline for
+            // the next commit (see the `full_stack` field doc + the block comment).
+            v.full_stack = shown.clone();
             let version = v.opstack_version;
             let image_id = v.image_id;
             let mut renderer = rs.renderer.write();
@@ -1660,7 +1691,9 @@ impl FerroliteApp {
         // Snapshot the pre-edit stack BEFORE `set_preview_and_full` overwrites
         // `v.op_stack`, so a lens-key comparison below sees the real old/new.
         let old_stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
-        self.set_preview_and_full(frame, stack.clone());
+        // Mid-drag (`commit == false`): preview-only, defer the full-res tier to
+        // release. On commit: sync + re-produce the full-res tier too.
+        self.set_preview_and_full(frame, stack.clone(), commit);
         if !commit {
             return;
         }
@@ -2979,7 +3012,7 @@ impl eframe::App for FerroliteApp {
                             if !stack.is_identity() {
                                 v.history =
                                     crate::develop::history::History::new(stack.clone(), 100);
-                                self.set_preview_and_full(frame, stack.clone());
+                                self.set_preview_and_full(frame, stack.clone(), true);
                             }
                             // Spec 4.4 (U9) Step 2: a persisted correction (any
                             // toggle enabled, with a resolvable lens key) needs
@@ -3683,7 +3716,7 @@ impl eframe::App for FerroliteApp {
                         v.before_after = hold_before;
                     }
                     let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
-                    self.set_preview_and_full(frame, stack); // re-evaluates with before_after
+                    self.set_preview_and_full(frame, stack, true); // re-evaluates with before_after
                 }
 
                 // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
@@ -4066,7 +4099,7 @@ impl eframe::App for FerroliteApp {
                         if crop_active != self.crop_active_prev {
                             let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
                             if let Some(stack) = stack {
-                                self.set_preview_and_full(frame, stack);
+                                self.set_preview_and_full(frame, stack, true);
                             }
                             self.crop_active_prev = crop_active;
                         }

@@ -79,6 +79,13 @@ pub struct ViewerState {
     pub path: PathBuf,
     pub kind: FileKind,
     pub op_stack: OpStack,
+    /// The op-stack the full-res `edit_producer` currently reflects. During a
+    /// slider DRAG the full-res tier is deferred (only the live preview updates
+    /// per frame), so `op_stack` moves ahead of what the producer was last synced
+    /// to. This is that last-synced baseline: `needs_full_rebuild` on commit
+    /// compares against THIS (not the previous frame) so a dehaze on/off or radius
+    /// change across the drag still triggers the right rebuild on release.
+    pub full_stack: OpStack,
     /// Plan 3: the full-res edit producer (built on full-decode when the stack is
     /// non-identity). `!Send`/`!Sync`, so it lives here, never in callback_resources.
     pub edit_producer: Option<edit_producer::EditTileProducer>,
@@ -309,6 +316,7 @@ impl ViewerState {
             path,
             kind,
             op_stack: OpStack::default(),
+            full_stack: OpStack::default(),
             edit_producer: None,
             view: ViewTransform {
                 zoom: 1.0,

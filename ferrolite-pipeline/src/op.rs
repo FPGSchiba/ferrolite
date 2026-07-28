@@ -191,6 +191,17 @@ pub struct Hsl {
     pub bands: [HslBand; 8],
 }
 
+impl Hsl {
+    /// True when every band is zero-identity (op can be dropped). Single source
+    /// of truth for the all-zero check — used by both the `EditDoc::hsl` getter
+    /// and `AdjustmentSet::is_identity` so the two predicates cannot drift.
+    pub fn is_identity(&self) -> bool {
+        self.bands
+            .iter()
+            .all(|b| b.hue == 0.0 && b.sat == 0.0 && b.lum == 0.0)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct Sharpen {
     /// Unsharp-mask amount (>= 0). 0 = identity.
@@ -382,6 +393,13 @@ impl Op {
 /// on top. Immutable editing: `set_op`/`reset` return new docs. The old
 /// `Vec<Op>` stack is gone; `Op`/`OpKind` survive as the edit-message
 /// vocabulary (`EditOutcome.kind`, rebuild decisions) until Phase 2.
+///
+/// **Invariant:** an identity-valued `set_op` is byte-equal to a reset — that
+/// is, `is_identity()`, `PartialEq` against `EditDoc::default()`, and the
+/// serde hash (`hash_serde`, keyed for the warm/preview caches) all agree.
+/// `set_op` enforces this by writing the exact per-kind `Default` value
+/// whenever the incoming op's parameters are identity, rather than the raw
+/// (possibly non-canonical) params.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct EditDoc {
     pub version: u32,
@@ -422,6 +440,12 @@ impl EditDoc {
 
     /// Return a new doc with `op`'s parameters written into their unified home
     /// (global set field, the layer list, or a geometry/lens global).
+    ///
+    /// Identity-valued params are normalized to the kind's exact `Default`
+    /// (see the invariant documented on `EditDoc`) so an identity `set_op`
+    /// never leaves the doc `is_identity() == true` yet `!= EditDoc::default()`
+    /// — which would otherwise desync `should_write_back`'s `== OpStack::default()`
+    /// check and the `hash_serde` cache key from `is_identity()`.
     pub fn set_op(&self, op: Op) -> EditDoc {
         let mut d = self.clone();
         match op {
@@ -431,12 +455,36 @@ impl EditDoc {
                 d.global.tint = w.tint;
             }
             Op::Contrast(c) => d.global.contrast = c.amount,
-            Op::Dehaze(x) => d.global.dehaze = x,
-            Op::ToneCurve(t) => d.global.tone_curve = t,
+            Op::Dehaze(x) => {
+                d.global.dehaze = if x.is_identity() {
+                    Dehaze::default()
+                } else {
+                    x
+                }
+            }
+            Op::ToneCurve(t) => {
+                d.global.tone_curve = if t.is_identity() {
+                    ToneCurve::default()
+                } else {
+                    t
+                }
+            }
             Op::Hsl(h) => d.global.hsl = h,
-            Op::ColorGrade(g) => d.global.color_grade = g,
+            Op::ColorGrade(g) => {
+                d.global.color_grade = if g.is_identity() {
+                    ColorGrade::default()
+                } else {
+                    g
+                }
+            }
             Op::LocalAdjustments(la) => d.layers = la.layers,
-            Op::Sharpen(s) => d.global.sharpen = s,
+            Op::Sharpen(s) => {
+                d.global.sharpen = if s.amount == 0.0 {
+                    Sharpen::default()
+                } else {
+                    s
+                }
+            }
             Op::LensCorrection(l) => d.lens = Some(l),
             Op::Geometry(g) => d.geometry = Some(g),
         }
@@ -488,12 +536,7 @@ impl EditDoc {
         (!self.global.tone_curve.is_identity()).then(|| self.global.tone_curve.clone())
     }
     pub fn hsl(&self) -> Option<Hsl> {
-        self.global
-            .hsl
-            .bands
-            .iter()
-            .any(|b| b.hue != 0.0 || b.sat != 0.0 || b.lum != 0.0)
-            .then_some(self.global.hsl)
+        (!self.global.hsl.is_identity()).then_some(self.global.hsl)
     }
     pub fn color_grade(&self) -> Option<ColorGrade> {
         (!self.global.color_grade.is_identity()).then_some(self.global.color_grade)
@@ -574,12 +617,77 @@ mod tests {
     #[test]
     fn getters_are_none_at_identity_values() {
         // Setting an identity-valued op is equivalent to reset (mirrors the old
-        // "op absent" semantics the whole app keys has_edits on).
+        // "op absent" semantics the whole app keys has_edits on). This is the
+        // stronger EditDoc invariant, not just "getter returns None": the
+        // resulting doc is byte-equal to EditDoc::default() (see
+        // identity_valued_set_op_is_byte_equal_to_default below), so
+        // is_identity(), PartialEq-vs-default, and the serde hash all agree.
         let d = EditDoc::default()
             .set_op(Op::Exposure(Exposure { ev: 0.5 }))
             .set_op(Op::Exposure(Exposure { ev: 0.0 }));
         assert!(d.exposure().is_none());
         assert!(d.is_identity());
+        assert_eq!(d, EditDoc::default());
+    }
+
+    #[test]
+    fn identity_valued_set_op_is_byte_equal_to_default() {
+        // The EditDoc invariant (see the doc comment on EditDoc and on set_op):
+        // an identity-valued set_op must be == EditDoc::default(), not merely
+        // is_identity() == true, so has_edits (== OpStack::default()) and
+        // hash_serde (the preview/warm cache key) stay in sync with is_identity().
+        let default = EditDoc::default();
+
+        let dehazed = default.set_op(Op::Dehaze(Dehaze {
+            amount: 0.0,
+            radius: 9, // non-canonical radius, but amount 0 => identity
+        }));
+        assert!(dehazed.is_identity());
+        assert_eq!(
+            dehazed, default,
+            "identity dehaze must normalize to default"
+        );
+
+        let sharpened = default.set_op(Op::Sharpen(Sharpen {
+            amount: 0.0,
+            radius: 3, // non-canonical radius, but amount 0 => identity
+        }));
+        assert!(sharpened.is_identity());
+        assert_eq!(
+            sharpened, default,
+            "identity sharpen must normalize to default"
+        );
+
+        let curved = default.set_op(Op::ToneCurve(ToneCurve {
+            points: vec![(0.0, 0.0), (1.0, 1.0)], // identity corner-ramp
+            ..Default::default()
+        }));
+        assert!(curved.is_identity());
+        assert_eq!(
+            curved, default,
+            "identity tone curve must normalize to default"
+        );
+
+        // ColorGrade::is_identity is full struct equality against
+        // ColorGrade::default() (`*self == ColorGrade::default()`), so the
+        // only way for is_identity() to be true on a value whose fields are
+        // not literally the default constants is IEEE-754 negative zero:
+        // -0.0 == 0.0 numerically (so is_identity() is true and `assert_eq!`,
+        // which uses that same PartialEq, can't tell them apart) but they
+        // serialize to different JSON ("-0.0" vs "0.0"), which is exactly the
+        // "different serde hash" failure mode this invariant guards against.
+        let graded = default.set_op(Op::ColorGrade(ColorGrade {
+            balance: -0.0,
+            ..ColorGrade::default()
+        }));
+        assert!(graded.is_identity());
+        assert_eq!(graded, default);
+        assert_eq!(
+            serde_json::to_string(&graded).unwrap(),
+            serde_json::to_string(&default).unwrap(),
+            "identity color grade must serialize byte-identically to default, \
+             not just PartialEq-equal (negative zero is == but not byte-equal)"
+        );
     }
 
     #[test]

@@ -118,11 +118,7 @@ impl AdjustmentSet {
             && self.vibrance == 0.0
             && self.color.amount == 0.0
             && self.tone_curve.is_identity()
-            && self
-                .hsl
-                .bands
-                .iter()
-                .all(|b| b.hue == 0.0 && b.sat == 0.0 && b.lum == 0.0)
+            && self.hsl.is_identity()
             && self.color_grade.is_identity()
             && self.sharpen.amount == 0.0
             && self.dehaze.is_identity()
@@ -314,6 +310,8 @@ mod tests {
     }
 
     #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
     #[allow(clippy::field_reassign_with_default)]
     fn each_structured_field_breaks_identity() {
         let mut s = AdjustmentSet::default();
@@ -346,6 +344,8 @@ mod tests {
     }
 
     #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
     #[allow(clippy::field_reassign_with_default)]
     fn expanded_set_round_trips() {
         let mut s = AdjustmentSet::default();

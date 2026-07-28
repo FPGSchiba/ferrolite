@@ -2,6 +2,12 @@
 //! op-stack edit helpers + undo/redo history, and off-thread frl:ops persistence.
 
 pub mod adjustment_panel;
+// Registry core for Tasks 3-6 (the base tabs rebuilt on scoped editing); not
+// yet consumed from `main.rs`'s private module tree, so its pub API reads as
+// dead code to the bin target's own dead-code pass (the lib target, used only
+// by `bench_browse`, does not flag pub API as dead).
+#[allow(dead_code)] // consumed by Task 3-6
+pub mod adjustments;
 pub mod base_tabs;
 pub mod cache;
 pub mod canvas;
@@ -33,6 +39,8 @@ pub mod meta_read;
 pub mod ops_edit;
 pub mod ops_persist;
 pub mod preview_cache;
+#[allow(dead_code)] // consumed by Task 3-6
+pub mod scope;
 pub mod split;
 pub mod thumb_regen;
 pub mod tool;

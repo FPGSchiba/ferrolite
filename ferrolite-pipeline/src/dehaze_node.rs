@@ -40,8 +40,8 @@ use std::sync::Arc;
 use ferrolite_gpu::{GpuContext, Node};
 
 use crate::dehaze::{
-    guided_radius, transmission_working_dims, DEHAZE_ATMOS_MIN, DEHAZE_GUIDED_EPS, DEHAZE_OMEGA,
-    DEHAZE_T0,
+    guided_radius, transmission_mip_level_count, transmission_working_dims, DEHAZE_ATMOS_MIN,
+    DEHAZE_GUIDED_EPS, DEHAZE_OMEGA, DEHAZE_T0,
 };
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::nodes::TileFrame;
@@ -421,7 +421,12 @@ fn linear_clamp_sampler(ctx: &GpuContext) -> wgpu::Sampler {
         address_mode_w: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::FilterMode::Nearest,
+        // Trilinear across mips: the recovery samples the mip-mapped shared
+        // transmission at an explicit LOD (`transmission_sample_lod`) so a
+        // zoomed-out tile fetches a band-limited level instead of aliasing the
+        // base map. Harmless for the transmission node's own `src` downsample
+        // (single-mip input, sampled at level 0 only).
+        mipmap_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     })
 }
@@ -453,6 +458,17 @@ fn compute_pipeline(
 
 fn view(tex: &wgpu::Texture) -> wgpu::TextureView {
     tex.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// A single-mip-level view of `tex` (a storage bind — and the read side of the
+/// mip-downsample chain — must target exactly one level, never the default
+/// all-levels view).
+fn mip_view(tex: &wgpu::Texture, level: u32) -> wgpu::TextureView {
+    tex.create_view(&wgpu::TextureViewDescriptor {
+        base_mip_level: level,
+        mip_level_count: Some(1),
+        ..Default::default()
+    })
 }
 
 fn dispatch(
@@ -511,6 +527,13 @@ pub(crate) struct DehazeTransmissionNode {
 
     guided_q_bgl: wgpu::BindGroupLayout,
     guided_q_pipeline: wgpu::ComputePipeline,
+
+    // Mip-chain downsample (LOD fix): builds transmission mip levels 1..N from
+    // level 0 (a 2x2 box average per level) so the tiled recovery can sample a
+    // band-limited level when zoomed out past fit. Built once; run in a small
+    // loop at the tail of `evaluate`, inside the same command buffer.
+    mip_bgl: wgpu::BindGroupLayout,
+    mip_pipeline: wgpu::ComputePipeline,
 
     intermediates: RefCell<Option<Intermediates>>,
     out: RefCell<Option<PipelineImage>>,
@@ -631,6 +654,20 @@ impl DehazeTransmissionNode {
             include_str!("shaders/dehaze_guided_q.wgsl"),
         );
 
+        let mip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("dehaze-transmission-mip-bgl"),
+            entries: &[
+                texture_entry(0, false),               // previous mip level (textureLoad)
+                storage_out_entry(1, PIPELINE_FORMAT), // next mip level
+            ],
+        });
+        let mip_pipeline = compute_pipeline(
+            &ctx,
+            &mip_bgl,
+            "dehaze-transmission-mip",
+            include_str!("shaders/dehaze_transmission_mip.wgsl"),
+        );
+
         Self {
             ctx,
             params,
@@ -650,6 +687,8 @@ impl DehazeTransmissionNode {
             guided_ab_pipeline,
             guided_q_bgl,
             guided_q_pipeline,
+            mip_bgl,
+            mip_pipeline,
             intermediates: RefCell::new(None),
             out: RefCell::new(None),
             rebuilds: Cell::new(0),
@@ -697,7 +736,11 @@ impl DehazeTransmissionNode {
                     height: h,
                     depth_or_array_layers: 1,
                 },
-                mip_level_count: 1,
+                // Full mip chain (LOD fix): level 0 holds the guided-filter
+                // result; levels 1..N are 2x2 box downsamples generated at the
+                // tail of `evaluate`, so the recovery can sample a band-limited
+                // level when the display LOD is coarser than this map.
+                mip_level_count: transmission_mip_level_count(w, h),
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: PIPELINE_FORMAT,
@@ -879,7 +922,9 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         let b_view = view(&im.b);
         let mean_a_view = view(&im.mean_a);
         let mean_b_view = view(&im.mean_b);
-        let out_view = view(&out.texture);
+        // Level 0 only: `out` now carries a mip chain, and a storage bind must
+        // target a single level. Levels 1..N are filled by the mip loop below.
+        let out_view = mip_view(&out.texture, 0);
 
         let mut enc = self
             .ctx
@@ -1131,6 +1176,47 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             ww,
             wh,
         );
+
+        // 8. Build the mip chain (LOD fix): each level is a 2x2 box downsample
+        // of the one above. wgpu inserts the storage-write -> texture-read
+        // barrier between the guided-q write of level 0 and the first read
+        // here, and between each successive level, since they are distinct
+        // subresources of the same texture within this one command buffer.
+        let mip_levels = out.texture.mip_level_count();
+        let (mut lw, mut lh) = (ww, wh);
+        for level in 1..mip_levels {
+            let dw = (lw / 2).max(1);
+            let dh = (lh / 2).max(1);
+            let src_mip = mip_view(&out.texture, level - 1);
+            let dst_mip = mip_view(&out.texture, level);
+            let mip_bind = self
+                .ctx
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("dehaze-transmission-mip-bind"),
+                    layout: &self.mip_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&src_mip),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&dst_mip),
+                        },
+                    ],
+                });
+            dispatch(
+                &mut enc,
+                "dehaze-transmission-mip",
+                &self.mip_pipeline,
+                &mip_bind,
+                dw,
+                dh,
+            );
+            lw = dw;
+            lh = dh;
+        }
 
         self.ctx.queue.submit([enc.finish()]);
         out

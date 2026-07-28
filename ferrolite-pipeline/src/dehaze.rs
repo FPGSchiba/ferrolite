@@ -109,6 +109,9 @@ pub fn dehaze_recover(px: [f32; 3], dark: f32, a: [f32; 3], amount: f32) -> [f32
 }
 
 /// Guided-filter regularization ε (design step 5): larger = smoother/less edge-aware.
+/// Measured flat for halo removal (81.0–81.3% across ε ∈ [1e-4, 2e-3] on a hard
+/// edge — the residual halo is set by the guided radius/single-scale filter, not
+/// ε), so kept at the design default rather than tuned.
 pub const DEHAZE_GUIDED_EPS: f32 = 1e-3;
 
 /// Guided-filter window radius as a function of the patch radius (one knob).
@@ -259,6 +262,39 @@ pub const DEHAZE_MAX_TRANSMISSION_DIM: u32 = 1536;
 pub fn transmission_working_dims(w: u32, h: u32) -> (u32, u32, u32) {
     let scale = (w.max(h)).div_ceil(DEHAZE_MAX_TRANSMISSION_DIM).max(1);
     ((w / scale).max(1), (h / scale).max(1), scale)
+}
+
+/// Full mip-chain length for a transmission map of working dims `(w,h)`:
+/// `floor(log2(max(w,h))) + 1` (>=1). The transmission is mip-mapped so the
+/// tiled recovery can sample a band-limited (coarser) level when the displayed
+/// LOD is smaller than the ~`DEHAZE_MAX_TRANSMISSION_DIM` map — without mips a
+/// zoomed-out tile point-samples the base level, undersampling the sharp
+/// guided-refined transmission edges into ringing (the near-black fix stopped
+/// the *collapse*; this stops the *aliasing*). See `transmission_sample_lod`.
+pub fn transmission_mip_level_count(w: u32, h: u32) -> u32 {
+    let m = w.max(h).max(1);
+    // `u32::BITS - leading_zeros` == floor(log2(m)) + 1 for m >= 1.
+    u32::BITS - m.leading_zeros()
+}
+
+/// Explicit transmission sampling LOD for a recovery pass whose output (at the
+/// current display LOD) is `full` px and whose bound transmission map is `trans`
+/// px (both whole-image-space). LOD = `log2(max(trans/full))`, floored at 0.
+///
+/// When `trans <= full` (fit / zoomed-in / preview tier) the ratio is <= 1 so
+/// LOD is 0 — the base level, IDENTICAL to the pre-mip behavior, leaving every
+/// golden and the fit view unchanged. When `full < trans` (zoomed out past fit —
+/// a coarse tiled LOD smaller than the map) the ratio is > 1 so LOD > 0, pulling
+/// a mip band-limited to the output resolution so the transmission no longer
+/// aliases into ringing. The GPU sampler clamps LOD to the available mip count,
+/// so no upper clamp is needed here. Pure reference; `dehaze_recovery.wgsl`
+/// mirrors this exactly.
+pub fn transmission_sample_lod(trans_w: f32, trans_h: f32, full_w: f32, full_h: f32) -> f32 {
+    if full_w <= 0.0 || full_h <= 0.0 {
+        return 0.0;
+    }
+    let ratio = (trans_w / full_w).max(trans_h / full_h);
+    ratio.log2().max(0.0)
 }
 
 /// Halo (px) a tiled full-res dehaze pass must over-fetch: ALWAYS 0 (ST-Task 3).
@@ -519,6 +555,46 @@ mod tests {
         assert_eq!(scale, 4);
         assert_eq!((ww, wh), (1500, 1000));
         assert!(ww.max(wh) <= DEHAZE_MAX_TRANSMISSION_DIM);
+    }
+
+    #[test]
+    fn mip_level_count_is_floor_log2_plus_one() {
+        assert_eq!(transmission_mip_level_count(1, 1), 1);
+        assert_eq!(transmission_mip_level_count(2, 2), 2);
+        assert_eq!(transmission_mip_level_count(3, 1), 2); // floor(log2 3)=1 -> 2
+        assert_eq!(transmission_mip_level_count(4, 4), 3);
+        // 1536 -> floor(log2 1536)=10 -> 11 levels (down to 1px).
+        assert_eq!(transmission_mip_level_count(1536, 1024), 11);
+        // Rectangular: driven by the larger dim.
+        assert_eq!(transmission_mip_level_count(1024, 1), 11);
+        // Degenerate 0 clamps to at least one level (never a zero-mip texture).
+        assert_eq!(transmission_mip_level_count(0, 0), 1);
+    }
+
+    #[test]
+    fn sample_lod_is_zero_when_magnifying_or_matched() {
+        // trans <= full (fit / zoomed in / preview tier): base level, unchanged.
+        assert_eq!(transmission_sample_lod(1000.0, 1000.0, 2000.0, 2000.0), 0.0);
+        assert_eq!(transmission_sample_lod(1536.0, 1024.0, 1536.0, 1024.0), 0.0);
+        // Larger output than map still floors at 0 (no negative LOD).
+        assert_eq!(transmission_sample_lod(1536.0, 1024.0, 4000.0, 3000.0), 0.0);
+    }
+
+    #[test]
+    fn sample_lod_grows_with_minification() {
+        // Output half the map per axis -> one octave of minification -> LOD 1.
+        assert!((transmission_sample_lod(1000.0, 1000.0, 500.0, 500.0) - 1.0).abs() < 1e-5);
+        // Quarter -> LOD 2.
+        assert!((transmission_sample_lod(1000.0, 1000.0, 250.0, 250.0) - 2.0).abs() < 1e-5);
+        // Driven by the axis needing the most minification (max ratio).
+        assert!((transmission_sample_lod(1000.0, 1000.0, 500.0, 900.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn sample_lod_guards_degenerate_full_dims() {
+        // full_dims <= 0 (the can't-happen guard mirrored in the shader): LOD 0.
+        assert_eq!(transmission_sample_lod(1000.0, 1000.0, 0.0, 1000.0), 0.0);
+        assert_eq!(transmission_sample_lod(1000.0, 1000.0, 1000.0, 0.0), 0.0);
     }
 
     #[test]

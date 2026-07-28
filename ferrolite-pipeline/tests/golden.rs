@@ -3,10 +3,11 @@ mod common;
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_pipeline::{
-    blit_to_rgba8, dehaze_recover, estimate_atmospheric_light, upload_source, Aspect, ColorGrade,
-    Contrast, CropRect, CurveMode, Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource,
-    GradeWheel, Hsl, HslBand, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline,
-    ToneCurve, WhiteBalance, DEHAZE_DEFAULT_RADIUS,
+    blit_to_rgba8, dehaze_recover, estimate_atmospheric_light, transmission_mip_level_count,
+    transmission_working_dims, upload_source, Aspect, ColorGrade, Contrast, CropRect, CurveMode,
+    Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, Op,
+    OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve, WhiteBalance,
+    DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -760,6 +761,26 @@ fn dehaze_coarse_lod_matches_whole_image_mean_luminance() {
         shared_transmission.is_some(),
         "dehaze is active (amount != 0) -> a shared transmission texture must exist"
     );
+    // The transmission is mip-mapped (LOD fix): the coarse-LOD recovery below
+    // (LOD 1: full_dims 256 < the 512px map -> sample LOD 1) relies on those
+    // levels existing to fetch a band-limited transmission
+    // (`transmission_sample_lod`) instead of aliasing the base map into
+    // ringing. Guard that the chain is actually allocated and matches the pure
+    // `transmission_mip_level_count` the node builds from.
+    {
+        let (tw, th, _) = transmission_working_dims(iw, ih);
+        let tex = shared_transmission.as_ref().unwrap();
+        assert_eq!(
+            tex.mip_level_count(),
+            transmission_mip_level_count(tw, th),
+            "transmission mip chain length must match transmission_mip_level_count"
+        );
+        assert!(
+            tex.mip_level_count() > 1,
+            "a large transmission ({tw}x{th}) must have >1 mip level so a zoomed-out \
+             tile can sample a band-limited level (LOD fix)"
+        );
+    }
     let whole_mean: f32 = whole_lin
         .chunks_exact(4)
         .flat_map(|px| px[..3].iter().copied())

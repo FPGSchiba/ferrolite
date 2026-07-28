@@ -26,8 +26,11 @@
 // alignment the dehaze goldens (and the tiled-vs-whole-image parity golden)
 // check. `trans` may be a different resolution than `img` (the transmission is
 // computed at a capped working resolution — see `transmission_working_dims`)
-// — sampled bilinearly via `textureSampleLevel`, which is resolution-agnostic
-// since `uv` is normalized.
+// and is MIP-MAPPED — sampled trilinearly via `textureSampleLevel` at an
+// explicit LOD (see the `transmission_sample_lod` block below), resolution-
+// agnostic since `uv` is normalized. The explicit LOD band-limits the fetch to
+// the display resolution so a zoomed-out (coarse-LOD) tile does not undersample
+// the map into ringing.
 //
 // `has_transmission == 0u` (no shared transmission bound — the node's default
 // 1×1 neutral fallback) passes `I` through unchanged, same as `amount == 0.0`.
@@ -88,7 +91,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     let uv = src / p.src_dims;
 
-    let t = clamp(textureSampleLevel(trans, samp, uv, 0.0).r, 0.0, 1.0);
+    // LOD-aware transmission fetch (mirrors `transmission_sample_lod`): the
+    // shared transmission is mip-mapped. When this LOD's output is COARSER than
+    // the map (`full_dims` < the map dims — i.e. zoomed out past fit), one
+    // output pixel covers many transmission texels; sampling the base level
+    // there undersamples the sharp guided-refined edges into ringing. Pick the
+    // band-limited level `log2(max(trans_dims/full_dims))` instead (floored at
+    // 0, so fit/zoom-in and the whole-image preview tier — where the output is
+    // >= the map — still sample the base level exactly as before). The sampler
+    // clamps LOD to the available mip count. `full_dims > 0` guaranteed above.
+    let trans_dims = vec2<f32>(textureDimensions(trans, 0));
+    let ratio = max(trans_dims.x / p.full_dims.x, trans_dims.y / p.full_dims.y);
+    let lod = max(0.0, log2(ratio));
+    let t = clamp(textureSampleLevel(trans, samp, uv, lod).r, 0.0, 1.0);
     let te = max(t, p.t0);
     let j = (c.rgb - a) / te + a;
     let hazed = a + (c.rgb - a) * t;

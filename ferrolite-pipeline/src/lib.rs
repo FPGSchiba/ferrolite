@@ -22,8 +22,9 @@ mod uniforms;
 pub use coord::{display_to_source, source_to_display};
 pub use dehaze::{
     dehaze_halo, dehaze_recover, estimate_atmospheric_light, guided_radius, transmission_map,
-    transmission_working_dims, DEHAZE_ATMOS_NEUTRAL, DEHAZE_DEFAULT_RADIUS, DEHAZE_GUIDED_EPS,
-    DEHAZE_MAX_TRANSMISSION_DIM, MAX_DEHAZE_RADIUS,
+    transmission_mip_level_count, transmission_sample_lod, transmission_working_dims,
+    DEHAZE_ATMOS_NEUTRAL, DEHAZE_DEFAULT_RADIUS, DEHAZE_GUIDED_EPS, DEHAZE_MAX_TRANSMISSION_DIM,
+    MAX_DEHAZE_RADIUS,
 };
 pub use gpu_pyramid::GpuPyramidSource;
 pub use image::PipelineImage;
@@ -63,7 +64,8 @@ pub use uniforms::{
 /// point op), `color-grade` (the three-way + global grading wheels point op),
 /// and the dehaze passes: `dehaze-dark-channel`/`-min-h`/`-min-v`/`-products`/
 /// `-box-h`/`-box-v`/`-guided-ab`/`-guided-q` (the multi-pass guided-filter
-/// transmission map, `DehazeTransmissionNode`) plus `dehaze-recovery` (the
+/// transmission map, `DehazeTransmissionNode`) — plus `dehaze-transmission-mip`
+/// (its mip-chain downsample for LOD-aware sampling) — plus `dehaze-recovery` (the
 /// amount/atmos blend, `DehazeRecoveryNode`) — both nodes shared by
 /// `EditPipeline` and `TileEditPipeline` (QS-Task 4/5).
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
@@ -91,6 +93,10 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         (
             "dehaze-guided-q",
             include_str!("shaders/dehaze_guided_q.wgsl"),
+        ),
+        (
+            "dehaze-transmission-mip",
+            include_str!("shaders/dehaze_transmission_mip.wgsl"),
         ),
         (
             "dehaze-recovery",

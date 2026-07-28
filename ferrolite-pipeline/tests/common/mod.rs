@@ -10,6 +10,13 @@
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 
+/// Fused-layer-engine phase (2026-07-28): parity fixtures + 16-bit-PNG golden
+/// helpers shared by `layer_engine_parity.rs`, `engine_bench.rs`, and later
+/// fusion tasks. Kept as its own submodule (rather than flattened into this
+/// file) so a later test file can `mod common; use common::layer_engine::...`
+/// at this exact path without depending on the rest of this module's helpers.
+pub mod layer_engine;
+
 /// A deterministic RGB gradient used as the edit source.
 pub fn gradient(w: u32, h: u32) -> LinearRgbaF32 {
     let mut px = Vec::with_capacity((w * h * 4) as usize);

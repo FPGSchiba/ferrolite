@@ -569,40 +569,27 @@ fn sharpen_tiles_match_whole_image_at_seam() {
     );
 }
 
-// QS-Task 4 gave `EditPipeline` (whole-image) the guided-filter-refined
-// transmission+recovery dehaze; QS-Task 5 migrated `TileEditPipeline` (tiled)
-// to the SAME two nodes (`DehazeTransmissionNode` + `DehazeRecoveryNode`) and
-// enlarged the halo to `dehaze_halo = r + 2*guided_radius(r) = 7r` so the
-// guided filter's full neighbourhood (not just the block-min patch) is
-// available across the tile seam. Both tiers now run the identical algorithm
-// with the identical `A`, so this asserts genuine tiled/whole-image parity
-// across an INTERNAL tile seam (previously ignored because the two tiers ran
-// different algorithms).
+// ST-Task 3 (shared-transmission migration): `TileEditPipeline` no longer
+// computes its own per-tile guided-filter transmission (the old QS-Task 5
+// per-tile `DehazeTransmissionNode`, halo `7r`, is GONE — see `dehaze_halo`,
+// now always 0). Instead its `DehazeRecoveryNode` SAMPLES the shared
+// whole-image transmission that `EditPipeline` computes once (source space),
+// handed over via `TileEditPipeline::set_shared_transmission`. Under identity
+// geometry the recovery's source-UV mapping reduces to `uv = pixel / dims`,
+// exactly the whole-image tier's own UV into the SAME shared texture, so this
+// is a genuine per-pixel parity check: no halo (dehaze contributes none) and
+// no true-edge margin (the old margin existed because the tiled tier used to
+// compute its OWN transmission per tile — a SEPARATE computation from the
+// whole-image one, which disagreed near true canvas edges due to a filter
+// boundary-convention difference, see the removed MARGIN NOTE in prior
+// history. With only ONE transmission computation now, shared by both tiers,
+// that discrepancy cannot occur — this test checks the FULL image, not just
+// an internal seam band).
 //
-// MARGIN NOTE (found while enabling this test): the min/box filter passes
-// clamp by INDEXING an already-filtered intermediate array at the buffer's own
-// edge (mirrors the pure CPU reference in `dehaze.rs`, `min_filter_separable`/
-// `box_blur_separable`'s `idx` clamp) rather than re-deriving a filtered value
-// from an edge-extended RAW signal. For a genuinely separable, multi-stage
-// filter (block-min -> guided coefficients -> box-filter-again) those two
-// boundary conventions are NOT numerically equivalent near a TRUE image edge —
-// "clamp the index into an already-filtered array" (what a single, self-
-// contained whole-image buffer does) differs from "the tile's real neighbour
-// data, extended past a true canvas edge by the geometry head, then re-filtered
-// fresh" (what a haloed tile does). This is an inherent property of separable
-// edge-clamped filtering, orthogonal to tiling correctness: verified with a
-// direct probe (`DehazeTransmissionNode` fed a manually clamp-extended buffer
-// vs. an exact-width buffer) that the divergence exists even at `radius=1` and
-// is independent of buffer width/alignment — i.e. it is NOT a tile-seam defect
-// and not introduced by this task's halo enlargement. An INTERNAL tile seam
-// (checked here) never hits it: both neighbours have REAL data, so no clamp of
-// any kind is needed. This test therefore checks a band around the x=256 seam
-// while staying `>= dehaze_halo` away from the canvas's true left/right/top/
-// bottom edges (the filters' dependency never reaches further than that), so
-// it asserts exactly what QS-Task 5 owns (seam parity) without being
-// confounded by that separate, pre-existing true-edge property (which would
-// require changing the filters' boundary convention — out of this task's
-// scope — to eliminate).
+// MANDATORY sensitivity check (recorded in the ST-Task 3 report): temporarily
+// calling `tep.set_shared_transmission(None)` (transmission-missing) — or
+// zeroing the recovery's bound geometry — must make this test's assertion
+// FAIL; otherwise the parity check below would be vacuous.
 #[test]
 fn dehaze_tiled_matches_whole_image() {
     let Some(ctx) = GpuContext::headless() else {
@@ -611,22 +598,18 @@ fn dehaze_tiled_matches_whole_image() {
     };
     let ctx = Arc::new(ctx);
     // A multi-tile image: 480x256 -> 2x1 tiles at LOD 0 (seam at x = 256).
-    // Sized so the checked region (below) has a margin (>= `dehaze_halo`) from
-    // every true canvas edge (see the MARGIN NOTE above) while the seam itself
-    // sits comfortably in the middle of that checked region.
     //
     // NOTE: this is a LOCAL fixture, not `common::gradient` — the shared gradient
     // (R = x/w, G = y/h, B = 0.25) is insensitive to this test's purpose. The
     // dehaze dark channel is `min(R,G,B)`; with the shared gradient, B (a flat
     // 0.25) or G (which varies only with y) dominates that min near the x=256
-    // seam, so the dark channel — and therefore the halo min-filter's cross-tile
-    // fetch — never varies across x there. That let this test pass (max diff 0)
-    // whether or not the dehaze halo fold-in (`tile_edit.rs`'s
-    // `.max(dehaze_halo(...))`) was even present, i.e. it asserted nothing about
-    // the feature it's meant to guard. This fixture instead puts a high-frequency
-    // sawtooth ripple in R across x (period 16px) and pins G/B to a high constant
-    // so R stays the min everywhere — the dark channel then varies sharply right
-    // at the seam, so the patch min-filter genuinely needs cross-tile neighbours.
+    // seam, so the dark channel never varies across x there — a change to the
+    // shared-transmission wiring could go undetected. This fixture instead puts
+    // a high-frequency sawtooth ripple in R across x (period 16px) and pins G/B
+    // to a high constant so R stays the min everywhere — the dark channel (and
+    // therefore the transmission) then varies sharply right at the seam, so a
+    // wrong source-UV mapping (misaligned by even a fraction of a tile) shows
+    // up clearly.
     let (iw, ih) = (480u32, 256u32);
     let src = {
         let mut px = Vec::with_capacity((iw * ih * 4) as usize);
@@ -638,18 +621,11 @@ fn dehaze_tiled_matches_whole_image() {
         }
         LinearRgbaF32::new(iw, ih, px).expect("dehaze seam fixture length")
     };
-    // radius 12 (rather than the default 8) so the enlarged `r + 2*guided_radius(r)
-    // = 7r = 84`px halo is exercised across the x=256 seam. `amount: 2.0` (an
-    // aggressive push, past the [-1,1] the UI slider exposes today but not
-    // rejected by the op itself) is chosen for the MANDATORY sensitivity check
-    // below: at `amount: 0.8` the seam is close enough even WITHOUT the halo
-    // fold-in (this fixture's periodic ripple partially self-heals at the tile's
-    // own clamped edge) that removing the fold-in stayed under `SEAM_TOL` — a
-    // false-negative sensitivity guard. `amount: 2.0` reliably pushes the
-    // without-fold-in seam error over `SEAM_TOL` (see the fold-in sensitivity
-    // numbers recorded in the QS-Task 5 report) while the WITH-fold-in case
-    // stays exact (max diff 0), so this value is load-bearing for the guard,
-    // not arbitrary.
+    // radius 12 (arbitrary now — it no longer sizes a halo, see `dehaze_halo`).
+    // `amount: 2.0` (an aggressive push, past the [-1,1] the UI slider exposes
+    // today but not rejected by the op itself) keeps the recovery's dependence
+    // on `t` strong, so a wrong/missing transmission sample is NOT masked by a
+    // small `amount` — load-bearing for the MANDATORY sensitivity check below.
     let radius = 12u32;
     let amount = 2.0f32;
     let stack = OpStack::default().set_op(Op::Dehaze(Dehaze { amount, radius }));
@@ -657,26 +633,33 @@ fn dehaze_tiled_matches_whole_image() {
     // estimates `A` internally from the same `src`, so the two agree exactly.
     let atmos = estimate_atmospheric_light(&src);
 
-    // Whole-image reference: render the edited image to display-linear f32 by
-    // evaluating the EditPipeline and reading its output back.
+    // Whole-image reference: evaluating computes (and caches) the shared
+    // transmission; render to display-linear f32 and read the transmission
+    // texture back AFTER evaluate so it reflects what produced `whole_lin`.
     let mut whole = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
     let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+    let shared_transmission = whole.transmission_texture();
+    assert!(
+        shared_transmission.is_some(),
+        "dehaze is active (amount != 0) -> a shared transmission texture must exist"
+    );
 
     // Per-tile producer over the GPU-resident source pyramid. `TileEditPipeline`
     // has no CPU source to estimate `A` from — it starts NEUTRAL and the caller
-    // hands it the same estimate via `set_dehaze_atmos`.
+    // hands it the same estimate via `set_dehaze_atmos`. It ALSO has no
+    // transmission of its own anymore (ST-Task 3) — the whole-image tier's
+    // texture computed above is handed over via `set_shared_transmission`.
     let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
     let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
     tep.set_dehaze_atmos(atmos);
+    tep.set_shared_transmission(shared_transmission);
 
     // Produce both tiles, read interiors, and compare against the whole-image
-    // reference within a margin of the true canvas edges (see MARGIN NOTE). The
-    // filters' dependency never reaches beyond `halo` (=84) px from where they're
-    // evaluated, so `halo` is already an exact safety bound; add a small buffer
-    // for rounding. `ih=256` only leaves room for a modest margin (256/2=128 max),
-    // so this is NOT doubled the way `iw`'s margin comfortably could be.
+    // reference over the FULL image (no true-edge margin needed — see the
+    // module doc above this test: both tiers now sample the SAME transmission
+    // texture, so there is no separate per-tile computation to disagree near a
+    // true edge).
     use ferrolite_image::{TileCoord, TILE_SIZE};
-    let margin = ferrolite_pipeline::dehaze_halo(Some(Dehaze { amount, radius })) + 10;
     let mut max_diff = 0.0f32;
     let mut max_loc = (0u32, 0u32, 0usize);
     for tx in 0..2u32 {
@@ -693,9 +676,6 @@ fn dehaze_tiled_matches_whole_image() {
                 if gx >= iw || gy >= ih {
                     continue; // out-of-image tile padding
                 }
-                if gx < margin || gx >= iw - margin || gy < margin || gy >= ih - margin {
-                    continue; // too close to a TRUE canvas edge (see MARGIN NOTE)
-                }
                 let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
                 let wi = ((gy * iw + gx) * 4) as usize;
                 for c in 0..3 {
@@ -711,6 +691,6 @@ fn dehaze_tiled_matches_whole_image() {
     eprintln!("dehaze tile-seam max linear diff = {max_diff} at {max_loc:?}");
     assert!(
         max_diff <= SEAM_TOL,
-        "per-tile dehaze diverged from whole-image (diff {max_diff}) — halo broken?"
+        "per-tile dehaze diverged from whole-image (diff {max_diff}) at {max_loc:?} — shared transmission wiring broken?"
     );
 }

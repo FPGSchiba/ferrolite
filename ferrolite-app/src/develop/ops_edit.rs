@@ -2,8 +2,8 @@
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
 
 use ferrolite_pipeline::{
-    dehaze_halo, sharpen_halo, ColorGrade, Contrast, Dehaze, Exposure, LensCorrection, Op, OpStack,
-    Sharpen, ToneCurve, WhiteBalance,
+    sharpen_halo, ColorGrade, Contrast, Dehaze, Exposure, LensCorrection, Op, OpStack, Sharpen,
+    ToneCurve, WhiteBalance,
 };
 
 pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
@@ -131,10 +131,15 @@ pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32
 /// or the rebuild-relevant lens key requires discarding + rebuilding it.
 /// Color-only changes (and lens/vignette Amount-only changes) are applied via
 /// `TileEditPipeline::set_stack` / the lens-uniform setters without a rebuild.
+///
+/// Dehaze does NOT force a rebuild (ST-Task 3): `dehaze_halo` is now always 0
+/// (the tiled dehaze recovery samples a shared whole-image transmission, no
+/// per-tile neighbourhood), so an amount/radius change is a `set_stack`
+/// uniform update + a re-wired shared transmission (see `EditTileProducer`),
+/// same as any other color op — never a `TileEditPipeline` rebuild.
 pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
     old.geometry() != new.geometry()
         || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
-        || dehaze_halo(old.dehaze()) != dehaze_halo(new.dehaze())
         || lens_rebuild_key(old) != lens_rebuild_key(new)
 }
 
@@ -476,19 +481,18 @@ mod tests {
     }
 
     #[test]
-    fn needs_full_rebuild_on_dehaze_halo_change() {
+    fn dehaze_changes_never_force_a_rebuild() {
+        // ST-Task 3: `dehaze_halo` is always 0 — the tiled dehaze recovery
+        // samples a shared whole-image transmission (no per-tile
+        // neighbourhood), so enabling/disabling dehaze, an amount-only change,
+        // and a radius change are all `set_stack`-only, same as a color op.
         let base = OpStack::default();
-        // Enabling dehaze introduces a halo → must rebuild the tiled producer.
         let on = set_dehaze(&base, 0.5, 8);
-        assert!(needs_full_rebuild(&base, &on), "dehaze on = halo change");
-        // Amount-only change (radius unchanged): halo is unchanged → NO rebuild
-        // (uniform-only, like a color op).
+        assert!(!needs_full_rebuild(&base, &on), "dehaze on: no rebuild");
         let on2 = set_dehaze(&base, 0.9, 8);
         assert!(!needs_full_rebuild(&on, &on2), "amount-only: no rebuild");
-        // Radius change alters the halo → rebuild (same as Sharpen's radius).
         let on3 = set_dehaze(&base, 0.9, 16);
-        assert!(needs_full_rebuild(&on2, &on3), "radius change: rebuild");
-        // Turning dehaze off removes the halo → rebuild.
-        assert!(needs_full_rebuild(&on, &base), "dehaze off = halo change");
+        assert!(!needs_full_rebuild(&on2, &on3), "radius change: no rebuild");
+        assert!(!needs_full_rebuild(&on, &base), "dehaze off: no rebuild");
     }
 }

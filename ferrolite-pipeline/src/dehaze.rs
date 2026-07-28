@@ -253,18 +253,22 @@ pub fn transmission_working_dims(w: u32, h: u32) -> (u32, u32, u32) {
     ((w / scale).max(1), (h / scale).max(1), scale)
 }
 
-/// Halo (px) a tiled full-res dehaze pass must over-fetch: the op's patch radius
-/// plus the guided filter window (clamped) when active, else 0 (mirrors `sharpen_halo`).
-/// Consumed by the tile producer; a radius change therefore triggers `needs_full_rebuild`,
-/// an amount-only change does not.
-pub fn dehaze_halo(op: Option<Dehaze>) -> u32 {
-    match op {
-        Some(d) if d.amount != 0.0 => {
-            let r = d.radius.min(MAX_DEHAZE_RADIUS);
-            r + 2 * guided_radius(r)
-        }
-        _ => 0,
-    }
+/// Halo (px) a tiled full-res dehaze pass must over-fetch: ALWAYS 0 (ST-Task 3).
+///
+/// Before ST-Task 3, `TileEditPipeline` computed its own per-tile transmission
+/// (the ~14-pass guided-filter dark-channel map), which needed the op's patch
+/// radius plus the guided-filter window fetched across tile borders to stay
+/// seamless — hence a `7r` halo. That per-tile transmission is gone: the tiled
+/// `DehazeRecoveryNode` now just SAMPLES a shared whole-image transmission
+/// (computed once by the whole-image `EditPipeline`, source-space, bilinearly
+/// upsampled) at each pixel's own source UV. A per-pixel sample has no
+/// neighbourhood to over-fetch — the guided filter's neighbourhood is entirely
+/// contained in the whole-image computation, off the tiled path — so the tiled
+/// tier contributes no halo for dehaze (mirrors why `LocalAdjustments`, another
+/// per-pixel sample, contributes none either). Kept `Option<Dehaze>`-shaped for
+/// call-site compatibility even though the op no longer affects the result.
+pub fn dehaze_halo(_op: Option<Dehaze>) -> u32 {
+    0
 }
 
 #[cfg(test)]
@@ -363,9 +367,11 @@ mod tests {
     }
 
     #[test]
-    fn dehaze_halo_is_op_radius_or_zero() {
+    fn dehaze_halo_is_always_zero() {
+        // ST-Task 3: the tiled recovery is a per-pixel sample of the shared
+        // whole-image transmission — no neighbourhood, no halo, regardless of
+        // amount/radius (mirrors the doc on `dehaze_halo`).
         assert_eq!(dehaze_halo(None), 0);
-        // amount 0 contributes no halo even with a radius set.
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: 0.0,
@@ -373,28 +379,26 @@ mod tests {
             })),
             0
         );
-        // With guided filter: halo = r + 2*gr(r).
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: 0.5,
                 radius: 10
             })),
-            10 + 2 * guided_radius(10)
+            0
         );
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: -0.5,
                 radius: 6
             })),
-            6 + 2 * guided_radius(6)
+            0
         );
-        // Clamped to MAX_DEHAZE_RADIUS (no u32→i32 wrap).
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: 0.5,
                 radius: u32::MAX
             })),
-            MAX_DEHAZE_RADIUS + 2 * guided_radius(MAX_DEHAZE_RADIUS)
+            0
         );
     }
 
@@ -518,13 +522,15 @@ mod tests {
 
     #[test]
     fn dehaze_halo_includes_guided_window() {
-        // Halo now covers the block-min radius PLUS the two guided-filter box windows.
+        // ST-Task 3: no more per-tile transmission/guided-filter window — the
+        // tiled halo is always 0 regardless of amount/radius (see the updated
+        // `dehaze_halo_is_always_zero` above and `dehaze_halo`'s doc).
         assert_eq!(
             dehaze_halo(Some(Dehaze {
                 amount: 0.5,
                 radius: 8
             })),
-            8 + 2 * guided_radius(8)
+            0
         );
         assert_eq!(
             dehaze_halo(Some(Dehaze {

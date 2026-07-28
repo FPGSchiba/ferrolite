@@ -1,17 +1,20 @@
 //! The Grade tab: four color-grading wheels (Shadows/Midtones/Highlights/Global),
 //! each with a Lum slider, plus Blending and Balance sliders. Reuses the shared
-//! `color_wheel` widget 4× (id-salted) and routes every edit through the
-//! identity-eliding `ops_edit::set_color_grade`. Per-control reset lives on each
+//! `color_wheel` widget 4× (id-salted). Renders against a `ScopedEdit` (design
+//! 2026-07-28 §2, Phase 2b Task 3), so the same widget drives both the global
+//! Color Grading and a selected mask's — writes go through `ScopedEdit::write`,
+//! which normalizes identity structures away on the doc side. `MaskNone`
+//! renders a faint hint and returns `None`. Per-control reset lives on each
 //! wheel (its own reset → neutral) and each `EguiSlider` (its reset column).
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::ops_edit::set_color_grade;
+use crate::develop::scope::ScopedEdit;
 use crate::icons;
 use crate::theme;
 use crate::widgets::color_wheel;
 use crate::widgets::slider::EguiSlider;
 use crate::widgets::WheelEdit;
-use ferrolite_pipeline::{ColorGrade, GradeWheel, OpKind, OpStack};
+use ferrolite_pipeline::{ColorGrade, GradeWheel, OpKind};
 
 /// True when any wheel or the blending/balance sliders differ (emit gate).
 pub(crate) fn grade_changed(a: &ColorGrade, b: &ColorGrade) -> bool {
@@ -63,8 +66,12 @@ fn wheel_row(
     (changed, commit)
 }
 
-pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
-    let mut cg = stack.color_grade().unwrap_or_default();
+pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
+    let Some(set) = scoped.set() else {
+        ui.label(egui::RichText::new("Create or select a mask first").color(theme::TEXT_FAINT));
+        return None;
+    };
+    let mut cg = set.color_grade;
     let before = cg;
 
     ui.horizontal(|ui| {
@@ -161,17 +168,24 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
     if !changed || !grade_changed(&before, &cg) {
         return None;
     }
-    Some(EditOutcome {
-        stack: set_color_grade(stack, cg),
-        kind: OpKind::ColorGrade,
-        commit,
-    })
+    let mut new_set = set.clone();
+    new_set.color_grade = cg;
+    let out = scoped.write(new_set, OpKind::ColorGrade, commit);
+    if let Some(o) = &out {
+        if !o.commit {
+            // Mid-drag on a wheel/slider: suppress the mask overlay the same
+            // way a dragged `scoped_slider` does.
+            scoped.adjusting.set(true);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrolite_pipeline::{ColorGrade, GradeWheel};
+    use crate::develop::scope::{EditScope, ScopedEdit};
+    use ferrolite_pipeline::{ColorGrade, GradeWheel, OpStack};
 
     #[test]
     fn grade_changed_detects_a_wheel_edit() {
@@ -210,6 +224,7 @@ mod tests {
     fn test_show_renders_in_2col_and_1col_layouts() {
         let ctx = egui::Context::default();
         let stack = OpStack::default();
+        let scoped = ScopedEdit::new(EditScope::Global, &stack);
 
         for width in [240.0_f32, 320.0_f32, 450.0_f32] {
             let screen_rect =
@@ -220,7 +235,7 @@ mod tests {
             };
             let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let outcome = show(ui, &stack);
+                    let outcome = show(ui, &scoped);
                     assert!(outcome.is_none(), "Unmodified grade widget returns None");
                 });
             });
@@ -231,6 +246,7 @@ mod tests {
     fn test_lum_slider_compact_label_width_in_2x2_grid() {
         let ctx = egui::Context::default();
         let stack = OpStack::default();
+        let scoped = ScopedEdit::new(EditScope::Global, &stack);
         let width = 350.0_f32;
 
         let screen_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
@@ -241,7 +257,7 @@ mod tests {
 
         let output = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let _ = show(ui, &stack);
+                let _ = show(ui, &scoped);
             });
         });
 
@@ -276,6 +292,7 @@ mod tests {
     fn test_lum_slider_symmetrical_centering_in_2x2_grid() {
         let ctx = egui::Context::default();
         let stack = OpStack::default();
+        let scoped = ScopedEdit::new(EditScope::Global, &stack);
         let width = 350.0_f32;
 
         let screen_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 600.0));
@@ -286,7 +303,7 @@ mod tests {
 
         let output = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let _ = show(ui, &stack);
+                let _ = show(ui, &scoped);
             });
         });
 

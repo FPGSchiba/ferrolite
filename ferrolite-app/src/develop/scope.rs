@@ -150,6 +150,22 @@ mod tests {
     }
 
     #[test]
+    fn scoped_curve_write_lands_in_the_selected_mask() {
+        // Build a doc with one mask; a Mask(0)-scoped write of a curve must land in
+        // layers[0].adjustments.tone_curve and leave the global curve untouched.
+        use crate::develop::scope::{EditScope, ScopedEdit};
+        use ferrolite_pipeline::{OpKind, OpStack};
+        let doc = crate::develop::mask_edit::create_mask(&OpStack::default(), "M".into());
+        let scoped = ScopedEdit::new(EditScope::Mask(0), &doc);
+        let mut new_set = scoped.set().unwrap().clone();
+        new_set.tone_curve.points = vec![(0.0, 0.2), (1.0, 1.0)];
+        let out = scoped.write(new_set, OpKind::ToneCurve, true).unwrap();
+        assert_eq!(out.kind, OpKind::LocalAdjustments);
+        assert!(!out.stack.layers[0].adjustments.tone_curve.is_identity());
+        assert!(out.stack.global.tone_curve.is_identity());
+    }
+
+    #[test]
     fn stale_mask_index_reads_and_writes_none() {
         let doc = ferrolite_pipeline::OpStack::default(); // zero layers
         let s = ScopedEdit::new(EditScope::Mask(2), &doc);

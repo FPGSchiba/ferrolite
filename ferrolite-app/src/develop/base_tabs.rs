@@ -67,20 +67,8 @@ impl PanelTab for LightTab {
         };
         section_header(ui, "TONE CURVE", open);
         if *open {
-            match scope {
-                EditScope::Global => {
-                    if let Some(curve_out) = curve_widget::show(ui, &stack) {
-                        out = Some(curve_out);
-                    }
-                }
-                EditScope::Mask(_) | EditScope::MaskNone => {
-                    ui.label(
-                        egui::RichText::new(
-                            "Per-mask Tone Curve arrives with the layer engine (Phase 2b)",
-                        )
-                        .color(theme::TEXT_FAINT),
-                    );
-                }
+            if let Some(curve_out) = curve_widget::show(ui, &scoped) {
+                out = Some(curve_out);
             }
         }
 
@@ -122,21 +110,9 @@ impl PanelTab for ColorTab {
         };
         section_header(ui, "COLOR (HSL)", open);
         if *open {
-            match scope {
-                EditScope::Global => {
-                    if let Some(v) = state.viewer.as_mut() {
-                        if let Some(o) = hsl_widget::show(ui, &stack, &mut v.hsl_band) {
-                            out = Some(o);
-                        }
-                    }
-                }
-                EditScope::Mask(_) | EditScope::MaskNone => {
-                    ui.label(
-                        egui::RichText::new(
-                            "Per-mask HSL arrives with the layer engine (Phase 2b)",
-                        )
-                        .color(theme::TEXT_FAINT),
-                    );
+            if let Some(v) = state.viewer.as_mut() {
+                if let Some(o) = hsl_widget::show(ui, &scoped, &mut v.hsl_band) {
+                    out = Some(o);
                 }
             }
         }
@@ -167,20 +143,8 @@ impl PanelTab for ColorTab {
         };
         section_header(ui, "COLOR GRADING", open);
         if *open {
-            match scope {
-                EditScope::Global => {
-                    if let Some(grade_out) = grade_widget::show(ui, &stack) {
-                        out = Some(grade_out);
-                    }
-                }
-                EditScope::Mask(_) | EditScope::MaskNone => {
-                    ui.label(
-                        egui::RichText::new(
-                            "Per-mask Color Grading arrives with the layer engine (Phase 2b)",
-                        )
-                        .color(theme::TEXT_FAINT),
-                    );
-                }
+            if let Some(grade_out) = grade_widget::show(ui, &scoped) {
+                out = Some(grade_out);
             }
         }
 

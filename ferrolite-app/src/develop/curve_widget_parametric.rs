@@ -1,13 +1,15 @@
 //! Parametric region sub-panel for the Curve tab: Highlights/Lights/Darks/
 //! Shadows region sliders + three split sliders (each with the `EguiSlider`
 //! per-control reset), plus a small read-only plot of the baked parametric
-//! shape. Edits route through `ops_edit::set_tone_curve` (identity-eliding).
+//! shape. Edits route through the caller's `ScopedEdit::write` (Phase 2b Task 3),
+//! same scoped path as `curve_widget` itself — identity normalization happens
+//! doc-side in `with_global`/`with_layer_adjustments`.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::ops_edit::set_tone_curve;
+use crate::develop::scope::ScopedEdit;
 use crate::theme;
 use crate::widgets::slider::EguiSlider;
-use ferrolite_pipeline::{parametric_curve_lut, OpKind, OpStack, ParametricCurve, ToneCurve};
+use ferrolite_pipeline::{parametric_curve_lut, OpKind, ParametricCurve, ToneCurve};
 
 const OVERLAY_H: f32 = 60.0;
 
@@ -16,7 +18,7 @@ pub(crate) fn param_changed(a: &ParametricCurve, b: &ParametricCurve) -> bool {
     a != b
 }
 
-pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOutcome> {
+pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit, tc: &ToneCurve) -> Option<EditOutcome> {
     let mut p = tc.parametric;
     let before = p;
 
@@ -168,11 +170,10 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, tc: &ToneCurve) -> Option<EditOu
         parametric: p,
         ..tc.clone()
     };
-    Some(EditOutcome {
-        stack: set_tone_curve(stack, new_tc),
-        kind: OpKind::ToneCurve,
-        commit: drag_stopped || !dragged,
-    })
+    let set = scoped.set()?;
+    let mut new_set = set.clone();
+    new_set.tone_curve = new_tc;
+    scoped.write(new_set, OpKind::ToneCurve, drag_stopped || !dragged)
 }
 
 /// Draw a small read-only plot of the baked parametric LUT (diagonal reference +

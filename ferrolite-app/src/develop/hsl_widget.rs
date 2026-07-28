@@ -1,9 +1,15 @@
 //! HSL widget: 8-band swatch row + per-band Hue/Sat/Lum sliders. The canonical
 //! band order is red, orange, yellow, green, aqua, blue, purple, magenta.
+//! Renders against a `ScopedEdit` (design 2026-07-28 §2, Phase 2b Task 3), so
+//! the same widget drives both the global HSL and a selected mask's; `band` is
+//! UI-only state (deliberately shared between scopes). `MaskNone` renders a
+//! faint hint and returns `None`.
 
 use crate::develop::adjustment_panel::EditOutcome;
+use crate::develop::scope::ScopedEdit;
+use crate::theme;
 use crate::widgets::slider::EguiSlider;
-use ferrolite_pipeline::{Hsl, HslBand, Op, OpKind, OpStack};
+use ferrolite_pipeline::{HslBand, OpKind};
 
 const SWATCHES: [(u8, u8, u8); 8] = [
     (0xc7, 0x54, 0x50),
@@ -16,14 +22,12 @@ const SWATCHES: [(u8, u8, u8); 8] = [
     (0xb5, 0x6d, 0x9a),
 ];
 
-pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<EditOutcome> {
-    let mut hsl = stack.hsl().unwrap_or(Hsl {
-        bands: [HslBand {
-            hue: 0.0,
-            sat: 0.0,
-            lum: 0.0,
-        }; 8],
-    });
+pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit, band: &mut usize) -> Option<EditOutcome> {
+    let Some(set) = scoped.set() else {
+        ui.label(egui::RichText::new("Create or select a mask first").color(theme::TEXT_FAINT));
+        return None;
+    };
+    let mut hsl = set.hsl;
     let mut out = None;
 
     ui.horizontal(|ui| {
@@ -87,26 +91,21 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack, band: &mut usize) -> Option<Edit
         signed: true,
         custom_label_w: None,
     });
+    if rh.dragged() || rs.dragged() || rl.dragged() {
+        // Mid-drag on a band slider: suppress the mask overlay the same way a
+        // dragged `scoped_slider` does.
+        scoped.adjusting.set(true);
+    }
+
     if rh.changed() || rs.changed() || rl.changed() {
         hsl.bands[b] = HslBand { hue, sat, lum };
-        let all_zero = hsl
-            .bands
-            .iter()
-            .all(|x| x.hue == 0.0 && x.sat == 0.0 && x.lum == 0.0);
-        let s = if all_zero {
-            stack.reset(OpKind::Hsl)
-        } else {
-            stack.set_op(Op::Hsl(hsl))
-        };
         let commit = rh.drag_stopped()
             || rs.drag_stopped()
             || rl.drag_stopped()
             || !(rh.dragged() || rs.dragged() || rl.dragged());
-        out = Some(EditOutcome {
-            stack: s,
-            kind: OpKind::Hsl,
-            commit,
-        });
+        let mut new_set = set.clone();
+        new_set.hsl = hsl;
+        out = scoped.write(new_set, OpKind::Hsl, commit);
     }
     out
 }

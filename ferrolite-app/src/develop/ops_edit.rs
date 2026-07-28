@@ -1,29 +1,13 @@
 //! Pure helpers: map a UI value to a new immutable `OpStack`. A value at its
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
+//!
+//! Tone curve and color grade no longer route through dedicated `set_*`
+//! helpers here (Phase 2b Task 3): both are now `AdjustmentSet` fields written
+//! via the scoped-edit path (`crate::develop::scope::ScopedEdit::write`),
+//! whose `with_global`/`with_layer_adjustments` normalize identity structures
+//! away doc-side, same effect as the old identity-eliding helpers.
 
-use ferrolite_pipeline::{sharpen_halo, ColorGrade, LensCorrection, Op, OpStack, ToneCurve};
-
-/// Set the tone curve, or REMOVE the op entirely when the whole curve (Master +
-/// R/G/B + parametric) is identity — so `is_identity()`/`has_edits` stay correct,
-/// mirroring every other `set_*` helper here.
-pub fn set_tone_curve(s: &OpStack, tc: ToneCurve) -> OpStack {
-    if tc.is_identity() {
-        s.reset(ferrolite_pipeline::OpKind::ToneCurve)
-    } else {
-        s.set_op(Op::ToneCurve(tc))
-    }
-}
-
-/// Set the color grade, or REMOVE the op entirely when every wheel is neutral
-/// (no tint, no lum) — so `is_identity()`/`has_edits` stay correct, mirroring
-/// every other `set_*` helper here.
-pub fn set_color_grade(s: &OpStack, cg: ColorGrade) -> OpStack {
-    if cg.is_identity() {
-        s.reset(ferrolite_pipeline::OpKind::ColorGrade)
-    } else {
-        s.set_op(Op::ColorGrade(cg))
-    }
-}
+use ferrolite_pipeline::{sharpen_halo, LensCorrection, Op, OpStack};
 
 /// A `LensCorrection` with no matched lens AND every correction disabled is
 /// identity (nothing to bake, nothing to apply) → remove the op entirely so
@@ -246,146 +230,6 @@ mod tests {
         // Different lens id → rebuild (new grid + halo):
         let other = base.set_op(Op::LensCorrection(lc(true, "B")));
         assert!(needs_full_rebuild(&on, &other));
-    }
-
-    #[test]
-    fn set_tone_curve_identity_removes_the_op() {
-        use ferrolite_pipeline::ToneCurve;
-        let s = set_tone_curve(&OpStack::default(), ToneCurve::default());
-        assert!(s.tone_curve().is_none(), "fully-identity curve = no op");
-        assert!(s.is_identity());
-    }
-
-    #[test]
-    fn set_tone_curve_master_edit_sets_the_op() {
-        use ferrolite_pipeline::{CurveMode, ToneCurve};
-        let tc = ToneCurve {
-            points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
-            mode: CurveMode::Smooth,
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc.clone());
-        assert_eq!(s.tone_curve(), Some(tc));
-    }
-
-    #[test]
-    fn set_tone_curve_channel_only_edit_is_kept() {
-        use ferrolite_pipeline::{CurveMode, PointCurve, ToneCurve};
-        let tc = ToneCurve {
-            blue: PointCurve {
-                points: vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)],
-                mode: CurveMode::Linear,
-            },
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc);
-        assert!(
-            s.tone_curve().is_some(),
-            "a blue-only curve is not identity"
-        );
-    }
-
-    #[test]
-    fn set_tone_curve_parametric_only_edit_is_kept() {
-        use ferrolite_pipeline::{ParametricCurve, ToneCurve};
-        let tc = ToneCurve {
-            parametric: ParametricCurve {
-                highlights: -0.5,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc);
-        assert!(s.tone_curve().is_some());
-    }
-
-    #[test]
-    fn set_tone_curve_split_only_edit_is_kept() {
-        // Regression: a parametric SPLIT moved off default (zero regions) must
-        // keep the op so the split slider persists instead of snapping back.
-        use ferrolite_pipeline::{ParametricCurve, ToneCurve};
-        let tc = ToneCurve {
-            parametric: ParametricCurve {
-                midtone_split: 0.65,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc);
-        assert!(
-            s.tone_curve().is_some(),
-            "a split-only parametric edit must not be elided"
-        );
-    }
-
-    #[test]
-    fn set_color_grade_blending_or_balance_only_edit_is_kept() {
-        // Regression: Blending/Balance moved off default (neutral wheels) must
-        // keep the op so those sliders persist instead of snapping back.
-        use ferrolite_pipeline::ColorGrade;
-        let s = set_color_grade(
-            &OpStack::default(),
-            ColorGrade {
-                blending: 0.8,
-                ..Default::default()
-            },
-        );
-        assert!(
-            s.color_grade().is_some(),
-            "a blending-only grade edit must not be elided"
-        );
-        let s2 = set_color_grade(
-            &OpStack::default(),
-            ColorGrade {
-                balance: -0.4,
-                ..Default::default()
-            },
-        );
-        assert!(
-            s2.color_grade().is_some(),
-            "a balance-only grade edit must not be elided"
-        );
-    }
-
-    #[test]
-    fn set_color_grade_identity_removes_the_op() {
-        use ferrolite_pipeline::ColorGrade;
-        let s = set_color_grade(&OpStack::default(), ColorGrade::default());
-        assert!(s.color_grade().is_none(), "neutral grade = no op");
-        assert!(s.is_identity());
-    }
-
-    #[test]
-    fn set_color_grade_tinted_wheel_sets_the_op() {
-        use ferrolite_pipeline::{ColorGrade, GradeWheel};
-        let cg = ColorGrade {
-            highlights: GradeWheel {
-                hue: 40.0,
-                sat: 0.3,
-                lum: 0.0,
-            },
-            ..Default::default()
-        };
-        let s = set_color_grade(&OpStack::default(), cg);
-        assert_eq!(s.color_grade(), Some(cg));
-    }
-
-    #[test]
-    fn set_color_grade_lum_only_is_kept() {
-        use ferrolite_pipeline::{ColorGrade, GradeWheel};
-        let cg = ColorGrade {
-            global: GradeWheel {
-                hue: 0.0,
-                sat: 0.0,
-                lum: 0.25,
-            },
-            ..Default::default()
-        };
-        let s = set_color_grade(&OpStack::default(), cg);
-        assert!(
-            s.color_grade().is_some(),
-            "a lum-only grade is not identity"
-        );
     }
 
     #[test]

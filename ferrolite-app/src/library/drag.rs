@@ -2,11 +2,44 @@
 //! collection/tag rows. Mirrors the export-queue DnD pattern (egui native
 //! `DragAndDrop` payload + manual drop detection).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// The images being dragged from the grid. egui `DragAndDrop` payload type.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraggedImages(pub Vec<i64>);
+
+/// A collection row being dragged (onto another collection row, to nest it,
+/// or onto the Collections root header, to un-nest it). A distinct type from
+/// `DraggedImages` and from the raw `i64` dnd payload the export queue uses
+/// for its own reorder drags (`export_module::queue_list`) — egui's
+/// `DragAndDrop` payload is matched by type, so without this newtype a
+/// collection drag could be misread as an export-queue reorder drag (or vice
+/// versa) if both ever hover the same frame.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct DraggedCollection(pub i64);
+
+/// Pure: true if making `dragged` a child of `target` would create a cycle —
+/// i.e. `target` is `dragged` itself, or `target` is already a descendant of
+/// `dragged` (walking up `target`'s ancestor chain reaches `dragged`).
+/// Dropping onto `dragged`'s *current* parent is NOT a cycle: it's a no-op
+/// move and is allowed.
+pub fn would_create_cycle(
+    dragged: i64,
+    target: i64,
+    parent_of: &HashMap<i64, Option<i64>>,
+) -> bool {
+    if dragged == target {
+        return true;
+    }
+    let mut cur = Some(target);
+    while let Some(id) = cur {
+        if id == dragged {
+            return true;
+        }
+        cur = parent_of.get(&id).copied().flatten();
+    }
+    false
+}
 
 /// Which images a drag starting on `grabbed` should carry: the whole
 /// multi-selection when `grabbed` is part of it, otherwise just `grabbed`.
@@ -71,6 +104,80 @@ pub fn row_drop_target(ui: &egui::Ui, row_rect: egui::Rect) -> Option<Vec<i64>> 
     None
 }
 
+/// Manual drop-target hit test for a collection row accepting a
+/// `DraggedCollection` payload (nesting one collection under another).
+/// Mirrors `row_drop_target`'s pattern and highlight (same `ACCENT_BG_SEL`
+/// fill) but for the collection payload type. Returns the dragged
+/// collection's id on release over `row_rect`. The caller decides whether
+/// the drop is cycle-safe (see `would_create_cycle`) before writing it.
+pub fn collection_drop_target(ui: &egui::Ui, row_rect: egui::Rect) -> Option<i64> {
+    let _dragged = egui::DragAndDrop::payload::<DraggedCollection>(ui.ctx())?;
+    let pointer = ui.ctx().pointer_interact_pos()?;
+    if !row_rect.contains(pointer) {
+        return None;
+    }
+    ui.painter().rect_filled(
+        row_rect.expand2(egui::vec2(4.0, 1.0)),
+        3.0,
+        crate::theme::ACCENT_BG_SEL,
+    );
+    if ui.input(|i| i.pointer.any_released()) {
+        return egui::DragAndDrop::take_payload::<DraggedCollection>(ui.ctx()).map(|p| p.0);
+    }
+    None
+}
+
+/// How long a rejected-drop row flashes red for (`flash_reject` /
+/// `paint_reject_flash`). No timers or threads: driven entirely by
+/// `ui.input(|i| i.time)` plus a bounded `request_repaint_after` so the
+/// flash reliably clears itself even without further input.
+const REJECT_FLASH_SECS: f64 = 0.6;
+
+fn reject_flash_id() -> egui::Id {
+    egui::Id::new("library_collection_reject_flash")
+}
+
+/// Mark `row_id` as having just rejected a drop (e.g. a would-be cycle).
+/// Call once, on release; `paint_reject_flash` renders the resulting flash
+/// on every frame until it expires.
+pub fn flash_reject(ctx: &egui::Context, row_id: i64) {
+    let until = ctx.input(|i| i.time) + REJECT_FLASH_SECS;
+    ctx.data_mut(|d| d.insert_temp(reject_flash_id(), (row_id, until)));
+}
+
+/// True if the stored `(row_id, until)` flash state means `row_id` should
+/// currently be painted red, given the current time `now`. Pure — split out
+/// from `paint_reject_flash` so the expiry/row-matching logic is testable
+/// without an egui context.
+fn is_flashing(flash: Option<(i64, f64)>, row_id: i64, now: f64) -> bool {
+    matches!(flash, Some((id, until)) if id == row_id && until > now)
+}
+
+/// Paint `row_rect` with a red-tinted fill if `row_id` is currently flashing
+/// from a rejected drop (see `flash_reject`); no-op otherwise. Requests a
+/// follow-up repaint so the flash disappears on schedule even with no other
+/// input driving frames.
+pub fn paint_reject_flash(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    row_rect: egui::Rect,
+    row_id: i64,
+) {
+    let flash = ctx.data(|d| d.get_temp::<(i64, f64)>(reject_flash_id()));
+    let now = ctx.input(|i| i.time);
+    if !is_flashing(flash, row_id, now) {
+        return;
+    }
+    let until = flash.expect("is_flashing confirmed Some").1;
+    let red = crate::theme::SEMANTIC_RED;
+    painter.rect_filled(
+        row_rect.expand2(egui::vec2(4.0, 1.0)),
+        3.0,
+        egui::Color32::from_rgba_unmultiplied(red.r(), red.g(), red.b(), 90),
+    );
+    ctx.request_repaint_after(std::time::Duration::from_secs_f64(until - now));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +199,66 @@ mod tests {
         // A lone selected image drags just itself (len==1 → not "multi").
         let sel: HashSet<i64> = [5].into_iter().collect();
         assert_eq!(ids_for_drag(5, &sel), vec![5]);
+    }
+
+    #[test]
+    fn self_drop_is_a_cycle() {
+        let parent_of: HashMap<i64, Option<i64>> = HashMap::new();
+        assert!(would_create_cycle(1, 1, &parent_of));
+    }
+
+    #[test]
+    fn dropping_onto_own_child_is_a_cycle() {
+        // 2's parent is 1: making 1 a child of 2 would cycle.
+        let parent_of: HashMap<i64, Option<i64>> = [(2, Some(1))].into_iter().collect();
+        assert!(would_create_cycle(1, 2, &parent_of));
+    }
+
+    #[test]
+    fn dropping_onto_own_grandchild_is_a_cycle() {
+        // 3's parent is 2, 2's parent is 1: making 1 a child of 3 would cycle.
+        let parent_of: HashMap<i64, Option<i64>> =
+            [(2, Some(1)), (3, Some(2))].into_iter().collect();
+        assert!(would_create_cycle(1, 3, &parent_of));
+    }
+
+    #[test]
+    fn dropping_onto_sibling_is_not_a_cycle() {
+        let parent_of: HashMap<i64, Option<i64>> =
+            [(2, Some(1)), (3, Some(1))].into_iter().collect();
+        assert!(!would_create_cycle(2, 3, &parent_of));
+    }
+
+    #[test]
+    fn dropping_onto_unrelated_node_is_not_a_cycle() {
+        let parent_of: HashMap<i64, Option<i64>> = [(2, None), (3, None)].into_iter().collect();
+        assert!(!would_create_cycle(2, 3, &parent_of));
+    }
+
+    #[test]
+    fn dropping_onto_current_parent_is_not_a_cycle() {
+        // 2's current parent is 1; re-dropping 2 onto 1 is a no-op move.
+        let parent_of: HashMap<i64, Option<i64>> = [(2, Some(1))].into_iter().collect();
+        assert!(!would_create_cycle(2, 1, &parent_of));
+    }
+
+    #[test]
+    fn is_flashing_true_for_matching_row_before_expiry() {
+        assert!(is_flashing(Some((5, 10.0)), 5, 9.9));
+    }
+
+    #[test]
+    fn is_flashing_false_for_different_row() {
+        assert!(!is_flashing(Some((5, 10.0)), 7, 9.9));
+    }
+
+    #[test]
+    fn is_flashing_false_after_expiry() {
+        assert!(!is_flashing(Some((5, 10.0)), 5, 10.1));
+    }
+
+    #[test]
+    fn is_flashing_false_when_nothing_flashing() {
+        assert!(!is_flashing(None, 5, 0.0));
     }
 }

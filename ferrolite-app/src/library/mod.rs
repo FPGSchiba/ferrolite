@@ -2,6 +2,7 @@
 
 pub mod cell_state;
 pub mod collection_menu;
+pub mod collection_tree;
 pub mod develop_filter_bar;
 pub mod develop_metadata_bar;
 pub mod drag;

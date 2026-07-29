@@ -165,24 +165,22 @@ impl PanelTab for ColorTab {
 /// The Color swatch picker (not a registry slider — `AdjustmentSet.color` is
 /// an RGB+amount overlay, and only the amount fits `SliderSpec`'s single-f32
 /// shape). Moved here verbatim from `mask_panel::selected_section` (Task 6
-/// deletes the original there): mask-live commits an RGB change through
-/// `scoped.write`; global scope stays greyed with the same Phase 3 reason as
-/// the `color_amount` row it sits beside, since both gate on the same
-/// unified-layer-engine milestone.
+/// deletes the original there): both Global and Mask scope commit an RGB
+/// change through `scoped.write` (Global goes through `ScopedEdit::write`'s
+/// `with_global` path) now that the unified layer engine (Phase 3) applies
+/// the color overlay globally too. Only `MaskNone` stays greyed, same as
+/// every other scoped control.
 fn show_color_swatch(
     ui: &mut egui::Ui,
     scope: EditScope,
     scoped: &ScopedEdit<'_>,
     out: &mut Option<EditOutcome>,
 ) {
-    const GLOBAL_REASON: &str =
-        "Global color overlay arrives with the unified layer engine (Phase 3)";
-
     let set = scoped.set();
     let mut rgb = set
         .map(|s| [s.color.r, s.color.g, s.color.b])
         .unwrap_or([0.0, 0.0, 0.0]);
-    let enabled = matches!(scope, EditScope::Mask(_)) && set.is_some();
+    let enabled = matches!(scope, EditScope::Global | EditScope::Mask(_)) && set.is_some();
 
     if enabled {
         if ui.color_edit_button_rgb(&mut rgb).changed() {
@@ -197,15 +195,11 @@ fn show_color_swatch(
         return;
     }
 
-    let reason = match scope {
-        EditScope::Global => GLOBAL_REASON,
-        EditScope::Mask(_) | EditScope::MaskNone => scope::MASK_NONE_HINT,
-    };
     ui.add_enabled_ui(false, |ui| {
         ui.color_edit_button_rgb(&mut rgb);
     })
     .response
-    .on_hover_text(reason);
+    .on_hover_text(scope::MASK_NONE_HINT);
 }
 
 pub struct EffectsTab;
@@ -699,8 +693,8 @@ mod tests {
             ]
         );
         let hl = specs.iter().find(|s| s.id.0 == "highlights").unwrap();
-        assert!(!hl.global_ready && hl.mask_ready);
-        assert!(!hl.global_reason.is_empty());
+        assert!(hl.global_ready && hl.mask_ready);
+        assert!(hl.global_reason.is_empty());
         let ex = specs.iter().find(|s| s.id.0 == "exposure").unwrap();
         assert!(ex.global_ready && ex.mask_ready);
     }

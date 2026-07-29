@@ -124,12 +124,14 @@ pub fn scoped_slider(
 
 /// The `AdjustmentSet` field specs consumed by `LightTab::show`'s BASIC
 /// SLIDERS section, in display order (design 2026-07-28 §2 table; Task 6's
-/// invariant tests iterate this). Highlights/Shadows/Whites/Blacks are
-/// mask-only for now (`global_ready: false`) — they read/write
-/// `AdjustmentSet.highlights/shadows/whites/blacks` directly, distinct from
-/// the legacy `ToneCurve.parametric` region sliders (`curve_widget_parametric`)
-/// which remain the only global path to those four until the unified layer
-/// engine (Phase 3) folds them together.
+/// invariant tests iterate this). Highlights/Shadows/Whites/Blacks are now
+/// global- and mask-ready (`global_ready: true`) since the unified layer
+/// engine (Phase 3) applies the full `AdjustmentSet` globally — they
+/// read/write `AdjustmentSet.highlights/shadows/whites/blacks` directly,
+/// distinct from (and coexisting with) the legacy `ToneCurve.parametric`
+/// region sliders (`curve_widget_parametric`), a different region-math
+/// algorithm kept for Lightroom-style precedent (Basic panel vs point-curve
+/// regions).
 static LIGHT_SLIDERS: [SliderSpec; 8] = [
     SliderSpec {
         id: AdjustmentId("exposure"),
@@ -180,9 +182,9 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.highlights,
         set: |s, v| s.highlights = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: true,
-        global_reason: "Global Highlights arrive with the unified layer engine (Phase 3)",
+        global_reason: "",
         mask_reason: "",
     },
     SliderSpec {
@@ -198,9 +200,9 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.shadows,
         set: |s, v| s.shadows = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: true,
-        global_reason: "Global Shadows arrive with the unified layer engine (Phase 3)",
+        global_reason: "",
         mask_reason: "",
     },
     SliderSpec {
@@ -216,9 +218,9 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.whites,
         set: |s, v| s.whites = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: true,
-        global_reason: "Global Whites arrive with the unified layer engine (Phase 3)",
+        global_reason: "",
         mask_reason: "",
     },
     SliderSpec {
@@ -234,9 +236,9 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.blacks,
         set: |s, v| s.blacks = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: true,
-        global_reason: "Global Blacks arrive with the unified layer engine (Phase 3)",
+        global_reason: "",
         mask_reason: "",
     },
     SliderSpec {
@@ -283,11 +285,11 @@ pub fn light_sliders() -> &'static [SliderSpec] {
 }
 
 /// The Color tab's COLOR MIX specs, in display order (design 2026-07-28 §2
-/// table; Task 6's invariant tests iterate this). None are global-live yet
-/// (`global_ready: false` on all four) — Saturation/Hue/Color already have a
-/// per-mask shader (`local_adjust.wgsl`/the swatch overlay) so `mask_ready:
-/// true`; Vibrance has no shader in any scope yet (`mask_ready: false`) until
-/// the unified layer engine (Phase 3) lands it everywhere.
+/// table; Task 6's invariant tests iterate this). All four are now global-
+/// and mask-ready (`global_ready: true, mask_ready: true`): Saturation/Hue/
+/// Color already had a per-mask shader (`local_adjust.wgsl`/the swatch
+/// overlay) and now get a global path too via the unified layer engine
+/// (Phase 3), which also lands Vibrance in both scopes for the first time.
 static COLOR_SLIDERS: [SliderSpec; 4] = [
     SliderSpec {
         id: AdjustmentId("saturation"),
@@ -302,9 +304,9 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         get: |s| s.saturation,
         set: |s, v| s.saturation = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: true,
-        global_reason: "Global Saturation arrives with the unified layer engine (Phase 3)",
+        global_reason: "",
         mask_reason: "",
     },
     SliderSpec {
@@ -320,9 +322,9 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         get: |s| s.hue,
         set: |s, v| s.hue = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: true,
-        global_reason: "Global Hue arrives with the unified layer engine (Phase 3)",
+        global_reason: "",
         mask_reason: "",
     },
     SliderSpec {
@@ -338,10 +340,10 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         get: |s| s.vibrance,
         set: |s, v| s.vibrance = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
-        mask_ready: false,
-        global_reason: "Vibrance arrives with the unified layer engine (Phase 3)",
-        mask_reason: "Vibrance arrives with the unified layer engine (Phase 3)",
+        global_ready: true,
+        mask_ready: true,
+        global_reason: "",
+        mask_reason: "",
     },
     SliderSpec {
         id: AdjustmentId("color_amount"),
@@ -356,9 +358,9 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         get: |s| s.color.amount,
         set: |s, v| s.color.amount = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: true,
-        global_reason: "Global color overlay arrives with the unified layer engine (Phase 3)",
+        global_reason: "",
         mask_reason: "",
     },
 ];
@@ -649,15 +651,15 @@ mod tests {
         let ids: Vec<&str> = specs.iter().map(|s| s.id.0).collect();
         assert_eq!(ids, vec!["saturation", "hue", "vibrance", "color_amount"]);
         assert!(
-            specs.iter().all(|s| !s.global_ready),
-            "none global-live until Phase 3"
+            specs.iter().all(|s| s.global_ready),
+            "all color rows go global-live with the Phase 3 engine"
+        );
+        assert!(
+            specs.iter().all(|s| s.mask_ready),
+            "all color rows (incl. vibrance) are mask-ready with the Phase 3 engine"
         );
         let vib = specs.iter().find(|s| s.id.0 == "vibrance").unwrap();
-        assert!(!vib.mask_ready, "vibrance has no shader in any scope yet");
-        assert!(specs
-            .iter()
-            .filter(|s| s.id.0 != "vibrance")
-            .all(|s| s.mask_ready));
+        assert!(vib.global_ready && vib.mask_ready);
     }
 
     #[test]

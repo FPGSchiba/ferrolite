@@ -321,6 +321,36 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                 },
             )),
         ),
+        // `vibrance_global`: a global vibrance adjustment (0.5), regression-
+        // pinning the grey-snap fix to the global-order vibrance branch.
+        // Vibrance has no dedicated `Op` variant — it's a plain `AdjustmentSet`
+        // field written via `with_global` (the same scoped-edit write path the
+        // app uses for `EditScope::Global`).
+        //
+        // A *pure* vibrance-only doc would be indistinguishable from identity
+        // against `hsv_sweep_source`: every non-grey pixel in that source has
+        // either HSV S=1 or V=1, and `rgb_to_hsl`'s `s = d / (1 - |2l-1|)`
+        // reduces to exactly 1 whenever one channel sits at the 0/1 rail — so
+        // the vibrance fade weight `w = clamp(s, 0, 1)` is pinned to 1 and
+        // `(1 - w)` is exactly 0 for virtually the whole image, regardless of
+        // the vibrance amount. A small global exposure lift (+1.5 EV) breaks
+        // that: it pushes the source's already-at-1.0 channel past 1.0 into
+        // scene-linear over-range, which is exactly the s >> 1 regime the
+        // grey-snap bug lived in (see the CPU unit test
+        // `vibrance_does_not_grey_snap_scene_linear_high_saturation_pixel` for
+        // the isolated-formula version of this same scenario). Exposure lives
+        // in `light_segment` (applied at the Light-stage node) and vibrance in
+        // `color_segment` (applied at the Color-stage node), so both fields on
+        // one `global` AdjustmentSet compose exactly as the app would: exposure
+        // first, vibrance second, on the same over-bright pixels.
+        (
+            "vibrance_global",
+            OpStack::default().with_global(AdjustmentSet {
+                exposure: 1.5,
+                vibrance: 0.5,
+                ..Default::default()
+            }),
+        ),
     ]
 }
 

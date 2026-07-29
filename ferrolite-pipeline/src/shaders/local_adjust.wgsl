@@ -172,12 +172,19 @@ fn adjust(rgb: vec3<f32>) -> vec3<f32> {
         c = hsl2rgb(hsl);
     }
     // Vibrance (Phase 3, new — both scopes): fades out as a pixel approaches
-    // full saturation. Slots after hue, before the tone curve; gated on
-    // non-zero so a zero-vibrance layer never enters the round trip.
+    // full saturation. Weighted by the CLAMPED saturation `w` (not the raw HSL
+    // saturation, which can be >> 1 for scene-linear pixels) so `(1 - w)` never
+    // goes hugely negative and snaps such a pixel to grey (or, for negative
+    // vibrance, boosts it) the instant vibrance leaves zero. Only the lower
+    // bound is clamped (0.0) — s > 1 is a legitimate scene-linear state, not an
+    // error to clip away. Slots after hue, before the tone curve; gated on
+    // non-zero so a zero-vibrance layer never enters the round trip. Keep in
+    // lockstep with the CPU reference in `uniforms.rs`'s `light_color_apply`.
     if (p.order_and_coverage.z != 0.0) {
         var hsl = rgb2hsl(max(c, vec3<f32>(0.0)));
         let v = p.order_and_coverage.z;
-        hsl.y = clamp(hsl.y * (1.0 + v * (1.0 - hsl.y)), 0.0, 1.0);
+        let w = clamp(hsl.y, 0.0, 1.0);
+        hsl.y = max(hsl.y * (1.0 + v * (1.0 - w)), 0.0);
         c = hsl2rgb(hsl);
     }
     // Phase 2b: per-layer tone curve (LUT), HSL bands, color grade — ported from

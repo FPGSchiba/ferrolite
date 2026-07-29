@@ -565,7 +565,11 @@ pub struct LocalAdjustUniform {
     // ── Phase 3 (fused layer engine): stage order + coverage flags + vibrance.
     /// x: 1.0 = global order (WB applied before contrast), 0.0 = mask order
     /// (contrast before WB — the historical/existing per-mask order, kept as
-    /// the default so an untouched call site stays byte-identical). y: 1.0 =
+    /// the default so an untouched call site stays byte-identical). `x` also
+    /// gates the mask-path floor clamp at the end of `adjust()`/
+    /// `light_color_apply` (clamped when `x == 0`, i.e. mask order; skipped
+    /// when `x != 0`, i.e. global order — see the comment at that clamp for
+    /// why). y: 1.0 =
     /// force full coverage (the shader skips the mask sample entirely and uses
     /// m = 1.0 — NOT merely a post-hoc override, so an out-of-bounds/degenerate
     /// mask texture bound for a global pseudo-layer is never read). z: vibrance
@@ -812,13 +816,22 @@ pub fn light_color_apply(
         c = hsl_to_rgb(hsl);
     }
     // Vibrance (Phase 3, new — both scopes): a saturation boost that fades as a
-    // pixel approaches full saturation; `s' = s * (1 + vibrance * (1 - s))`,
-    // clamped to [0,1]. Slots after hue, before the tone curve. Gated on
-    // non-zero (like the hue step above) so a zero-vibrance AdjustmentSet stays
-    // bit-exact through the rgb2hsl/hsl2rgb round trip.
+    // pixel approaches full saturation; `s' = s * (1 + vibrance * (1 - w))`
+    // where `w = clamp(s, 0, 1)`. Scene-linear pixels can have HSL saturation
+    // s >> 1 (e.g. a strongly-graded highlight); weighting the fade term by
+    // the CLAMPED saturation (not the raw one) keeps `(1 - w)` in [0,1] so the
+    // factor never goes hugely negative and snaps such a pixel to grey (or, for
+    // negative vibrance, boosts it). For s in [0,1] (the common case) w == s
+    // and the formula is unchanged. Only the lower bound is clamped (0.0) —
+    // s > 1 is a legitimate scene-linear state and must not be clipped down to
+    // 1. Slots after hue, before the tone curve. Gated on non-zero (like the
+    // hue step above) so a zero-vibrance AdjustmentSet stays bit-exact through
+    // the rgb2hsl/hsl2rgb round trip. Keep in lockstep with the WGSL vibrance
+    // branch in `shaders/local_adjust.wgsl`.
     if a.vibrance != 0.0 {
         let mut hsl = rgb_to_hsl([c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]);
-        hsl[1] = (hsl[1] * (1.0 + a.vibrance * (1.0 - hsl[1]))).clamp(0.0, 1.0);
+        let w = hsl[1].clamp(0.0, 1.0);
+        hsl[1] = (hsl[1] * (1.0 + a.vibrance * (1.0 - w))).max(0.0);
         c = hsl_to_rgb(hsl);
     }
     // ── Phase 2b: per-layer curve → HSL bands → grade, mirroring the WGSL Task 2
@@ -1593,6 +1606,59 @@ mod tests {
                 "vibrance 0 must be a no-op: {out:?}"
             );
         }
+    }
+
+    /// Scene-linear pixels can have HSL saturation `s >> 1` (e.g. this fixture:
+    /// (1.74, 0.17, 0.17) has s ≈ 18.7). The pre-fix formula weighted the
+    /// `(1 - s)` fade term by the RAW (unclamped) saturation, so at s ≈ 18.7 the
+    /// factor `1 + v*(1-s)` went hugely negative for any non-zero vibrance,
+    /// snapping the pixel to flat grey — and doing so WORSE (more grey) for
+    /// negative vibrance, i.e. negative vibrance BOOSTED such a pixel's spread
+    /// instead of reducing it. The fix weights the fade term by the clamped
+    /// saturation `w = clamp(s, 0, 1)` instead, so `(1 - w)` stays in [0,1] and
+    /// the pixel's channel spread degrades gracefully rather than collapsing.
+    #[test]
+    fn vibrance_does_not_grey_snap_scene_linear_high_saturation_pixel() {
+        use crate::local::AdjustmentSet;
+
+        let hot = [1.74, 0.17, 0.17];
+        let spread = |c: [f32; 3]| {
+            c.iter().cloned().fold(f32::MIN, f32::max) - c.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let input_spread = spread(hot);
+        assert!(
+            input_spread > 1.0,
+            "fixture must actually be high-saturation scene-linear: spread={input_spread}"
+        );
+
+        // Positive vibrance must not collapse the pixel toward grey: its output
+        // spread must retain a sane fraction of the input spread.
+        let a_pos = AdjustmentSet {
+            vibrance: 0.3,
+            ..Default::default()
+        };
+        let out_pos = light_color_apply(hot, &a_pos, false);
+        let pos_spread = spread(out_pos);
+        assert!(
+            pos_spread >= 0.5 * input_spread,
+            "vibrance +0.3 must not grey-snap a high-saturation scene-linear pixel: \
+             input spread={input_spread} output spread={pos_spread} out={out_pos:?}"
+        );
+
+        // Negative vibrance must not INCREASE the spread (that would mean the
+        // old bug's sign flip — grey-snapping "harder" than intended — is still
+        // present).
+        let a_neg = AdjustmentSet {
+            vibrance: -0.5,
+            ..Default::default()
+        };
+        let out_neg = light_color_apply(hot, &a_neg, false);
+        let neg_spread = spread(out_neg);
+        assert!(
+            neg_spread <= input_spread + 1e-4,
+            "vibrance -0.5 must not increase a high-saturation pixel's spread: \
+             input spread={input_spread} output spread={neg_spread} out={out_neg:?}"
+        );
     }
 
     #[test]

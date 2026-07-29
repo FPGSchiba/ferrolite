@@ -48,7 +48,14 @@ struct CachedMasks {
     // `has_content_dependent_component`) — purely spatial masks (gradient/
     // radial/brush) don't care what color the pixels are, so they keep the
     // original defs+dims-only cache key (and its adjustment-only-change reuse
-    // guarantee) untouched.
+    // guarantee) untouched. Upstream light-segment (the `Light`-stage node) and
+    // dehaze changes also alter what `current` contains at this node, but are
+    // deliberately NOT folded into this key: that preserves the pre-fusion
+    // stale-mask-across-upstream-edit semantics (an upstream-only edit reused
+    // the old composited mask rather than re-compositing against the new
+    // content), and applies to the whole-image path only — the tiled path
+    // (`use_cache == false` below) composites fresh on every evaluate, so it
+    // never goes stale regardless.
     color_seg_key: Option<AdjustmentSet>,
     masks: Vec<MaskBuffer>, // one per visible layer, in visible order
 }
@@ -191,7 +198,8 @@ impl LocalAdjustmentsNode {
                         count: None,
                     },
                     // 4: per-layer 3x256 tone-curve LUT (R,G,B rows), read-only storage
-                    // buffer — same binding style as `CurveNode`'s global LUT.
+                    // buffer — same binding style as `tone_curve.wgsl`'s retired
+                    // global LUT binding.
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::COMPUTE,

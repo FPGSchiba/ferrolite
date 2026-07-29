@@ -86,7 +86,7 @@ fn time_iterations(
 
 #[test]
 #[ignore]
-fn engine_bench_pre_fusion_medians() {
+fn engine_bench_medians() {
     let Some(ctx) = GpuContext::headless() else {
         eprintln!("no GPU adapter; skipping (expected in headless CI)");
         return;
@@ -164,7 +164,7 @@ fn engine_bench_pre_fusion_medians() {
         }))
     });
 
-    eprintln!("=== engine_bench (pre-fusion) medians over {ITERATIONS} iterations, {w}x{h} ===");
+    eprintln!("=== engine bench medians over {ITERATIONS} iterations, {w}x{h} ===");
     eprintln!("(a) exposure-dirty evaluate:              {median_a:.3} ms");
     eprintln!("(b) grade-dirty evaluate:                 {median_b:.3} ms");
     eprintln!("(c) exposure-dirty + two_masks' layers:    {median_c:.3} ms");

@@ -6,7 +6,7 @@ pub mod slider;
 pub mod tabs;
 pub mod tool_button;
 #[allow(unused_imports)]
-pub use chips::{segmented_control, SegmentedControl};
+pub use chips::{multi_select_chips, segmented_control, SegmentedControl};
 #[allow(unused_imports)]
 pub use color_wheel::{color_grading_wheel, color_wheel, ColorGradingEdit, WheelEdit};
 #[allow(unused_imports)]

@@ -325,6 +325,40 @@ mod tests {
         assert_eq!(q.focal, Some((24.0, 70.0)));
     }
 
+    /// Step 1 (Task 8): `file_types` behaves as a genuine set — toggling a
+    /// chip in and back out again must round-trip to the exact same query
+    /// state, and an emptied set (the "all types" reset state) must never
+    /// reach `to_query` as an active file-type predicate.
+    #[test]
+    fn file_types_toggle_behaves_as_a_set_and_empty_means_no_predicate() {
+        let mut fs = FilterState::default();
+        assert!(fs.to_query(ViewSource::All, true).file_types.is_empty());
+
+        // Toggle a chip in: set gains exactly that member.
+        fs.file_types.insert(FileTypeChip::Jpeg);
+        let q = fs.to_query(ViewSource::All, true);
+        assert_eq!(q.file_types.len(), 1);
+        assert!(q.file_types.contains(&FileTypeChip::Jpeg));
+
+        // Toggle a second, independent chip in: both are members (a set, not
+        // a single-choice replacement).
+        fs.file_types.insert(FileTypeChip::Raw);
+        let q = fs.to_query(ViewSource::All, true);
+        assert_eq!(q.file_types.len(), 2);
+        assert!(q.file_types.contains(&FileTypeChip::Jpeg));
+        assert!(q.file_types.contains(&FileTypeChip::Raw));
+
+        // Toggle the first chip back out: only the second remains.
+        fs.file_types.remove(&FileTypeChip::Jpeg);
+        let q = fs.to_query(ViewSource::All, true);
+        assert_eq!(q.file_types.len(), 1);
+        assert!(q.file_types.contains(&FileTypeChip::Raw));
+
+        // Toggle the last one out: empty set again, no predicate.
+        fs.file_types.remove(&FileTypeChip::Raw);
+        assert!(fs.to_query(ViewSource::All, true).file_types.is_empty());
+    }
+
     #[test]
     fn to_query_defaults_forward_as_none_or_empty() {
         let q = FilterState::default().to_query(ViewSource::All, true);

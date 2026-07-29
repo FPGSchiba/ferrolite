@@ -9,7 +9,7 @@ use crate::library::filter_widgets as fw;
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
-use crate::widgets::{EguiSlider, RangeSlider, SegmentedControl};
+use crate::widgets::{draw_reset_arrow, multi_select_chips, EguiSlider, RangeSlider};
 use egui::{pos2, Color32, FontId, Rounding, Stroke};
 use ferrolite_catalog::FileTypeChip;
 use std::sync::LazyLock;
@@ -265,36 +265,66 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
 
                             ui.separator();
 
-                            // "FILE TYPE" segmented chips using SegmentedControl
-                            ui.label(
-                                egui::RichText::new("FILE TYPE")
-                                    .font(FontId::proportional(10.5_f32))
-                                    .color(theme::TEXT_DIM),
-                            );
+                            // "FILE TYPE" multi-select chips (spec L4, Task 8): each
+                            // chip independently toggles membership in
+                            // `file_types` (selected = in the set); the empty set
+                            // is the "all types" state, and the reset arrow beside
+                            // the section label clears it back to that state.
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("FILE TYPE")
+                                        .font(FontId::proportional(10.5_f32))
+                                        .color(theme::TEXT_DIM),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let modified = !state.filter.file_types.is_empty();
+                                        let (reset_rect, reset_resp) = ui.allocate_exact_size(
+                                            egui::vec2(16.0_f32, 16.0_f32),
+                                            egui::Sense::click(),
+                                        );
+                                        if reset_resp.hovered() && modified {
+                                            ui.output_mut(|o| {
+                                                o.cursor_icon = egui::CursorIcon::PointingHand
+                                            });
+                                        }
+                                        if reset_resp.clicked() && modified {
+                                            state.filter.file_types.clear();
+                                            changed = true;
+                                        }
+                                        let reset_color = if modified {
+                                            if reset_resp.hovered() {
+                                                theme::ACCENT_BRIGHT
+                                            } else {
+                                                theme::TEXT_DIM
+                                            }
+                                        } else {
+                                            theme::BORDER_STRONG
+                                        };
+                                        draw_reset_arrow(
+                                            ui.painter(),
+                                            reset_rect.center(),
+                                            4.5,
+                                            reset_color,
+                                        );
+                                    },
+                                );
+                            });
                             let chip_options = [
                                 (FileTypeChip::Raw, "RAW"),
                                 (FileTypeChip::Jpeg, "JPEG"),
                                 (FileTypeChip::Png, "PNG"),
                                 (FileTypeChip::Tiff, "TIFF"),
                             ];
-                            // Single-choice for now (Task 8 replaces this with a
-                            // proper multi-select chip row): the segmented control
-                            // shows the first selected chip (or the default when
-                            // none is selected) and a pick replaces the whole set
-                            // with just that one chip.
-                            let mut current_chip = state
-                                .filter
-                                .file_types
-                                .iter()
-                                .next()
-                                .copied()
-                                .unwrap_or_default();
-                            if SegmentedControl::new(&mut current_chip, &chip_options)
-                                .ui(ui, "file_type_segmented")
-                                .changed()
+                            if multi_select_chips(
+                                ui,
+                                "file_type_chips",
+                                &mut state.filter.file_types,
+                                &chip_options,
+                            )
+                            .changed()
                             {
-                                state.filter.file_types.clear();
-                                state.filter.file_types.insert(current_chip);
                                 changed = true;
                             }
 

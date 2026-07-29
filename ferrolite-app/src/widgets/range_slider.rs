@@ -11,9 +11,6 @@
 /// itself isn't detent-aligned (e.g. seeded from stored/external state) —
 /// the post-condition is "snapped, then clamped to `other`", not
 /// unconditionally "lands on a detent".
-///
-/// Consumed by `RangeSlider` (used by Task 7); allowed dead-code until then.
-#[allow(dead_code)]
 pub fn snap_and_clamp(v: f32, detents: &[f32], other: f32, moving_lo: bool) -> f32 {
     let snapped = nearest_detent(v, detents);
     if moving_lo {
@@ -23,7 +20,6 @@ pub fn snap_and_clamp(v: f32, detents: &[f32], other: f32, moving_lo: bool) -> f
     }
 }
 
-#[allow(dead_code)]
 fn nearest_detent(v: f32, detents: &[f32]) -> f32 {
     let Some(&first) = detents.first() else {
         return v;
@@ -39,7 +35,6 @@ fn nearest_detent(v: f32, detents: &[f32]) -> f32 {
 
 /// Pure: track fraction for value `v` on `[min, max]`, in 0.0..=1.0.
 /// Log-scaled when `log` is true (ISO/aperture-style ranges), linear otherwise.
-#[allow(dead_code)]
 pub fn track_fraction(v: f32, min: f32, max: f32, log: bool) -> f32 {
     if log {
         debug_assert!(
@@ -63,7 +58,6 @@ pub fn track_fraction(v: f32, min: f32, max: f32, log: bool) -> f32 {
 
 /// Pure: inverse of `track_fraction` — the value at track fraction `frac`
 /// on `[min, max]`, log or linear.
-#[allow(dead_code)]
 fn value_at_fraction(frac: f32, min: f32, max: f32, log: bool) -> f32 {
     let frac = frac.clamp(0.0, 1.0);
     if log {
@@ -78,9 +72,8 @@ fn value_at_fraction(frac: f32, min: f32, max: f32, log: bool) -> f32 {
 /// Dual-handle range slider: filters a value to a `[lo, hi]` sub-range of
 /// `[min, max]`. Reset restores the full range (`lo = min, hi = max`).
 ///
-/// Consumed by Task 7 (Library Metadata popup ISO/aperture/focal filters);
-/// nothing constructs it yet, hence the blanket `dead_code` allowance below.
-#[allow(dead_code)]
+/// Consumed by the Library Metadata popup's ISO/aperture/focal filters
+/// (`library::toolbar`).
 pub struct RangeSlider<'a> {
     pub label: &'static str,
     pub lo: &'a mut f32,
@@ -99,28 +92,17 @@ use crate::theme;
 use egui::{pos2, vec2, Color32, Response, Sense, Stroke, Ui, Widget};
 
 // Design-system §5 slider tokens (mirrors slider.rs; widened value column to
-// fit the two-number "{lo}\u{2013}{hi}{unit}" readout). Unused until Task 7
-// constructs a `RangeSlider` and adds it to a `Ui`.
-#[allow(dead_code)]
+// fit the two-number "{lo}\u{2013}{hi}{unit}" readout).
 const TRACK: Color32 = Color32::from_rgb(0x3a, 0x3a, 0x3a);
-#[allow(dead_code)]
 const FILL_IDLE: Color32 = Color32::from_rgb(0x58, 0x58, 0x58);
-#[allow(dead_code)]
 const HANDLE_IDLE: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
-#[allow(dead_code)]
 const HANDLE_BORDER: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-#[allow(dead_code)]
 const LABEL: Color32 = Color32::from_rgb(0x8c, 0x8c, 0x8c);
-#[allow(dead_code)]
 const VALUE_IDLE: Color32 = Color32::from_rgb(0xbd, 0xbd, 0xbd);
 
-#[allow(dead_code)]
 const LABEL_W: f32 = 74.0;
-#[allow(dead_code)]
 const VALUE_W: f32 = 92.0;
-#[allow(dead_code)]
 const ROW_H: f32 = 22.0;
-#[allow(dead_code)]
 const RESET_W: f32 = 16.0;
 
 impl<'a> Widget for RangeSlider<'a> {

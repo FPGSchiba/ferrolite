@@ -115,6 +115,39 @@ impl FilterState {
         self.focal = None;
     }
 
+    /// True when every user-facing filter is at its default (search empty, no
+    /// rating/flag constraint, no tags with `tag_mode` back to `Any`, no
+    /// metadata filters, empty `file_types`, no date range). Sort order
+    /// (`sort_key`/`sort_desc`) does NOT count — it is a view preference, not
+    /// a filter (see `reset_all`, which preserves it).
+    pub fn is_default(&self) -> bool {
+        self.search.trim().is_empty()
+            && self.min_rating == 0
+            && self.flags.is_empty()
+            && self.tag_ids.is_empty()
+            && self.tag_mode == TagMode::Any
+            && self.camera.is_none()
+            && self.lens.is_none()
+            && self.file_types.is_empty()
+            && self.iso.is_none()
+            && self.aperture.is_none()
+            && self.focal.is_none()
+            && self.date.is_none()
+    }
+
+    /// Reset every user-facing filter to its default (unfiltered) state;
+    /// leaves `sort_key`/`sort_desc` untouched, since sort is a view
+    /// preference rather than a filter (see `is_default`).
+    pub fn reset_all(&mut self) {
+        self.reset_metadata_filters();
+        self.search.clear();
+        self.rating_cmp = RatingCmp::default();
+        self.flags.clear();
+        self.tag_ids.clear();
+        self.tag_mode = TagMode::Any;
+        self.date = None;
+    }
+
     pub fn to_query(&self, source: ViewSource, include_subfolders: bool) -> LibraryQuery {
         let scope = match source {
             ViewSource::Folder(id) => Scope::Folder {
@@ -388,5 +421,167 @@ mod tests {
             range_to_filter(50.0, 3200.0, 50.0, 102_400.0),
             Some((50.0, 3200.0))
         );
+    }
+
+    // ── is_default / reset_all (Task 9) ─────────────────────────────────────
+
+    #[test]
+    fn fresh_default_state_is_default() {
+        assert!(FilterState::default().is_default());
+    }
+
+    #[test]
+    fn search_text_flips_is_default_false() {
+        let fs = FilterState {
+            search: "cat".into(),
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn min_rating_flips_is_default_false() {
+        let fs = FilterState {
+            min_rating: 3,
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn a_flag_flips_is_default_false() {
+        let fs = FilterState {
+            flags: vec![Flag::Pick],
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn a_tag_flips_is_default_false() {
+        let fs = FilterState {
+            tag_ids: vec![TagId(1)],
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn non_any_tag_mode_flips_is_default_false() {
+        // tag_mode=All with no tags selected is still a user-facing deviation
+        // from the default (Any) — it would change results the instant a tag
+        // is picked, so treat it as non-default on its own.
+        let fs = FilterState {
+            tag_mode: TagMode::All,
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn camera_flips_is_default_false() {
+        let fs = FilterState {
+            camera: Some("Sony A7IV".into()),
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn lens_flips_is_default_false() {
+        let fs = FilterState {
+            lens: Some("24-70mm f/2.8".into()),
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn iso_flips_is_default_false() {
+        let fs = FilterState {
+            iso: Some((100, 3200)),
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn aperture_flips_is_default_false() {
+        let fs = FilterState {
+            aperture: Some((2.8, 11.0)),
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn focal_flips_is_default_false() {
+        let fs = FilterState {
+            focal: Some((24.0, 70.0)),
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn date_flips_is_default_false() {
+        let fs = FilterState {
+            date: Some(("2026-01-01".into(), "2026-12-31".into())),
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn file_type_chip_flips_is_default_false() {
+        let mut file_types = BTreeSet::new();
+        file_types.insert(FileTypeChip::Raw);
+        let fs = FilterState {
+            file_types,
+            ..Default::default()
+        };
+        assert!(!fs.is_default());
+    }
+
+    #[test]
+    fn sort_order_alone_does_not_count_as_a_filter() {
+        // Sort is a view preference, not a filter — is_default ignores it.
+        let fs = FilterState {
+            sort_key: SortKey::AddedAt,
+            sort_desc: true,
+            ..Default::default()
+        };
+        assert!(fs.is_default());
+    }
+
+    #[test]
+    fn reset_all_restores_default_while_preserving_a_non_default_sort() {
+        let mut file_types = BTreeSet::new();
+        file_types.insert(FileTypeChip::Jpeg);
+        let mut fs = FilterState {
+            search: "cat".into(),
+            sort_key: SortKey::AddedAt,
+            sort_desc: true,
+            min_rating: 4,
+            rating_cmp: RatingCmp::Exactly,
+            flags: vec![Flag::Pick],
+            tag_ids: vec![TagId(1)],
+            tag_mode: TagMode::All,
+            camera: Some("Sony A7IV".into()),
+            lens: Some("24-70mm f/2.8".into()),
+            file_types,
+            iso: Some((100, 3200)),
+            aperture: Some((2.8, 11.0)),
+            focal: Some((24.0, 70.0)),
+            date: Some(("2026-01-01".into(), "2026-12-31".into())),
+        };
+        assert!(!fs.is_default());
+
+        fs.reset_all();
+
+        assert!(fs.is_default());
+        // The non-default sort preference must survive the reset.
+        assert_eq!(fs.sort_key, SortKey::AddedAt);
+        assert!(fs.sort_desc);
     }
 }

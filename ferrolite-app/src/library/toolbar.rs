@@ -9,7 +9,7 @@ use crate::library::filter_widgets as fw;
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
-use crate::widgets::{draw_reset_arrow, multi_select_chips, EguiSlider, RangeSlider};
+use crate::widgets::{draw_reset_arrow, multi_select_chips, tool_button, EguiSlider, RangeSlider};
 use egui::{pos2, Color32, FontId, Rounding, Stroke};
 use ferrolite_catalog::FileTypeChip;
 use std::sync::LazyLock;
@@ -481,6 +481,26 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
         );
 
         ui.data_mut(|d| d.insert_temp(popup_id, popup_open));
+
+        // Reset-all-filters: clears every Library filter (rating, flag, tags,
+        // search, camera, lens, ISO/aperture/focal, file-type chips) in one
+        // click. Disabled — with a "why" hover reason — once nothing is
+        // active, so it's inert rather than misleadingly clickable.
+        let all_default = state.filter.is_default();
+        if tool_button(
+            ui,
+            crate::icons::RESET,
+            "Reset all filters",
+            false,
+            !all_default,
+            Some("All filters are at default"),
+        )
+        .clicked()
+            && !all_default
+        {
+            state.filter.reset_all();
+            changed = true;
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.allocate_ui_with_layout(

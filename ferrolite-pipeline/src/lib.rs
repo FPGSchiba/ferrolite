@@ -82,9 +82,10 @@ pub use uniforms::{
 /// dehaze passes: `dehaze-dark-channel`/`-min-h`/`-min-v`/`-products`/
 /// `-box-h`/`-box-v`/`-guided-ab`/`-guided-q` (the multi-pass guided-filter
 /// transmission map, `DehazeTransmissionNode`) — plus `dehaze-transmission-mip`
-/// (its mip-chain downsample for LOD-aware sampling) — plus `dehaze-recovery` (the
-/// amount/atmos blend, `DehazeRecoveryNode`) — both nodes shared by
-/// `EditPipeline` and `TileEditPipeline` (QS-Task 4/5).
+/// (its mip-chain downsample for LOD-aware sampling) — shared by `EditPipeline`
+/// and `TileEditPipeline` (QS-Task 4/5). The amount/atmos recovery+blend step
+/// (formerly a separate `dehaze-recovery`/`DehazeRecoveryNode` pass) is fused
+/// into `local-adjust` below (Phase 4 Task 2) — no longer a standalone shader.
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
@@ -112,10 +113,10 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "dehaze-transmission-mip",
             include_str!("shaders/dehaze_transmission_mip.wgsl"),
         ),
-        (
-            "dehaze-recovery",
-            include_str!("shaders/dehaze_recovery.wgsl"),
-        ),
+        // `dehaze_recovery.wgsl` (the retired standalone recovery pass) stays
+        // in-tree as reference math (its per-pixel kernel was ported verbatim
+        // into `local_adjust.wgsl`'s `dehaze_recover_step`, Phase 4 Task 2) but
+        // is no longer compiled here.
         // `sharpen.wgsl` (the retired fused 2D pass) stays in-tree as
         // reference math (see `sharpen_node.rs`'s doc) but is no longer
         // compiled here — `SharpenNode` (both pipelines) now dispatches the

@@ -26,11 +26,34 @@ struct P {
     // force full coverage (skip the mask sample entirely, m = 1.0); z =
     // vibrance amount (0 = identity); w = pad.
     order_and_coverage: vec4<f32>,
+    // Phase 4 Task 2: dehaze recovery fused as the FIRST step of `adjust()`,
+    // ported EXACTLY from the retired `DehazeRecoveryNode`'s
+    // `dehaze_recovery.wgsl`. Zero (identity) at every call site except the
+    // global Color-stage pseudo-layer's own dispatch — see
+    // `dehaze_recover_step`'s doc.
+    dehaze_amount_atmos: vec4<f32>,   // x = amount, yzw = atmos
+    dehaze_geo_m: vec4<f32>,          // row-major 2x2 output->source mapping
+    dehaze_geo_off_src_dims: vec4<f32>, // xy = geo_off, zw = src_dims
+    dehaze_frame: vec4<f32>,          // xy = frame_origin, zw = full_dims
+    dehaze_out_dims_flags: vec4<f32>, // xy = out_dims, z = has_transmission, w = pad
 };
 @group(0) @binding(3) var<uniform> p: P;
 // Phase 2b: per-layer 3x256 tone-curve LUT (R,G,B rows), same packing + binding
 // style as `tone_curve.wgsl`'s LUT (a fresh small storage buffer per layer).
 @group(0) @binding(4) var<storage, read> lut: array<f32, 768>;
+// Phase 4 Task 2: the shared whole-image dehaze transmission (source space,
+// possibly mip-mapped) + its sampler — mirrors the retired `DehazeRecoveryNode`'s
+// bindings 1/4 exactly. Always bound (a 1x1 neutral fallback when dehaze has no
+// real transmission yet — see `LocalAdjustmentsNode::set_shared_transmission`),
+// so every dispatch (Light stage, mask layers, global pseudo-layer) validates
+// regardless of whether this pass ever samples it.
+@group(0) @binding(5) var dehaze_trans: texture_2d<f32>;
+@group(0) @binding(6) var dehaze_samp: sampler;
+
+// Transmission floor (design §5.2 step 4): avoids divide-by-~0 noise blow-up.
+// Mirrors `crate::dehaze::DEHAZE_T0` — a fixed internal constant, never
+// user-adjustable, so it is not worth a uniform field.
+const DEHAZE_T0: f32 = 0.1;
 
 fn luma709(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
 
@@ -152,8 +175,65 @@ fn grade_apply(c: vec3<f32>) -> vec3<f32> {
     return c + tint + vec3<f32>(lum);
 }
 
-fn adjust(rgb: vec3<f32>) -> vec3<f32> {
-    var c = rgb * p.exposure_gain;
+// Phase 4 Task 2: dehaze recovery, ported EXACTLY from the retired
+// `DehazeRecoveryNode`'s `dehaze_recovery.wgsl` (source-UV mapping incl. the
+// LOD-independent `frame_origin`/`full_dims` normalization, the mip-aware
+// transmission LOD pick, and the `t0` floor). Identity when `dehaze_amount_atmos.x
+// == 0.0` (no active Dehaze op) or `has_transmission == 0.0` (the node's 1x1
+// neutral fallback is bound — no real transmission computed/bound yet), so
+// every non-global-pseudo-layer dispatch (Light stage, per-mask layers, whose
+// uniform never has these fields populated — see `LocalAdjustUniform`'s doc)
+// takes this cheap early-out and pays for nothing beyond the branch.
+fn dehaze_recover_step(rgb: vec3<f32>, xy: vec2<i32>) -> vec3<f32> {
+    let amount = p.dehaze_amount_atmos.x;
+    let has_transmission = p.dehaze_out_dims_flags.z;
+    if (amount == 0.0 || has_transmission == 0.0) {
+        return rgb;
+    }
+    let full_dims = p.dehaze_frame.zw;
+    if (full_dims.x <= 0.0 || full_dims.y <= 0.0) {
+        // Can't-happen guard (mirrors the retired node's shader): avoids a
+        // divide-by-zero rather than assuming a real `TileFrame` is set.
+        return rgb;
+    }
+    let a = p.dehaze_amount_atmos.yzw;
+    let frame_origin = p.dehaze_frame.xy;
+    let out_dims = p.dehaze_out_dims_flags.xy;
+    let geo_off = p.dehaze_geo_off_src_dims.xy;
+    let src_dims = p.dehaze_geo_off_src_dims.zw;
+    let geo_m = p.dehaze_geo_m;
+
+    // LOD-independent output-pixel coordinate (see the retired
+    // `dehaze_recovery.wgsl`'s file doc): normalize by this LOD's full output
+    // dims, then re-expand to the level-0 output dims the geometry mapping
+    // expects.
+    let out_norm = (frame_origin + vec2<f32>(f32(xy.x), f32(xy.y))) / full_dims;
+    let out_px_l0 = out_norm * out_dims;
+    let src = vec2<f32>(
+        geo_m.x * out_px_l0.x + geo_m.y * out_px_l0.y + geo_off.x,
+        geo_m.z * out_px_l0.x + geo_m.w * out_px_l0.y + geo_off.y,
+    );
+    let uv = src / src_dims;
+
+    // LOD-aware transmission fetch (mirrors `transmission_sample_lod`): pick
+    // the band-limited mip level when this LOD's output is coarser than the
+    // transmission map, so a zoomed-out tile doesn't undersample the sharp
+    // guided-refined edges into ringing.
+    let trans_dims = vec2<f32>(textureDimensions(dehaze_trans, 0));
+    let ratio = max(trans_dims.x / full_dims.x, trans_dims.y / full_dims.y);
+    let lod = max(0.0, log2(ratio));
+    let t = clamp(textureSampleLevel(dehaze_trans, dehaze_samp, uv, lod).r, 0.0, 1.0);
+    let te = max(t, DEHAZE_T0);
+    let j = (rgb - a) / te + a;
+    let hazed = a + (rgb - a) * t;
+    if (amount >= 0.0) {
+        return rgb + amount * (j - rgb);
+    }
+    return rgb + (-amount) * (hazed - rgb);
+}
+
+fn adjust(rgb_in: vec3<f32>, xy: vec2<i32>) -> vec3<f32> {
+    var c = dehaze_recover_step(rgb_in, xy) * p.exposure_gain;
     let y = luma709(c);
     let hi = smoothstep(0.5, 1.0, y);
     let sh = 1.0 - smoothstep(0.0, 0.5, y);
@@ -256,6 +336,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (p.order_and_coverage.y == 0.0) {
         m = textureLoad(mask, xy, 0).r;
     }
-    let out = mix(c.rgb, adjust(c.rgb), clamp(m, 0.0, 1.0));
+    let out = mix(c.rgb, adjust(c.rgb, xy), clamp(m, 0.0, 1.0));
     textureStore(dst, xy, vec4<f32>(out, c.a));
 }

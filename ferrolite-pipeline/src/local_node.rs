@@ -5,16 +5,20 @@
 //! the old exposure position (before dehaze); the `Color`-stage instance sits
 //! at the old tone-curve…local-adjust position (before `Sharpen`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
 use ferrolite_mask::{MaskBuffer, MaskCompositor, RasterStore, TileTransform};
 
+use crate::dehaze::DEHAZE_ATMOS_MIN;
+use crate::dehaze_node::linear_clamp_sampler;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::local::{AdjustmentSet, LocalAdjustments};
-use crate::uniforms::{local_adjust_uniform, local_layer_lut, LocalAdjustUniform};
+use crate::nodes::TileFrame;
+use crate::op::Dehaze;
+use crate::uniforms::{local_adjust_uniform, local_layer_lut, GeometryUniform, LocalAdjustUniform};
 
 /// Which fused-engine pass this node instance is. `Light` runs once, at the
 /// exposure position (before dehaze), applying only the global set's
@@ -77,6 +81,77 @@ fn has_content_dependent_component(def: &ferrolite_mask::MaskDefinition) -> bool
     })
 }
 
+/// Phase 4 Task 2: the base (amount/atmos) params for the dehaze recovery now
+/// fused into the Color-stage engine node's global pseudo-layer. Read from a
+/// shared `Cell` each `evaluate` (mirrors the retired `DehazeRecoveryNode`'s
+/// `RecoveryParams`, minus `t0` — hardcoded as a WGSL const — and the
+/// geometry/frame/has_transmission fields, which live on THIS node's own
+/// private `dehaze_geometry`/`dehaze_frame`/`dehaze_has_transmission` instead
+/// (see those fields' docs) so a `set_stack`-driven reseed of this shared cell
+/// never clobbers them.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct ColorDehazeParams {
+    pub amount: f32,
+    pub atmos: [f32; 4],
+}
+
+impl ColorDehazeParams {
+    /// Seed from the op's `amount` and the whole-image atmospheric light
+    /// (mirrors the retired `RecoveryParams::from_op` exactly, minus the
+    /// inert geometry/frame fields that struct also carried).
+    pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
+        Self {
+            amount: op.map(|d| d.amount).unwrap_or(0.0),
+            atmos: [
+                atmos[0].max(DEHAZE_ATMOS_MIN),
+                atmos[1].max(DEHAZE_ATMOS_MIN),
+                atmos[2].max(DEHAZE_ATMOS_MIN),
+                0.0,
+            ],
+        }
+    }
+}
+
+impl Default for ColorDehazeParams {
+    /// Identity: `amount == 0.0` gates the whole recovery step off regardless
+    /// of `atmos`'s (harmless placeholder) content.
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            atmos: [DEHAZE_ATMOS_MIN; 4],
+        }
+    }
+}
+
+/// Output→source geometry mapping for the fused dehaze recovery step, held
+/// internally by `LocalAdjustmentsNode` (set via `set_geometry`, merged into
+/// the uniform at each `evaluate_color`). Mirrors the retired
+/// `DehazeRecoveryNode`'s `RecoveryGeometry` exactly — kept OUT of the
+/// pipeline-visible `ColorDehazeParams` cell so a `set_stack`-driven reseed of
+/// that cell can never clobber it.
+#[derive(Clone, Copy)]
+struct EngineDehazeGeometry {
+    m: [f32; 4],
+    off: [f32; 2],
+    src_dims: [f32; 2],
+    out_dims: [f32; 2],
+}
+
+impl Default for EngineDehazeGeometry {
+    /// Identity mapping over a nominal 1×1 source. Harmless even before the
+    /// first `set_geometry` call: `has_transmission` (default false, from the
+    /// neutral-texture fallback) gates the recovery step, so this mapping is
+    /// never actually used for real math in that state.
+    fn default() -> Self {
+        Self {
+            m: [1.0, 0.0, 0.0, 1.0],
+            off: [0.0, 0.0],
+            src_dims: [1.0, 1.0],
+            out_dims: [1.0, 1.0],
+        }
+    }
+}
+
 pub(crate) struct LocalAdjustmentsNode {
     ctx: Arc<GpuContext>,
     layers: Rc<RefCell<LocalAdjustments>>,
@@ -136,6 +211,30 @@ pub(crate) struct LocalAdjustmentsNode {
     // skips a stage whose relevant segment/layers didn't change — e.g. a
     // color-segment-only edit must not tick the Light-stage node's counter).
     evals: std::cell::Cell<u32>,
+    // Phase 4 Task 2: dehaze recovery fused into the Color-stage global
+    // pseudo-layer (see `evaluate_color`). Present on every instance (incl.
+    // the Light stage) for a uniform type, but only ever populated/read for
+    // the Color stage — the Light-stage constructor is handed fresh,
+    // never-mutated placeholders (mirrors `layers`' own placeholder pattern).
+    dehaze_params: Rc<Cell<ColorDehazeParams>>,
+    dehaze_geometry: Cell<EngineDehazeGeometry>,
+    // Shared with the tile pipeline's `GeometryHeadNode`/`VignetteNode` (the
+    // head writes this each evaluate); a dedicated default-origin `Rc` on the
+    // whole-image tier (no per-tile frame there) — mirrors the retired
+    // `DehazeRecoveryNode`'s `frame` field exactly.
+    dehaze_frame: Rc<Cell<TileFrame>>,
+    // Linear, clamp-to-edge sampler for the shared transmission's source-UV
+    // sample. Built once here, never per-evaluate (CLAUDE.md GPU rule).
+    dehaze_sampler: wgpu::Sampler,
+    // 1x1 neutral fallback (source-space) transmission so the `apply` bind
+    // group always validates before `set_shared_transmission` is ever called
+    // (or after it is cleared back to `None`); `dehaze_has_transmission` is
+    // false in that state, so the shader's recovery step is a no-op
+    // regardless of this texture's (unused) content.
+    dehaze_neutral_tex: Arc<wgpu::Texture>,
+    dehaze_shared_tex: RefCell<Arc<wgpu::Texture>>,
+    dehaze_shared_view: RefCell<wgpu::TextureView>,
+    dehaze_has_transmission: Cell<bool>,
 }
 
 impl LocalAdjustmentsNode {
@@ -147,6 +246,12 @@ impl LocalAdjustmentsNode {
         layers: Rc<RefCell<LocalAdjustments>>,
         stage: EngineStage,
         global_set: Rc<RefCell<AdjustmentSet>>,
+        // Phase 4 Task 2: dehaze recovery state (see the field docs). The Light
+        // stage never reads these (see `evaluate_light`) — callers pass fresh,
+        // never-mutated placeholders for that instance, mirroring `layers`'
+        // own placeholder pattern for the Light stage.
+        dehaze_params: Rc<Cell<ColorDehazeParams>>,
+        dehaze_frame: Rc<Cell<TileFrame>>,
     ) -> Self {
         let apply_bgl = ctx
             .device
@@ -210,6 +315,30 @@ impl LocalAdjustmentsNode {
                         },
                         count: None,
                     },
+                    // 5/6 (Phase 4 Task 2): the shared whole-image dehaze
+                    // transmission (source space, possibly mip-mapped) + its
+                    // sampler — mirrors the retired `DehazeRecoveryNode`'s
+                    // bindings 1/4 exactly. Always bound (a 1x1 neutral
+                    // fallback when no real transmission is set — see
+                    // `dehaze_neutral_tex`), so every dispatch (Light stage,
+                    // mask layers, global pseudo-layer) validates regardless
+                    // of whether it ever samples this.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
         let module = ctx.shader_module("local-adjust", include_str!("shaders/local_adjust.wgsl"));
@@ -231,6 +360,28 @@ impl LocalAdjustmentsNode {
                 cache: None,
             });
         let full_coverage_mask = Self::alloc_full_coverage_mask(&ctx);
+
+        // Phase 4 Task 2: the fused dehaze recovery's shared-transmission
+        // binding — mirrors the retired `DehazeRecoveryNode`'s neutral-texture
+        // fallback pattern exactly.
+        let dehaze_sampler = linear_clamp_sampler(&ctx);
+        let dehaze_neutral_tex = Arc::new(ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("local-adjust-neutral-transmission"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: PIPELINE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        }));
+        let dehaze_neutral_view =
+            dehaze_neutral_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         Self {
             compositor: MaskCompositor::new(ctx.clone()),
             apply_bgl,
@@ -245,9 +396,51 @@ impl LocalAdjustmentsNode {
             stage,
             global_set,
             full_coverage_mask,
+            dehaze_params,
+            dehaze_geometry: Cell::new(EngineDehazeGeometry::default()),
+            dehaze_frame,
+            dehaze_sampler,
+            dehaze_neutral_tex: dehaze_neutral_tex.clone(),
+            dehaze_shared_tex: RefCell::new(dehaze_neutral_tex),
+            dehaze_shared_view: RefCell::new(dehaze_neutral_view),
+            dehaze_has_transmission: Cell::new(false),
             ctx,
             layers,
         }
+    }
+
+    /// Set the output→source geometry mapping for the fused dehaze recovery
+    /// step (mirrors the retired `DehazeRecoveryNode::set_geometry` exactly).
+    /// `out_origin` is ignored — this node's own output-space origin comes
+    /// from the shared `TileFrame` (`dehaze_frame`) instead. Harmless to call
+    /// on a Light-stage instance (never read there).
+    pub(crate) fn set_geometry(&self, g: GeometryUniform) {
+        self.dehaze_geometry.set(EngineDehazeGeometry {
+            m: g.m,
+            off: g.off,
+            src_dims: g.src_dims,
+            out_dims: g.out_dims,
+        });
+    }
+
+    /// Bind (or clear) the externally-supplied shared dehaze transmission
+    /// texture (source space; e.g. `DehazeTransmissionNode::current_output_texture()`).
+    /// `None` falls back to the 1×1 neutral texture with `has_transmission =
+    /// false`, so the fused recovery step passes pixels through unchanged.
+    /// Rebuilds only the cached view — NEVER the pipeline (CLAUDE.md GPU
+    /// rule). A no-op when `tex` is already the currently-bound texture (`Arc`
+    /// pointer equality), so the owning pipeline can call this unconditionally
+    /// every evaluate. Mirrors the retired `DehazeRecoveryNode::set_shared_transmission`.
+    pub(crate) fn set_shared_transmission(&self, tex: Option<Arc<wgpu::Texture>>) {
+        let next = tex.unwrap_or_else(|| self.dehaze_neutral_tex.clone());
+        if Arc::ptr_eq(&self.dehaze_shared_tex.borrow(), &next) {
+            return;
+        }
+        let view = next.create_view(&wgpu::TextureViewDescriptor::default());
+        self.dehaze_has_transmission
+            .set(!Arc::ptr_eq(&next, &self.dehaze_neutral_tex));
+        *self.dehaze_shared_view.borrow_mut() = view;
+        *self.dehaze_shared_tex.borrow_mut() = next;
     }
 
     /// Allocate the 1x1 mask bound (but never sampled — see the field doc) for
@@ -399,6 +592,12 @@ impl LocalAdjustmentsNode {
         let dst_view = dst
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        // Phase 4 Task 2: the shared dehaze transmission binding — always
+        // present (the 1x1 neutral fallback when unset), so this bind group
+        // validates for every apply() call (Light stage, mask layers, global
+        // pseudo-layer) regardless of whether the shader's recovery step
+        // actually samples it (see `dehaze_recover_step`'s gate).
+        let trans_view = self.dehaze_shared_view.borrow();
         let bind = self
             .ctx
             .device
@@ -425,6 +624,14 @@ impl LocalAdjustmentsNode {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: lut_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&trans_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.dehaze_sampler),
                     },
                 ],
             });
@@ -492,13 +699,44 @@ impl LocalAdjustmentsNode {
         let global_seg = self.global_set.borrow().color_segment();
         let layers = self.layers.borrow();
 
-        if global_seg.is_identity() && layers.is_identity() {
+        // Phase 4 Task 2: the fused dehaze recovery is the FIRST step of this
+        // node's global pseudo-layer dispatch. Active only when a real
+        // `Dehaze` op is present (`amount != 0.0`) AND a real shared
+        // transmission is bound (`dehaze_has_transmission`) — mirrors the
+        // retired `DehazeRecoveryNode`'s own `amount == 0.0 || !has_transmission`
+        // passthrough gate exactly, so this reproduces bit-identical output to
+        // the pre-fusion engine whenever dehaze is inactive, at zero extra
+        // dispatch cost.
+        let dehaze = self.dehaze_params.get();
+        let dehaze_active = dehaze.amount != 0.0 && self.dehaze_has_transmission.get();
+
+        if global_seg.is_identity() && !dehaze_active && layers.is_identity() {
             return input.clone();
         }
 
         let mut current = input.clone();
-        if !global_seg.is_identity() {
-            let u = local_adjust_uniform(&global_seg, true, true);
+        if !global_seg.is_identity() || dehaze_active {
+            let mut u = local_adjust_uniform(&global_seg, true, true);
+            if dehaze_active {
+                let geo = self.dehaze_geometry.get();
+                let frame = self.dehaze_frame.get();
+                u.dehaze_amount_atmos = [
+                    dehaze.amount,
+                    dehaze.atmos[0],
+                    dehaze.atmos[1],
+                    dehaze.atmos[2],
+                ];
+                u.dehaze_geo_m = geo.m;
+                u.dehaze_geo_off_src_dims =
+                    [geo.off[0], geo.off[1], geo.src_dims[0], geo.src_dims[1]];
+                u.dehaze_frame = [
+                    frame.origin[0],
+                    frame.origin[1],
+                    frame.full_dims[0],
+                    frame.full_dims[1],
+                ];
+                u.dehaze_out_dims_flags = [geo.out_dims[0], geo.out_dims[1], 1.0, 0.0];
+            }
             let lut = local_layer_lut(&global_seg);
             current = self.apply(&current, &self.full_coverage_mask, u, &lut);
         }
@@ -615,6 +853,17 @@ mod tests {
         upload_source(ctx, &img)
     }
 
+    /// Placeholder Phase 4 Task 2 dehaze state for tests that don't exercise
+    /// the fused recovery — never mutated, so `evaluate_color`'s
+    /// `dehaze_active` gate stays false (`ColorDehazeParams::default().amount
+    /// == 0.0`) and these tests are unaffected by the fusion.
+    fn no_dehaze() -> (Rc<Cell<ColorDehazeParams>>, Rc<Cell<TileFrame>>) {
+        (
+            Rc::new(Cell::new(ColorDehazeParams::default())),
+            Rc::new(Cell::new(TileFrame::default())),
+        )
+    }
+
     /// Read an `Rgba16Float` `PipelineImage` back to display-linear f32 RGBA on
     /// the CPU (test-only; minimal inline readback, mirroring the integration
     /// tests' `read_image_linear` helper which unit tests in this crate cannot
@@ -724,11 +973,14 @@ mod tests {
         let la = LocalAdjustments {
             layers: vec![layer("layer1", 0.5, 0.0), layer("layer2", -0.3, 0.4)],
         };
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(la)),
             EngineStage::Color,
             Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
         );
 
         // Reaching this line without a wgpu validation panic already proves the
@@ -765,11 +1017,14 @@ mod tests {
         let la = LocalAdjustments {
             layers: vec![layer("layer1", 0.5, 0.0), layer("layer2", -0.3, 0.4)],
         };
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(la)),
             EngineStage::Color,
             Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
         );
 
         let out1 = node.evaluate(&[&src]);
@@ -815,11 +1070,14 @@ mod tests {
             }],
         };
         let layers_rc = Rc::new(RefCell::new(la.clone()));
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             layers_rc.clone(),
             EngineStage::Color,
             Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
         );
 
         let _ = node.evaluate(&[&src]);
@@ -892,11 +1150,14 @@ mod tests {
                 adjustments,
             }],
         };
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(la)),
             EngineStage::Color,
             Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
         );
 
         let out = node.evaluate(&[&src]);
@@ -929,11 +1190,14 @@ mod tests {
         let la = LocalAdjustments {
             layers: vec![layer("legacy", 0.35, -0.2)],
         };
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(la)),
             EngineStage::Color,
             Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
         );
 
         let out = node.evaluate(&[&src]);
@@ -969,11 +1233,14 @@ mod tests {
             tint: -0.2,
             ..Default::default()
         };
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(LocalAdjustments::default())),
             EngineStage::Light,
             Rc::new(RefCell::new(global.clone())),
+            dehaze_params,
+            dehaze_frame,
         );
 
         let out = node.evaluate(&[&src]);
@@ -1019,11 +1286,14 @@ mod tests {
         let la = LocalAdjustments {
             layers: vec![layer("m", 0.3, 0.2)],
         };
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(la.clone())),
             EngineStage::Color,
             Rc::new(RefCell::new(global.clone())),
+            dehaze_params,
+            dehaze_frame,
         );
 
         let out = node.evaluate(&[&src]);
@@ -1063,11 +1333,14 @@ mod tests {
         let ctx = Arc::new(ctx);
         let src = gradient_source(&ctx);
 
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(LocalAdjustments::default())),
             EngineStage::Color,
             Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
         );
         let out = node.evaluate(&[&src]);
         assert!(
@@ -1086,16 +1359,141 @@ mod tests {
         let ctx = Arc::new(ctx);
         let src = gradient_source(&ctx);
 
+        let (dehaze_params, dehaze_frame) = no_dehaze();
         let node = LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(LocalAdjustments::default())),
             EngineStage::Light,
             Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
         );
         let out = node.evaluate(&[&src]);
         assert!(
             Arc::ptr_eq(&out.texture, &src.texture),
             "default global set must add zero dispatches for the Light stage too"
+        );
+    }
+
+    /// Phase 4 Task 2 Step 1 (TDD): the Color-stage engine node with a
+    /// synthetic constant transmission (q = 0.5) bound and a non-zero global
+    /// dehaze amount matches the CPU reference `light_color_apply_with_dehaze`
+    /// (recovery step with an injected constant `t`), within the same
+    /// tolerance every other node-vs-CPU parity test in this module uses.
+    /// Identity geometry + a `TileFrame` spanning the whole 8x8 fixture means
+    /// source UV == local UV, so the constant transmission is sampled
+    /// uniformly across every pixel.
+    #[test]
+    fn color_engine_dehaze_recovery_matches_cpu_reference() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+        let (w, h) = (src.width, src.height);
+
+        let q = 0.5f32;
+        let mut trans_px = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            trans_px.extend_from_slice(&[q, q, q, 1.0]);
+        }
+        let trans_img = LinearRgbaF32::new(w, h, trans_px).expect("transmission fixture");
+        let gpu_trans = upload_source(&ctx, &trans_img);
+
+        let atmos = [0.9f32, 0.9, 0.9];
+        let amount = 0.4f32;
+        let dehaze_params = Rc::new(Cell::new(ColorDehazeParams {
+            amount,
+            atmos: [atmos[0], atmos[1], atmos[2], 0.0],
+        }));
+        let dehaze_frame = Rc::new(Cell::new(TileFrame {
+            origin: [0.0, 0.0],
+            full_dims: [w as f32, h as f32],
+        }));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(LocalAdjustments::default())),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
+        );
+        let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
+        node.set_geometry(identity_geo);
+        node.set_shared_transmission(Some(gpu_trans.texture.clone()));
+
+        let out = node.evaluate(&[&src]);
+        let out_px = read_pixels(&ctx, &out);
+
+        let mut expected = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let rgb = [x as f32 / w as f32, y as f32 / h as f32, 0.25];
+                let out_rgb = crate::uniforms::light_color_apply_with_dehaze(
+                    rgb,
+                    &AdjustmentSet::default(),
+                    true,
+                    Some((amount, atmos, q)),
+                );
+                expected.extend_from_slice(&[out_rgb[0], out_rgb[1], out_rgb[2], 1.0]);
+            }
+        }
+        for (got, want) in out_px.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 5e-3,
+                "pixel mismatch: got {got}, want {want}"
+            );
+        }
+    }
+
+    /// Phase 4 Task 2: identity amount (0.0) must add ZERO dispatches — the
+    /// SAME `Arc::ptr_eq` passthrough as a fully-default global set — even
+    /// with a real shared transmission bound and non-default geometry/frame
+    /// set. This is what makes the fusion bit-identical to the pre-change
+    /// engine whenever dehaze is inactive (the brief's "flag-gated, zero
+    /// extra work" requirement) rather than merely pixel-identical.
+    #[test]
+    fn color_engine_dehaze_identity_amount_adds_no_dispatch() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+        let (w, h) = (src.width, src.height);
+
+        let mut trans_px = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            trans_px.extend_from_slice(&[0.5f32, 0.5, 0.5, 1.0]);
+        }
+        let trans_img = LinearRgbaF32::new(w, h, trans_px).expect("transmission fixture");
+        let gpu_trans = upload_source(&ctx, &trans_img);
+
+        let dehaze_params = Rc::new(Cell::new(ColorDehazeParams {
+            amount: 0.0,
+            atmos: [0.9, 0.9, 0.9, 0.0],
+        }));
+        let dehaze_frame = Rc::new(Cell::new(TileFrame {
+            origin: [0.0, 0.0],
+            full_dims: [w as f32, h as f32],
+        }));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(LocalAdjustments::default())),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
+        );
+        let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
+        node.set_geometry(identity_geo);
+        node.set_shared_transmission(Some(gpu_trans.texture.clone()));
+
+        let out = node.evaluate(&[&src]);
+        assert!(
+            Arc::ptr_eq(&out.texture, &src.texture),
+            "amount == 0.0 must add zero dispatches even with a real transmission bound"
         );
     }
 }

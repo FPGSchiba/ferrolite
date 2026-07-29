@@ -11,17 +11,20 @@
 //! non-identity geometry, Sharpen operates in output space rather than source
 //! space, an accepted pragmatic difference (architecture map §2).
 //!
-//! **Dehaze (ST-Task 3): shared whole-image transmission, no per-tile cost, no
-//! halo.** Unlike Sharpen, dehaze does NOT compute its own per-tile
-//! neighbourhood map. The guided-filter-refined transmission (design §5.2, the
-//! ~14-dispatch dark-channel + guided filter) is computed exactly ONCE by the
-//! whole-image `EditPipeline` (source space, bounded to
-//! `DEHAZE_MAX_TRANSMISSION_DIM`) and handed to this pipeline via
-//! `set_shared_transmission` (the app re-wires it whenever the preview
-//! re-evaluates). `DehazeRecoveryNode` — the ONLY dehaze node here — just
-//! SAMPLES that shared texture at each output pixel's SOURCE UV (the same
-//! `m·out+off` mapping `GeometryHeadNode` uses, via `set_geometry` + the head's
-//! shared `TileFrame`), a cheap single per-pixel pass. This is what fixed the
+//! **Dehaze (ST-Task 3; fused into the Color engine by Phase 4 Task 2): shared
+//! whole-image transmission, no per-tile cost, no halo.** Unlike Sharpen,
+//! dehaze does NOT compute its own per-tile neighbourhood map. The
+//! guided-filter-refined transmission (design §5.2, the ~14-dispatch
+//! dark-channel + guided filter) is computed exactly ONCE by the whole-image
+//! `EditPipeline` (source space, bounded to `DEHAZE_MAX_TRANSMISSION_DIM`) and
+//! handed to this pipeline via `set_shared_transmission` (the app re-wires it
+//! whenever the preview re-evaluates). The Color-stage engine node's fused
+//! recovery step (`local_node.rs`'s `LocalAdjustmentsNode`, `EngineStage::Color`
+//! — no standalone recovery node exists anymore) just SAMPLES that shared
+//! texture at each output pixel's SOURCE UV (the same `m·out+off` mapping
+//! `GeometryHeadNode` uses, via `set_geometry` + the head's shared
+//! `TileFrame`), as the first step of its global pseudo-layer — a cheap single
+//! per-pixel add-on to a pass that already runs. This is what fixed the
 //! integrated-GPU OOM: the old per-tile `DehazeTransmissionNode` (removed) ran
 //! its full multi-pass guided filter, haloed `7r` px, for every tile streamed
 //! across a full-res image — exhausting a memory-constrained GPU's buffer
@@ -56,12 +59,11 @@ use ferrolite_image::{haloed_tile_origin, level_size, TileCoord, TILE_SIZE};
 use ferrolite_mask::TileTransform;
 
 use crate::dehaze::{DEHAZE_ATMOS_MIN, DEHAZE_ATMOS_NEUTRAL};
-use crate::dehaze_node::{DehazeRecoveryNode, RecoveryParams};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::{AdjustmentSet, LocalAdjustments};
-use crate::local_node::{EngineStage, LocalAdjustmentsNode};
+use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode};
 use crate::nodes::{GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode};
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::sharpen_node::SharpenNode;
@@ -97,17 +99,16 @@ pub struct TileEditPipeline {
     // no test hook here today, but retained for parity/future use).
     #[allow(dead_code)]
     light_engine_node: Rc<LocalAdjustmentsNode>,
-    // Halo-free dehaze (ST-Task 3): no per-tile transmission node here anymore
-    // — `DehazeRecoveryNode` is the ONLY dehaze node, sampling a shared
-    // whole-image transmission set via `set_shared_transmission` (see the
-    // module doc). `dehaze_recovery_id`'s only graph input is `light_engine_id`.
-    dehaze_recovery_id: NodeId,
-    recovery_params: Rc<Cell<RecoveryParams>>,
-    // Handle to the recovery node, retained for `set_shared_transmission` /
-    // `set_dehaze_atmos`. Constructed with the head's SHARED `TileFrame`
-    // (`frame`, same `Rc` the head writes and the vignette node reads) so its
-    // `frame_origin` tracks each produced tile's real output-space origin.
-    dehaze_recovery_node: Rc<DehazeRecoveryNode>,
+    // Halo-free dehaze (ST-Task 3, fused into the Color engine by Phase 4 Task
+    // 2): no per-tile transmission node here anymore — the Color-stage engine
+    // node's fused recovery step is the ONLY dehaze consumer, sampling a
+    // shared whole-image transmission set via `set_shared_transmission` (see
+    // the module doc). `color_dehaze_params` is the shared amount/atmos cell
+    // `set_stack`/`set_dehaze_atmos` reseed. Constructed with the head's
+    // SHARED `TileFrame` (`frame`, same `Rc` the head writes and the vignette
+    // node reads) so its `frame_origin` tracks each produced tile's real
+    // output-space origin.
+    color_dehaze_params: Rc<Cell<ColorDehazeParams>>,
     /// Whole-image atmospheric light (design §5.3). Unlike `EditPipeline`,
     /// `TileEditPipeline` has no CPU source to estimate this from directly — it
     /// starts at `DEHAZE_ATMOS_NEUTRAL` and the app hands it the real estimate
@@ -199,39 +200,25 @@ impl TileEditPipeline {
         // old exposure/white-balance/contrast `PointOpNode` trio at this exact
         // graph position — mirrors `EditPipeline::new`'s wiring exactly.
         let global_set = Rc::new(RefCell::new(stack.global.clone()));
+        // The Light stage never reads dehaze state (recovery is fused into the
+        // COLOR stage only — see Phase 4 Task 2) — a fresh, never-mutated
+        // placeholder pair is a valid stand-in here.
         let light_engine_node = Rc::new(LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             Rc::new(RefCell::new(LocalAdjustments::default())),
             EngineStage::Light,
             global_set.clone(),
+            Rc::new(Cell::new(ColorDehazeParams::default())),
+            Rc::new(Cell::new(TileFrame::default())),
         ));
         let light_engine_id =
             graph.add_node(Box::new(light_engine_node.clone()), vec![vignette_id]);
 
         let dehaze_atmos = DEHAZE_ATMOS_NEUTRAL;
-        let recovery_params = Rc::new(Cell::new(RecoveryParams::from_op(
+        let color_dehaze_params = Rc::new(Cell::new(ColorDehazeParams::from_op(
             stack.dehaze(),
             dehaze_atmos,
         )));
-        // ST-Task 3: no per-tile `DehazeTransmissionNode` anymore — the
-        // recovery's only graph input is `I` (now `light_engine_id`); its
-        // shared transmission is set out-of-band via `set_shared_transmission`
-        // (see that fn + `produce_tile`). Constructed with the SAME shared
-        // `frame` the head writes/vignette reads, so `frame_origin` is this
-        // tile's real output-space origin (not a local per-tile identity
-        // origin) — required for the source-UV mapping to be correct across
-        // tiles.
-        let dehaze_recovery_node = Rc::new(DehazeRecoveryNode::new(
-            ctx.clone(),
-            recovery_params.clone(),
-            frame.clone(),
-        ));
-        let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
-        dehaze_recovery_node.set_geometry(geo_uniform);
-        let dehaze_recovery_id = graph.add_node(
-            Box::new(dehaze_recovery_node.clone()),
-            vec![light_engine_id],
-        );
 
         // Phase 3: the Color-stage engine node replaces the old tone-curve →
         // hsl → color-grade → local-adjust chain in one node at this exact
@@ -239,16 +226,27 @@ impl TileEditPipeline {
         // per-tile mask compositing gets the same post-global-color-segment
         // treatment as the whole-image node (see `evaluate_color`'s doc);
         // `set_tile_transform` (called per `produce_tile`, below) is unchanged.
+        // Phase 4 Task 2: no per-tile `DehazeTransmissionNode`/standalone
+        // recovery node anymore — the fused recovery step's only graph input
+        // is `I` (now `light_engine_id` directly); its shared transmission is
+        // set out-of-band via `set_shared_transmission` (see that fn +
+        // `produce_tile`). Constructed with the SAME shared `frame` the head
+        // writes/vignette reads, so `frame_origin` is this tile's real
+        // output-space origin (not a local per-tile identity origin) —
+        // required for the source-UV mapping to be correct across tiles.
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
         let local_node = Rc::new(LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             local_layers.clone(),
             EngineStage::Color,
             global_set.clone(),
+            color_dehaze_params.clone(),
+            frame.clone(),
         ));
+        let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
+        local_node.set_geometry(geo_uniform);
         let (out_w, out_h) = crate::edited_output_dims(&stack, src_w, src_h);
-        let local_adjust_id =
-            graph.add_node(Box::new(local_node.clone()), vec![dehaze_recovery_id]);
+        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![light_engine_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_id = graph.add_node(
@@ -296,9 +294,7 @@ impl TileEditPipeline {
             global_set,
             light_engine_id,
             light_engine_node,
-            dehaze_recovery_id,
-            recovery_params,
-            dehaze_recovery_node,
+            color_dehaze_params,
             dehaze_atmos,
             local_adjust_id,
             local_layers,
@@ -329,8 +325,9 @@ impl TileEditPipeline {
     /// geometry at construction time and fixed thereafter — a geometry/output-dims
     /// change requires the same full rebuild, not just a `set_stack` call. The
     /// per-tile mask placement is set per `produce_tile` via `set_tile_transform`.
-    /// `dehaze_recovery_node.set_geometry` is re-derived here too (ST-Task 3):
-    /// this pipeline's geometry never actually changes across `set_stack` calls
+    /// `local_node.set_geometry` (Phase 4 Task 2: the fused recovery step's
+    /// mapping, on the Color-stage engine node) is re-derived here too: this
+    /// pipeline's geometry never actually changes across `set_stack` calls
     /// (see the LIMITATION above — a real geometry change needs a full rebuild),
     /// so this is a no-op in practice, but keeps the recovery's source-UV mapping
     /// explicitly in sync with the head's rather than relying on that invariant.
@@ -350,15 +347,16 @@ impl TileEditPipeline {
             self.graph.mark_dirty(self.local_adjust_id);
         }
         *self.global_set.borrow_mut() = stack.global.clone();
-        // ST-Task 3: no transmission node here anymore — only `amount`/`atmos`
-        // feed the (single) recovery node, a cheap uniform-only update.
-        let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
-        if r != self.recovery_params.get() {
-            self.recovery_params.set(r);
-            self.graph.mark_dirty(self.dehaze_recovery_id);
+        // Phase 4 Task 2: no transmission node here anymore — only
+        // `amount`/`atmos` feed the Color-stage engine node's fused recovery
+        // step, a cheap uniform-only update.
+        let cd = ColorDehazeParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        if cd != self.color_dehaze_params.get() {
+            self.color_dehaze_params.set(cd);
+            self.graph.mark_dirty(self.local_adjust_id);
         }
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), self.src_w, self.src_h);
-        self.dehaze_recovery_node.set_geometry(geo_uniform);
+        self.local_node.set_geometry(geo_uniform);
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {
             *self.local_layers.borrow_mut() = la;
@@ -443,41 +441,42 @@ impl TileEditPipeline {
                 atmos[2].max(DEHAZE_ATMOS_MIN),
                 0.0,
             ];
-            // ST-Task 3: only the recovery pass needs `A` (for its
+            // Phase 4 Task 2: only the fused recovery step needs `A` (for its
             // `(I-A)/t + A` recovery) — there is no transmission node here
             // anymore to also update.
-            let r = RecoveryParams {
+            let cd = ColorDehazeParams {
                 atmos: floored,
-                ..self.recovery_params.get()
+                ..self.color_dehaze_params.get()
             };
-            self.recovery_params.set(r);
-            self.graph.mark_dirty(self.dehaze_recovery_id);
+            self.color_dehaze_params.set(cd);
+            self.graph.mark_dirty(self.local_adjust_id);
         }
     }
 
     /// Bind (or clear) the externally-computed shared whole-image dehaze
     /// transmission (source space, bounded to `DEHAZE_MAX_TRANSMISSION_DIM`) —
-    /// e.g. `EditPipeline::transmission_texture()`. ST-Task 3: this pipeline no
-    /// longer computes its own per-tile transmission; `produce_tile` samples
+    /// e.g. `EditPipeline::transmission_texture()`. This pipeline never
+    /// computes its own per-tile transmission; `produce_tile` samples
     /// whatever was last bound here. `None` (or never called) falls back to a
     /// passthrough (identity) recovery, same as `amount == 0`. Buffer/view
     /// update only — never a pipeline rebuild (CLAUDE.md GPU rule); a no-op
     /// when `tex` is already the bound texture, so the caller (the app, after
     /// every preview re-evaluate) can call this unconditionally.
     pub fn set_shared_transmission(&mut self, tex: Option<Arc<wgpu::Texture>>) {
-        self.dehaze_recovery_node.set_shared_transmission(tex);
+        self.local_node.set_shared_transmission(tex);
     }
 
     /// Render the edited interior `TILE_SIZE`² for `coord` as an `Rgba16Float`
     /// `COPY_SRC` texture. Re-runs the whole per-tile chain (the geometry head is
     /// dirtied each call because the tile coord changed).
     ///
-    /// ST-Task 3: there is no per-tile transmission to force-evaluate anymore —
-    /// `dehaze_recovery_node` just samples whatever shared transmission was
-    /// last bound via `set_shared_transmission`, at this tile's real
-    /// output-space origin (the shared `frame` the head writes just above, in
-    /// the SAME evaluate). A single `graph.evaluate(output_id)` runs the whole
-    /// chain, head through the (now halo-free) dehaze recovery to sharpen.
+    /// Phase 4 Task 2: there is no per-tile transmission to force-evaluate —
+    /// the Color-stage engine node's fused recovery step just samples whatever
+    /// shared transmission was last bound via `set_shared_transmission`, at
+    /// this tile's real output-space origin (the shared `frame` the head
+    /// writes just above, in the SAME evaluate). A single
+    /// `graph.evaluate(output_id)` runs the whole chain, head through the (now
+    /// halo-free) fused dehaze recovery to sharpen.
     pub fn produce_tile(&mut self, coord: TileCoord) -> wgpu::Texture {
         self.request.set(TileRequest {
             coord,

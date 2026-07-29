@@ -575,6 +575,37 @@ pub struct LocalAdjustUniform {
     /// mask texture bound for a global pseudo-layer is never read). z: vibrance
     /// amount (rides in this vec4 rather than growing the struct again). w: pad.
     pub order_and_coverage: [f32; 4],
+    // ── Phase 4 Task 2 (fused engine): dehaze recovery fused as the FIRST step
+    // of `adjust()`, gated on `dehaze_amount_atmos.x != 0.0`. Zeroed by
+    // `local_adjust_uniform` for every call site (Light stage, per-mask
+    // layers); `LocalAdjustmentsNode::evaluate_color` overwrites these five
+    // fields ONLY on the uniform it builds for the global Color-stage
+    // pseudo-layer dispatch, and only when a `Dehaze` op is active AND a real
+    // shared transmission is bound — every other dispatch takes the identical
+    // zero-extra-work path the old (now-retired) `DehazeRecoveryNode` used for
+    // `amount == 0`/no transmission. Field shapes mirror that node's retired
+    // `RecoveryParams` exactly (minus `t0`, hardcoded as a WGSL const — never
+    // user-adjustable — and reflowed into vec4s since WGSL/std140 has no
+    // scalar/vec2 packing here).
+    /// x = dehaze amount (0 = inactive this dispatch); yzw = atmospheric
+    /// light `A` (floored to `DEHAZE_ATMOS_MIN`).
+    pub dehaze_amount_atmos: [f32; 4],
+    /// Row-major 2×2 output→source mapping (mirrors `GeometryUniform::m`).
+    pub dehaze_geo_m: [f32; 4],
+    /// `[geo_off.x, geo_off.y, src_dims.x, src_dims.y]` (mirrors
+    /// `GeometryUniform::off`/`src_dims`).
+    pub dehaze_geo_off_src_dims: [f32; 4],
+    /// `[frame_origin.x, frame_origin.y, full_dims.x, full_dims.y]` — this
+    /// pass's `TileFrame` (haloed tile origin + full output dims at this LOD),
+    /// making the source-UV sample LOD-independent exactly as the retired
+    /// `DehazeRecoveryNode`'s `dehaze_recovery.wgsl` did.
+    pub dehaze_frame: [f32; 4],
+    /// `[out_dims.x, out_dims.y, has_transmission (0.0/1.0), pad]`. `out_dims`
+    /// is the LEVEL-0 output dims (mirrors `GeometryUniform::out_dims`);
+    /// `has_transmission` gates the shader's sample (0 = the node's 1×1
+    /// neutral fallback is bound, so the recovery step is a no-op regardless
+    /// of `dehaze_amount_atmos.x`).
+    pub dehaze_out_dims_flags: [f32; 4],
 }
 
 /// `light_color_apply` (below) is still test-only; `local_adjust_uniform` is now
@@ -629,6 +660,15 @@ pub fn local_adjust_uniform(
             a.vibrance,
             0.0,
         ],
+        // Phase 4 Task 2: identity/inert by default at every call site — only
+        // `LocalAdjustmentsNode::evaluate_color` overwrites these, and only for
+        // the global Color-stage pseudo-layer's own uniform instance (see the
+        // field doc on the struct).
+        dehaze_amount_atmos: [0.0; 4],
+        dehaze_geo_m: [0.0; 4],
+        dehaze_geo_off_src_dims: [0.0; 4],
+        dehaze_frame: [0.0; 4],
+        dehaze_out_dims_flags: [0.0; 4],
     }
 }
 
@@ -764,6 +804,44 @@ fn hsl_bands_apply(c: [f32; 3], bands: &[[f32; 4]; 8]) -> [f32; 3] {
 
     let rgb = hsl_to_rgb(out_hsl);
     [rgb[0] + excess[0], rgb[1] + excess[1], rgb[2] + excess[2]]
+}
+
+/// `light_color_apply` with the Phase 4 Task 2 dehaze recovery fused in as the
+/// first step of the color segment — mirrors `local_adjust.wgsl`'s
+/// `dehaze_recover_step` + `adjust()` exactly. `dehaze` is `Some((amount,
+/// atmos, t))` when recovery is active for THIS call: `t` is the
+/// ALREADY-REFINED transmission (what the shader's `trans` sample would
+/// return) — injected directly since a CPU caller has no GPU transmission
+/// texture to sample, exactly as `RecoveryParams`'s retired GPU parity tests
+/// injected a constant `q`. `None` (or `amount == 0.0`) is the identity path,
+/// matching the shader's `dehaze_amount_atmos.x == 0.0` gate. Only meaningful
+/// when `global_order` is true — the shader only ever populates the dehaze
+/// fields on the global Color-stage pseudo-layer's uniform (see
+/// `local_node.rs::evaluate_color`); every other caller keeps using
+/// `light_color_apply` (below), which is this function with `dehaze: None`
+/// and is therefore unaffected — no existing call site needs to change.
+#[allow(dead_code)]
+pub fn light_color_apply_with_dehaze(
+    rgb: [f32; 3],
+    a: &crate::local::AdjustmentSet,
+    global_order: bool,
+    dehaze: Option<(f32, [f32; 3], f32)>,
+) -> [f32; 3] {
+    let rgb = match dehaze {
+        Some((amount, atmos, t)) if amount != 0.0 => {
+            // Convert the injected transmission `t` back to the `dark`
+            // (pre-omega dark-channel) input `dehaze_recover` expects, so its
+            // internal `t = 1 - omega*dark` reconstructs exactly `t` (then
+            // applies the SAME `.clamp(0,1)`/`t0`-floor the shader does).
+            // Mirrors the conversion the retired `DehazeRecoveryNode`'s own
+            // GPU-vs-CPU parity test used for its shader (which also consumes
+            // an already-refined `q`/`t` directly).
+            let dark = (1.0 - t) / crate::dehaze::DEHAZE_OMEGA;
+            crate::dehaze::dehaze_recover(rgb, dark, atmos, amount)
+        }
+        _ => rgb,
+    };
+    light_color_apply(rgb, a, global_order)
 }
 
 /// CPU reference for the Light+Color point op. `local_adjust.wgsl` mirrors this

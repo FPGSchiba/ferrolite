@@ -9,13 +9,11 @@ use ferrolite_image::LinearRgbaF32;
 use wgpu::util::DeviceExt;
 
 use crate::dehaze::estimate_atmospheric_light;
-use crate::dehaze_node::{
-    DehazeRecoveryNode, DehazeTransmissionNode, RecoveryParams, TransmissionParams,
-};
+use crate::dehaze_node::{DehazeTransmissionNode, TransmissionParams};
 use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::{AdjustmentSet, LocalAdjustments};
-use crate::local_node::{EngineStage, LocalAdjustmentsNode};
+use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode};
 use crate::nodes::{GeometryNode, PointOpNode, SourceNode, TileFrame, VignetteNode};
 use crate::op::OpStack;
 use crate::sharpen_node::SharpenNode;
@@ -57,13 +55,15 @@ pub struct EditPipeline {
     // Mirrors `local_node`'s retention rationale.
     #[cfg_attr(not(test), allow(dead_code))]
     dehaze_transmission_node: Rc<DehazeTransmissionNode>,
-    dehaze_recovery_id: NodeId,
-    recovery_params: Rc<Cell<RecoveryParams>>,
-    // Handle to the recovery node, retained so `evaluate` can hand it the
-    // transmission node's fresh output every call (ST-Task 2: the recovery node
-    // is no longer a graph-edge dependent of `dehaze_transmission_id` — see
-    // `evaluate`'s doc — so this hand-off can't happen via the graph itself).
-    dehaze_recovery_node: Rc<DehazeRecoveryNode>,
+    // Phase 4 Task 2: dehaze recovery is now fused into the Color-stage engine
+    // node (`local_node`, below) — there is no standalone recovery node/id
+    // anymore. `color_dehaze_params` is the shared amount/atmos cell
+    // `set_stack` reseeds (mirrors the retired `recovery_params` field);
+    // `evaluate` still hands `local_node` the transmission node's fresh output
+    // every call the same way it used to hand it to the (now-gone)
+    // `DehazeRecoveryNode` (see `evaluate`'s doc — the hand-off is out-of-band,
+    // not a graph edge, so it can't happen via the graph itself).
+    color_dehaze_params: Rc<Cell<ColorDehazeParams>>,
     /// Whole-image atmospheric light, estimated once from the CPU source at
     /// construction (design §5.3) and reused by every `set_stack` (it is an image
     /// property, independent of the edit stack).
@@ -124,6 +124,10 @@ impl EditPipeline {
         // graph position. One shared `global_set` feeds both this node's
         // `light_segment()` and the Color-stage node's `color_segment()` below.
         let global_set = Rc::new(RefCell::new(stack.global.clone()));
+        // The Light stage never reads dehaze state (recovery is fused into the
+        // COLOR stage only — see Task 2) — a fresh, never-mutated placeholder
+        // pair is a valid stand-in, mirroring `layers`' own placeholder just
+        // below.
         let light_engine_node = Rc::new(LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             // The Light stage never reads `layers` (see `evaluate_light`) — a
@@ -131,16 +135,20 @@ impl EditPipeline {
             Rc::new(RefCell::new(LocalAdjustments::default())),
             EngineStage::Light,
             global_set.clone(),
+            Rc::new(Cell::new(ColorDehazeParams::default())),
+            Rc::new(Cell::new(TileFrame::default())),
         ));
         let light_engine_id =
             graph.add_node(Box::new(light_engine_node.clone()), vec![vignette_id]);
 
-        // Halo-free dehaze (QS-Task 4): the refined transmission map (guided
-        // filter, expensive multi-pass) and the amount/atmos recovery+blend
-        // (cheap single pass) are separate graph nodes so an amount-only drag
-        // dirties only the recovery node — the transmission node's dirty-cache
-        // means it is NOT recomputed (see `transmission_rebuild_count`/
-        // `amount_change_does_not_recompute_transmission`).
+        // Halo-free dehaze (QS-Task 4, Phase 4 Task 2): the refined transmission
+        // map (guided filter, expensive multi-pass) stays a separate graph node
+        // so an amount-only drag never recomputes it (see
+        // `transmission_rebuild_count`/`amount_change_does_not_recompute_transmission`);
+        // the amount/atmos recovery+blend step is now FUSED into the Color-stage
+        // engine node below (no standalone recovery node/id anymore — one less
+        // full-res pass whenever both dehaze and a color-segment/mask edit are
+        // active).
         let dehaze_atmos = estimate_atmospheric_light(source);
         let transmission_params = Rc::new(Cell::new(TransmissionParams::from_op(
             stack.dehaze(),
@@ -155,51 +163,46 @@ impl EditPipeline {
             vec![light_engine_id],
         );
 
-        let recovery_params = Rc::new(Cell::new(RecoveryParams::from_op(
+        let color_dehaze_params = Rc::new(Cell::new(ColorDehazeParams::from_op(
             stack.dehaze(),
             dehaze_atmos,
         )));
-        // ST-Task 2: the recovery node takes only `I` (now `light_engine_id`) as
-        // a graph input — the transmission is bound out-of-band via
-        // `set_shared_transmission` (see `evaluate`), not a graph edge, so the
-        // shared texture can later also serve the tiled tier. No tiling here, so
-        // a dedicated frame — but NOT `TileFrame::default()` (`full_dims =
-        // [0,0]`, which the shader's LOD-independent mapping would divide by
-        // zero on): the whole-image tier has no LOD tiers, so its "full output
-        // dims" is simply the source dims, origin `[0,0]`.
-        let dehaze_recovery_node = Rc::new(DehazeRecoveryNode::new(
-            ctx.clone(),
-            recovery_params.clone(),
-            Rc::new(Cell::new(TileFrame {
-                origin: [0.0, 0.0],
-                full_dims: [src_w as f32, src_h as f32],
-            })),
-        ));
-        // Geometry (crop/rotate) runs downstream of dehaze in this graph (at
-        // `geometry_id`, the very end), so recovery always sees the FULL source
-        // dims here — identity mapping makes source UV == whole-image UV,
-        // exactly matching the pre-ST-Task-2 `(xy+0.5)/dims(img)` sampling.
-        let (identity_geo, _, _) = geometry_uniform(None, src_w, src_h);
-        dehaze_recovery_node.set_geometry(identity_geo);
-        let dehaze_recovery_id = graph.add_node(
-            Box::new(dehaze_recovery_node.clone()),
-            vec![light_engine_id],
-        );
+        // Phase 4 Task 2: the fused recovery step's shared `TileFrame` — no
+        // tiling here, so a dedicated frame, but NOT `TileFrame::default()`
+        // (`full_dims = [0,0]`, which the shader's LOD-independent mapping
+        // would divide by zero on): the whole-image tier has no LOD tiers, so
+        // its "full output dims" is simply the source dims, origin `[0,0]`.
+        // Mirrors the retired `DehazeRecoveryNode`'s own construction exactly.
+        let color_dehaze_frame = Rc::new(Cell::new(TileFrame {
+            origin: [0.0, 0.0],
+            full_dims: [src_w as f32, src_h as f32],
+        }));
 
         // Phase 3: the Color-stage engine node replaces the old tone-curve → hsl
         // → color-grade → local-adjust chain in one node at this exact graph
-        // position: the global set's `color_segment()` pseudo-layer first, then
-        // the per-mask-layer loop (unchanged mask-compositing math, now keyed
-        // off this node's post-pseudo-layer `current` — see `evaluate_color`).
+        // position: the global set's `color_segment()` pseudo-layer first
+        // (fused dehaze recovery, THEN the color-segment point ops — Task 2),
+        // then the per-mask-layer loop (unchanged mask-compositing math, now
+        // keyed off this node's post-pseudo-layer `current` — see
+        // `evaluate_color`). Its only graph input is `light_engine_id` directly
+        // now that the standalone recovery node is gone.
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
         let local_node = Rc::new(LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             local_layers.clone(),
             EngineStage::Color,
             global_set.clone(),
+            color_dehaze_params.clone(),
+            color_dehaze_frame,
         ));
-        let local_adjust_id =
-            graph.add_node(Box::new(local_node.clone()), vec![dehaze_recovery_id]);
+        // Geometry (crop/rotate) runs downstream of dehaze/color in this graph
+        // (at `geometry_id`, the very end), so the fused recovery step always
+        // sees the FULL source dims here — identity mapping makes source UV ==
+        // whole-image UV, exactly matching the retired `DehazeRecoveryNode`'s
+        // pre-fusion `(xy+0.5)/dims(img)` sampling.
+        let (identity_geo, _, _) = geometry_uniform(None, src_w, src_h);
+        local_node.set_geometry(identity_geo);
+        let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![light_engine_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_node = SharpenNode::new(ctx.clone(), sharpen.clone());
@@ -225,9 +228,7 @@ impl EditPipeline {
             dehaze_transmission_id,
             transmission_params,
             dehaze_transmission_node,
-            dehaze_recovery_id,
-            recovery_params,
-            dehaze_recovery_node,
+            color_dehaze_params,
             dehaze_atmos,
             local_adjust_id,
             local_layers,
@@ -240,8 +241,8 @@ impl EditPipeline {
             src_w,
             src_h,
             // source, color-matrix, vignette, light-engine, dehaze-transmission,
-            // dehaze-recovery, color-engine, sharpen, geometry.
-            node_count: 9,
+            // color-engine (recovery fused in), sharpen, geometry.
+            node_count: 8,
             stack,
         }
     }
@@ -325,27 +326,30 @@ impl EditPipeline {
             self.graph.mark_dirty(self.local_adjust_id);
         }
         *self.global_set.borrow_mut() = stack.global.clone();
-        // Route `radius`/`atmos` to the transmission node (dirtying it only when
-        // one of those actually changed) and `amount`/`atmos` to the recovery
-        // node, independently — an amount-only change leaves `t` unchanged, so
-        // the (expensive) transmission node is NOT dirtied; the graph still
-        // re-runs recovery (its downstream consumer) because `r` changed.
+        // Phase 4 Task 2: route `radius`/`atmos` to the transmission node
+        // (dirtying it only when one of those actually changed) and
+        // `amount`/`atmos` to the Color-stage engine node's fused recovery
+        // step, independently — an amount-only change leaves the transmission
+        // MAP unchanged, so the (expensive) transmission node is NOT dirtied;
+        // the Color engine still re-runs (it now applies `amount`) because
+        // `color_dehaze_params` changed below.
         let t = TransmissionParams::from_op(stack.dehaze(), self.dehaze_atmos);
         if t != self.transmission_params.get() {
             self.transmission_params.set(t);
             self.graph.mark_dirty(self.dehaze_transmission_id);
-            // ST-Task 2: the recovery node reads the transmission's OUTPUT via an
+            // The Color engine reads the transmission's OUTPUT via an
             // out-of-band shared-texture handle, not a graph edge, so
             // `mark_dirty`'s automatic dependent-propagation no longer reaches
             // it. A transmission change (radius/atmos/active) can change that
             // texture's CONTENT in place (same `Arc`, same dims) without
-            // changing its identity, so dirty recovery explicitly here too.
-            self.graph.mark_dirty(self.dehaze_recovery_id);
+            // changing its identity, so dirty the Color engine explicitly here
+            // too.
+            self.graph.mark_dirty(self.local_adjust_id);
         }
-        let r = RecoveryParams::from_op(stack.dehaze(), self.dehaze_atmos);
-        if r != self.recovery_params.get() {
-            self.recovery_params.set(r);
-            self.graph.mark_dirty(self.dehaze_recovery_id);
+        let cd = ColorDehazeParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        if cd != self.color_dehaze_params.get() {
+            self.color_dehaze_params.set(cd);
+            self.graph.mark_dirty(self.local_adjust_id);
         }
         let la = stack.local_adjustments().unwrap_or_default();
         if *self.local_layers.borrow() != la {
@@ -375,17 +379,18 @@ impl EditPipeline {
 
     /// Evaluate the pipeline output (re-running only dirty nodes).
     ///
-    /// ST-Task 2: `DehazeRecoveryNode` is no longer a graph-edge dependent of
-    /// `dehaze_transmission_id` (so the same shared-texture hand-off can also
-    /// serve the tiled tier without a redundant per-tile transmission compute).
-    /// That means `dehaze_transmission_id` is no longer an ancestor of
-    /// `output_id`, so the graph's own lazy pull would never evaluate it. Force
+    /// `dehaze_transmission_id` is not a graph-edge ancestor of `output_id`
+    /// (the Color-stage engine node reads its output via an out-of-band
+    /// shared-texture handle, not a graph edge — so the same hand-off can also
+    /// serve the tiled tier without a redundant per-tile transmission
+    /// compute), so the graph's own lazy pull would never evaluate it. Force
     /// it via the graph (reusing its own dirty-cache — cheap when clean) and
-    /// hand its current output to the recovery node BEFORE evaluating the rest
-    /// of the chain, so recovery always samples the up-to-date transmission.
+    /// hand its current output to the Color engine BEFORE evaluating the rest
+    /// of the chain, so the fused recovery step always samples the up-to-date
+    /// transmission.
     pub fn evaluate(&mut self) -> PipelineImage {
         self.graph.evaluate(self.dehaze_transmission_id);
-        self.dehaze_recovery_node
+        self.local_node
             .set_shared_transmission(self.dehaze_transmission_node.current_output_texture());
         self.graph.evaluate(self.output_id).clone()
     }
@@ -730,6 +735,82 @@ mod edit_pipeline_tests {
         );
     }
 
+    /// Phase 4 Task 2 Step 3 (dirty-routing regression): the fused recovery
+    /// step now lives on the Color-stage engine node, so a dehaze AMOUNT-only
+    /// change must dirty ONLY that node — NOT the (expensive) transmission
+    /// node, and NOT the Light-stage engine node (dehaze is not a light-
+    /// segment field). A RADIUS change must dirty the transmission node (and,
+    /// transitively, the Color engine, since its input's content changed) but
+    /// must still leave the Light engine untouched.
+    #[test]
+    fn dehaze_amount_dirties_color_engine_only_radius_also_dirties_transmission() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = LinearRgbaF32::new(16, 16, vec![0.6; 16 * 16 * 4]).unwrap();
+
+        let dehaze_stack = |amount: f32, radius: u32| {
+            OpStack::default().set_op(Op::Dehaze(crate::op::Dehaze { amount, radius }))
+        };
+
+        let mut ep = EditPipeline::new(ctx, &src, dehaze_stack(0.5, 8), IDENTITY);
+        let _ = ep.evaluate();
+        let (light_before, color_before, trans_before) = (
+            ep.light_engine_eval_count(),
+            ep.color_engine_eval_count(),
+            ep.transmission_rebuild_count(),
+        );
+
+        // Amount-only change: transmission must NOT recompute; the Light
+        // engine must NOT re-run; the Color engine (where the fused recovery
+        // now applies `amount`) MUST re-run.
+        ep.set_stack(dehaze_stack(0.9, 8));
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            trans_before,
+            "amount-only change must not recompute the transmission map"
+        );
+        assert_eq!(
+            ep.light_engine_eval_count(),
+            light_before,
+            "amount-only change must not re-run the Light engine"
+        );
+        assert_eq!(
+            ep.color_engine_eval_count(),
+            color_before + 1,
+            "amount-only change must re-run the Color engine (fused recovery)"
+        );
+
+        // Radius change: transmission recomputes (and the Color engine
+        // re-runs as its downstream consumer), but the Light engine still
+        // must not re-run.
+        let (light_before2, color_before2, trans_before2) = (
+            ep.light_engine_eval_count(),
+            ep.color_engine_eval_count(),
+            ep.transmission_rebuild_count(),
+        );
+        ep.set_stack(dehaze_stack(0.9, 16));
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            trans_before2 + 1,
+            "radius change must recompute the transmission map"
+        );
+        assert_eq!(
+            ep.light_engine_eval_count(),
+            light_before2,
+            "radius change must not re-run the Light engine"
+        );
+        assert_eq!(
+            ep.color_engine_eval_count(),
+            color_before2 + 1,
+            "radius change must re-run the Color engine (samples the new transmission)"
+        );
+    }
+
     /// Regression for the dehaze two-node-split perf bug: with NO `Dehaze` op in
     /// the stack, `DehazeTransmissionNode` must never run its expensive
     /// multi-pass guided filter, even as unrelated upstream ops (exposure,
@@ -809,10 +890,12 @@ mod edit_pipeline_tests {
         assert!(ep.transmission_texture().is_some());
     }
 
-    /// ST-Task 2 review fix (round 1): a pixel-level regression proving the
-    /// out-of-band transmission→recovery hand-off (`set_shared_transmission` +
-    /// the explicit `mark_dirty(dehaze_recovery_id)` in `set_stack`) actually
-    /// propagates into the RECOVERED OUTPUT of a LIVE pipeline, not just that
+    /// ST-Task 2 review fix (round 1), still exercised post-Phase-4-Task-2: a
+    /// pixel-level regression proving the out-of-band transmission→recovery
+    /// hand-off (`set_shared_transmission` + the explicit
+    /// `mark_dirty(local_adjust_id)` in `set_stack`'s transmission-change
+    /// branch) actually propagates into the RECOVERED OUTPUT of a LIVE
+    /// pipeline, not just that
     /// `transmission_rebuild_count()` incremented or `transmission_texture()`
     /// is present. Every existing dehaze test either discards `evaluate()`'s
     /// output (`let _ = ep.evaluate();`) or does a single fresh-evaluate golden
@@ -864,8 +947,9 @@ mod edit_pipeline_tests {
 
         // Live `set_stack` on the SAME pipeline instance — this is the path that
         // relies on `set_shared_transmission`/the explicit
-        // `mark_dirty(dehaze_recovery_id)` to propagate the new transmission
-        // into recovery's output, rather than constructing a fresh pipeline.
+        // `mark_dirty(local_adjust_id)` to propagate the new transmission into
+        // the fused recovery step's output, rather than constructing a fresh
+        // pipeline.
         let large_radius = OpStack::default().set_op(Op::Dehaze(crate::op::Dehaze {
             amount: 1.0,
             radius: 16,

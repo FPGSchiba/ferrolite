@@ -9,12 +9,20 @@
 //! metadata-only call `develop::meta_read::spawn_meta_read` uses (no pixel
 //! decode), and delivers each finished batch as ONE `AppEvent::MetaBackfillReady`
 //! (CLAUDE.md rule 1: even a "cheap" header read is real file I/O and must
-//! never run on the UI/update thread). The listing read goes through the
-//! `ReadPool` from this job thread (mirrors
-//! `develop::warm_prefetch::spawn_warm_sources`'s off-thread-catalog-read
-//! pattern); the batch WRITE happens later, on the UI thread, inside
-//! `AppState::apply`'s `MetaBackfillReady` arm — see that variant's doc
-//! comment for why.
+//! never run on the UI/update thread — and that rule covers the backlog
+//! CHECK too, not just the EXIF reads: `has_backlog`'s `COUNT(*)` is an
+//! unindexed sequential scan of `images`, so it runs as the job's first step,
+//! off the UI thread, not as a spawn-time gate on the UI thread). Every read
+//! (the backlog check AND the listing) goes through the `ReadPool` from this
+//! job thread (mirrors `develop::warm_prefetch::spawn_warm_sources`'s
+//! off-thread-catalog-read pattern); the batch WRITE happens later, on the
+//! UI thread, inside `AppState::apply`'s `MetaBackfillReady` arm — see that
+//! variant's doc comment for why.
+//!
+//! **Actual per-launch cost:** the job is spawned unconditionally on every
+//! app run's first frame (`spawn_once`); a fully-backfilled library pays
+//! exactly one off-thread `COUNT(*)` per launch, forever, and zero UI-thread
+//! work either way.
 //!
 //! **Skip semantics (load-bearing):** a row whose EXIF read fails (missing or
 //! corrupt file) OR whose metadata has no lens/aperture/focal data at all is
@@ -55,11 +63,25 @@ fn backfill_one(candidate: &BackfillCandidate) -> BackfillResult {
     }
 }
 
+/// Whether there is any Task-14 backlog left at all — the job's first step,
+/// run OFF the UI thread (see the module doc: this `COUNT(*)` has no
+/// supporting index, so it's a full sequential scan of `images` and must
+/// never run synchronously at spawn time). `Err` (a broken catalog handle)
+/// is treated the same as "nothing to do": the job simply exits, and a
+/// healthy catalog will retry on the next launch.
+fn has_backlog(reads: &ReadPool) -> bool {
+    reads.metadata_backfill_pending_count().unwrap_or(0) > 0
+}
+
 /// Spawn the one-shot `Background` job that walks the ENTIRE NULL-metadata
 /// backlog in `BATCH_SIZE` chunks, oldest id first, until none remain or
-/// `cancel` fires. Cancellation is checked between batches AND between
-/// individual files within a batch, so a shutdown mid-batch stops promptly
-/// instead of finishing the whole backlog first.
+/// `cancel` fires. Its FIRST action, before any listing or decode work, is
+/// `has_backlog` — so a fully-backfilled catalog does exactly one off-thread
+/// `COUNT(*)` and returns, never touching `images_needing_metadata_backfill`
+/// or `ferrolite_decode::read_metadata` at all. Cancellation is then checked
+/// between batches AND between individual files within a batch, so a
+/// shutdown mid-batch stops promptly instead of finishing the whole backlog
+/// first.
 ///
 /// Uses the id-cursor listing (`ReadPool::images_needing_metadata_backfill`)
 /// rather than re-querying the same "all NULL" predicate from a fixed start:
@@ -75,6 +97,13 @@ pub fn spawn_meta_backfill(
     let tx = tx.clone();
     let ctx = ctx.clone();
     jobs.submit(Priority::Background, move |cancel| {
+        if cancel.is_cancelled() {
+            return;
+        }
+        if !has_backlog(&reads) {
+            return; // nothing to do this launch — one COUNT(*), no more work
+        }
+
         let mut cursor = 0i64;
         loop {
             if cancel.is_cancelled() {
@@ -108,18 +137,15 @@ pub fn spawn_meta_backfill(
     })
 }
 
-/// One-shot startup gate: spawn the backfill job only when the cheap `COUNT`
-/// query (`metadata_backfill_pending_count`) says there is work, so a
-/// fully-backfilled catalog never pays even one `Background` job submission
-/// on a later launch. Called once from `FerroliteApp::update`'s first-frame
-/// block (mirrors the `did_restore` one-shot guard); the returned handle is
-/// stored on `AppState::meta_backfill_handle` so it can be cancelled on
-/// shutdown like the app's other long-lived job handles.
-pub fn maybe_spawn(state: &mut crate::state::AppState, ctx: &egui::Context) {
-    let pending = state.reads.metadata_backfill_pending_count().unwrap_or(0);
-    if pending == 0 {
-        return;
-    }
+/// One-shot-per-run startup spawn: submits the backfill job UNCONDITIONALLY
+/// on the first `update()` frame (the caller's `did_meta_backfill_spawn` flag
+/// ensures that). There is deliberately NO gate here on the UI thread — the
+/// job itself checks `has_backlog` as its first off-thread step, so a
+/// fully-backfilled library still pays exactly one `Background` job
+/// submission per launch, but zero UI-thread catalog work. The returned
+/// handle is stored on `AppState::meta_backfill_handle` so it can be
+/// cancelled on shutdown like the app's other long-lived job handles.
+pub fn spawn_once(state: &mut crate::state::AppState, ctx: &egui::Context) {
     let handle = spawn_meta_backfill(&state.jobs, Arc::clone(&state.reads), &state.tx, ctx);
     state.meta_backfill_handle = Some(handle);
 }
@@ -127,7 +153,7 @@ pub fn maybe_spawn(state: &mut crate::state::AppState, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrolite_catalog::{Catalog, FileKind, NewImage};
+    use ferrolite_catalog::{Catalog, FileKind, NewImage, ReadPool};
     use std::path::PathBuf;
 
     fn temp_catalog(name: &str) -> (Catalog, PathBuf) {
@@ -140,6 +166,63 @@ mod tests {
         let path = dir.join("c.db");
         let _ = std::fs::remove_file(&path);
         (Catalog::open(&path).unwrap(), path)
+    }
+
+    /// `has_backlog` is the job's first, off-thread-only step (see the
+    /// reviewed fix: no UI-thread COUNT call anymore). This is the retargeted
+    /// gate test: an empty/fully-backfilled catalog must report no backlog
+    /// (the job would return here, before any listing/decode work), and a
+    /// catalog with a NULL-metadata row must report backlog present.
+    #[test]
+    fn has_backlog_false_when_catalog_is_fully_backfilled() {
+        let (cat, path) = temp_catalog("gate-empty");
+        // A row with real (non-NULL) metadata: nothing left to do.
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        cat.apply_metadata_backfill_batch(&[BackfillResult {
+            id: cat
+                .upsert_image(&NewImage::pending(
+                    f,
+                    "a.nef".into(),
+                    1,
+                    1,
+                    FileKind::Raw,
+                    0,
+                ))
+                .unwrap(),
+            lens: Some("50mm f/1.8".to_string()),
+            aperture: Some(1.8),
+            focal_length: Some(50.0),
+        }])
+        .unwrap();
+        drop(cat);
+
+        let reads = ReadPool::open(&path, 1).unwrap();
+        assert!(
+            !has_backlog(&reads),
+            "a fully-backfilled catalog must report no backlog"
+        );
+    }
+
+    #[test]
+    fn has_backlog_true_when_a_null_metadata_row_exists() {
+        let (cat, path) = temp_catalog("gate-pending");
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        cat.upsert_image(&NewImage::pending(
+            f,
+            "a.nef".into(),
+            1,
+            1,
+            FileKind::Raw,
+            0,
+        ))
+        .unwrap();
+        drop(cat);
+
+        let reads = ReadPool::open(&path, 1).unwrap();
+        assert!(
+            has_backlog(&reads),
+            "a NULL-metadata row must report backlog present"
+        );
     }
 
     #[test]

@@ -28,10 +28,12 @@ pub struct FerroliteApp {
     /// whether or not a restore actually happened, so the check runs exactly once.
     did_restore: bool,
     /// One-shot Task-14 metadata-backfill spawn guard: set `true` on the
-    /// first `update()` frame, mirroring `did_restore`. The actual spawn is
-    /// further gated inside `library::meta_backfill::maybe_spawn` on a cheap
-    /// NULL-count check, so this flag only ensures that check itself runs at
-    /// most once per app run.
+    /// first `update()` frame, mirroring `did_restore`. The job
+    /// (`library::meta_backfill::spawn_once`) is submitted unconditionally
+    /// when this flag flips — the backlog check (`has_backlog`) runs INSIDE
+    /// the job, off the UI thread, as its first step, so this flag only
+    /// ensures the job is submitted at most once per app run, not a gate on
+    /// whether there's work to do.
     did_meta_backfill_spawn: bool,
     /// Whether the Help modal (`crate::help::show`) is open. Opened by
     /// `Action::OpenHelp` (F1, global) or the Help menu.
@@ -1397,14 +1399,16 @@ impl eframe::App for FerroliteApp {
             }
         }
 
-        // One-shot Task-14 background metadata backfill: only actually spawns
-        // a job when the catalog has NULL-metadata rows left (cheap COUNT
-        // query inside `maybe_spawn`), so a fully-backfilled library pays
-        // nothing on later launches. Independent of `did_restore`/session
-        // restore — runs across the whole catalog, not the browsed folder.
+        // One-shot Task-14 background metadata backfill: the job is spawned
+        // unconditionally here (never a synchronous DB check on the UI
+        // thread — the job's OWN first step, off-thread, is the cheap
+        // backlog check, so a fully-backfilled library pays one off-thread
+        // COUNT per launch, zero UI-thread work). Independent of
+        // `did_restore`/session restore — runs across the whole catalog, not
+        // the browsed folder.
         if !self.did_meta_backfill_spawn {
             self.did_meta_backfill_spawn = true;
-            crate::library::meta_backfill::maybe_spawn(&mut self.state, ctx);
+            crate::library::meta_backfill::spawn_once(&mut self.state, ctx);
         }
 
         // One-shot startup display-profile detect, once the render state is valid

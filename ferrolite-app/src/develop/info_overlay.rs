@@ -10,6 +10,9 @@ const FILL_ALPHA: u8 = 160;
 const MARGIN: f32 = 12.0;
 /// Bright near-white so text stays legible on the black box regardless of theme.
 const TEXT: egui::Color32 = egui::Color32::from_gray(235);
+/// Approximate height of the info overlay HUD box produced by `draw()`.
+/// Used to position the toggle pill above the overlay when visible.
+const OVERLAY_APPROX_H: f32 = 108.0;
 
 pub fn draw(ui: &egui::Ui, facts: &crate::develop::info::ImageFacts) {
     let canvas_rect = ui.min_rect();
@@ -44,12 +47,24 @@ pub fn draw(ui: &egui::Ui, facts: &crate::develop::info::ImageFacts) {
         });
 }
 
-/// Draw the floating `ℹ Info` pill button on the canvas (~132px from bottom edge,
-/// positioned above the EXIF chip). Highlights with accent tint when
-/// `show_info_panel` is true, and clicking toggles `show_info_panel`.
+/// Y-offset (up from the canvas bottom edge) of the info pill's anchor.
+/// Overlay visible: sit above the overlay box. Hidden: sit at the corner margin.
+pub(crate) fn pill_bottom_offset(overlay_visible: bool, overlay_height: f32) -> f32 {
+    if overlay_visible {
+        overlay_height + 2.0 * MARGIN
+    } else {
+        MARGIN
+    }
+}
+
+/// Draw the floating `ℹ Info` pill button on the canvas. When the overlay is
+/// hidden, anchors at the bottom-left corner margin. When visible, positions
+/// above the EXIF overlay. Highlights with accent tint when `show_info_panel`
+/// is true, and clicking toggles `show_info_panel`.
 pub fn draw_toggle_button(ui: &egui::Ui, show_info_panel: &mut bool) {
     let canvas_rect = ui.min_rect();
-    let pos = egui::pos2(canvas_rect.left() + MARGIN, canvas_rect.bottom() - 132.0);
+    let offset = pill_bottom_offset(*show_info_panel, OVERLAY_APPROX_H);
+    let pos = egui::pos2(canvas_rect.left() + MARGIN, canvas_rect.bottom() - offset);
 
     egui::Area::new(egui::Id::new("develop_info_pill_button"))
         .order(egui::Order::Middle)
@@ -81,4 +96,15 @@ pub fn draw_toggle_button(ui: &egui::Ui, show_info_panel: &mut bool) {
                 *show_info_panel = !*show_info_panel;
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pill_docks_to_corner_when_overlay_hidden() {
+        assert_eq!(pill_bottom_offset(false, 120.0), MARGIN);
+        assert!(pill_bottom_offset(true, 120.0) > 120.0);
+    }
 }

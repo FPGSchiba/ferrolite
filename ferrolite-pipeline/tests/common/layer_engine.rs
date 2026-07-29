@@ -22,10 +22,18 @@
 //! (`ferrolite-pipeline/tests/common/layer_engine.rs`, reached via
 //! `mod common; common::layer_engine::...`) stable so future tasks can import
 //! it unchanged.
+//!
+//! **2026-07-29 addendum (Phase 4, `2026-07-29-unified-engine-phase4-mask-neighborhood`):**
+//! `mask_dehaze` and `mask_sharpen` were added to cover the per-mask
+//! neighborhood ops Tasks 2-4 of that phase landed (dehaze recovery fused
+//! into the Color engine + per-mask dehaze amount; separable sharpen +
+//! per-mask sharpen at a distinct radius). Rendered directly through the
+//! already-fused engine (no pre-fusion comparison — that job is done), so
+//! their goldens were written fresh, not regenerated from an older render.
 #![allow(dead_code)]
 
 use ferrolite_image::LinearRgbaF32;
-use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Rgb};
+use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Rgb, Vec2};
 use ferrolite_pipeline::{
     AdjustmentSet, ColorGrade, ColorSwatch, Contrast, Dehaze, Exposure, GradeWheel, Hsl,
     LocalAdjustments, MaskLayer, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
@@ -248,6 +256,60 @@ fn masked_layer_saturation_swatch() -> MaskLayer {
     }
 }
 
+/// The masked layer for `mask_dehaze`: a LEFT/RIGHT split `LinearGradient`
+/// mask (half the frame at 0.0, half at 1.0, matching the pattern
+/// `local_node.rs`'s own per-mask-dehaze tests use to isolate masked from
+/// unmasked pixels) driving ONLY `adjustments.dehaze.amount = 0.5` — no other
+/// adjustment on this layer, so a parity regression here can be attributed
+/// to the per-mask dehaze wiring (Task 3) and not entangled with any other
+/// per-layer step.
+fn masked_layer_dehaze_only() -> MaskLayer {
+    MaskLayer {
+        name: "mask-dehaze".into(),
+        visible: true,
+        mask: MaskDefinition {
+            components: vec![(
+                MaskComponent::LinearGradient {
+                    start: Vec2::new(0.0, 0.5),
+                    end: Vec2::new(1.0, 0.5),
+                },
+                CompositeMode::Add,
+            )],
+            invert: false,
+        },
+        adjustments: AdjustmentSet {
+            dehaze: Dehaze {
+                amount: 0.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    }
+}
+
+/// The masked layer for `mask_sharpen`: full-coverage mask (`MaskDefinition::default()`
+/// — the sharpen node's own masked-apply path already gets partial-coverage
+/// coverage from `sharpen_node.rs`'s unit tests, so this fixture's job is
+/// exercising the DISTINCT-radius two-blur path at the whole-pipeline level,
+/// not re-proving partial masking) driving ONLY `adjustments.sharpen`, amount
+/// 1.0 at radius 4 — deliberately different from the global sharpen's radius
+/// 2 (see `mask_sharpen` in `fixture_docs()`) so the fixture forces
+/// `SharpenNode` to compute two distinct separable blurs in one evaluate.
+fn masked_layer_sharpen_distinct_radius() -> MaskLayer {
+    MaskLayer {
+        name: "mask-sharpen".into(),
+        visible: true,
+        mask: MaskDefinition::default(),
+        adjustments: AdjustmentSet {
+            sharpen: Sharpen {
+                amount: 1.0,
+                radius: 4,
+            },
+            ..Default::default()
+        },
+    }
+}
+
 /// The shared fixture set: name -> doc. Consumed by the parity test (this
 /// task) and by `engine_bench.rs`'s "case (c)" (which pulls `two_masks`'
 /// `LocalAdjustments` back out via `OpStack::local_adjustments()` and layers it
@@ -357,6 +419,48 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                 vibrance: 0.5,
                 ..Default::default()
             }),
+        ),
+        // `mask_dehaze`: Phase 4 (per-mask neighborhood) coverage — a global
+        // dehaze op (0.3/r8, same params `full_global` already pins) alongside
+        // a half-coverage mask layer's OWN dehaze amount (0.5), driven off the
+        // SAME shared transmission map. Exercises the global recovery path
+        // (Task 2) and the per-mask recovery path (Task 3) together in one
+        // render. Base is `OpStack::default()` (unlike `one_mask`/`two_masks`,
+        // which layer on `light_trio_stack()`) — compounding light_trio's
+        // exposure/contrast/WB with a DOUBLE dehaze-recovery application
+        // (global then per-mask, on the same masked half) pushed this HSV
+        // sweep's near-black corner's recovered value past this file's
+        // `GOLDEN_MAX` encoding headroom (36.7 vs the [-1, 8] range); dropping
+        // light_trio keeps the fixture's job (double-recovery composition)
+        // isolated without widening the shared golden encoding range for
+        // every other fixture.
+        (
+            "mask_dehaze",
+            OpStack::default()
+                .set_op(Op::Dehaze(Dehaze {
+                    amount: 0.3,
+                    radius: 8,
+                }))
+                .set_op(Op::LocalAdjustments(LocalAdjustments {
+                    layers: vec![masked_layer_dehaze_only()],
+                })),
+        ),
+        // `mask_sharpen`: Phase 4 (per-mask neighborhood) coverage — a global
+        // sharpen (0.8/r2, same params `full_global` already pins) plus one
+        // full-coverage mask layer's OWN sharpen at a DISTINCT radius (1.0/r4),
+        // forcing `SharpenNode` to compute two separate separable blurs (one
+        // per distinct radius) in a single evaluate — the two-blur path Task 4
+        // added.
+        (
+            "mask_sharpen",
+            light_trio_stack()
+                .set_op(Op::Sharpen(Sharpen {
+                    amount: 0.8,
+                    radius: 2,
+                }))
+                .set_op(Op::LocalAdjustments(LocalAdjustments {
+                    layers: vec![masked_layer_sharpen_distinct_radius()],
+                })),
         ),
     ]
 }

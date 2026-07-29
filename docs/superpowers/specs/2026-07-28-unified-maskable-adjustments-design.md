@@ -145,6 +145,45 @@ source → color-matrix → [lens/vignette] →
 * **Fallback:** if the fused pass regresses on constrained GPUs (register pressure), split into
   two fused segments — still far fewer than 7 passes.
 
+### 4.1 Phase 4 amendment (2026-07-29) — per-mask neighborhood passes landed
+
+`.superpowers/sdd/2026-07-29-unified-engine-phase4-mask-neighborhood/` implemented the
+"Per-mask versions phase in later" line above for dehaze and sharpen (NR/clarity remain
+deferred — no algorithm exists in any scope yet). The chain above is updated as follows,
+without rewriting the history it documents:
+
+* **Dehaze recovery is no longer a discrete node.** The standalone `DehazeRecoveryNode`
+  (`(I−A)/t′ + A`, previously its own full-texture pass between the transmission node and
+  the color layer-engine pass) was fused INTO the layer-engine's Color-stage dispatch as
+  its first per-pixel step — one fewer full-res read+write round trip per evaluate. The
+  whole-image transmission map (`DehazeTransmissionNode`) stays its own heavy node (nothing
+  about the shared-map cost model changes); only the recovery *apply* step moved. Updated
+  chain:
+
+  ```text
+  source → color-matrix → [lens/vignette] →
+    layer-engine(global, coverage ≡ 1, dehaze-recovery fused in) →
+    [dehaze-transmission: shared whole-image map, still discrete] →
+    layer-engine(mask₁, own dehaze-recovery + own amount) → layer-engine(mask₂) → … →
+    sharpen(global apply, then one masked apply per active mask layer) →
+    geometry → display tail
+  ```
+
+* **Sharpen is separable and layered, not fused-per-mask-pass.** Rather than a discrete
+  node per mask layer (as the original bullet's "one fused pass per visible mask" implied
+  for neighborhood ops generally), `SharpenNode` computes ONE shared O(r) two-pass
+  (horizontal + vertical) box blur per DISTINCT radius among {global ∪ active mask layers},
+  then dispatches one global apply followed by one masked apply per active layer — all
+  within the node's own single command encoder/submit. This mirrors dehaze's existing
+  "heavy map shared, cheap masked apply" template exactly, as the original bullet
+  anticipated, but the "cheap apply" is itself now multiple small dispatches (one per
+  active layer) rather than a single global one.
+* **Per-mask dehaze RADIUS stays global-only** (the shared transmission map has exactly
+  one radius); per-mask dehaze AMOUNT and per-mask sharpen (amount + radius) are fully live.
+* Parity/perf evidence for both changes: `docs/benchmarks/2026-07-28-phase3-fused-engine.md`'s
+  "Phase 4 increments" section; fixture coverage: `mask_dehaze`/`mask_sharpen` in
+  `ferrolite-pipeline/tests/common/layer_engine.rs`.
+
 ## 5. History, undo & persistence plumbing
 
 * `History<OpStack>` → `History<EditDoc>`; same per-gesture sealing (`EditOutcome { doc, commit }`),

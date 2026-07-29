@@ -1,7 +1,8 @@
 //! Library top toolbar: search, sort, rating/flag/tag filters, Metadata Filters popup, and the
 //! thumbnail-size slider pinned to the right. All widgets drive `state.filter`
-//! and `state.include_subfolders` directly; the caller sets `state.dirty` when
-//! the returned `changed` flag is true (so the read pool re-queries off-thread).
+//! directly; the caller sets `state.dirty` when the returned `changed` flag is
+//! true (so the read pool re-queries off-thread). The "Subfolders" scope toggle
+//! lives in the Folders tree header (`panel.rs`), not here.
 
 use crate::library::filter::FileTypeChip;
 use crate::library::filter_widgets as fw;
@@ -83,13 +84,6 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             &mut state.filter.tag_mode,
             &state.tags,
         ) {
-            changed = true;
-        }
-
-        if ui
-            .checkbox(&mut state.include_subfolders, "Subfolders")
-            .changed()
-        {
             changed = true;
         }
 

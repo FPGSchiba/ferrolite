@@ -8,10 +8,13 @@ use crate::library::folder_tree::{flatten, subtree_count};
 use crate::state::{AppState, PendingRemove, RenameKind};
 use crate::theme;
 
-/// Returns `true` if the user opened a new folder this frame (via "Open
-/// folder…"), so the caller can persist `settings.last_folder` + mark dirty.
+/// Returns `true` if the caller should persist settings this frame — either
+/// because the user opened a new folder (via "Open folder…", which also sets
+/// `settings.last_folder`) or toggled the Folders tree's "Subfolders" scope
+/// checkbox (which is mirrored into `settings.filter.include_subfolders`).
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> bool {
     let mut folder_opened = false;
+    let mut settings_changed = false;
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new("CATALOG")
@@ -48,7 +51,23 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
     }
 
     ui.add_space(12.0);
-    ui.colored_label(theme::TEXT_FAINT, "FOLDERS");
+    ui.horizontal(|ui| {
+        ui.colored_label(theme::TEXT_FAINT, "FOLDERS");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let label = egui::RichText::new("Subfolders")
+                .color(theme::TEXT_FAINT)
+                .size(11.0);
+            if ui
+                .checkbox(&mut state.include_subfolders, label)
+                .on_hover_text("Include images in subfolders")
+                .changed()
+            {
+                state.dirty = true;
+                state.settings.filter.include_subfolders = state.include_subfolders;
+                settings_changed = true;
+            }
+        });
+    });
 
     let folders = state.reads.list_folders().unwrap_or_default();
     let nodes = flatten(&folders, &state.expanded_folders);
@@ -532,7 +551,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, ctx: &egui::Context) -> boo
             );
         }
     }
-    folder_opened
+    folder_opened || settings_changed
 }
 
 /// Delete a collection and clean up source / dirty state accordingly.

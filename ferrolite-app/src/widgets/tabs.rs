@@ -84,10 +84,17 @@ pub fn tab_row<T: PartialEq + Clone>(
             painter.galley(text_pos, text_galley, text_color);
 
             if is_active {
+                // The titlebar's `TopBottomPanel` (chrome::title_bar) paints its default
+                // separator hline (visuals.widgets.noninteractive.bg_stroke, ~1px gray) at
+                // panel-bottom - 1px AFTER this content runs, since `show_separator_line`
+                // defaults to true and that draw happens after `add_contents` returns. A
+                // stroke at `rect.bottom() - 1.0` sits almost exactly under that separator
+                // and gets painted over. Sit clearly above it (rect.bottom() - 3.0) so the
+                // accent underline stays fully visible above the separator line.
                 painter.line_segment(
                     [
-                        egui::pos2(rect.left() + 6.0_f32, rect.bottom() - 1.0),
-                        egui::pos2(rect.right() - 6.0_f32, rect.bottom() - 1.0),
+                        egui::pos2(rect.left() + 6.0_f32, rect.bottom() - 3.0),
+                        egui::pos2(rect.right() - 6.0_f32, rect.bottom() - 3.0),
                     ],
                     egui::Stroke::new(2.0_f32, theme::ACCENT),
                 );
@@ -221,31 +228,48 @@ mod tests {
         let mut current = TestTab::First;
         let tabs = [(TestTab::First, "First"), (TestTab::Second, "Second")];
 
+        let mut row_rect = egui::Rect::NOTHING;
         let output = ctx.run(RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let _ = tab_row(ui, &mut current, &tabs);
+                let resp = tab_row(ui, &mut current, &tabs);
+                // All tabs share the same vertical extent, so the union response's
+                // bottom edge equals the active tab's own rect bottom.
+                row_rect = resp.rect;
             });
         });
 
-        fn has_accent_underline(shape: &egui::Shape) -> bool {
+        fn find_accent_underline_y(shape: &egui::Shape) -> Option<f32> {
             match shape {
                 egui::Shape::LineSegment { points, stroke } => {
-                    (stroke.width - 2.0_f32).abs() < 1e-4
+                    let is_accent_underline = (stroke.width - 2.0_f32).abs() < 1e-4
                         && stroke.color == egui::epaint::ColorMode::Solid(theme::ACCENT)
-                        && (points[0].y - points[1].y).abs() < 1e-4
+                        && (points[0].y - points[1].y).abs() < 1e-4;
+                    is_accent_underline.then(|| points[0].y)
                 }
-                egui::Shape::Vec(shapes) => shapes.iter().any(has_accent_underline),
-                _ => false,
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(find_accent_underline_y),
+                _ => None,
             }
         }
 
-        let found = output
+        let underline_y = output
             .shapes
             .iter()
-            .any(|clipped| has_accent_underline(&clipped.shape));
+            .find_map(|clipped| find_accent_underline_y(&clipped.shape));
+
         assert!(
-            found,
+            underline_y.is_some(),
             "Active tab underline stroke (2px theme::ACCENT line segment) should be painted"
+        );
+
+        // Placement: fully inside the tab, clear of the titlebar's default
+        // TopBottomPanel separator line (painted after content, ~1px above the
+        // panel's bottom edge) — see the comment in `tab_row` above the stroke.
+        let expected_y = row_rect.bottom() - 3.0_f32;
+        assert!(
+            (underline_y.unwrap() - expected_y).abs() < 1e-3,
+            "underline should sit at rect.bottom() - 3.0 (got {}, expected {})",
+            underline_y.unwrap(),
+            expected_y
         );
     }
 }

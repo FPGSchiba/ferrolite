@@ -87,6 +87,22 @@ impl Default for FilterState {
     }
 }
 
+/// Maps a `RangeSlider`'s handle positions to the optional min/max filter
+/// tuple it drives: handles sitting at the FULL `[min, max]` bounds mean the
+/// filter is inactive (`None`); anything narrower is a real filter and maps
+/// to `Some((lo, hi))`. Pure/egui-free so it's unit-testable on its own —
+/// used by the toolbar's ISO/Aperture/Focal `RangeSlider`s (`toolbar.rs`).
+/// Equality uses `f32::EPSILON` to match the exact bounds the widget itself
+/// resets to (see `RangeSlider`'s own `modified` check in `widgets/range_slider.rs`).
+pub fn range_to_filter(lo: f32, hi: f32, min: f32, max: f32) -> Option<(f32, f32)> {
+    let full_range = (lo - min).abs() < f32::EPSILON && (hi - max).abs() < f32::EPSILON;
+    if full_range {
+        None
+    } else {
+        Some((lo, hi))
+    }
+}
+
 impl FilterState {
     /// Reset metadata popup filter selections to their default (unfiltered) state.
     pub fn reset_metadata_filters(&mut self) {
@@ -316,5 +332,27 @@ mod tests {
         assert!(q.file_types.is_empty());
         assert_eq!(q.aperture, None);
         assert_eq!(q.focal, None);
+    }
+
+    #[test]
+    fn range_to_filter_full_range_is_none() {
+        // Handles sitting exactly at [min, max] (e.g. after a widget reset,
+        // or an untouched filter) must never reach the query as a real
+        // filter — the whole point of the None/Some split.
+        assert_eq!(range_to_filter(50.0, 102_400.0, 50.0, 102_400.0), None);
+        assert_eq!(range_to_filter(0.7, 32.0, 0.7, 32.0), None);
+    }
+
+    #[test]
+    fn range_to_filter_narrowed_range_is_some() {
+        assert_eq!(
+            range_to_filter(100.0, 3200.0, 50.0, 102_400.0),
+            Some((100.0, 3200.0))
+        );
+        // Narrowed on only one side still counts as active.
+        assert_eq!(
+            range_to_filter(50.0, 3200.0, 50.0, 102_400.0),
+            Some((50.0, 3200.0))
+        );
     }
 }

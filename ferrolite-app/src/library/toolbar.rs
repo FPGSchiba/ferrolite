@@ -4,13 +4,15 @@
 //! true (so the read pool re-queries off-thread). The "Subfolders" scope toggle
 //! lives in the Folders tree header (`panel.rs`), not here.
 
+use crate::library::filter::range_to_filter;
 use crate::library::filter_widgets as fw;
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
-use crate::widgets::{EguiSlider, SegmentedControl};
+use crate::widgets::{EguiSlider, RangeSlider, SegmentedControl};
 use egui::{pos2, Color32, FontId, Rounding, Stroke};
 use ferrolite_catalog::FileTypeChip;
+use std::sync::LazyLock;
 
 /// Toolbar layout constants (Spec 3.3).
 #[allow(dead_code)]
@@ -29,6 +31,28 @@ const SIZE_SLIDER_W: f32 = 208.0_f32;
 
 /// Caret half-width (px) used in the Metadata button.
 const CARET_HW: f32 = 4.5_f32;
+
+/// ISO range-filter bounds and full-stop detents (spec L3, Task 7).
+const ISO_MIN: f32 = 50.0_f32;
+const ISO_MAX: f32 = 102_400.0_f32;
+const ISO_DETENTS: &[f32] = &[
+    50.0, 100.0, 200.0, 400.0, 800.0, 1600.0, 3200.0, 6400.0, 12800.0, 25600.0, 51200.0, 102400.0,
+];
+
+/// Aperture range-filter bounds and third-stop detents (spec L3, Task 7).
+const APERTURE_MIN: f32 = 0.7_f32;
+const APERTURE_MAX: f32 = 32.0_f32;
+const APERTURE_DETENTS: &[f32] = &[
+    0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6,
+    6.3, 7.1, 8.0, 9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0, 25.0, 29.0, 32.0,
+];
+
+/// Focal-length range-filter bounds (spec L3, Task 7). Detents are every
+/// whole mm from `FOCAL_MIN` to `FOCAL_MAX` — built once (not per-frame) into
+/// a cached `Vec` since `RangeSlider` needs a `&[f32]` every frame it draws.
+const FOCAL_MIN: f32 = 8.0_f32;
+const FOCAL_MAX: f32 = 1200.0_f32;
+static FOCAL_DETENTS: LazyLock<Vec<f32>> = LazyLock::new(|| (8..=1200).map(|v| v as f32).collect());
 
 /// Returns `true` if any filter/sort/source field changed this frame.
 pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bool {
@@ -283,76 +307,77 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                     .color(theme::TEXT_DIM),
                             );
 
-                            // ISO Slider
-                            let mut iso_val = state
+                            // ISO range filter: full-stop detents, log track.
+                            // `None` reads as handles at the full [min, max] bounds;
+                            // narrowed handles write back `Some((lo, hi))`.
+                            let (mut iso_lo, mut iso_hi) = state
                                 .filter
                                 .iso
-                                .map(|(lo, _)| lo as f32)
-                                .unwrap_or(100.0_f32);
+                                .map(|(lo, hi)| (lo as f32, hi as f32))
+                                .unwrap_or((ISO_MIN, ISO_MAX));
                             if ui
-                                .add(EguiSlider {
+                                .add(RangeSlider {
                                     label: "ISO",
-                                    value: &mut iso_val,
-                                    min: 100.0_f32,
-                                    max: 12800.0_f32,
-                                    default: 100.0_f32,
-                                    step: 100.0_f32,
+                                    lo: &mut iso_lo,
+                                    hi: &mut iso_hi,
+                                    min: ISO_MIN,
+                                    max: ISO_MAX,
+                                    detents: ISO_DETENTS,
+                                    log: true,
                                     decimals: 0,
                                     unit: "",
-                                    bipolar: false,
-                                    signed: false,
-                                    custom_label_w: Some(60.0_f32),
                                 })
                                 .changed()
                             {
-                                let v = iso_val as u32;
-                                state.filter.iso = Some((v, 12800));
+                                state.filter.iso =
+                                    range_to_filter(iso_lo, iso_hi, ISO_MIN, ISO_MAX)
+                                        .map(|(lo, hi)| (lo.round() as u32, hi.round() as u32));
                                 changed = true;
                             }
 
-                            // Aperture Slider
-                            let mut ap_val =
-                                state.filter.aperture.map(|(lo, _)| lo).unwrap_or(1.4_f32);
+                            // Aperture range filter: third-stop detents, log track.
+                            let (mut ap_lo, mut ap_hi) = state
+                                .filter
+                                .aperture
+                                .unwrap_or((APERTURE_MIN, APERTURE_MAX));
                             if ui
-                                .add(EguiSlider {
+                                .add(RangeSlider {
                                     label: "Aperture",
-                                    value: &mut ap_val,
-                                    min: 1.0_f32,
-                                    max: 22.0_f32,
-                                    default: 1.4_f32,
-                                    step: 0.1_f32,
+                                    lo: &mut ap_lo,
+                                    hi: &mut ap_hi,
+                                    min: APERTURE_MIN,
+                                    max: APERTURE_MAX,
+                                    detents: APERTURE_DETENTS,
+                                    log: true,
                                     decimals: 1,
-                                    unit: "f/",
-                                    bipolar: false,
-                                    signed: false,
-                                    custom_label_w: Some(60.0_f32),
+                                    unit: "",
                                 })
                                 .changed()
                             {
-                                state.filter.aperture = Some((ap_val, 22.0_f32));
+                                state.filter.aperture =
+                                    range_to_filter(ap_lo, ap_hi, APERTURE_MIN, APERTURE_MAX);
                                 changed = true;
                             }
 
-                            // Focal Slider
-                            let mut focal_val =
-                                state.filter.focal.map(|(lo, _)| lo).unwrap_or(24.0_f32);
+                            // Focal-length range filter: every-mm detents, linear track.
+                            let (mut focal_lo, mut focal_hi) =
+                                state.filter.focal.unwrap_or((FOCAL_MIN, FOCAL_MAX));
                             if ui
-                                .add(EguiSlider {
+                                .add(RangeSlider {
                                     label: "Focal",
-                                    value: &mut focal_val,
-                                    min: 14.0_f32,
-                                    max: 600.0_f32,
-                                    default: 24.0_f32,
-                                    step: 1.0_f32,
+                                    lo: &mut focal_lo,
+                                    hi: &mut focal_hi,
+                                    min: FOCAL_MIN,
+                                    max: FOCAL_MAX,
+                                    detents: &FOCAL_DETENTS,
+                                    log: false,
                                     decimals: 0,
-                                    unit: "mm",
-                                    bipolar: false,
-                                    signed: false,
-                                    custom_label_w: Some(60.0_f32),
+                                    unit: " mm",
                                 })
                                 .changed()
                             {
-                                state.filter.focal = Some((focal_val, 600.0_f32));
+                                state.filter.focal =
+                                    range_to_filter(focal_lo, focal_hi, FOCAL_MIN, FOCAL_MAX);
                                 changed = true;
                             }
 

@@ -27,6 +27,12 @@ pub struct FerroliteApp {
     /// One-shot restore-session guard: set `true` on the first `update()` frame,
     /// whether or not a restore actually happened, so the check runs exactly once.
     did_restore: bool,
+    /// One-shot Task-14 metadata-backfill spawn guard: set `true` on the
+    /// first `update()` frame, mirroring `did_restore`. The actual spawn is
+    /// further gated inside `library::meta_backfill::maybe_spawn` on a cheap
+    /// NULL-count check, so this flag only ensures that check itself runs at
+    /// most once per app run.
+    did_meta_backfill_spawn: bool,
     /// Whether the Help modal (`crate::help::show`) is open. Opened by
     /// `Action::OpenHelp` (F1, global) or the Help menu.
     pub(crate) show_help: bool,
@@ -93,6 +99,7 @@ impl FerroliteApp {
             diag: crate::diag::DiagState::new(),
             settings_dirty: false,
             did_restore: false,
+            did_meta_backfill_spawn: false,
             show_help: false,
             show_settings: false,
             did_display_detect: false,
@@ -1390,6 +1397,16 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // One-shot Task-14 background metadata backfill: only actually spawns
+        // a job when the catalog has NULL-metadata rows left (cheap COUNT
+        // query inside `maybe_spawn`), so a fully-backfilled library pays
+        // nothing on later launches. Independent of `did_restore`/session
+        // restore — runs across the whole catalog, not the browsed folder.
+        if !self.did_meta_backfill_spawn {
+            self.did_meta_backfill_spawn = true;
+            crate::library::meta_backfill::maybe_spawn(&mut self.state, ctx);
+        }
+
         // One-shot startup display-profile detect, once the render state is valid
         // (ViewerPipelines pre-warmed in `new`). Ordering is guaranteed: `new()`
         // inserts `ViewerPipelines` into `cc.wgpu_render_state`'s callback
@@ -2541,6 +2558,13 @@ impl eframe::App for FerroliteApp {
         let t0 = crate::diag::enabled().then(std::time::Instant::now);
         let before = crate::diag::enabled().then(|| self.state.jobs.stats());
 
+        // Task 14's backfill job runs across the whole catalog, not the
+        // browsed folder, so it is intentionally NOT cancelled by
+        // `cancel_pending_jobs` (folder-switch/reindex scoped) — cancel it
+        // explicitly here instead, like the app's other long-lived handles.
+        if let Some(h) = self.state.meta_backfill_handle.take() {
+            h.cancel();
+        }
         self.state.cancel_pending_jobs();
         self.state.jobs.request_shutdown();
         let timeout_ms = 75u64;

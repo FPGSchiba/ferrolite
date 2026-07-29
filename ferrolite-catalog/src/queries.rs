@@ -2,10 +2,11 @@
 //! writer (`Catalog`) and the read pool (`ReadPool`) share one implementation.
 
 use crate::error::CatalogError;
-use crate::model::{DecodeStatus, ImageRecord};
+use crate::model::{BackfillCandidate, DecodeStatus, ImageRecord};
 use crate::thumbnail::Thumbnail;
 use ferrolite_image::{Color, FileKind, Flag, Orientation, Rating, TagId};
 use rusqlite::{Connection, OptionalExtension};
+use std::path::PathBuf;
 
 pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     let orientation_exif: Option<i64> = row.get(5)?;
@@ -328,6 +329,65 @@ pub(crate) fn images_by_ids(
         }
     }
     Ok(out)
+}
+
+/// Images whose `lens`, `aperture`, and `focal_length` are ALL still NULL —
+/// the Task-14 background-backfill backlog: exactly the pre-v7-ingest set
+/// (see `schema.rs`'s v7 migration note) plus any row a backfill pass hasn't
+/// reached yet. A row that WAS attempted and found nothing is written back
+/// with `lens = ''` (empty string, not NULL — see
+/// `Catalog::apply_metadata_backfill_batch`), so it no longer has `lens IS
+/// NULL` and drops out of this predicate on its own — it is never retried on
+/// a later launch.
+///
+/// `after_id` + `ORDER BY images.id ASC` makes repeated calls within one
+/// backfill job walk the backlog forward deterministically. This matters
+/// because the write-back for a batch happens later, on the UI thread (see
+/// `ferrolite-app`'s `meta_backfill` job) — without the id cursor, a second
+/// call issued before that write lands would just re-fetch the same NULL
+/// rows instead of making progress.
+pub(crate) fn images_needing_metadata_backfill(
+    conn: &Connection,
+    after_id: i64,
+    limit: i64,
+) -> Result<Vec<BackfillCandidate>, CatalogError> {
+    let mut stmt = conn.prepare(
+        "SELECT images.id, folders.path, images.filename, images.kind
+         FROM images JOIN folders ON folders.id = images.folder_id
+         WHERE images.id > ?1
+           AND images.lens IS NULL AND images.aperture IS NULL AND images.focal_length IS NULL
+         ORDER BY images.id ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![after_id, limit], |row| {
+        let folder_path: String = row.get(1)?;
+        let filename: String = row.get(2)?;
+        let kind: i64 = row.get(3)?;
+        Ok(BackfillCandidate {
+            id: row.get(0)?,
+            path: PathBuf::from(folder_path).join(filename),
+            kind: FileKind::from_i64(kind),
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Count of rows still awaiting the Task-14 backfill (same predicate as
+/// `images_needing_metadata_backfill`). Used for the one-shot startup gate:
+/// the app only spawns the backfill job when this is `> 0`, so a fully
+/// backfilled catalog pays zero extra job submissions on later launches.
+pub(crate) fn metadata_backfill_pending_count(conn: &Connection) -> Result<i64, CatalogError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM images
+         WHERE lens IS NULL AND aperture IS NULL AND focal_length IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
 }
 
 pub(crate) fn date_bounds(conn: &Connection) -> Result<Option<(String, String)>, CatalogError> {

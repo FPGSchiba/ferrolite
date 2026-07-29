@@ -16,8 +16,8 @@ pub use catalog::Catalog;
 pub use error::CatalogError;
 pub use ferrolite_image::{Color, FileKind, Flag, Rating, TagId};
 pub use model::{
-    CollectionRecord, DecodeStatus, ExportQueueEntry, ImageRecord, IngestSummary, NewImage,
-    TagRecord,
+    BackfillCandidate, BackfillResult, CollectionRecord, DecodeStatus, ExportQueueEntry,
+    ImageRecord, IngestSummary, NewImage, TagRecord,
 };
 pub use query::{
     FileTypeChip, LibraryQuery, RatingFilter, Scope, Sort, SortKey, TagFilter, TagMode,

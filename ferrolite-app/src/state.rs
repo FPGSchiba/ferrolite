@@ -53,6 +53,15 @@ pub struct AppState {
     pub ingest_done: usize,
 
     pub ingest_handle: Option<JobHandle>,
+    /// The Task-14 background EXIF metadata-backfill job handle, `Some` while
+    /// it is walking the NULL-metadata backlog. Spawned at most once per app
+    /// run (`library::meta_backfill::maybe_spawn`, called from
+    /// `FerroliteApp::update`'s one-shot startup block) and cancelled at
+    /// shutdown (`on_exit`) like the app's other long-lived job handles —
+    /// deliberately NOT cancelled by `cancel_pending_jobs` (folder-switch /
+    /// reindex scoped), since this backfill runs across the whole catalog,
+    /// not the currently browsed folder.
+    pub meta_backfill_handle: Option<JobHandle>,
 
     /// LRU cache of decoded thumbnail textures (cap 512).
     pub textures: crate::library::texture_cache::TextureCache,
@@ -292,6 +301,7 @@ impl AppState {
             ingest_total: 0,
             ingest_done: 0,
             ingest_handle: None,
+            meta_backfill_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,
@@ -917,6 +927,7 @@ impl AppState {
             ingest_total: 0,
             ingest_done: 0,
             ingest_handle: None,
+            meta_backfill_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,

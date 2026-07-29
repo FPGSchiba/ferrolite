@@ -187,6 +187,17 @@ pub enum AppEvent {
         level: crate::notifications::Level,
         message: String,
     },
+    /// One Task-14 background-backfill batch finished off-thread
+    /// (`library::meta_backfill::spawn_meta_backfill`): up to `BATCH_SIZE`
+    /// resolved `lens`/`aperture`/`focal_length` reads for pre-v7-ingest rows.
+    /// Unlike other metadata writes (`metadata::spawn_metadata_write`, which
+    /// locks the writer from the job thread), this catalog write happens HERE
+    /// in `apply`, on the UI thread: it ties exactly one `state.dirty` bump
+    /// to exactly one delivered batch, so an active metadata range/lens
+    /// filter refreshes once per batch as the backfill progresses.
+    MetaBackfillReady {
+        results: Vec<ferrolite_catalog::BackfillResult>,
+    },
 }
 
 /// Owned fields of a delivered `AppEvent::WarmSourceReady`, queued onto
@@ -336,6 +347,10 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("Notify")
                 .field("level", level)
                 .field("message", message)
+                .finish(),
+            AppEvent::MetaBackfillReady { results } => f
+                .debug_struct("MetaBackfillReady")
+                .field("batch_len", &results.len())
                 .finish(),
         }
     }
@@ -489,6 +504,29 @@ impl AppState {
             AppEvent::Notify { level, message } => {
                 self.notifications
                     .push(level, message, std::time::Instant::now());
+                None
+            }
+            AppEvent::MetaBackfillReady { results } => {
+                // Deliberately on the UI thread (see the variant's doc
+                // comment): locks the same writer every other catalog
+                // mutation uses, then bumps `dirty` exactly once so any
+                // active lens/aperture/focal filter re-queries with the
+                // freshly-backfilled rows visible. A write failure (e.g. a
+                // disk error) is surfaced as a toast rather than silently
+                // dropped; the rows simply stay NULL and are picked up
+                // again by a later launch's backfill pass.
+                let write_result = self
+                    .writer
+                    .lock()
+                    .expect("writer")
+                    .apply_metadata_backfill_batch(&results);
+                if let Err(e) = write_result {
+                    self.notify(
+                        crate::notifications::Level::Error,
+                        format!("metadata backfill write failed: {e}"),
+                    );
+                }
+                self.dirty = true;
                 None
             }
         }
@@ -755,5 +793,59 @@ mod tests {
         let mut s = AppState::for_test();
         s.notify(Level::Info, "12 photos indexed");
         assert_eq!(s.notifications.iter_newest_first().count(), 1);
+    }
+
+    /// `MetaBackfillReady` writes through the catalog writer HERE, on the UI
+    /// thread inside `apply` (unlike `metadata::spawn_metadata_write`, which
+    /// writes from a job thread) — see the variant's doc comment. This test
+    /// exercises that write end-to-end: seed a NULL-metadata row via the same
+    /// writer `AppState::for_test` sets up, fold the event, then confirm the
+    /// backlog count dropped to zero and `dirty` was bumped.
+    #[test]
+    fn meta_backfill_ready_writes_batch_through_writer_and_marks_dirty() {
+        let mut s = AppState::for_test();
+        let image_id = {
+            let db = s.writer.lock().unwrap();
+            let folder = db.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            db.upsert_image(&ferrolite_catalog::NewImage::pending(
+                folder,
+                "a.nef".into(),
+                1,
+                1,
+                ferrolite_catalog::FileKind::Raw,
+                0,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            s.writer
+                .lock()
+                .unwrap()
+                .metadata_backfill_pending_count()
+                .unwrap(),
+            1
+        );
+
+        s.dirty = false;
+        let out = s.apply(AppEvent::MetaBackfillReady {
+            results: vec![ferrolite_catalog::BackfillResult {
+                id: image_id,
+                lens: Some("50mm f/1.8".to_string()),
+                aperture: Some(1.8),
+                focal_length: Some(50.0),
+            }],
+        });
+        assert_eq!(out, None);
+        assert!(s.dirty, "MetaBackfillReady must bump dirty once per batch");
+        assert_eq!(
+            s.writer
+                .lock()
+                .unwrap()
+                .metadata_backfill_pending_count()
+                .unwrap(),
+            0,
+            "the backfilled row must drop out of the NULL-metadata backlog"
+        );
+        assert!(s.notifications.is_empty(), "a clean write raises no toast");
     }
 }

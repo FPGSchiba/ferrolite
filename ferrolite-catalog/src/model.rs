@@ -1,4 +1,5 @@
 use ferrolite_image::{Color, FileKind, Flag, Orientation, Rating, TagId};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeStatus {
@@ -100,6 +101,33 @@ pub struct IngestSummary {
     pub added: usize,
     pub skipped: usize,
     pub failed: usize,
+}
+
+/// One row awaiting the Task-14 background EXIF metadata backfill: an image
+/// whose `lens`/`aperture`/`focal_length` are all still NULL (either
+/// ingested before the v7 migration added those columns, or not yet reached
+/// by a backfill pass). `path` is the already-joined folder-path + filename
+/// (see `images_needing_metadata_backfill`'s doc comment), so the backfill
+/// job never needs a separate `folder_path` round-trip per row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillCandidate {
+    pub id: i64,
+    pub path: PathBuf,
+    pub kind: FileKind,
+}
+
+/// One image's resolved Task-14 backfill write, ready for
+/// `Catalog::apply_metadata_backfill_batch`. `lens = Some(String::new())` is
+/// the "attempted, found nothing" sentinel (see that method's doc comment) —
+/// it is written back literally (never coerced to `None`), which is what
+/// permanently excludes the row from `images_needing_metadata_backfill`
+/// instead of retrying it on every launch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackfillResult {
+    pub id: i64,
+    pub lens: Option<String>,
+    pub aperture: Option<f32>,
+    pub focal_length: Option<f32>,
 }
 
 impl NewImage {

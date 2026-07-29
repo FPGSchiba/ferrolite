@@ -135,6 +135,24 @@ impl ReadPool {
     pub fn images_by_ids(&self, ids: &[i64]) -> Result<Vec<crate::ImageRecord>, CatalogError> {
         self.with_conn(|c| crate::queries::images_by_ids(c, ids))
     }
+
+    /// Task-14 background-backfill backlog listing, off the UI thread (see
+    /// `crate::queries::images_needing_metadata_backfill`'s doc comment).
+    /// This is the read path the backfill job uses: it never touches the
+    /// writer, so it never contends with the single-writer lock.
+    pub fn images_needing_metadata_backfill(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::model::BackfillCandidate>, CatalogError> {
+        self.with_conn(|c| crate::queries::images_needing_metadata_backfill(c, after_id, limit))
+    }
+
+    /// Count of rows still awaiting the Task-14 backfill — the one-shot
+    /// startup gate.
+    pub fn metadata_backfill_pending_count(&self) -> Result<i64, CatalogError> {
+        self.with_conn(crate::queries::metadata_backfill_pending_count)
+    }
 }
 
 #[cfg(test)]

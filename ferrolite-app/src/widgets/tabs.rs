@@ -86,8 +86,8 @@ pub fn tab_row<T: PartialEq + Clone>(
             if is_active {
                 painter.line_segment(
                     [
-                        egui::pos2(rect.left(), rect.bottom() - 1.0),
-                        egui::pos2(rect.right(), rect.bottom() - 1.0),
+                        egui::pos2(rect.left() + 6.0_f32, rect.bottom() - 1.0),
+                        egui::pos2(rect.right() - 6.0_f32, rect.bottom() - 1.0),
                     ],
                     egui::Stroke::new(2.0_f32, theme::ACCENT),
                 );

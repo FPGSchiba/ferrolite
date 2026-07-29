@@ -7,6 +7,11 @@
 /// `other` is the *other* handle's current value (the one not being moved).
 /// Empty `detents` disables snapping (returns `v` unchanged before the clamp).
 ///
+/// Note: the clamp step can leave the moved handle off-detent when `other`
+/// itself isn't detent-aligned (e.g. seeded from stored/external state) —
+/// the post-condition is "snapped, then clamped to `other`", not
+/// unconditionally "lands on a detent".
+///
 /// Consumed by `RangeSlider` (used by Task 7); allowed dead-code until then.
 #[allow(dead_code)]
 pub fn snap_and_clamp(v: f32, detents: &[f32], other: f32, moving_lo: bool) -> f32 {
@@ -37,8 +42,14 @@ fn nearest_detent(v: f32, detents: &[f32]) -> f32 {
 #[allow(dead_code)]
 pub fn track_fraction(v: f32, min: f32, max: f32, log: bool) -> f32 {
     if log {
+        debug_assert!(
+            min > 0.0 && max > min,
+            "log-mode track_fraction requires 0 < min < max, got min={min}, max={max}"
+        );
         // Ranges using log scaling (ISO, aperture) are always strictly
         // positive; floor at a tiny positive value to keep `ln` finite.
+        // (Release builds fall back to this floor instead of asserting, so a
+        // misconfiguration compresses the track rather than panicking.)
         let floor = f32::MIN_POSITIVE;
         let (lv, lmin, lmax) = (v.max(floor).ln(), min.max(floor).ln(), max.max(floor).ln());
         if (lmax - lmin).abs() < f32::EPSILON {
@@ -112,7 +123,6 @@ const ROW_H: f32 = 22.0;
 #[allow(dead_code)]
 const RESET_W: f32 = 16.0;
 
-#[allow(dead_code)]
 impl<'a> Widget for RangeSlider<'a> {
     fn ui(self, ui: &mut Ui) -> Response {
         let full = ui.available_width();
@@ -150,7 +160,7 @@ impl<'a> Widget for RangeSlider<'a> {
         // handle mid-drag never flips which one is moving.
         let handle_id = response.id.with("active_handle");
         if let Some(p) = response.interact_pointer_pos() {
-            if response.dragged() || response.clicked() {
+            if (response.dragged() || response.clicked()) && p.x <= track_right + 8.0 {
                 let moving_lo = if response.drag_started() || response.clicked() {
                     let choice = (p.x - hx_lo).abs() <= (p.x - hx_hi).abs();
                     ui.data_mut(|d| d.insert_temp(handle_id, choice));

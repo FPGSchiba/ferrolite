@@ -23,6 +23,16 @@ pub struct DraggedCollection(pub i64);
 /// `dragged` (walking up `target`'s ancestor chain reaches `dragged`).
 /// Dropping onto `dragged`'s *current* parent is NOT a cycle: it's a no-op
 /// move and is allowed.
+///
+/// Guards against a `parent_of` map that is itself corrupt — a cycle in the
+/// ancestor chain that does NOT pass through `dragged` (this should never
+/// happen via normal reparenting, since this function is exactly what
+/// prevents it, but could arise from DB tampering, a second writer, or a
+/// future bug elsewhere). Without a visited-set guard, walking such a map
+/// would loop forever and hang the UI thread at drop time. When corrupt
+/// ancestry is detected, the walk stops and this returns `true` — treating
+/// it as an unsafe drop and refusing it is the safer choice over silently
+/// allowing a write into unknown-shaped ancestry.
 pub fn would_create_cycle(
     dragged: i64,
     target: i64,
@@ -32,8 +42,14 @@ pub fn would_create_cycle(
         return true;
     }
     let mut cur = Some(target);
+    let mut visited: HashSet<i64> = HashSet::new();
     while let Some(id) = cur {
         if id == dragged {
+            return true;
+        }
+        if !visited.insert(id) {
+            // Revisited a node without passing through `dragged`: the map's
+            // ancestry is corrupt (a cycle elsewhere). Refuse rather than loop.
             return true;
         }
         cur = parent_of.get(&id).copied().flatten();
@@ -240,6 +256,19 @@ mod tests {
         // 2's current parent is 1; re-dropping 2 onto 1 is a no-op move.
         let parent_of: HashMap<i64, Option<i64>> = [(2, Some(1))].into_iter().collect();
         assert!(!would_create_cycle(2, 1, &parent_of));
+    }
+
+    #[test]
+    fn corrupted_ancestor_cycle_not_involving_dragged_is_refused_without_hanging() {
+        // 10 and 11 point at each other — a corrupt parent map that should
+        // never arise from normal reparenting (this function is what
+        // prevents it), but could come from DB tampering, a second writer,
+        // or a future bug elsewhere. Dragging unrelated `1` onto `10` must
+        // not loop forever walking this corrupt ancestry; the chosen safe
+        // semantics is to refuse the drop (treat as a cycle).
+        let parent_of: HashMap<i64, Option<i64>> =
+            [(10, Some(11)), (11, Some(10))].into_iter().collect();
+        assert!(would_create_cycle(1, 10, &parent_of));
     }
 
     #[test]

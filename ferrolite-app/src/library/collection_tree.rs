@@ -4,7 +4,10 @@
 //!   - Dragging images from the grid onto a row adds them to that collection
 //!     (`crate::library::drag::row_drop_target`).
 //!   - Dragging a collection row onto the "COLLECTIONS" root header un-nests
-//!     it (see `panel::show`, which still owns that root-header target).
+//!     it. This module's `show` owns the whole COLLECTIONS section — header,
+//!     "+" button, the root-header drop target, and the un-nest write —
+//!     `panel::show` only delegates to it, it does not render any of this
+//!     itself.
 //!   - Dragging a collection row onto another collection row nests the
 //!     dragged collection under the target — cycle-safe (see
 //!     `crate::library::drag::would_create_cycle`). A rejected (cycle) drop

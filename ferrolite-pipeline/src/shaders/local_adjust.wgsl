@@ -34,6 +34,16 @@ struct P {
 
 fn luma709(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
 
+// HSV-style saturation measure (max-min)/max(max, eps), clamped to [0,1] —
+// stable for any brightness (no HSL round-trip, so no denominator singularity
+// at l==1.0 / negative saturation at l>1.0, see rgb2hsl below). Used by
+// vibrance's fade weight; mirrors `uniforms.rs`'s `hsv_sat_measure` exactly.
+fn vibrance_weight(c: vec3<f32>) -> f32 {
+    let mx = max(c.r, max(c.g, c.b));
+    let mn = min(c.r, min(c.g, c.b));
+    return clamp((mx - mn) / max(mx, 1e-4), 0.0, 1.0);
+}
+
 fn rgb2hsl(c: vec3<f32>) -> vec3<f32> {
     let mx = max(c.r, max(c.g, c.b)); let mn = min(c.r, min(c.g, c.b));
     let l = (mx + mn) * 0.5; let d = mx - mn;
@@ -165,27 +175,46 @@ fn adjust(rgb: vec3<f32>) -> vec3<f32> {
     }
     let y2 = luma709(c);
     c = vec3<f32>(y2) + (c - vec3<f32>(y2)) * p.saturation;
+    // Hue rotation round-trips through HSL, whose `s = d / (1 - |2l-1|)`
+    // formula has a removable-singularity denominator at `l == 1.0` (Inf) and
+    // goes negative at `l > 1.0` — both reachable by ordinary scene-linear
+    // bright pixels. Either regime turns `hsl2rgb`'s `q = l + s - l*s` into
+    // NaN, which is stored to the output texture and renders as a black pixel
+    // — the root cause of the "black pixel in bright sky" bug for hue,
+    // mirrored exactly by vibrance below (same round trip, same fix shape). An
+    // achromatic-domain pixel this close to the l==0/1 rail has no meaningful
+    // hue to rotate, so the rotation is simply skipped there (identity for
+    // this step). Keep the threshold in lockstep with the CPU reference's hue
+    // branch in `uniforms.rs`'s `light_color_apply`.
     if (p.hue_deg != 0.0) {
-        var hsl = rgb2hsl(max(c, vec3<f32>(0.0)));
-        hsl.x = hsl.x + p.hue_deg;
-        hsl.x = hsl.x - floor(hsl.x / 360.0) * 360.0;
-        c = hsl2rgb(hsl);
+        let cc = max(c, vec3<f32>(0.0));
+        let mx = max(cc.r, max(cc.g, cc.b));
+        let mn = min(cc.r, min(cc.g, cc.b));
+        let l = (mx + mn) * 0.5;
+        let denom = 1.0 - abs(2.0 * l - 1.0);
+        if (denom > 1e-4) {
+            var hsl = rgb2hsl(cc);
+            hsl.x = hsl.x + p.hue_deg;
+            hsl.x = hsl.x - floor(hsl.x / 360.0) * 360.0;
+            c = hsl2rgb(hsl);
+        }
     }
-    // Vibrance (Phase 3, new — both scopes): fades out as a pixel approaches
-    // full saturation. Weighted by the CLAMPED saturation `w` (not the raw HSL
-    // saturation, which can be >> 1 for scene-linear pixels) so `(1 - w)` never
-    // goes hugely negative and snaps such a pixel to grey (or, for negative
-    // vibrance, boosts it) the instant vibrance leaves zero. Only the lower
-    // bound is clamped (0.0) — s > 1 is a legitimate scene-linear state, not an
-    // error to clip away. Slots after hue, before the tone curve; gated on
-    // non-zero so a zero-vibrance layer never enters the round trip. Keep in
-    // lockstep with the CPU reference in `uniforms.rs`'s `light_color_apply`.
+    // Vibrance (Phase 3): a saturation boost that fades as a pixel approaches
+    // full saturation. Reimplemented WITHOUT the HSL round trip (the original
+    // formula shared hue's l==1/l>1 singularity above and produced NaN/black
+    // pixels on ordinary scene-linear highlights). Mirrors the `saturation`
+    // step's luma-mix pattern instead: measure "how saturated" the pixel is
+    // with a stable HSV-style ratio (`vibrance_weight`, bounded in [0,1] for
+    // any brightness, no HSL detour), fade the boost as that measure rises
+    // toward 1, then mix toward/away from luma exactly like `saturation` does.
+    // Gated on non-zero so a zero-vibrance layer takes none of this math. Keep
+    // in lockstep with the CPU reference's vibrance branch in `uniforms.rs`'s
+    // `light_color_apply`.
     if (p.order_and_coverage.z != 0.0) {
-        var hsl = rgb2hsl(max(c, vec3<f32>(0.0)));
         let v = p.order_and_coverage.z;
-        let w = clamp(hsl.y, 0.0, 1.0);
-        hsl.y = max(hsl.y * (1.0 + v * (1.0 - w)), 0.0);
-        c = hsl2rgb(hsl);
+        let w = 1.0 - vibrance_weight(c);
+        let y3 = luma709(c);
+        c = vec3<f32>(y3) + (c - vec3<f32>(y3)) * (1.0 + v * w);
     }
     // Phase 2b: per-layer tone curve (LUT), HSL bands, color grade — ported from
     // the global curve/hsl/color_grade passes; identity-skipped via flags.

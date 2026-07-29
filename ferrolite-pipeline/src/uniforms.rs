@@ -641,6 +641,16 @@ pub fn local_layer_lut(a: &crate::local::AdjustmentSet) -> [[f32; 256]; 3] {
 fn luma709(c: [f32; 3]) -> f32 {
     0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
+/// HSV-style saturation measure `(max-min)/max(max, eps)`, clamped to `[0,1]`.
+/// Stable for any brightness — no HSL round-trip, so no denominator
+/// singularity at `l == 1.0` or negative saturation at `l > 1.0` (see
+/// `rgb_to_hsl`). Used by vibrance's fade weight; mirrors the WGSL
+/// `vibrance_weight` in `local_adjust.wgsl` exactly.
+fn hsv_sat_measure(c: [f32; 3]) -> f32 {
+    let mx = c[0].max(c[1].max(c[2]));
+    let mn = c[0].min(c[1].min(c[2]));
+    ((mx - mn) / mx.max(1e-4)).clamp(0.0, 1.0)
+}
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -759,7 +769,9 @@ fn hsl_bands_apply(c: [f32; 3], bands: &[[f32; 4]; 8]) -> [f32; 3] {
 /// CPU reference for the Light+Color point op. `local_adjust.wgsl` mirrors this
 /// exactly (golden tolerance absorbs f16/driver drift). Order: exposure → tonal
 /// region gains → {contrast, wb} in the order `global_order` selects → saturation
-/// → hue → vibrance → curve/HSL/grade → color swatch. Output clamped ≥0.
+/// → hue (HSL round-trip, skipped in the achromatic-domain `l≈0/1` singularity)
+/// → vibrance (HSV-measure luma-mix, no HSL round-trip) → curve/HSL/grade →
+/// color swatch. Output clamped ≥0.
 ///
 /// `global_order`: true = the light-engine/global-pseudo-layer order (WB before
 /// contrast); false = the per-mask order (contrast before WB — the historical
@@ -810,29 +822,52 @@ pub fn light_color_apply(
     for v in &mut c {
         *v = y2 + (*v - y2) * u.saturation;
     }
+    // Hue rotation round-trips through HSL, whose `s = d / (1 - |2l-1|)`
+    // formula has a removable-singularity denominator at `l == 1.0` (Inf) and
+    // goes negative at `l > 1.0` — both reachable by ordinary scene-linear
+    // bright pixels (e.g. an overexposed sky sample after exposure/WB/
+    // contrast). Either regime turns `hsl_to_rgb`'s `q = l + s - l*s` into
+    // `Inf - Inf` / a NaN propagation, which the GPU stores as NaN and renders
+    // as a black pixel — this is the root cause of the "black pixel in bright
+    // sky" bug for hue, mirrored exactly by vibrance below (same round trip,
+    // same fix shape). An achromatic-domain pixel this close to the l==0/1
+    // rail has no meaningful hue to rotate (hue is undefined at the achromatic
+    // poles), so the rotation is simply skipped there — identity for this
+    // step, not an approximation. Keep the threshold in lockstep with the
+    // WGSL `adjust()`'s hue branch in `shaders/local_adjust.wgsl`.
     if u.hue_deg != 0.0 {
-        let mut hsl = rgb_to_hsl([c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]);
-        hsl[0] = (hsl[0] + u.hue_deg).rem_euclid(360.0);
-        c = hsl_to_rgb(hsl);
+        let cc = [c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)];
+        let mx = cc[0].max(cc[1].max(cc[2]));
+        let mn = cc[0].min(cc[1].min(cc[2]));
+        let l = (mx + mn) * 0.5;
+        let denom = 1.0 - (2.0 * l - 1.0).abs();
+        if denom > 1e-4 {
+            let mut hsl = rgb_to_hsl(cc);
+            hsl[0] = (hsl[0] + u.hue_deg).rem_euclid(360.0);
+            c = hsl_to_rgb(hsl);
+        }
     }
-    // Vibrance (Phase 3, new — both scopes): a saturation boost that fades as a
-    // pixel approaches full saturation; `s' = s * (1 + vibrance * (1 - w))`
-    // where `w = clamp(s, 0, 1)`. Scene-linear pixels can have HSL saturation
-    // s >> 1 (e.g. a strongly-graded highlight); weighting the fade term by
-    // the CLAMPED saturation (not the raw one) keeps `(1 - w)` in [0,1] so the
-    // factor never goes hugely negative and snaps such a pixel to grey (or, for
-    // negative vibrance, boosts it). For s in [0,1] (the common case) w == s
-    // and the formula is unchanged. Only the lower bound is clamped (0.0) —
-    // s > 1 is a legitimate scene-linear state and must not be clipped down to
-    // 1. Slots after hue, before the tone curve. Gated on non-zero (like the
-    // hue step above) so a zero-vibrance AdjustmentSet stays bit-exact through
-    // the rgb2hsl/hsl2rgb round trip. Keep in lockstep with the WGSL vibrance
-    // branch in `shaders/local_adjust.wgsl`.
+    // Vibrance (Phase 3): a saturation boost that fades as a pixel approaches
+    // full saturation. Reimplemented WITHOUT the HSL round trip (the original
+    // formula shared hue's `l==1`/`l>1` singularity above — see the comment on
+    // the hue branch — and produced NaN/black pixels on ordinary scene-linear
+    // highlights, e.g. an overexposed sky sample after +1 EV). Mirrors the
+    // existing `saturation` step's luma-mix pattern instead: measure "how
+    // saturated" the pixel is with a stable HSV-style ratio
+    // `(max-min)/max(max, eps)` (well-defined and bounded in `[0,1]` for ANY
+    // brightness, no HSL detour), fade the boost as that measure rises toward
+    // 1, then mix toward/away from luma exactly like `saturation` does. Gated
+    // on non-zero so a zero-vibrance `AdjustmentSet` takes none of this and
+    // stays bit-exact (required by `light_color_identity_is_a_no_op`). Keep in
+    // lockstep with the WGSL `vibrance_weight`/vibrance branch in
+    // `shaders/local_adjust.wgsl`.
     if a.vibrance != 0.0 {
-        let mut hsl = rgb_to_hsl([c[0].max(0.0), c[1].max(0.0), c[2].max(0.0)]);
-        let w = hsl[1].clamp(0.0, 1.0);
-        hsl[1] = (hsl[1] * (1.0 + a.vibrance * (1.0 - w))).max(0.0);
-        c = hsl_to_rgb(hsl);
+        let w = 1.0 - hsv_sat_measure(c);
+        let y3 = luma709(c);
+        let factor = 1.0 + a.vibrance * w;
+        for v in &mut c {
+            *v = y3 + (*v - y3) * factor;
+        }
     }
     // ── Phase 2b: per-layer curve → HSL bands → grade, mirroring the WGSL Task 2
     // will add. Each step is gated by its identity flag (not just internal
@@ -1593,8 +1628,9 @@ mod tests {
         );
 
         // Vibrance 0 is a no-op: the step is flag-gated (not merely a no-op
-        // formula), so it never enters the rgb2hsl/hsl2rgb round trip. Compared
-        // with the same tolerance as `light_color_identity_is_a_no_op` (the
+        // formula), so it never enters the luma-mix math (nor, historically,
+        // the rgb2hsl/hsl2rgb round trip it once used). Compared with the
+        // same tolerance as `light_color_identity_is_a_no_op` (the
         // pivot-contrast subtract/add at identity params is not itself
         // bit-exact under float rounding, independent of vibrance).
         let a0 = AdjustmentSet::default();
@@ -1609,14 +1645,22 @@ mod tests {
     }
 
     /// Scene-linear pixels can have HSL saturation `s >> 1` (e.g. this fixture:
-    /// (1.74, 0.17, 0.17) has s ≈ 18.7). The pre-fix formula weighted the
-    /// `(1 - s)` fade term by the RAW (unclamped) saturation, so at s ≈ 18.7 the
-    /// factor `1 + v*(1-s)` went hugely negative for any non-zero vibrance,
-    /// snapping the pixel to flat grey — and doing so WORSE (more grey) for
-    /// negative vibrance, i.e. negative vibrance BOOSTED such a pixel's spread
-    /// instead of reducing it. The fix weights the fade term by the clamped
-    /// saturation `w = clamp(s, 0, 1)` instead, so `(1 - w)` stays in [0,1] and
-    /// the pixel's channel spread degrades gracefully rather than collapsing.
+    /// (1.74, 0.17, 0.17) has HSL s ≈ 18.7 under the old HSL-based formula).
+    /// history: an earlier version weighted the `(1 - s)` fade term by the RAW
+    /// (unclamped) HSL saturation, so at s ≈ 18.7 the factor `1 + v*(1-s)` went
+    /// hugely negative for any non-zero vibrance, snapping the pixel to flat
+    /// grey — worse (more grey) for negative vibrance, i.e. negative vibrance
+    /// BOOSTED such a pixel's spread instead of reducing it. A later revision
+    /// clamped that fade weight to `[0,1]`, which fixed the grey-snap but kept
+    /// the HSL round trip — and inherited ITS OWN singularity: HSL saturation's
+    /// `s = d / (1 - |2l-1|)` denominator hits exactly 0 at `l == 1.0` (Inf/NaN,
+    /// the "black pixel in bright sky" bug this fix addresses). The CURRENT
+    /// implementation drops the HSL round trip entirely in favor of an
+    /// HSV-style measure `(max-min)/max(max, eps)` (see `hsv_sat_measure`),
+    /// which is bounded in `[0,1]` for any brightness with no denominator that
+    /// can reach zero — so the pixel's channel spread degrades gracefully
+    /// rather than collapsing, for every scene-linear brightness, not just the
+    /// ones this fixture happens to cover.
     #[test]
     fn vibrance_does_not_grey_snap_scene_linear_high_saturation_pixel() {
         use crate::local::AdjustmentSet;
@@ -1658,6 +1702,106 @@ mod tests {
             neg_spread <= input_spread + 1e-4,
             "vibrance -0.5 must not increase a high-saturation pixel's spread: \
              input spread={input_spread} output spread={neg_spread} out={out_neg:?}"
+        );
+    }
+
+    /// ROOT-CAUSE CONFIRMATION (pre-fix): `rgb_to_hsl`'s `s = d / (1 - |2l-1|)`
+    /// has a removable-singularity denominator at `l == 1.0` (a scene-linear
+    /// bright pixel, e.g. an overexposed sky sample) and goes NEGATIVE at
+    /// `l > 1.0`. Vibrance's rgb2hsl/hsl2rgb round trip inherits both: at
+    /// `l == 1` the denominator is exactly 0, so `s` is `Inf`/`NaN`, and the
+    /// vibrance formula's `s' = s * (1 + v*(1-w))` stays non-finite through
+    /// `hsl_to_rgb`, which is stored to the GPU texture as NaN and rendered as
+    /// black. This test is the failing reproduction demanding finite output
+    /// everywhere; it must be green only once vibrance no longer round-trips
+    /// through HSL for its saturation measure.
+    #[test]
+    fn vibrance_is_finite_on_l_equals_one_and_l_greater_than_one_pixels() {
+        use crate::local::AdjustmentSet;
+
+        let a = AdjustmentSet {
+            vibrance: 0.3,
+            ..Default::default()
+        };
+
+        // l == (1.05+0.95)/2 == 1.0 exactly -> pre-fix denominator (1-|2l-1|) == 0.
+        // `global_order = true` is the relevant call shape here: it's the path the
+        // GLOBAL Vibrance slider actually takes (`color_segment()`'s pseudo-layer
+        // dispatch, full coverage, global order) and — critically — it is the ONLY
+        // path that skips the final `max(0.0)` floor clamp, so a NaN produced here
+        // reaches the GPU texture unmasked. The mask-order path (`global_order =
+        // false`) launders the same NaN to 0.0 via that floor clamp (`NaN.max(0.0)
+        // == 0.0` in Rust/IEEE-754), which is finite but is the same underlying
+        // black-pixel bug wearing a different hat — so both are asserted.
+        let l_eq_1 = [1.05, 0.95, 0.97];
+        let out_l_eq_1_global = light_color_apply(l_eq_1, &a, true);
+        let out_l_eq_1_mask = light_color_apply(l_eq_1, &a, false);
+        assert!(
+            out_l_eq_1_global.iter().all(|v| v.is_finite()),
+            "l==1.0 pixel must stay finite through vibrance (global order): \
+             in={l_eq_1:?} out={out_l_eq_1_global:?}"
+        );
+        assert!(
+            out_l_eq_1_mask.iter().all(|v| v.is_finite()),
+            "l==1.0 pixel must stay finite through vibrance (mask order): \
+             in={l_eq_1:?} out={out_l_eq_1_mask:?}"
+        );
+
+        // l == (1.4+1.2)/2 == 1.3 > 1.0 -> pre-fix denominator negative -> s negative.
+        let l_gt_1 = [1.4, 1.2, 1.3];
+        let out_l_gt_1_global = light_color_apply(l_gt_1, &a, true);
+        let out_l_gt_1_mask = light_color_apply(l_gt_1, &a, false);
+        assert!(
+            out_l_gt_1_global.iter().all(|v| v.is_finite()),
+            "l>1.0 pixel must stay finite through vibrance (global order): \
+             in={l_gt_1:?} out={out_l_gt_1_global:?}"
+        );
+        assert!(
+            out_l_gt_1_mask.iter().all(|v| v.is_finite()),
+            "l>1.0 pixel must stay finite through vibrance (mask order): \
+             in={l_gt_1:?} out={out_l_gt_1_mask:?}"
+        );
+    }
+
+    /// ROOT-CAUSE CONFIRMATION (pre-fix, hue path): the pre-existing hue step
+    /// shares the SAME `rgb_to_hsl`/`hsl_to_rgb` round trip and therefore the
+    /// same `l==1.0` (Inf saturation) / `l>1.0` (negative saturation) singularity
+    /// — it does not need `vibrance` set at all, a non-zero `hue` alone is enough.
+    #[test]
+    fn hue_is_finite_on_l_equals_one_and_l_greater_than_one_pixels() {
+        use crate::local::AdjustmentSet;
+
+        let a = AdjustmentSet {
+            hue: 0.1, // -> hue_deg = 0.1 * 180 = 18 deg
+            ..Default::default()
+        };
+
+        let l_eq_1 = [1.05, 0.95, 0.97];
+        let out_l_eq_1_global = light_color_apply(l_eq_1, &a, true);
+        let out_l_eq_1_mask = light_color_apply(l_eq_1, &a, false);
+        assert!(
+            out_l_eq_1_global.iter().all(|v| v.is_finite()),
+            "l==1.0 pixel must stay finite through hue (global order): \
+             in={l_eq_1:?} out={out_l_eq_1_global:?}"
+        );
+        assert!(
+            out_l_eq_1_mask.iter().all(|v| v.is_finite()),
+            "l==1.0 pixel must stay finite through hue (mask order): \
+             in={l_eq_1:?} out={out_l_eq_1_mask:?}"
+        );
+
+        let l_gt_1 = [1.4, 1.2, 1.3];
+        let out_l_gt_1_global = light_color_apply(l_gt_1, &a, true);
+        let out_l_gt_1_mask = light_color_apply(l_gt_1, &a, false);
+        assert!(
+            out_l_gt_1_global.iter().all(|v| v.is_finite()),
+            "l>1.0 pixel must stay finite through hue (global order): \
+             in={l_gt_1:?} out={out_l_gt_1_global:?}"
+        );
+        assert!(
+            out_l_gt_1_mask.iter().all(|v| v.is_finite()),
+            "l>1.0 pixel must stay finite through hue (mask order): \
+             in={l_gt_1:?} out={out_l_gt_1_mask:?}"
         );
     }
 

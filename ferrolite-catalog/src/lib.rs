@@ -19,7 +19,9 @@ pub use model::{
     CollectionRecord, DecodeStatus, ExportQueueEntry, ImageRecord, IngestSummary, NewImage,
     TagRecord,
 };
-pub use query::{LibraryQuery, RatingFilter, Scope, Sort, SortKey, TagFilter, TagMode};
+pub use query::{
+    FileTypeChip, LibraryQuery, RatingFilter, Scope, Sort, SortKey, TagFilter, TagMode,
+};
 pub use read_pool::ReadPool;
 pub use scan::{classify, collect_dirs, is_raw, scan_raw_files, scan_tree, ScannedFile};
 pub use schema::SCHEMA_VERSION;

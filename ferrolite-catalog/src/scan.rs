@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// RAW extensions we ingest (lowercased). Extend as camera coverage grows.
-const RAW_EXTS: &[&str] = &[
+///
+/// `pub(crate)`: also the single source of truth for `FileTypeChip::Raw`'s
+/// extension list in `query.rs`, so the ingest classifier and the library
+/// filter's "RAW" predicate never drift apart.
+pub(crate) const RAW_EXTS: &[&str] = &[
     "nef", "nrw", "cr2", "cr3", "crw", "arw", "sr2", "srf", "raf", "rw2", "orf", "pef", "dng",
     "raw", "rwl", "iiq", "3fr", "erf", "mef", "mos", "kdc", "dcr", "srw", "x3f", "gpr", "fff",
     "cap", "rwz", "bay", "cs1", "ari", "dcs",

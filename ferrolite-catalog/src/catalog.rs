@@ -67,12 +67,13 @@ impl Catalog {
             "INSERT INTO images
                (folder_id, filename, mtime, size, camera_make, camera_model,
                 width, height, orientation, capture_time, iso, decode_status, kind,
-                rating, added_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                rating, added_at, lens, aperture, focal_length)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
              ON CONFLICT(folder_id, filename) DO UPDATE SET
                 mtime=?3, size=?4, camera_make=?5, camera_model=?6, width=?7,
                 height=?8, orientation=?9, capture_time=?10, iso=?11,
-                decode_status=?12, kind=?13, rating=?14",
+                decode_status=?12, kind=?13, rating=?14, lens=?16, aperture=?17,
+                focal_length=?18",
             rusqlite::params![
                 img.folder_id,
                 img.filename,
@@ -89,6 +90,9 @@ impl Catalog {
                 img.kind.as_i64(),
                 img.rating.as_i64(),
                 img.added_at,
+                img.lens,
+                img.aperture,
+                img.focal_length,
             ],
         )?;
         let id = self.conn().query_row(
@@ -124,12 +128,13 @@ impl Catalog {
                 "INSERT INTO images
                    (folder_id, filename, mtime, size, camera_make, camera_model,
                     width, height, orientation, capture_time, iso, decode_status, kind,
-                    rating, added_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                    rating, added_at, lens, aperture, focal_length)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
                  ON CONFLICT(folder_id, filename) DO UPDATE SET
                     mtime=?3, size=?4, camera_make=?5, camera_model=?6, width=?7,
                     height=?8, orientation=?9, capture_time=?10, iso=?11,
-                    decode_status=?12, kind=?13, rating=?14",
+                    decode_status=?12, kind=?13, rating=?14, lens=?16, aperture=?17,
+                    focal_length=?18",
                 rusqlite::params![
                     img.folder_id,
                     img.filename,
@@ -146,6 +151,9 @@ impl Catalog {
                     img.kind.as_i64(),
                     img.rating.as_i64(),
                     img.added_at,
+                    img.lens,
+                    img.aperture,
+                    img.focal_length,
                 ],
             )?;
             let id: i64 = tx.query_row(
@@ -182,8 +190,8 @@ impl Catalog {
             "INSERT INTO images
                (folder_id, filename, mtime, size, camera_make, camera_model,
                 width, height, orientation, capture_time, iso, decode_status, kind,
-                rating, added_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                rating, added_at, lens, aperture, focal_length)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
              ON CONFLICT(folder_id, filename) DO NOTHING",
             rusqlite::params![
                 img.folder_id,
@@ -201,6 +209,9 @@ impl Catalog {
                 img.kind.as_i64(),
                 img.rating.as_i64(),
                 img.added_at,
+                img.lens,
+                img.aperture,
+                img.focal_length,
             ],
         )?;
         Ok(())

@@ -1,7 +1,10 @@
 //! Pure mapping from toolbar UI state to a `LibraryQuery`. No egui here.
 
-use ferrolite_catalog::{LibraryQuery, RatingFilter, Scope, Sort, SortKey, TagFilter, TagMode};
+use ferrolite_catalog::{
+    FileTypeChip, LibraryQuery, RatingFilter, Scope, Sort, SortKey, TagFilter, TagMode,
+};
 use ferrolite_image::{Flag, TagId};
+use std::collections::BTreeSet;
 
 /// How many images "Recently Added" shows.
 const RECENT_LIMIT: i64 = 200;
@@ -35,15 +38,6 @@ impl RatingCmp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum FileTypeChip {
-    #[default]
-    Raw,
-    Jpeg,
-    Heic,
-    Tiff,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewSource {
     Folder(i64),
@@ -64,7 +58,7 @@ pub struct FilterState {
     pub tag_mode: TagMode,
     pub camera: Option<String>,
     pub lens: Option<String>,
-    pub file_type: Option<FileTypeChip>,
+    pub file_types: BTreeSet<FileTypeChip>,
     pub iso: Option<(u32, u32)>,
     pub aperture: Option<(f32, f32)>,
     pub focal: Option<(f32, f32)>,
@@ -84,7 +78,7 @@ impl Default for FilterState {
             tag_mode: TagMode::Any,
             camera: None,
             lens: None,
-            file_type: None,
+            file_types: BTreeSet::new(),
             iso: None,
             aperture: None,
             focal: None,
@@ -98,7 +92,7 @@ impl FilterState {
     pub fn reset_metadata_filters(&mut self) {
         self.camera = None;
         self.lens = None;
-        self.file_type = None;
+        self.file_types.clear();
         self.min_rating = 0;
         self.iso = None;
         self.aperture = None;
@@ -148,7 +142,11 @@ impl FilterState {
                 mode: self.tag_mode,
             },
             camera: self.camera.clone(),
+            lens: self.lens.clone(),
+            file_types: self.file_types.clone(),
             iso: self.iso,
+            aperture: self.aperture,
+            focal: self.focal,
             date: self.date.clone(),
         }
     }
@@ -290,5 +288,33 @@ mod tests {
         );
         assert_eq!(q.sort.key, SortKey::AddedAt);
         assert!(q.sort.desc);
+    }
+
+    #[test]
+    fn to_query_forwards_lens_file_types_aperture_focal_verbatim() {
+        let mut file_types = BTreeSet::new();
+        file_types.insert(FileTypeChip::Jpeg);
+        file_types.insert(FileTypeChip::Png);
+        let fs = FilterState {
+            lens: Some("Sigma 50mm f/1.4".into()),
+            file_types: file_types.clone(),
+            aperture: Some((2.8, 11.0)),
+            focal: Some((24.0, 70.0)),
+            ..Default::default()
+        };
+        let q = fs.to_query(ViewSource::All, true);
+        assert_eq!(q.lens.as_deref(), Some("Sigma 50mm f/1.4"));
+        assert_eq!(q.file_types, file_types);
+        assert_eq!(q.aperture, Some((2.8, 11.0)));
+        assert_eq!(q.focal, Some((24.0, 70.0)));
+    }
+
+    #[test]
+    fn to_query_defaults_forward_as_none_or_empty() {
+        let q = FilterState::default().to_query(ViewSource::All, true);
+        assert_eq!(q.lens, None);
+        assert!(q.file_types.is_empty());
+        assert_eq!(q.aperture, None);
+        assert_eq!(q.focal, None);
     }
 }

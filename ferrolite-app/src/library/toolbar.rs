@@ -4,13 +4,13 @@
 //! true (so the read pool re-queries off-thread). The "Subfolders" scope toggle
 //! lives in the Folders tree header (`panel.rs`), not here.
 
-use crate::library::filter::FileTypeChip;
 use crate::library::filter_widgets as fw;
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
 use crate::widgets::{EguiSlider, SegmentedControl};
 use egui::{pos2, Color32, FontId, Rounding, Stroke};
+use ferrolite_catalog::FileTypeChip;
 
 /// Toolbar layout constants (Spec 3.3).
 #[allow(dead_code)]
@@ -250,15 +250,27 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                             let chip_options = [
                                 (FileTypeChip::Raw, "RAW"),
                                 (FileTypeChip::Jpeg, "JPEG"),
-                                (FileTypeChip::Heic, "HEIC"),
+                                (FileTypeChip::Png, "PNG"),
                                 (FileTypeChip::Tiff, "TIFF"),
                             ];
-                            let mut current_chip = state.filter.file_type.unwrap_or_default();
+                            // Single-choice for now (Task 8 replaces this with a
+                            // proper multi-select chip row): the segmented control
+                            // shows the first selected chip (or the default when
+                            // none is selected) and a pick replaces the whole set
+                            // with just that one chip.
+                            let mut current_chip = state
+                                .filter
+                                .file_types
+                                .iter()
+                                .next()
+                                .copied()
+                                .unwrap_or_default();
                             if SegmentedControl::new(&mut current_chip, &chip_options)
                                 .ui(ui, "file_type_segmented")
                                 .changed()
                             {
-                                state.filter.file_type = Some(current_chip);
+                                state.filter.file_types.clear();
+                                state.filter.file_types.insert(current_chip);
                                 changed = true;
                             }
 
@@ -565,10 +577,12 @@ mod tests {
 
     #[test]
     fn filter_state_reset_metadata_filters() {
+        let mut file_types = std::collections::BTreeSet::new();
+        file_types.insert(FileTypeChip::Raw);
         let mut fs = crate::library::filter::FilterState {
             camera: Some("Sony A7IV".to_string()),
             lens: Some("24-70mm f/2.8".to_string()),
-            file_type: Some(FileTypeChip::Raw),
+            file_types,
             min_rating: 4,
             iso: Some((100, 3200)),
             aperture: Some((2.8_f32, 11.0_f32)),
@@ -580,7 +594,7 @@ mod tests {
 
         assert_eq!(fs.camera, None);
         assert_eq!(fs.lens, None);
-        assert_eq!(fs.file_type, None);
+        assert!(fs.file_types.is_empty());
         assert_eq!(fs.min_rating, 0);
         assert_eq!(fs.iso, None);
         assert_eq!(fs.aperture, None);

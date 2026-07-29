@@ -458,3 +458,14 @@ author sign-off as accepted deltas (like the fusion's own f16 note):
 All three together would put ~35 ms in reach — i.e. the 2× bar is reachable
 only as a Phase-4-style follow-up with accepted-delta review, not as a safe
 optimization of the current semantics.
+
+## Gate closure (author decision, 2026-07-29)
+
+The original acceptance criterion ("every case <= baseline AND >=2x on the early-op drag") was
+re-based by the author after the Task 5b profiling investigation: the >=2x prediction assumed the
+six point-op passes dominated an evaluate, but they were ~27% of it (sharpen 34%, dehaze
+transmission 24% dominate and must re-run on upstream edits). Re-based gate: **no regression in
+any case + a profiled explanation of the residual cost** - met (1.11-1.32x across all cases).
+Output-affecting perf follow-ups (separable sharpen ~-12 ms, recovery-into-engine fusion ~-5 ms,
+transmission working-res cap ~-7 ms) are deferred to Phase 4, which reworks sharpen for per-mask
+support anyway.

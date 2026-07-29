@@ -141,6 +141,11 @@ pub struct AppState {
     /// Interactive canvas panning/zooming/drag state parameters.
     pub canvas: crate::develop::canvas::ViewerCanvasState,
 
+    /// Develop filmstrip UI state (which selection it has already
+    /// auto-centered on), so the strip free-scrolls and only snaps on
+    /// navigation, not every frame.
+    pub filmstrip: crate::library::filmstrip::FilmstripUiState,
+
     /// Whether the Develop view read-only left info panel is visible.
     pub show_info_panel: bool,
 
@@ -314,6 +319,7 @@ impl AppState {
             mask_overlay_highlight_gpu: None,
             viewer: None,
             canvas: crate::develop::canvas::ViewerCanvasState::default(),
+            filmstrip: crate::library::filmstrip::FilmstripUiState::default(),
             show_info_panel: settings.show_info_panel,
             tool_state: Default::default(),
             export_dialog: None,
@@ -938,6 +944,7 @@ impl AppState {
             mask_overlay_highlight_gpu: None,
             viewer: None,
             canvas: crate::develop::canvas::ViewerCanvasState::default(),
+            filmstrip: crate::library::filmstrip::FilmstripUiState::default(),
             show_info_panel: false,
             tool_state: Default::default(),
             export_dialog: None,

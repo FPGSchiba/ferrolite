@@ -17,6 +17,25 @@ pub fn clamp_filmstrip_height(h: f32) -> f32 {
     h.clamp(MIN_FILMSTRIP_HEIGHT, MAX_FILMSTRIP_HEIGHT)
 }
 
+/// Filmstrip UI state that must survive across frames (kept on `AppState`,
+/// not egui temp data, so it is plain and testable). Tracks which selection
+/// the strip has already auto-centered on, so free-scrolling the strip by
+/// hand never gets fought by a per-frame re-center.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FilmstripUiState {
+    /// The image id the strip was last scrolled to center on. `None` before
+    /// the first selection, or if that centering scroll has not fired yet
+    /// (e.g. the current image's rect wasn't realized the frame the
+    /// selection changed).
+    pub last_centered: Option<i64>,
+}
+
+/// Pure: should this frame auto-center the strip on `current`?
+/// Centers exactly once per selection change.
+pub(crate) fn should_center(current: Option<i64>, last_centered: Option<i64>) -> bool {
+    current.is_some() && current != last_centered
+}
+
 const GAP: f32 = 10.0;
 /// Clamp on cell width (as a multiple of thumbnail height) so extreme panoramas or
 /// super-tall portraits can't break the strip's layout.
@@ -138,13 +157,20 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, current_id: Option<i64>) ->
                             );
                         }
                     }
-                    // Keep the current image centered in the strip. egui clamps
-                    // scrolling to the content bounds, so near the ends the cell
-                    // naturally sits toward the left/right edge instead of forcing
-                    // an over-scroll. (Runs even when off-screen so an off-screen
-                    // current is pulled to center, then loads next frame.)
-                    if Some(id) == current_id {
+                    // Center on the current image ONLY the frame its selection
+                    // changes (nav key, click, programmatic open) — never every
+                    // frame, or the strip snaps back the instant the user tries
+                    // to free-scroll it by hand. `rect` is computed above for
+                    // every cell regardless of visibility, so this works even
+                    // when the target is off-screen (virtualized strip). Only
+                    // `last_centered` advances once the scroll actually fires,
+                    // so a selection made while the strip is hidden/off-screen
+                    // still centers the next time this runs.
+                    if Some(id) == current_id
+                        && should_center(current_id, state.filmstrip.last_centered)
+                    {
                         ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                        state.filmstrip.last_centered = current_id;
                     }
                     if resp.clicked() {
                         clicked = Some(id);
@@ -180,5 +206,26 @@ mod tests {
         assert_eq!(height, MAX_FILMSTRIP_HEIGHT);
         height = clamp_filmstrip_height(height - 200.0);
         assert_eq!(height, MIN_FILMSTRIP_HEIGHT);
+    }
+
+    #[test]
+    fn test_should_center_same_id_twice_is_false() {
+        assert!(!should_center(Some(1), Some(1)));
+    }
+
+    #[test]
+    fn test_should_center_changed_id_is_true() {
+        assert!(should_center(Some(2), Some(1)));
+    }
+
+    #[test]
+    fn test_should_center_none_current_is_false() {
+        assert!(!should_center(None, Some(1)));
+        assert!(!should_center(None, None));
+    }
+
+    #[test]
+    fn test_should_center_none_to_some_is_true() {
+        assert!(should_center(Some(1), None));
     }
 }

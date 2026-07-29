@@ -2164,21 +2164,18 @@ impl eframe::App for FerroliteApp {
                                     bottom: 0.0,
                                 })
                                 .show(ui, |ui| {
-                                    let prev_disclosures = (
-                                        self.state.settings.tone_curve_open,
-                                        self.state.settings.color_grading_open,
-                                        self.state.settings.optics_open,
-                                    );
+                                    let prev_disclosures =
+                                        crate::settings::dto::disclosure_snapshot(
+                                            &self.state.settings,
+                                        );
                                     outcome = Some(crate::develop::tool_panel::show(
                                         ui,
                                         &mut self.state,
                                         &self.tool_registry,
                                         working_space,
                                     ));
-                                    if (
-                                        self.state.settings.tone_curve_open,
-                                        self.state.settings.color_grading_open,
-                                        self.state.settings.optics_open,
+                                    if crate::settings::dto::disclosure_snapshot(
+                                        &self.state.settings,
                                     ) != prev_disclosures
                                     {
                                         self.mark_settings_dirty();

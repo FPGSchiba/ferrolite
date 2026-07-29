@@ -677,9 +677,13 @@ impl Catalog {
         crate::queries::images_needing_metadata_backfill(self.conn(), after_id, limit)
     }
 
-    /// Count of rows still awaiting the Task-14 backfill — the one-shot
-    /// startup gate (`ferrolite-app`'s `meta_backfill::maybe_spawn`) checks
-    /// this and only spawns the job when it is `> 0`.
+    /// Count of rows still awaiting the Task-14 backfill. The backfill JOB
+    /// (`ferrolite-app`'s `meta_backfill::spawn_meta_backfill`) checks this as
+    /// its first off-thread step (`has_backlog`) and returns early when it is
+    /// `0` — the job itself is submitted unconditionally every launch
+    /// (`meta_backfill::spawn_once`); this count is what makes a
+    /// fully-backfilled catalog cheap (one `COUNT(*)`, nothing more) rather
+    /// than what gates whether the job is spawned at all.
     pub fn metadata_backfill_pending_count(&self) -> Result<i64, CatalogError> {
         crate::queries::metadata_backfill_pending_count(self.conn())
     }
@@ -693,8 +697,22 @@ impl Catalog {
     /// It is written back literally, NOT coerced to `NULL` — writing NULL
     /// would leave the row matching `images_needing_metadata_backfill`'s
     /// all-NULL predicate forever, re-reading the same unreadable/empty file
-    /// on every subsequent launch. The empty string is otherwise never a
-    /// legitimate lens name, so it is unambiguous as a marker.
+    /// on every subsequent launch. This assumes a decoder never legitimately
+    /// emits `Some("")` as a real lens name; if one ever did, the row would
+    /// still safely drop out of the backlog (it no longer matches the
+    /// all-NULL predicate) — the sentinel and a hypothetical genuine empty
+    /// string are indistinguishable, but both outcomes are safe here, just
+    /// not re-checked again.
+    ///
+    /// The `WHERE` clause only touches rows that are STILL all-NULL at write
+    /// time — a race guard against concurrent ingest: the backfill job reads
+    /// a candidate's current file-system metadata off the UI thread, but this
+    /// write lands later, on the UI thread (see the variant's doc comment on
+    /// `AppEvent::MetaBackfillReady`). If a concurrent ingest pass wrote real
+    /// `lens`/`aperture`/`focal_length` values for the same row in between,
+    /// the extra predicate makes this UPDATE a no-op for that row instead of
+    /// clobbering the fresh data with a stale (possibly sentinel) backfill
+    /// result.
     pub fn apply_metadata_backfill_batch(
         &self,
         results: &[crate::model::BackfillResult],
@@ -702,7 +720,8 @@ impl Catalog {
         let tx = self.conn().unchecked_transaction()?;
         for r in results {
             tx.execute(
-                "UPDATE images SET lens = ?1, aperture = ?2, focal_length = ?3 WHERE id = ?4",
+                "UPDATE images SET lens = ?1, aperture = ?2, focal_length = ?3 WHERE id = ?4
+                 AND lens IS NULL AND aperture IS NULL AND focal_length IS NULL",
                 rusqlite::params![r.lens, r.aperture, r.focal_length, r.id],
             )?;
         }
@@ -1161,6 +1180,10 @@ mod metadata_backfill_tests {
     }
 
     fn image_with_metadata(cat: &Catalog, folder: i64, name: &str) -> i64 {
+        image_with_lens(cat, folder, name, "50mm f/1.8")
+    }
+
+    fn image_with_lens(cat: &Catalog, folder: i64, name: &str, lens: &str) -> i64 {
         let meta = ferrolite_decode::Metadata {
             make: "Acme".into(),
             model: "X100".into(),
@@ -1173,7 +1196,7 @@ mod metadata_backfill_tests {
             shutter: None,
             focal_length: Some(50.0),
             focal_length_35mm: None,
-            lens: Some("50mm f/1.8".to_string()),
+            lens: Some(lens.to_string()),
         };
         cat.upsert_image(&NewImage::from_metadata(
             folder,
@@ -1325,5 +1348,68 @@ mod metadata_backfill_tests {
                 .is_empty(),
             "a row with any non-NULL column is excluded from the listing"
         );
+    }
+
+    #[test]
+    fn distinct_lenses_excludes_null_and_sentinel_returns_sorted_reals() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        null_metadata_image(&cat, f, "null.nef");
+        let sentinel = null_metadata_image(&cat, f, "sentinel.nef");
+        cat.apply_metadata_backfill_batch(&[BackfillResult {
+            id: sentinel,
+            lens: Some(String::new()),
+            aperture: None,
+            focal_length: None,
+        }])
+        .unwrap();
+        image_with_lens(&cat, f, "b.nef", "Zeiss 50mm f/1.4");
+        image_with_lens(&cat, f, "a.nef", "Nikkor 24-70mm f/2.8");
+
+        let lenses = crate::queries::distinct_lenses(cat.conn()).unwrap();
+        assert_eq!(
+            lenses,
+            vec![
+                "Nikkor 24-70mm f/2.8".to_string(),
+                "Zeiss 50mm f/1.4".to_string(),
+            ],
+            "NULL and the empty-string sentinel are excluded; reals come back sorted"
+        );
+    }
+
+    #[test]
+    fn batch_write_does_not_clobber_metadata_written_by_concurrent_ingest() {
+        // Simulates the race the WHERE-clause guard closes: the backfill job
+        // reads a candidate's on-disk EXIF off the UI thread, but the write
+        // lands later, on the UI thread — a concurrent ingest could have
+        // already written real metadata for the same row in between. The
+        // guarded UPDATE must leave that already-populated row untouched.
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let id = image_with_lens(&cat, f, "a.nef", "Real Lens 50mm f/1.4");
+
+        cat.apply_metadata_backfill_batch(&[BackfillResult {
+            id,
+            lens: Some(String::new()),
+            aperture: None,
+            focal_length: None,
+        }])
+        .unwrap();
+
+        let (lens, aperture, focal): (Option<String>, Option<f64>, Option<f64>) = cat
+            .conn()
+            .query_row(
+                "SELECT lens, aperture, focal_length FROM images WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            lens.as_deref(),
+            Some("Real Lens 50mm f/1.4"),
+            "pre-existing lens must survive the race-guarded backfill write"
+        );
+        assert_eq!(aperture, Some(2.8_f32 as f64));
+        assert_eq!(focal, Some(50.0_f32 as f64));
     }
 }

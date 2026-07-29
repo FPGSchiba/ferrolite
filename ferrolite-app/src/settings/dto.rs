@@ -453,6 +453,48 @@ impl Default for Settings {
     }
 }
 
+/// Number of section-disclosure (`*_open`) flags in `Settings` — see
+/// `disclosure_snapshot`. Kept as a named constant so the snapshot array size
+/// and the coverage test share one source of truth.
+pub const DISCLOSURE_FLAG_COUNT: usize = 19;
+
+/// Snapshot of EVERY section-disclosure flag on `Settings` (both the Adjust
+/// scope and its per-scope Mask counterpart — see the `mask_*_open` fields'
+/// doc comment). Callers diff two snapshots taken across a frame to detect
+/// whether ANY disclosure toggle changed, so the settings-dirty flag can be
+/// set once regardless of which specific section was (dis)closed — see
+/// `FerroliteApp`'s Develop tool-panel frame, which used to hand-diff only 3
+/// of these fields and silently missed the rest.
+///
+/// Order is arbitrary — only whole-array equality matters. If you add a new
+/// section-disclosure field to `Settings`, add it here too: the
+/// `disclosure_snapshot_covers_every_open_field` test below fails otherwise
+/// (it counts the matching field declarations in this file's own source),
+/// which is exactly the tripwire this helper exists to provide.
+pub fn disclosure_snapshot(s: &Settings) -> [bool; DISCLOSURE_FLAG_COUNT] {
+    [
+        s.basic_sliders_open,
+        s.color_hsl_open,
+        s.color_mix_open,
+        s.sharpening_open,
+        s.noise_reduction_open,
+        s.dehaze_open,
+        s.tone_curve_open,
+        s.region_tones_open,
+        s.color_grading_open,
+        s.optics_open,
+        s.mask_basic_sliders_open,
+        s.mask_tone_curve_open,
+        s.mask_region_tones_open,
+        s.mask_color_hsl_open,
+        s.mask_color_mix_open,
+        s.mask_color_grading_open,
+        s.mask_sharpening_open,
+        s.mask_noise_reduction_open,
+        s.mask_dehaze_open,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +714,28 @@ mod tests {
         let deserialized: Settings =
             serde_json::from_str(&serialized).expect("deserialize custom settings");
         assert_eq!(deserialized, custom);
+    }
+
+    /// Tripwire for `disclosure_snapshot`: counts field declarations of the
+    /// shape `<name>_open: bool,` in this file's own source (a new `*_open`
+    /// field on `Settings` adds exactly one more such declaration — note the
+    /// trailing `,` + newline, so this can't self-match the prose describing
+    /// it) and asserts it matches `DISCLOSURE_FLAG_COUNT` / the snapshot
+    /// array's length. A future section's disclosure flag can no longer
+    /// silently fall out of the settings-dirty tracking the way
+    /// `tone_curve_open` / `color_grading_open` / `optics_open`-only
+    /// hand-diffing once did.
+    #[test]
+    fn disclosure_snapshot_covers_every_open_field() {
+        let field_declarations = include_str!("dto.rs").matches("_open: bool,\n").count();
+        assert_eq!(
+            field_declarations, DISCLOSURE_FLAG_COUNT,
+            "a `*_open` field was added to/removed from Settings without updating \
+             DISCLOSURE_FLAG_COUNT and disclosure_snapshot"
+        );
+        assert_eq!(
+            disclosure_snapshot(&Settings::default()).len(),
+            DISCLOSURE_FLAG_COUNT
+        );
     }
 }

@@ -115,6 +115,12 @@ impl ReadPool {
         self.with_conn(crate::queries::distinct_cameras)
     }
 
+    /// Sorted list of distinct non-null, non-empty lens names for the filter
+    /// toolbar (excludes the backfill "attempted, found nothing" sentinel).
+    pub fn distinct_lenses(&self) -> Result<Vec<String>, CatalogError> {
+        self.with_conn(crate::queries::distinct_lenses)
+    }
+
     /// Min/max ISO values across all images, or `None` if no ISO data is present.
     pub fn iso_bounds(&self) -> Result<Option<(u32, u32)>, CatalogError> {
         self.with_conn(crate::queries::iso_bounds)

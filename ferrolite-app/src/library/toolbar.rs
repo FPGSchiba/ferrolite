@@ -356,6 +356,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                     log: true,
                                     decimals: 0,
                                     unit: "",
+                                    value_prefix: "",
                                 })
                                 .changed()
                             {
@@ -381,6 +382,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                     log: true,
                                     decimals: 1,
                                     unit: "",
+                                    value_prefix: "f/",
                                 })
                                 .changed()
                             {
@@ -403,6 +405,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                     log: false,
                                     decimals: 0,
                                     unit: " mm",
+                                    value_prefix: "",
                                 })
                                 .changed()
                             {

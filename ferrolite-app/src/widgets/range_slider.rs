@@ -56,6 +56,13 @@ pub fn track_fraction(v: f32, min: f32, max: f32, log: bool) -> f32 {
     }
 }
 
+/// Pure: format the two-value readout, e.g. `"2.8\u{2013}8.0"` or, with a
+/// non-empty `prefix`, `"f/2.8\u{2013}f/8.0"`. `prefix` is printed before
+/// BOTH values; `unit` is printed once, after the second value.
+fn format_range_readout(lo: f32, hi: f32, decimals: usize, unit: &str, prefix: &str) -> String {
+    format!("{prefix}{lo:.decimals$}\u{2013}{prefix}{hi:.decimals$}{unit}")
+}
+
 /// Pure: inverse of `track_fraction` — the value at track fraction `frac`
 /// on `[min, max]`, log or linear.
 fn value_at_fraction(frac: f32, min: f32, max: f32, log: bool) -> f32 {
@@ -86,6 +93,10 @@ pub struct RangeSlider<'a> {
     pub log: bool,
     pub decimals: usize,
     pub unit: &'static str,
+    /// Printed before EACH of the two values in the readout (e.g. `"f/"` for
+    /// aperture: `"f/2.8\u{2013}f/8.0"`). Empty for ranges with no such
+    /// marker (ISO, focal length).
+    pub value_prefix: &'static str,
 }
 
 use crate::theme;
@@ -251,10 +262,7 @@ impl<'a> Widget for RangeSlider<'a> {
         ui.painter().text(
             value_rect.right_center(),
             egui::Align2::RIGHT_CENTER,
-            format!(
-                "{:.*}\u{2013}{:.*}{}",
-                self.decimals, lo, self.decimals, hi, self.unit
-            ),
+            format_range_readout(lo, hi, self.decimals, self.unit, self.value_prefix),
             egui::FontId::monospace(11.0),
             value_color,
         );
@@ -292,6 +300,26 @@ mod tests {
     fn snap_and_clamp_with_no_detents_only_clamps() {
         assert_eq!(snap_and_clamp(123.4, &[], 100.0, true), 100.0);
         assert_eq!(snap_and_clamp(90.0, &[], 100.0, false), 100.0);
+    }
+
+    #[test]
+    fn format_range_readout_applies_prefix_to_both_values() {
+        assert_eq!(
+            format_range_readout(2.8, 8.0, 1, "", "f/"),
+            "f/2.8\u{2013}f/8.0"
+        );
+    }
+
+    #[test]
+    fn format_range_readout_empty_prefix_matches_plain_readout() {
+        assert_eq!(
+            format_range_readout(100.0, 400.0, 0, "", ""),
+            "100\u{2013}400"
+        );
+        assert_eq!(
+            format_range_readout(24.0, 70.0, 0, " mm", ""),
+            "24\u{2013}70 mm"
+        );
     }
 
     #[test]

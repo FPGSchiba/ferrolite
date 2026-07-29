@@ -293,6 +293,23 @@ pub(crate) fn distinct_cameras(conn: &Connection) -> Result<Vec<String>, Catalog
     Ok(out)
 }
 
+/// Sorted distinct non-null, non-empty lens names for the filter toolbar's
+/// Lens dropdown. Excludes the empty-string "attempted, found nothing"
+/// backfill sentinel (see `apply_metadata_backfill_batch`'s doc comment) in
+/// addition to NULL, so an unresolved/unreadable lens never appears in the
+/// dropdown as a spurious blank entry.
+pub(crate) fn distinct_lenses(conn: &Connection) -> Result<Vec<String>, CatalogError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT lens FROM images WHERE lens IS NOT NULL AND lens != '' ORDER BY lens",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub(crate) fn iso_bounds(conn: &Connection) -> Result<Option<(u32, u32)>, CatalogError> {
     let row: (Option<i64>, Option<i64>) = conn.query_row(
         "SELECT MIN(iso), MAX(iso) FROM images WHERE iso IS NOT NULL",
@@ -377,9 +394,12 @@ pub(crate) fn images_needing_metadata_backfill(
 }
 
 /// Count of rows still awaiting the Task-14 backfill (same predicate as
-/// `images_needing_metadata_backfill`). Used for the one-shot startup gate:
-/// the app only spawns the backfill job when this is `> 0`, so a fully
-/// backfilled catalog pays zero extra job submissions on later launches.
+/// `images_needing_metadata_backfill`). The backfill job (`ferrolite-app`'s
+/// `meta_backfill::spawn_meta_backfill`) is submitted unconditionally every
+/// launch (`meta_backfill::spawn_once`); this count is checked as the job's
+/// first off-thread step (`has_backlog`), so a fully-backfilled catalog does
+/// exactly one `COUNT(*)` and returns, never reaching the per-row listing or
+/// EXIF re-reads.
 pub(crate) fn metadata_backfill_pending_count(conn: &Connection) -> Result<i64, CatalogError> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM images

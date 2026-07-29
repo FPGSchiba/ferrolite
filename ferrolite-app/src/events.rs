@@ -526,6 +526,11 @@ impl AppState {
                         format!("metadata backfill write failed: {e}"),
                     );
                 }
+                // Refresh the cached camera/lens/ISO/date aggregates once per
+                // batch so newly-recovered lenses show up in the Lens filter
+                // dropdown without a restart. Bounded by distinct-value
+                // count, so this is cheap even across many batches.
+                self.reload_vocab();
                 self.dirty = true;
                 None
             }

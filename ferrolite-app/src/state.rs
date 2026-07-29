@@ -55,7 +55,7 @@ pub struct AppState {
     pub ingest_handle: Option<JobHandle>,
     /// The Task-14 background EXIF metadata-backfill job handle, `Some` while
     /// it is walking the NULL-metadata backlog. Spawned at most once per app
-    /// run (`library::meta_backfill::maybe_spawn`, called from
+    /// run (`library::meta_backfill::spawn_once`, called from
     /// `FerroliteApp::update`'s one-shot startup block) and cancelled at
     /// shutdown (`on_exit`) like the app's other long-lived job handles —
     /// deliberately NOT cancelled by `cancel_pending_jobs` (folder-switch /
@@ -480,8 +480,11 @@ impl AppState {
     }
 
     /// Load the full tag and collection vocabularies, and refresh cached
-    /// toolbar metadata-filter aggregates (camera list, ISO range, date range).
-    /// Called at startup and after ingest completes.
+    /// toolbar metadata-filter aggregates (camera list, lens list, ISO range,
+    /// date range). Called at startup, after ingest completes, and once per
+    /// backfilled batch (`AppEvent::MetaBackfillReady`) so newly-recovered
+    /// lenses appear in the filter dropdown without a restart. Bounded by the
+    /// number of distinct values, so per-batch calls are cheap.
     pub fn reload_vocab(&mut self) {
         if let Ok(t) = self.reads.list_tags() {
             self.tags = t;
@@ -490,6 +493,7 @@ impl AppState {
             self.collections = c;
         }
         self.camera_options = self.reads.distinct_cameras().unwrap_or_default();
+        self.lens_options = self.reads.distinct_lenses().unwrap_or_default();
         self.iso_range = self.reads.iso_bounds().unwrap_or_default();
         self.date_range = self.reads.date_bounds().unwrap_or_default();
     }

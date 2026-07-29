@@ -9,6 +9,7 @@ use crate::library::filter_widgets as fw;
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
+use crate::widgets::range_slider::graduated_detents;
 use crate::widgets::{draw_reset_arrow, multi_select_chips, tool_button, EguiSlider, RangeSlider};
 use egui::{pos2, Color32, FontId, Rounding, Stroke};
 use ferrolite_catalog::FileTypeChip;
@@ -47,12 +48,23 @@ const APERTURE_DETENTS: &[f32] = &[
     6.3, 7.1, 8.0, 9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0, 25.0, 29.0, 32.0,
 ];
 
-/// Focal-length range-filter bounds (spec L3, Task 7). Detents are every
-/// whole mm from `FOCAL_MIN` to `FOCAL_MAX` — built once (not per-frame) into
-/// a cached `Vec` since `RangeSlider` needs a `&[f32]` every frame it draws.
+/// Focal-length range-filter bounds (spec L3, Task 7; round4 feedback item 1).
+/// Whole-mm detents were twitchy and hard to aim across the full 8-1200mm
+/// span, so the detent step grows the further out the value gets: 1mm in
+/// `[8,50)`, 5mm in `[50,200)`, 10mm in `[200,600)`, 50mm in `[600,1200]`.
+/// Built once (not per-frame) into a cached `Vec` since `RangeSlider` needs a
+/// `&[f32]` every frame it draws. Manual double-click entry (`parse_range_entry`)
+/// is not constrained to these steps, so precision is still available.
 const FOCAL_MIN: f32 = 8.0_f32;
 const FOCAL_MAX: f32 = 1200.0_f32;
-static FOCAL_DETENTS: LazyLock<Vec<f32>> = LazyLock::new(|| (8..=1200).map(|v| v as f32).collect());
+static FOCAL_DETENTS: LazyLock<Vec<f32>> = LazyLock::new(|| {
+    graduated_detents(&[
+        (8.0, 50.0, 1.0),
+        (50.0, 200.0, 5.0),
+        (200.0, 600.0, 10.0),
+        (600.0, 1200.0, 50.0),
+    ])
+});
 
 /// Returns `true` if any filter/sort/source field changed this frame.
 pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bool {
@@ -116,12 +128,12 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
         // NOTE: this is a hand-rolled `egui::Area`-based popup, NOT
         // `Memory::toggle_popup` + `popup_below_widget`. egui's `Memory` tracks the
         // open popup in a single global slot (`Memory.popup: Option<Id>`), and the
-        // three `egui::ComboBox`es inside this popup use that exact same slot for
-        // their own dropdown. Clicking a combo overwrote the slot with the combo's
-        // id, so next frame `popup_below_widget`'s `is_popup_open` guard failed and
-        // the whole Metadata popup vanished. Tracking our own open/closed bool in
-        // temp data sidesteps the shared slot entirely, so the combos are free to
-        // use it for themselves without disturbing us.
+        // `egui::ComboBox`es inside this popup (Camera, Lens) use that exact same
+        // slot for their own dropdown. Clicking a combo overwrote the slot with the
+        // combo's id, so next frame `popup_below_widget`'s `is_popup_open` guard
+        // failed and the whole Metadata popup vanished. Tracking our own
+        // open/closed bool in temp data sidesteps the shared slot entirely, so the
+        // combos are free to use it for themselves without disturbing us.
         let popup_id = ui.make_persistent_id("metadata_filters_popup");
         let mut popup_open = ui.data(|d| d.get_temp::<bool>(popup_id)).unwrap_or(false);
 
@@ -177,7 +189,12 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
 
                             ui.separator();
 
-                            // Combos: Camera, Lens, Rating
+                            // Combos: Camera, Lens. (The popup used to also carry
+                            // a Rating combo here, duplicating the toolbar's main
+                            // rating filter — removed per round4 feedback item 1;
+                            // the main toolbar rating control, `fw::rating_threshold`,
+                            // remains the only rating control and still drives
+                            // `state.filter.min_rating`.)
                             ui.horizontal(|ui| {
                                 ui.label("Camera");
                                 let selected_cam =
@@ -231,31 +248,6 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                                 state.filter.lens.as_deref() == Some(l.as_str());
                                             if ui.selectable_label(sel, l.as_str()).clicked() {
                                                 state.filter.lens = Some(l.clone());
-                                                changed = true;
-                                                combo_selection_this_frame = true;
-                                            }
-                                        }
-                                    });
-                            });
-
-                            ui.horizontal(|ui| {
-                                ui.label("Rating");
-                                let rating_text = match state.filter.min_rating {
-                                    0 => "Any Rating".to_string(),
-                                    r => format!("{r}+ Stars"),
-                                };
-                                egui::ComboBox::from_id_salt("rating_combo")
-                                    .selected_text(rating_text)
-                                    .show_ui(ui, |ui| {
-                                        for r in 0..=5 {
-                                            let label = if r == 0 {
-                                                "Any Rating".to_string()
-                                            } else {
-                                                format!("{r}+ Stars")
-                                            };
-                                            let sel = state.filter.min_rating == r;
-                                            if ui.selectable_label(sel, label).clicked() {
-                                                state.filter.min_rating = r;
                                                 changed = true;
                                                 combo_selection_this_frame = true;
                                             }
@@ -391,7 +383,9 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                 changed = true;
                             }
 
-                            // Focal-length range filter: every-mm detents, linear track.
+                            // Focal-length range filter: graduated detents (round4
+                            // feedback item 1), log track — easier to aim across
+                            // the wide 8-1200mm span than a linear track.
                             let (mut focal_lo, mut focal_hi) =
                                 state.filter.focal.unwrap_or((FOCAL_MIN, FOCAL_MAX));
                             if ui
@@ -402,7 +396,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                     min: FOCAL_MIN,
                                     max: FOCAL_MAX,
                                     detents: &FOCAL_DETENTS,
-                                    log: false,
+                                    log: true,
                                     decimals: 0,
                                     unit: " mm",
                                     value_prefix: "",

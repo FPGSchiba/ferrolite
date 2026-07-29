@@ -107,10 +107,18 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
         let popup_id = ui.make_persistent_id("metadata_filters_popup");
         let mut popup_open = ui.data(|d| d.get_temp::<bool>(popup_id)).unwrap_or(false);
 
-        let btn_resp = show_metadata_button(ui, popup_open);
+        // `show_metadata_button` only reserves the caret's rect and does not paint
+        // it yet: the caret is painted once, at the very bottom of this block,
+        // from `popup_open`'s FINAL value for the frame (after the toggle below
+        // and after the close-decision that may also flip it via Escape/outside
+        // click). Painting it here — before those — would show last frame's
+        // direction for one frame on the exact click that opens/closes the popup.
+        let (btn_resp, caret_rect) = show_metadata_button(ui);
         if btn_resp.clicked() {
             popup_open = !popup_open;
         }
+
+        let mut combo_selection_this_frame = false;
 
         if popup_open {
             let mut close_popup = false;
@@ -168,6 +176,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                         {
                                             state.filter.camera = None;
                                             changed = true;
+                                            combo_selection_this_frame = true;
                                         }
                                         for c in &state.camera_options {
                                             let sel =
@@ -175,6 +184,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                             if ui.selectable_label(sel, c.as_str()).clicked() {
                                                 state.filter.camera = Some(c.clone());
                                                 changed = true;
+                                                combo_selection_this_frame = true;
                                             }
                                         }
                                     });
@@ -196,6 +206,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                         {
                                             state.filter.lens = None;
                                             changed = true;
+                                            combo_selection_this_frame = true;
                                         }
                                         for l in &state.lens_options {
                                             let sel =
@@ -203,6 +214,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                             if ui.selectable_label(sel, l.as_str()).clicked() {
                                                 state.filter.lens = Some(l.clone());
                                                 changed = true;
+                                                combo_selection_this_frame = true;
                                             }
                                         }
                                     });
@@ -227,6 +239,7 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                                             if ui.selectable_label(sel, label).clicked() {
                                                 state.filter.min_rating = r;
                                                 changed = true;
+                                                combo_selection_this_frame = true;
                                             }
                                         }
                                     });
@@ -360,8 +373,22 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             // ComboBox dropdown inside is open. A combo's dropdown area can extend
             // past the popup's own Area rect, so a raw "click outside the popup"
             // check would treat picking a combo option as an outside click and
-            // slam the whole Metadata popup shut — `any_popup_open` is true while
-            // that dropdown is showing, so we hold off closing until it settles.
+            // slam the whole Metadata popup shut.
+            //
+            // `any_inner_popup_open` is read AFTER the Area above (and the combos
+            // inside it) already ran, so it is NOT a reliable "a combo dropdown
+            // was open" signal for the exact frame a selection is made: egui's
+            // `ComboBox` uses `PopupCloseBehavior::CloseOnClick` internally, which
+            // closes its own dropdown (clearing the shared `Memory` popup slot)
+            // synchronously the moment any of its options is clicked — before we
+            // get to read `any_popup_open()` here. So on that frame this would
+            // read `false` even though the click was really "pick a combo option",
+            // and `clicked_outside` would read `true` (the option can render
+            // outside the popup's own Area rect), closing the whole popup right
+            // after the pick. `combo_selection_this_frame` is set directly at each
+            // `selectable_label` click site above and short-circuits the close
+            // for exactly that frame, independent of the (here, unreliable)
+            // `any_inner_popup_open` snapshot.
             let clicked_outside =
                 btn_resp.clicked_elsewhere() && area_resp.response.clicked_elsewhere();
             let any_inner_popup_open = ui.memory(|m| m.any_popup_open());
@@ -372,11 +399,25 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                     clicked_outside,
                     any_inner_popup_open,
                     escape_pressed,
+                    combo_selection_this_frame,
                 )
             {
                 popup_open = false;
             }
         }
+
+        // Paint the caret from `popup_open`'s value at the END of the frame's
+        // decision-making (after the toggle click above AND the close-decision
+        // just above, which can also flip it via Escape/outside-click) so it
+        // never shows a stale direction for a frame — see the comment on
+        // `show_metadata_button`.
+        icons::caret(
+            ui.painter(),
+            caret_rect.center(),
+            CARET_HW - 1.0_f32,
+            theme::TEXT_DIM,
+            !popup_open,
+        );
 
         ui.data_mut(|d| d.insert_temp(popup_id, popup_open));
 
@@ -405,41 +446,56 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
     changed
 }
 
-/// Render the "Metadata" button with a small painted caret to the right that
-/// reflects the popup's actual open state (points up while open, down while closed).
-/// Returns the `Response` for the text button (used to anchor + toggle the popup).
-fn show_metadata_button(ui: &mut egui::Ui, is_open: bool) -> egui::Response {
-    // Lay out text button + caret in a tight inline group.
+/// Render the "Metadata" button and reserve the rect for its caret glyph.
+/// Returns the button `Response` (used to anchor + toggle the popup) and the
+/// caret's paint rect — the caller paints the caret itself, once, from
+/// `popup_open`'s value at the end of this frame's decision-making (see the
+/// call site in `show`). Painting it here, before that toggle/close logic
+/// runs, would show the previous frame's direction for one frame on the exact
+/// click that opens or closes the popup.
+fn show_metadata_button(ui: &mut egui::Ui) -> (egui::Response, egui::Rect) {
+    // Lay out text button + caret rect in a tight inline group.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0_f32;
         let btn = ui.button("Metadata");
-        // Small caret to the right of the button text.
+        // Small caret to the right of the button text (painted by the caller).
         let caret_size = egui::vec2(12.0_f32, 12.0_f32);
         let (rect, _) = ui.allocate_exact_size(caret_size, egui::Sense::hover());
-        icons::caret(
-            ui.painter(),
-            rect.center(),
-            CARET_HW - 1.0_f32,
-            theme::TEXT_DIM,
-            !is_open,
-        );
-        btn
+        (btn, rect)
     })
     .inner
 }
 
 /// Pure close-decision for the Metadata popup, factored out so it's testable
-/// without an `egui::Context`. `any_inner_popup_open` must reflect
-/// `ui.memory(|m| m.any_popup_open())` — a `ComboBox` nested inside the popup
-/// drives that same egui-global flag while its own dropdown is open, and a click
-/// that lands in that dropdown must NOT be treated as "clicked outside the
-/// popup" (that was the root cause of the popup closing on every combo click).
+/// without an `egui::Context`.
+///
+/// - `any_inner_popup_open` should reflect `ui.memory(|m| m.any_popup_open())`
+///   sampled after this frame's ComboBoxes ran. It's kept as an input (rather
+///   than dropped) because it still guards the case where a dropdown is open
+///   but nothing was clicked this frame. It is NOT sufficient on its own for a
+///   combo *selection* click: egui's `ComboBox` uses
+///   `PopupCloseBehavior::CloseOnClick`, which closes the combo's own dropdown
+///   (clearing the shared `Memory` popup slot) synchronously as part of
+///   rendering it, before this flag is sampled — so on the very frame a
+///   selection is made, this reads `false` even though the click was a combo
+///   pick, not a click outside the popup.
+/// - `combo_selection_this_frame` covers exactly that frame: it's set directly
+///   at each `selectable_label` click site inside the popup's ComboBoxes and
+///   unconditionally keeps the popup open, since a selection can render past
+///   the popup's own Area rect and would otherwise look like an outside click.
 fn should_close_metadata_popup(
     clicked_outside: bool,
     any_inner_popup_open: bool,
     escape_pressed: bool,
+    combo_selection_this_frame: bool,
 ) -> bool {
-    escape_pressed || (clicked_outside && !any_inner_popup_open)
+    if escape_pressed {
+        return true;
+    }
+    if combo_selection_this_frame {
+        return false;
+    }
+    clicked_outside && !any_inner_popup_open
 }
 
 #[cfg(test)]
@@ -476,29 +532,41 @@ mod tests {
 
     #[test]
     fn should_close_metadata_popup_escape_always_closes() {
-        assert!(should_close_metadata_popup(false, false, true));
-        assert!(should_close_metadata_popup(false, true, true));
-        assert!(should_close_metadata_popup(true, true, true));
+        assert!(should_close_metadata_popup(false, false, true, false));
+        assert!(should_close_metadata_popup(false, true, true, false));
+        assert!(should_close_metadata_popup(true, true, true, false));
+        // Escape wins even in the (contrived) case a selection flag is also set.
+        assert!(should_close_metadata_popup(false, false, true, true));
     }
 
     #[test]
     fn should_close_metadata_popup_outside_click_closes_when_no_inner_popup_open() {
-        assert!(should_close_metadata_popup(true, false, false));
+        assert!(should_close_metadata_popup(true, false, false, false));
     }
 
     #[test]
     fn should_close_metadata_popup_stays_open_while_combo_dropdown_is_open() {
+        // A dropdown is open but nothing was clicked yet this frame: don't close.
+        assert!(!should_close_metadata_popup(true, true, false, false));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_stays_open_on_combo_selection_even_if_it_reads_as_outside_click()
+    {
         // This is the exact interaction that used to close the popup before the
-        // fix: clicking a ComboBox option lands outside the popup's own Area
-        // rect, but the combo's dropdown is still open (`any_inner_popup_open`),
-        // so we must not close.
-        assert!(!should_close_metadata_popup(true, true, false));
+        // fix: picking a ComboBox option renders past the popup's own Area rect,
+        // so the click reads as "outside the popup" (`clicked_outside`), AND by
+        // the time we sample it, `any_inner_popup_open` has already gone false
+        // (the combo closed its own dropdown as part of handling that same
+        // click, before we get to check). Only `combo_selection_this_frame`
+        // — set directly at the selection site — can save the popup here.
+        assert!(!should_close_metadata_popup(true, false, false, true));
     }
 
     #[test]
     fn should_close_metadata_popup_stays_open_with_no_signal() {
-        assert!(!should_close_metadata_popup(false, false, false));
-        assert!(!should_close_metadata_popup(false, true, false));
+        assert!(!should_close_metadata_popup(false, false, false, false));
+        assert!(!should_close_metadata_popup(false, true, false, false));
     }
 
     #[test]

@@ -16,6 +16,7 @@ mod op;
 mod pipeline;
 mod rcd_gpu;
 mod serialize;
+mod sharpen_node;
 mod tile_edit;
 mod uniforms;
 
@@ -68,8 +69,11 @@ pub use uniforms::{
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Covers `color-matrix`/`sharpen`/
+/// alongside the display-pipeline pre-warm. Covers `color-matrix`/
 /// `geometry`/`vignette` (the surviving standalone point/geometry passes),
+/// `sharpen-box-h`/`-box-v`/`-apply` (the Phase 4 separable `SharpenNode`
+/// three-pass replacement for the old fused `sharpen.wgsl`, which stays
+/// in-tree as reference math but is no longer compiled here),
 /// `local-adjust` (the fused Light+Color engine — one shader now covers what
 /// used to be six standalone passes: exposure/white-balance/contrast/
 /// tone-curve/hsl/color-grade, retired as graph nodes by the Phase 3 fused
@@ -112,7 +116,13 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "dehaze-recovery",
             include_str!("shaders/dehaze_recovery.wgsl"),
         ),
-        ("sharpen", include_str!("shaders/sharpen.wgsl")),
+        // `sharpen.wgsl` (the retired fused 2D pass) stays in-tree as
+        // reference math (see `sharpen_node.rs`'s doc) but is no longer
+        // compiled here — `SharpenNode` (both pipelines) now dispatches the
+        // three passes below instead.
+        ("sharpen-box-h", include_str!("shaders/sharpen_box_h.wgsl")),
+        ("sharpen-box-v", include_str!("shaders/sharpen_box_v.wgsl")),
+        ("sharpen-apply", include_str!("shaders/sharpen_apply.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
         ("local-adjust", include_str!("shaders/local_adjust.wgsl")),

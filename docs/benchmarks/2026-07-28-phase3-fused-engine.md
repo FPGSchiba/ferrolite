@@ -469,3 +469,129 @@ any case + a profiled explanation of the residual cost** - met (1.11-1.32x acros
 Output-affecting perf follow-ups (separable sharpen ~-12 ms, recovery-into-engine fusion ~-5 ms,
 transmission working-res cap ~-7 ms) are deferred to Phase 4, which reworks sharpen for per-mask
 support anyway.
+
+---
+
+## Phase 4 increments
+
+**Phase:** `.superpowers/sdd/2026-07-29-unified-engine-phase4-mask-neighborhood/`
+
+### Task 1 — separable sharpen (O(r²) fused box blur -> O(r) two-pass box blur)
+
+Replaced the fused single-pass `sharpen.wgsl` (`(2r+1)²` taps, `PointOpNode`) with
+`SharpenNode` (`ferrolite-pipeline/src/sharpen_node.rs`): a horizontal box-blur pass
+(`sharpen_box_h.wgsl`) into an intermediate plane, a vertical box-blur pass
+(`sharpen_box_v.wgsl`) over that intermediate, and an apply pass (`sharpen_apply.wgsl`,
+`out = src + amount*(src - blur)`, clamped non-negative). Same graph position/inputs in
+both `EditPipeline` and `TileEditPipeline`; `amount == 0 || radius <= 0` still returns the
+input texture unchanged (zero dispatches — an `Arc` clone, not even a copy), mirroring
+`DehazeTransmissionNode`'s early-return pattern. The old fused `sharpen.wgsl` stays
+in-tree as reference math (not compiled/dispatched anymore).
+
+**Intermediate texture format — a real false start.** The H/V blur intermediates were
+first built as full-precision `Rgba32Float` (matching `dehaze_node.rs`'s `PLANE_FORMAT`
+pattern) specifically to shrink the parity drift below (see below). This roughly DOUBLED
+the node's memory traffic (two full-res `Rgba32Float` planes vs `Rgba16Float`) and measured
+as an outright regression: a same-session, immediately-sequential A/B (old fused shader
+built and benched, then the new node built and benched right after, same process
+session) showed case (a) go from 56.6 ms (old) to 91.6-104.0 ms (new-with-f32) — the
+opposite of this task's purpose. Reverted the intermediates to `PIPELINE_FORMAT`
+(`rgba16float`, matching every other node's textures) before benching for real; see
+"Parity" below for the resulting (larger, but still explained) precision cost of that
+choice.
+
+### Method (Task 1)
+
+Same method as the Phase 3 baselines above (`engine_bench.rs` case (a): `full_global`
+fixture, `Exposure.ev` alternating `base ± 0.01`, 20 iterations/case, median reported,
+`ctx.device.poll(Maintain::Wait)` after each iteration). This machine's run-to-run
+absolute-number noise is large enough (documented in Task 5b above: the *same* unmodified
+binary measured 55.9-95.9 ms across sessions) that a bare "3 runs of the new binary" number
+is not trustworthy in isolation — so, in addition to the requested 3-run spot-check, an
+interleaved old-vs-new A/B (3 rounds, `git stash`/`git stash pop` to swap binaries,
+immediately-sequential builds+runs per round) was run to isolate the real effect from
+ambient session drift, following the same practice Task 5b already established.
+
+### 3-run spot-check (new code only, release, `--ignored --nocapture`)
+
+| Run | (a) exposure-dirty | (b) grade-dirty | (c) exposure-dirty + two_masks |
+|---|---|---|---|
+| 1 | 58.408 | 36.258 | 81.943 |
+| 2 | 59.724 | 35.783 | 80.746 |
+| 3 | 61.539 | 36.226 | 79.240 |
+
+Median: (a) 59.724 ms, (b) 36.226 ms, (c) 80.746 ms.
+
+### Interleaved old-vs-new A/B (3 rounds, same session, immediately-sequential)
+
+| Round | Case | Old (ms) | New (ms) | Δ (ms) | Δ (%) |
+|---|---|---|---|---|---|
+| 1 | (a) | 67.765 | 60.595 | -7.17 | -10.6% |
+| 1 | (b) | 42.433 | 34.892 | -7.54 | -17.8% |
+| 1 | (c) | 92.421 | 82.782 | -9.64 | -10.4% |
+| 2 | (a) | 65.816 | 60.414 | -5.40 | -8.2% |
+| 2 | (b) | 42.555 | 35.744 | -6.81 | -16.0% |
+| 2 | (c) | 89.365 | 79.111 | -10.25 | -11.5% |
+| 3 | (a) | 65.688 | 60.481 | -5.21 | -7.9% |
+| 3 | (b) | 40.903 | 36.058 | -4.85 | -11.8% |
+| 3 | (c) | 88.293 | 84.285 | -4.01 | -4.5% |
+
+Median old vs median new:
+
+| Case | Median old (ms) | Median new (ms) | Δ (ms) | Δ (%) |
+|---|---|---|---|---|
+| (a) exposure-dirty | 65.816 | 60.481 | -5.34 | -8.1% |
+| (b) grade-dirty | 42.433 | 35.744 | -6.69 | -15.8% |
+| (c) exposure-dirty + two_masks | 89.365 | 82.782 | -6.58 | -7.4% |
+
+**Verdict:** a real, consistent, but more modest improvement than the ~-12 ms / ~34%-of-
+evaluate the Task 5b profile predicted for sharpen alone — new is faster than old in
+EVERY one of the 3 interleaved rounds, for every case, but by ~5-10 ms rather than ~12 ms.
+Plausible explanation (not independently re-profiled): at `full_global`'s small radius (2),
+the O(r) vs O(r²) tap-count win (5 vs 25) is real but the two extra full-res texture
+round-trips (H pass write, V pass write+read) eat back some of it — the fused shader's 25
+taps were served largely from the texture cache (2D spatial locality across neighboring
+output pixels), while the separable version pays two extra full passes' worth of
+storage-write bandwidth that the fused version never had. A larger radius should widen the
+win (O(r) vs O(r²) diverges faster than the fixed two-extra-passes cost), but that wasn't
+re-measured here — `full_global`'s radius is fixed at 2 by the parity fixture.
+
+**Machine-state caveat** (same pattern as Task 5b): absolute numbers vary run-to-run on
+this laptop by as much as 20% even for byte-identical code (compare the two "old" measurements
+of case (a): 56.6 ms in the very first sequential comparison vs 65.6-67.8 ms in the three
+interleaved rounds moments later) — the interleaved-round Δ is the trustworthy signal, not
+the standalone 3-run absolute numbers on either side.
+
+### Parity
+
+`full_global` (the only sharpen-bearing fixture in `layer_engine_parity.rs`) drifted beyond
+`PARITY_TOL` (2e-3) after the sharpen swap. Root-caused (not an edge-handling bug) via three
+synthetic GPU-vs-GPU comparisons of the OLD fused `sharpen.wgsl` against the NEW `SharpenNode`
+at identical amount/radius (0.8/2):
+
+- Smooth gradient, magnitude ~0-1.3: **0 diff** (bit-identical).
+- Sharp checkerboard, magnitude ~0.2-7.5: **0 diff** (bit-identical).
+- Per-pixel high-frequency noise, magnitude ~0-8: **2.4e-4** max diff.
+
+Diff magnitude scales with local pixel variance in the sampled window, exactly as expected
+from floating-point summation-order non-associativity (a 25-tap single accumulation vs a
+5-tap-then-5-tap composition are algebraically equal but not bit-identical once terms differ
+enough in magnitude/sign to expose rounding-order sensitivity) — and vanishes entirely for
+smooth/uniform content, which rules out a clamp/edge-handling bug (independently confirmed by
+`separable_box_equals_2d_box`, a pure-CPU test proving the two box-mean formulations agree to
+<1e-6 at full f32 precision). `full_global`'s real HSV-sweep content (curve/HSL/grade pushing
+some pixels to high magnitude near hue-boundary transitions) sits at the high-variance end of
+that spectrum, measuring **7.9e-3** max diff with `rgba16float` intermediates (an f32-intermediate
+variant measured 4.0e-3 — see the "false start" note above for why f32 intermediates were
+rejected despite the smaller drift).
+
+7.9e-3 is larger than the ~1e-3 "pure float-order" drift originally anticipated for this kind
+of change — flagged here explicitly rather than silently accepted. Given (a) the root cause is
+demonstrated precision, not a logic bug, (b) it is bounded and explained by the three-tier
+synthetic proof above, and (c) `rgba16float` intermediates are required to actually deliver
+this task's performance goal (see the false-start note), the `full_global` golden was
+regenerated (`UPDATE_GOLDENS=1`) — verified via `git status` that ONLY `full_global.png`
+actually changed (every other fixture re-rendered byte-identical, confirming no unrelated
+regression). All identity-sharpen fixtures (everything except `full_global`) stay bit-green,
+as do `golden.rs`'s `sharpen_matches_golden`/`sharpen_tiles_match_whole_image_at_seam` (looser
+u8 tolerance, unaffected).

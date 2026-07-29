@@ -64,6 +64,7 @@ use crate::local::{AdjustmentSet, LocalAdjustments};
 use crate::local_node::{EngineStage, LocalAdjustmentsNode};
 use crate::nodes::{GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode};
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
+use crate::sharpen_node::SharpenNode;
 use crate::uniforms::{
     color_matrix_uniform, geometry_uniform, lens_halo_px, sharpen_halo, sharpen_uniform,
     ColorMatrixUniform, LensUniform, SharpenUniform, VignetteUniform,
@@ -251,12 +252,7 @@ impl TileEditPipeline {
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_id = graph.add_node(
-            Box::new(PointOpNode::new(
-                ctx.clone(),
-                include_str!("shaders/sharpen.wgsl"),
-                "sharpen",
-                sharpen.clone(),
-            )),
+            Box::new(SharpenNode::new(ctx.clone(), sharpen.clone())),
             vec![local_adjust_id],
         );
 

@@ -18,6 +18,7 @@ use crate::local::{AdjustmentSet, LocalAdjustments};
 use crate::local_node::{EngineStage, LocalAdjustmentsNode};
 use crate::nodes::{GeometryNode, PointOpNode, SourceNode, TileFrame, VignetteNode};
 use crate::op::OpStack;
+use crate::sharpen_node::SharpenNode;
 use crate::uniforms::{
     color_matrix_uniform, geometry_uniform, sharpen_uniform, ColorMatrixUniform, GeometryUniform,
     LensUniform, SharpenUniform, VignetteUniform,
@@ -201,12 +202,7 @@ impl EditPipeline {
             graph.add_node(Box::new(local_node.clone()), vec![dehaze_recovery_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
-        let sharpen_node = PointOpNode::new(
-            ctx.clone(),
-            include_str!("shaders/sharpen.wgsl"),
-            "sharpen",
-            sharpen.clone(),
-        );
+        let sharpen_node = SharpenNode::new(ctx.clone(), sharpen.clone());
         let sharpen_id = graph.add_node(Box::new(sharpen_node), vec![local_adjust_id]);
 
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);

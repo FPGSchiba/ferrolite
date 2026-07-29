@@ -107,6 +107,10 @@ mod tests {
     #[test]
     fn scope_resolution_follows_tool_and_selection() {
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
         assert_eq!(current(&state), EditScope::Global, "Adjust tool ⇒ Global");
         state.tool_state.active = crate::develop::tool::ToolId::Mask;
         assert_eq!(

@@ -669,6 +669,10 @@ mod tests {
     fn light_tab_edits_the_selected_mask_when_mask_scope_active() {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
         // No viewer ⇒ tab renders nothing and returns None (unchanged behavior).
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -703,6 +707,10 @@ mod tests {
     fn test_light_tab_collapsible_sections() {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
         state.settings.basic_sliders_open = false;
         state.settings.tone_curve_open = false;
 
@@ -721,6 +729,10 @@ mod tests {
     fn test_color_tab_collapsible_sections() {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
         state.settings.color_hsl_open = false;
         state.settings.color_mix_open = false;
         state.settings.color_grading_open = false;
@@ -743,6 +755,10 @@ mod tests {
         // mirroring `light_tab_edits_the_selected_mask_when_mask_scope_active`.
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 assert!(ColorTab.show(ui, &mut state).is_none());
@@ -754,6 +770,10 @@ mod tests {
     fn test_effects_tab_collapsible_sections() {
         let ctx = egui::Context::default();
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
         state.settings.sharpening_open = false;
         state.settings.noise_reduction_open = false;
         state.settings.dehaze_open = false;
@@ -775,6 +795,10 @@ mod tests {
     #[test]
     fn test_all_eight_section_headers_bound_and_persist() {
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
 
         // Defaults should all be open (true)
         assert!(state.settings.basic_sliders_open);
@@ -822,6 +846,10 @@ mod tests {
     #[test]
     fn mask_scope_uses_its_own_section_flags() {
         let mut state = AppState::new().unwrap();
+        // Hermetic: AppState::new loads the developer's REAL settings file; these
+        // tests assert against defaults, so reset (the author collapsing a section
+        // in the running app must never fail the suite).
+        state.settings = crate::settings::Settings::default();
         state.settings.basic_sliders_open = true;
         state.settings.mask_basic_sliders_open = false;
 

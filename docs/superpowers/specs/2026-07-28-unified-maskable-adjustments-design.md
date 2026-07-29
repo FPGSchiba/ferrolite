@@ -184,6 +184,12 @@ without rewriting the history it documents:
   "Phase 4 increments" section; fixture coverage: `mask_dehaze`/`mask_sharpen` in
   `ferrolite-pipeline/tests/common/layer_engine.rs`.
 
+**Cascade semantics (author-accepted 2026-07-29):** overlapping dehaze applications (global +
+per-mask, or multiple masks) compound multiplicatively — each layer's recovery runs on the
+already-recovered content. Verified visually on a two-mask + global stress case: extreme but
+predictable ("one needs to know where and how to apply dehazing; if it overlaps it is applied
+two times or more"). Accepted as designed; no clamping added.
+
 ## 5. History, undo & persistence plumbing
 
 * `History<OpStack>` → `History<EditDoc>`; same per-gesture sealing (`EditOutcome { doc, commit }`),

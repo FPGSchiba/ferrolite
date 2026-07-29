@@ -10,9 +10,31 @@ const FILL_ALPHA: u8 = 160;
 const MARGIN: f32 = 12.0;
 /// Bright near-white so text stays legible on the black box regardless of theme.
 const TEXT: egui::Color32 = egui::Color32::from_gray(235);
-/// Approximate height of the info overlay HUD box produced by `draw()`.
-/// Used to position the toggle pill above the overlay when visible.
-const OVERLAY_APPROX_H: f32 = 108.0;
+/// Fallback height for the info overlay HUD box, used by `draw_toggle_button`
+/// only before `draw()` has ever painted the overlay this session (e.g. the
+/// very first frame, or the overlay has never been shown yet) — see
+/// `resolve_overlay_height`. Once `draw()` has run at least once, the pill is
+/// positioned from the overlay's REAL last-frame height instead, so this
+/// number does not need to track the overlay's actual content height.
+const OVERLAY_HEIGHT_FALLBACK: f32 = 108.0;
+
+/// `egui` temp-data id used to hand the overlay's real painted height from
+/// `draw()` to `draw_toggle_button()`. The two live in the same `Ui`/frame,
+/// but `draw_toggle_button` is called BEFORE `draw()` each frame (see
+/// `develop::canvas::overlays::draw_info`), so it can only ever see the
+/// height recorded during the *previous* frame. That one-frame lag is fine
+/// for a HUD whose height changes only when the user toggles it or switches
+/// photos, not every frame.
+fn overlay_height_temp_id() -> egui::Id {
+    egui::Id::new("develop_info_overlay_actual_height")
+}
+
+/// Resolve the overlay's real last-frame height, falling back to
+/// `OVERLAY_HEIGHT_FALLBACK` if `draw()` has never recorded one yet.
+fn resolve_overlay_height(ctx: &egui::Context) -> f32 {
+    ctx.data(|d| d.get_temp::<f32>(overlay_height_temp_id()))
+        .unwrap_or(OVERLAY_HEIGHT_FALLBACK)
+}
 
 pub fn draw(ui: &egui::Ui, facts: &crate::develop::info::ImageFacts) {
     let canvas_rect = ui.min_rect();
@@ -21,7 +43,7 @@ pub fn draw(ui: &egui::Ui, facts: &crate::develop::info::ImageFacts) {
     // added without needing to know its height in advance.
     let pos = egui::pos2(canvas_rect.left() + MARGIN, canvas_rect.bottom() - MARGIN);
 
-    egui::Area::new(egui::Id::new("develop_info_overlay"))
+    let area_response = egui::Area::new(egui::Id::new("develop_info_overlay"))
         .order(egui::Order::Middle)
         .fixed_pos(pos)
         .pivot(egui::Align2::LEFT_BOTTOM)
@@ -45,6 +67,13 @@ pub fn draw(ui: &egui::Ui, facts: &crate::develop::info::ImageFacts) {
                     }
                 });
         });
+
+    // Record the REAL painted height (frame + all rows), so the toggle pill
+    // can dock above the actual box instead of a hardcoded estimate — see
+    // `overlay_height_temp_id`.
+    let real_height = area_response.response.rect.height();
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(overlay_height_temp_id(), real_height));
 }
 
 /// Y-offset (up from the canvas bottom edge) of the info pill's anchor.
@@ -59,15 +88,21 @@ pub(crate) fn pill_bottom_offset(overlay_visible: bool, overlay_height: f32) -> 
 
 /// Draw the floating `ℹ Info` pill button on the canvas. When the overlay is
 /// hidden, anchors at the bottom-left corner margin. When visible, positions
-/// above the EXIF overlay. Highlights with accent tint when `show_info_panel`
-/// is true, and clicking toggles `show_info_panel`.
+/// above the EXIF overlay's REAL last-frame height (see `resolve_overlay_height`).
+/// Highlights with accent tint when `show_info_panel` is true, and clicking
+/// toggles `show_info_panel`.
 pub fn draw_toggle_button(ui: &egui::Ui, show_info_panel: &mut bool) {
     let canvas_rect = ui.min_rect();
-    let offset = pill_bottom_offset(*show_info_panel, OVERLAY_APPROX_H);
+    let overlay_height = resolve_overlay_height(ui.ctx());
+    let offset = pill_bottom_offset(*show_info_panel, overlay_height);
     let pos = egui::pos2(canvas_rect.left() + MARGIN, canvas_rect.bottom() - offset);
 
     egui::Area::new(egui::Id::new("develop_info_pill_button"))
-        .order(egui::Order::Middle)
+        // `Foreground` (strictly above the overlay's `Middle`) so the pill is
+        // never painted underneath the overlay even during the one-frame lag
+        // in `resolve_overlay_height`, or mid-transition when the overlay's
+        // height is changing (e.g. facts gaining/losing a row).
+        .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .pivot(egui::Align2::LEFT_BOTTOM)
         .show(ui.ctx(), |ui| {
@@ -106,5 +141,29 @@ mod tests {
     fn pill_docks_to_corner_when_overlay_hidden() {
         assert_eq!(pill_bottom_offset(false, 120.0), MARGIN);
         assert!(pill_bottom_offset(true, 120.0) > 120.0);
+    }
+
+    #[test]
+    fn resolve_overlay_height_falls_back_before_any_frame_painted() {
+        // No call to `draw()` has ever run against this context, so no real
+        // height has been recorded — must fall back to the documented default
+        // rather than e.g. panicking or returning 0.0 (which would dock the
+        // pill at the very bottom, underneath the overlay it hasn't drawn yet).
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            assert_eq!(resolve_overlay_height(ctx), OVERLAY_HEIGHT_FALLBACK);
+        });
+    }
+
+    #[test]
+    fn resolve_overlay_height_uses_real_height_once_recorded() {
+        // Once `draw()` has recorded a real painted height (as it does at the
+        // end of every frame it runs in), `draw_toggle_button` must use that
+        // instead of the fallback estimate.
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.data_mut(|d| d.insert_temp(overlay_height_temp_id(), 150.0_f32));
+            assert_eq!(resolve_overlay_height(ctx), 150.0);
+        });
     }
 }

@@ -258,6 +258,34 @@ impl Default for RecoveryGeometry {
     }
 }
 
+/// Every bind group one full transmission evaluate dispatches, prebuilt ONCE
+/// and reused until the input texture identity, the output texture, or the
+/// working dims change (profiled: rebuilding all ~17 bind groups + ~16 texture
+/// views per evaluate was the pipeline's single largest CPU-encode cost on an
+/// exposure drag with dehaze active). Everything referenced is persistent: the
+/// `Intermediates` planes, the two uniform buffers (whose CONTENTS are still
+/// written fresh via `queue.write_buffer` each evaluate — cached binds don't
+/// pin stale params), the sampler, and the cached `out` texture's mip views.
+struct CachedBinds {
+    /// `Arc::as_ptr` identity of the source texture the `dark` bind samples.
+    src_ptr: usize,
+    /// `Arc::as_ptr` identity of the `out` texture the q/mip binds write.
+    out_ptr: usize,
+    /// Working dims the `Intermediates` these binds reference were built for.
+    dims: (u32, u32),
+    dark: wgpu::BindGroup,
+    min_h: wgpu::BindGroup,
+    min_v: wgpu::BindGroup,
+    products: wgpu::BindGroup,
+    /// `(h, v)` bind pair per guided-filter box run, in dispatch order:
+    /// `mean_g, mean_p, corr_g, corr_gp, mean_a, mean_b`.
+    boxes: [(wgpu::BindGroup, wgpu::BindGroup); 6],
+    guided_ab: wgpu::BindGroup,
+    guided_q: wgpu::BindGroup,
+    /// One bind per mip level 1..N (reads level-1, writes level).
+    mips: Vec<wgpu::BindGroup>,
+}
+
 /// All fifteen `R32Float` intermediate planes, keyed on `(w, h)` and
 /// reallocated together when the input dims change (mirrors
 /// `local_node.rs::CachedMasks`'s dims-keyed cache).
@@ -537,6 +565,9 @@ pub(crate) struct DehazeTransmissionNode {
 
     intermediates: RefCell<Option<Intermediates>>,
     out: RefCell<Option<PipelineImage>>,
+    // Prebuilt bind groups for one full evaluate (see `CachedBinds`), rebuilt
+    // only when the source/out texture identity or the working dims change.
+    binds: RefCell<Option<CachedBinds>>,
     // Test hook: counts full multi-pass evaluates (QS-Task 4 asserts an
     // amount-only change on the downstream recovery node does NOT bump this).
     rebuilds: Cell<u32>,
@@ -691,6 +722,7 @@ impl DehazeTransmissionNode {
             mip_pipeline,
             intermediates: RefCell::new(None),
             out: RefCell::new(None),
+            binds: RefCell::new(None),
             rebuilds: Cell::new(0),
         }
     }
@@ -788,48 +820,235 @@ impl DehazeTransmissionNode {
             })
     }
 
-    /// Run the box_h -> box_v pair (radius = guided radius, via `uniform_box`)
-    /// over `input`, writing the normalized box mean into `output`, using
-    /// `self`'s single reusable `box_scratch` plane as the H-pass landing spot.
-    #[allow(clippy::too_many_arguments)]
-    fn box_filter(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        label: &str,
-        input: &wgpu::TextureView,
-        scratch: &wgpu::TextureView,
-        output: &wgpu::TextureView,
-        w: u32,
-        h: u32,
-    ) {
-        let h_bind = self.plane_bind(
-            input,
-            scratch,
-            &self.uniform_box,
-            &format!("{label}-h-bind"),
+    /// Build (or reuse) the full evaluate's bind-group set (see `CachedBinds`).
+    /// Rebuilds only when the source texture identity, the `out` texture, or
+    /// the working dims changed — the steady state of a slider drag reuses the
+    /// whole set with zero view/bind-group creation.
+    fn ensure_binds(&self, src: &PipelineImage, out: &PipelineImage) {
+        let src_ptr = Arc::as_ptr(&src.texture) as usize;
+        let out_ptr = Arc::as_ptr(&out.texture) as usize;
+        let intermediates = self.intermediates.borrow();
+        let im = intermediates.as_ref().expect("intermediates allocated");
+        {
+            let cur = self.binds.borrow();
+            if matches!(&*cur, Some(b) if b.src_ptr == src_ptr
+                && b.out_ptr == out_ptr
+                && b.dims == im.dims)
+            {
+                return;
+            }
+        }
+
+        let src_view = view(&src.texture);
+        let dc0_view = view(&im.dc0);
+        let guide_view = view(&im.guide);
+        let dc_h_view = view(&im.dc_h);
+        let praw_view = view(&im.praw);
+        let gg_view = view(&im.gg);
+        let gp_view = view(&im.gp);
+        let box_scratch_view = view(&im.box_scratch);
+        let mean_g_view = view(&im.mean_g);
+        let mean_p_view = view(&im.mean_p);
+        let corr_g_view = view(&im.corr_g);
+        let corr_gp_view = view(&im.corr_gp);
+        let a_view = view(&im.a);
+        let b_view = view(&im.b);
+        let mean_a_view = view(&im.mean_a);
+        let mean_b_view = view(&im.mean_b);
+        // Level 0 only: `out` carries a mip chain, and a storage bind must
+        // target a single level. Levels 1..N get their own binds below.
+        let out_view = mip_view(&out.texture, 0);
+
+        let dark = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-dark-bind"),
+                layout: &self.dark_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dc0_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&guide_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.uniform_min.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+        let min_h = self.plane_bind(
+            &dc0_view,
+            &dc_h_view,
+            &self.uniform_min,
+            "dehaze-min-h-bind",
         );
-        dispatch(
-            enc,
-            &format!("{label}-h"),
-            &self.box_h_pipeline,
-            &h_bind,
-            w,
-            h,
+        let min_v = self.plane_bind(
+            &dc_h_view,
+            &praw_view,
+            &self.uniform_min,
+            "dehaze-min-v-bind",
         );
-        let v_bind = self.plane_bind(
-            scratch,
-            output,
-            &self.uniform_box,
-            &format!("{label}-v-bind"),
-        );
-        dispatch(
-            enc,
-            &format!("{label}-v"),
-            &self.box_v_pipeline,
-            &v_bind,
-            w,
-            h,
-        );
+        let products = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-products-bind"),
+                layout: &self.products_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&guide_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&praw_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&gg_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&gp_view),
+                    },
+                ],
+            });
+        // (input, output) per guided-filter box run, in dispatch order; each
+        // becomes an (input->scratch H, scratch->output V) bind pair.
+        let box_io: [(&wgpu::TextureView, &wgpu::TextureView, &str); 6] = [
+            (&guide_view, &mean_g_view, "dehaze-box-mean-g"),
+            (&praw_view, &mean_p_view, "dehaze-box-mean-p"),
+            (&gg_view, &corr_g_view, "dehaze-box-corr-g"),
+            (&gp_view, &corr_gp_view, "dehaze-box-corr-gp"),
+            (&a_view, &mean_a_view, "dehaze-box-mean-a"),
+            (&b_view, &mean_b_view, "dehaze-box-mean-b"),
+        ];
+        let boxes = box_io.map(|(input, output, label)| {
+            (
+                self.plane_bind(
+                    input,
+                    &box_scratch_view,
+                    &self.uniform_box,
+                    &format!("{label}-h-bind"),
+                ),
+                self.plane_bind(
+                    &box_scratch_view,
+                    output,
+                    &self.uniform_box,
+                    &format!("{label}-v-bind"),
+                ),
+            )
+        });
+        let guided_ab = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-guided-ab-bind"),
+                layout: &self.guided_ab_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&mean_g_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&mean_p_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&corr_g_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&corr_gp_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&a_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.uniform_box.as_entire_binding(),
+                    },
+                ],
+            });
+        let guided_q = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-guided-q-bind"),
+                layout: &self.guided_q_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&mean_a_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&mean_b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&guide_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&out_view),
+                    },
+                ],
+            });
+        let mips = (1..out.texture.mip_level_count())
+            .map(|level| {
+                let src_mip = mip_view(&out.texture, level - 1);
+                let dst_mip = mip_view(&out.texture, level);
+                self.ctx
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("dehaze-transmission-mip-bind"),
+                        layout: &self.mip_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&src_mip),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&dst_mip),
+                            },
+                        ],
+                    })
+            })
+            .collect();
+
+        *self.binds.borrow_mut() = Some(CachedBinds {
+            src_ptr,
+            out_ptr,
+            dims: im.dims,
+            dark,
+            min_h,
+            min_v,
+            products,
+            boxes,
+            guided_ab,
+            guided_q,
+            mips,
+        });
     }
 }
 
@@ -903,28 +1122,12 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             .queue
             .write_buffer(&self.uniform_box, 0, bytemuck::bytes_of(&box_uniform));
 
-        let intermediates = self.intermediates.borrow();
-        let im = intermediates.as_ref().expect("allocated above");
-
-        let src_view = view(&src.texture);
-        let dc0_view = view(&im.dc0);
-        let guide_view = view(&im.guide);
-        let dc_h_view = view(&im.dc_h);
-        let praw_view = view(&im.praw);
-        let gg_view = view(&im.gg);
-        let gp_view = view(&im.gp);
-        let box_scratch_view = view(&im.box_scratch);
-        let mean_g_view = view(&im.mean_g);
-        let mean_p_view = view(&im.mean_p);
-        let corr_g_view = view(&im.corr_g);
-        let corr_gp_view = view(&im.corr_gp);
-        let a_view = view(&im.a);
-        let b_view = view(&im.b);
-        let mean_a_view = view(&im.mean_a);
-        let mean_b_view = view(&im.mean_b);
-        // Level 0 only: `out` now carries a mip chain, and a storage bind must
-        // target a single level. Levels 1..N are filled by the mip loop below.
-        let out_view = mip_view(&out.texture, 0);
+        // Prebuilt bind groups (rebuilt only on source/out/dims change — see
+        // `CachedBinds`); the uniform CONTENTS above are refreshed every
+        // evaluate regardless, so cached binds never pin stale params.
+        self.ensure_binds(src, &out);
+        let binds = self.binds.borrow();
+        let b = binds.as_ref().expect("built above");
 
         let mut enc = self
             .ctx
@@ -934,245 +1137,101 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             });
 
         // 1. dark channel + guide.
-        let dark_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-dark-bind"),
-                layout: &self.dark_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&dc0_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&guide_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.uniform_min.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-dark-channel",
             &self.dark_pipeline,
-            &dark_bind,
+            &b.dark,
             ww,
             wh,
         );
 
         // 2. separable block-min (H then V, folding in the praw transform).
-        let min_h_bind = self.plane_bind(
-            &dc0_view,
-            &dc_h_view,
-            &self.uniform_min,
-            "dehaze-min-h-bind",
-        );
         dispatch(
             &mut enc,
             "dehaze-min-h",
             &self.min_h_pipeline,
-            &min_h_bind,
+            &b.min_h,
             ww,
             wh,
-        );
-        let min_v_bind = self.plane_bind(
-            &dc_h_view,
-            &praw_view,
-            &self.uniform_min,
-            "dehaze-min-v-bind",
         );
         dispatch(
             &mut enc,
             "dehaze-min-v",
             &self.min_v_pipeline,
-            &min_v_bind,
+            &b.min_v,
             ww,
             wh,
         );
 
         // 3. products gg = guide^2, gp = guide*praw.
-        let products_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-products-bind"),
-                layout: &self.products_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&guide_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&praw_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&gg_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&gp_view),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-products",
             &self.products_pipeline,
-            &products_bind,
+            &b.products,
             ww,
             wh,
         );
 
-        // 4. guided-filter box means/correlations (reusing box_h/box_v).
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-g",
-            &guide_view,
-            &box_scratch_view,
-            &mean_g_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-p",
-            &praw_view,
-            &box_scratch_view,
-            &mean_p_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-corr-g",
-            &gg_view,
-            &box_scratch_view,
-            &corr_g_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-corr-gp",
-            &gp_view,
-            &box_scratch_view,
-            &corr_gp_view,
-            ww,
-            wh,
-        );
+        // 4. guided-filter box means/correlations (mean_g, mean_p, corr_g,
+        // corr_gp — `boxes[..4]`), each an H pass into the shared scratch then
+        // a V pass into its output plane.
+        for (h_bind, v_bind) in &b.boxes[..4] {
+            dispatch(
+                &mut enc,
+                "dehaze-box-h",
+                &self.box_h_pipeline,
+                h_bind,
+                ww,
+                wh,
+            );
+            dispatch(
+                &mut enc,
+                "dehaze-box-v",
+                &self.box_v_pipeline,
+                v_bind,
+                ww,
+                wh,
+            );
+        }
 
         // 5. guided-filter linear coefficients a, b.
-        let guided_ab_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-guided-ab-bind"),
-                layout: &self.guided_ab_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&mean_g_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mean_p_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&corr_g_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&corr_gp_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&a_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&b_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: self.uniform_box.as_entire_binding(),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-guided-ab",
             &self.guided_ab_pipeline,
-            &guided_ab_bind,
+            &b.guided_ab,
             ww,
             wh,
         );
 
-        // 6. box filter a, b -> mean_a, mean_b (reusing box_h/box_v again).
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-a",
-            &a_view,
-            &box_scratch_view,
-            &mean_a_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-b",
-            &b_view,
-            &box_scratch_view,
-            &mean_b_view,
-            ww,
-            wh,
-        );
+        // 6. box filter a, b -> mean_a, mean_b (`boxes[4..]`).
+        for (h_bind, v_bind) in &b.boxes[4..] {
+            dispatch(
+                &mut enc,
+                "dehaze-box-h",
+                &self.box_h_pipeline,
+                h_bind,
+                ww,
+                wh,
+            );
+            dispatch(
+                &mut enc,
+                "dehaze-box-v",
+                &self.box_v_pipeline,
+                v_bind,
+                ww,
+                wh,
+            );
+        }
 
         // 7. combine into the final refined transmission q.
-        let guided_q_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-guided-q-bind"),
-                layout: &self.guided_q_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&mean_a_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mean_b_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&guide_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&out_view),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-guided-q",
             &self.guided_q_pipeline,
-            &guided_q_bind,
+            &b.guided_q,
             ww,
             wh,
         );
@@ -1182,35 +1241,15 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         // barrier between the guided-q write of level 0 and the first read
         // here, and between each successive level, since they are distinct
         // subresources of the same texture within this one command buffer.
-        let mip_levels = out.texture.mip_level_count();
         let (mut lw, mut lh) = (ww, wh);
-        for level in 1..mip_levels {
+        for mip_bind in &b.mips {
             let dw = (lw / 2).max(1);
             let dh = (lh / 2).max(1);
-            let src_mip = mip_view(&out.texture, level - 1);
-            let dst_mip = mip_view(&out.texture, level);
-            let mip_bind = self
-                .ctx
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("dehaze-transmission-mip-bind"),
-                    layout: &self.mip_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&src_mip),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&dst_mip),
-                        },
-                    ],
-                });
             dispatch(
                 &mut enc,
                 "dehaze-transmission-mip",
                 &self.mip_pipeline,
-                &mip_bind,
+                mip_bind,
                 dw,
                 dh,
             );

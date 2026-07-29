@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use ferrolite_gpu::{GpuContext, Node};
 use ferrolite_mask::{MaskBuffer, MaskCompositor, RasterStore, TileTransform};
-use wgpu::util::DeviceExt;
 
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::local::{AdjustmentSet, LocalAdjustments};
@@ -106,6 +105,18 @@ pub(crate) struct LocalAdjustmentsNode {
     // time any previously-returned `current` has already been consumed
     // downstream in that same call.
     apply_out: RefCell<Option<[PipelineImage; 2]>>,
+    // Persistent per-dispatch (uniform, LUT) buffer pairs, reused across
+    // evaluates via `queue.write_buffer` instead of a fresh `create_buffer_init`
+    // pair per `apply` (profiled: the per-evaluate allocation churn was pure
+    // CPU-encode overhead). A POOL (not one pair) because a single `evaluate`
+    // calls `apply` once per pseudo-layer/mask layer, and each dispatch needs
+    // its own live contents: slot `i` serves the i-th `apply` of the current
+    // evaluate (`apply_buf_cursor`, reset at the top of `evaluate`), so the
+    // writes for a later dispatch can never clobber an earlier one — even if
+    // the per-apply submits are ever batched into one. Grows to the max layer
+    // count seen; entries are `LocalAdjustUniform`-sized + 3 KiB LUT each.
+    apply_bufs: RefCell<Vec<(wgpu::Buffer, wgpu::Buffer)>>,
+    apply_buf_cursor: std::cell::Cell<usize>,
     // tile-tier placement: None = whole-image (cached, identity); Some = tiled
     // (composite fresh at input dims with this placement so range components
     // sample the tile's own content and spatial components map to full-image uv).
@@ -217,6 +228,8 @@ impl LocalAdjustmentsNode {
             apply_bgl,
             apply_pipeline,
             apply_out: RefCell::new(None),
+            apply_bufs: RefCell::new(Vec::new()),
+            apply_buf_cursor: std::cell::Cell::new(0),
             tile: RefCell::new(None),
             cache: RefCell::new(None),
             rebuilds: std::cell::Cell::new(0),
@@ -340,25 +353,35 @@ impl LocalAdjustmentsNode {
         lut: &[[f32; 256]; 3],
     ) -> PipelineImage {
         let dst = self.ensure_out(input, input.width, input.height);
-        let ubuf = self
-            .ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("local-adjust-uniform"),
-                contents: bytemuck::bytes_of(&u),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-        // Fresh small storage buffer per dispatch, matching the uniform buffer's
-        // style — layer counts are small, so no caching is needed here (the
-        // mask-def cache above already handles the expensive part).
-        let lut_buf = self
-            .ctx
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("local-adjust-lut"),
-                contents: bytemuck::bytes_of(lut),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        // Reuse the pooled per-dispatch (uniform, LUT) pair for this apply's
+        // slot (see the `apply_bufs` field doc), writing fresh contents via the
+        // queue instead of allocating new buffers every dispatch.
+        let slot = self.apply_buf_cursor.get();
+        self.apply_buf_cursor.set(slot + 1);
+        {
+            let mut bufs = self.apply_bufs.borrow_mut();
+            while bufs.len() <= slot {
+                let ubuf = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("local-adjust-uniform"),
+                    size: std::mem::size_of::<LocalAdjustUniform>() as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let lut_buf = self.ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("local-adjust-lut"),
+                    size: std::mem::size_of::<[[f32; 256]; 3]>() as u64,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                bufs.push((ubuf, lut_buf));
+            }
+        }
+        let bufs = self.apply_bufs.borrow();
+        let (ubuf, lut_buf) = &bufs[slot];
+        self.ctx.queue.write_buffer(ubuf, 0, bytemuck::bytes_of(&u));
+        self.ctx
+            .queue
+            .write_buffer(lut_buf, 0, bytemuck::bytes_of(lut));
         let src_view = input
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -418,6 +441,9 @@ impl LocalAdjustmentsNode {
 impl Node<PipelineImage> for LocalAdjustmentsNode {
     fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
         self.evals.set(self.evals.get() + 1);
+        // Rewind the pooled per-dispatch buffer cursor: each `apply` of THIS
+        // evaluate takes the next slot (see the `apply_bufs` field doc).
+        self.apply_buf_cursor.set(0);
         let input = inputs[0];
         match self.stage {
             EngineStage::Light => self.evaluate_light(input),

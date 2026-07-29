@@ -226,17 +226,23 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                 })
                 .response;
 
+            // `ui.horizontal(...)`'s own response only ever senses `hover`
+            // (see `egui::Ui::allocate_new_ui_dyn`), so `drag_started()` can
+            // never fire on it and `dnd_set_drag_payload` below was a silent
+            // no-op — this was the root cause of collection drag not
+            // starting at all. Re-`interact` on the row's own id (not a new
+            // one) so this merges drag sense onto its already-registered,
+            // early widget slot rather than shadowing the row's children
+            // (see `egui::WidgetRects::insert` — updates in place, keeping
+            // the row "behind" its later-registered, click-only children in
+            // hit-test order). This mirrors how `library::grid` makes image
+            // cells draggable via `ui.interact(rect, id,
+            // Sense::click_and_drag())` before checking `drag_started()`.
+            let row_resp = ui.interact(row_resp.rect, row_resp.id, egui::Sense::drag());
             row_resp.dnd_set_drag_payload(DraggedCollection(c.id));
 
             if ui.ctx().is_being_dragged(row_resp.id) {
-                egui::show_tooltip_at_pointer(
-                    ui.ctx(),
-                    ui.layer_id(),
-                    row_resp.id.with("ghost"),
-                    |ui| {
-                        ui.label(format!("{} Moving {}", crate::icons::COLOR, c.name));
-                    },
-                );
+                drag::draw_collection_drag_chip(ui.ctx(), &c.name);
             }
 
             if ui.ctx().dragged_id().is_some() && ui.ctx().dragged_id() != Some(row_resp.id) {
@@ -483,12 +489,16 @@ fn render_collection_row(
         })
         .response;
 
+    // See the matching comment in `show`: the row's own response only senses
+    // `hover`, so this re-`interact` (same id) merges in drag sense onto the
+    // row's own already-registered widget slot instead of introducing a new,
+    // shadowing one — without this, `dnd_set_drag_payload` below can never
+    // observe `drag_started()` and no drag ever begins.
+    let row_resp = ui.interact(row_resp.rect, row_resp.id, egui::Sense::drag());
     row_resp.dnd_set_drag_payload(DraggedCollection(c.id));
 
     if ui.ctx().is_being_dragged(row_resp.id) {
-        egui::show_tooltip_at_pointer(ui.ctx(), ui.layer_id(), row_resp.id.with("ghost"), |ui| {
-            ui.label(format!("{} Moving {}", crate::icons::COLOR, c.name));
-        });
+        drag::draw_collection_drag_chip(ui.ctx(), &c.name);
     }
 
     if !is_child && ui.ctx().dragged_id().is_some() && ui.ctx().dragged_id() != Some(row_resp.id) {

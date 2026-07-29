@@ -98,6 +98,32 @@ pub fn draw_drag_chip(ctx: &egui::Context, count: usize) {
     painter.galley(anchor + pad, galley, crate::theme::TEXT_PRIMARY);
 }
 
+/// Paint a small chip that follows the cursor while a `DraggedCollection`
+/// drag is active, naming the collection being moved. Mirrors
+/// `draw_drag_chip`'s visual style and foreground-layer approach (same font,
+/// padding, and accent fill) so collection drags read as the same affordance
+/// family as image drags, just with a different id/text.
+pub fn draw_collection_drag_chip(ctx: &egui::Context, name: &str) {
+    let Some(pos) = ctx.pointer_interact_pos() else {
+        return;
+    };
+    let text = format!("Moving \"{name}\"");
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("library_collection_drag_chip"),
+    ));
+    let anchor = pos + egui::vec2(12.0, 8.0);
+    let galley = painter.layout_no_wrap(
+        text,
+        egui::FontId::proportional(11.0),
+        crate::theme::TEXT_PRIMARY,
+    );
+    let pad = egui::vec2(6.0, 3.0);
+    let rect = egui::Rect::from_min_size(anchor, galley.size() + pad * 2.0);
+    painter.rect_filled(rect, 3.0, crate::theme::ACCENT);
+    painter.galley(anchor + pad, galley, crate::theme::TEXT_PRIMARY);
+}
+
 /// Manual drop-target hit test for a left-panel row (egui 0.29.1 has no
 /// `dnd_drop_zone`). While a `DraggedImages` drag hovers `row_rect`, paints a
 /// highlight; on pointer release over the row, takes the payload and returns

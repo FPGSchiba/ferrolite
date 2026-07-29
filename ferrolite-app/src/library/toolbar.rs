@@ -93,256 +93,292 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             changed = true;
         }
 
-        // Metadata Filters popup panel (300px wide, #1d1d1d bg, 1px #353535 border)
+        // Metadata Filters popup panel (300px wide, #1d1d1d bg, 1px #353535 border).
+        //
+        // NOTE: this is a hand-rolled `egui::Area`-based popup, NOT
+        // `Memory::toggle_popup` + `popup_below_widget`. egui's `Memory` tracks the
+        // open popup in a single global slot (`Memory.popup: Option<Id>`), and the
+        // three `egui::ComboBox`es inside this popup use that exact same slot for
+        // their own dropdown. Clicking a combo overwrote the slot with the combo's
+        // id, so next frame `popup_below_widget`'s `is_popup_open` guard failed and
+        // the whole Metadata popup vanished. Tracking our own open/closed bool in
+        // temp data sidesteps the shared slot entirely, so the combos are free to
+        // use it for themselves without disturbing us.
         let popup_id = ui.make_persistent_id("metadata_filters_popup");
-        let btn_resp = show_metadata_button(ui, popup_id);
+        let mut popup_open = ui.data(|d| d.get_temp::<bool>(popup_id)).unwrap_or(false);
+
+        let btn_resp = show_metadata_button(ui, popup_open);
         if btn_resp.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
+            popup_open = !popup_open;
         }
 
-        let mut close_popup = false;
+        if popup_open {
+            let mut close_popup = false;
 
-        egui::popup::popup_below_widget(
-            ui,
-            popup_id,
-            &btn_resp,
-            egui::PopupCloseBehavior::CloseOnClickOutside,
-            |ui| {
-                ui.set_min_width(300.0_f32);
-                ui.set_max_width(300.0_f32);
+            let area_resp = egui::Area::new(popup_id.with("area"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(btn_resp.rect.left_bottom())
+                .default_width(300.0_f32)
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_width(300.0_f32);
+                    ui.set_max_width(300.0_f32);
 
-                egui::Frame::none()
-                    .fill(METADATA_POPUP_BG)
-                    .stroke(Stroke::new(1.0_f32, METADATA_POPUP_BORDER))
-                    .inner_margin(egui::Margin::same(12.0_f32))
-                    .show(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 8.0_f32;
+                    egui::Frame::popup(ui.style())
+                        .fill(METADATA_POPUP_BG)
+                        .stroke(Stroke::new(1.0_f32, METADATA_POPUP_BORDER))
+                        .inner_margin(egui::Margin::same(12.0_f32))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0_f32;
 
-                        // Header "METADATA FILTERS" + "Reset" link
-                        ui.horizontal(|ui| {
+                            // Header "METADATA FILTERS" + "Reset" link
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("METADATA FILTERS")
+                                        .font(FontId::proportional(11.0_f32))
+                                        .strong()
+                                        .color(theme::TEXT_PRIMARY),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.link("Reset").clicked() {
+                                            state.filter.reset_metadata_filters();
+                                            changed = true;
+                                        }
+                                    },
+                                );
+                            });
+
+                            ui.separator();
+
+                            // Combos: Camera, Lens, Rating
+                            ui.horizontal(|ui| {
+                                ui.label("Camera");
+                                let selected_cam =
+                                    state.filter.camera.as_deref().unwrap_or("All Cameras");
+                                egui::ComboBox::from_id_salt("camera_combo")
+                                    .selected_text(selected_cam)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                state.filter.camera.is_none(),
+                                                "All Cameras",
+                                            )
+                                            .clicked()
+                                        {
+                                            state.filter.camera = None;
+                                            changed = true;
+                                        }
+                                        for c in &state.camera_options {
+                                            let sel =
+                                                state.filter.camera.as_deref() == Some(c.as_str());
+                                            if ui.selectable_label(sel, c.as_str()).clicked() {
+                                                state.filter.camera = Some(c.clone());
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Lens");
+                                let selected_lens =
+                                    state.filter.lens.as_deref().unwrap_or("All Lenses");
+                                egui::ComboBox::from_id_salt("lens_combo")
+                                    .selected_text(selected_lens)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                state.filter.lens.is_none(),
+                                                "All Lenses",
+                                            )
+                                            .clicked()
+                                        {
+                                            state.filter.lens = None;
+                                            changed = true;
+                                        }
+                                        for l in &state.lens_options {
+                                            let sel =
+                                                state.filter.lens.as_deref() == Some(l.as_str());
+                                            if ui.selectable_label(sel, l.as_str()).clicked() {
+                                                state.filter.lens = Some(l.clone());
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Rating");
+                                let rating_text = match state.filter.min_rating {
+                                    0 => "Any Rating".to_string(),
+                                    r => format!("{r}+ Stars"),
+                                };
+                                egui::ComboBox::from_id_salt("rating_combo")
+                                    .selected_text(rating_text)
+                                    .show_ui(ui, |ui| {
+                                        for r in 0..=5 {
+                                            let label = if r == 0 {
+                                                "Any Rating".to_string()
+                                            } else {
+                                                format!("{r}+ Stars")
+                                            };
+                                            let sel = state.filter.min_rating == r;
+                                            if ui.selectable_label(sel, label).clicked() {
+                                                state.filter.min_rating = r;
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                            });
+
+                            ui.separator();
+
+                            // "FILE TYPE" segmented chips using SegmentedControl
                             ui.label(
-                                egui::RichText::new("METADATA FILTERS")
-                                    .font(FontId::proportional(11.0_f32))
-                                    .strong()
-                                    .color(theme::TEXT_PRIMARY),
+                                egui::RichText::new("FILE TYPE")
+                                    .font(FontId::proportional(10.5_f32))
+                                    .color(theme::TEXT_DIM),
                             );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.link("Reset").clicked() {
-                                        state.filter.reset_metadata_filters();
-                                        changed = true;
-                                    }
-                                },
-                            );
-                        });
-
-                        ui.separator();
-
-                        // Combos: Camera, Lens, Rating
-                        ui.horizontal(|ui| {
-                            ui.label("Camera");
-                            let selected_cam =
-                                state.filter.camera.as_deref().unwrap_or("All Cameras");
-                            egui::ComboBox::from_id_salt("camera_combo")
-                                .selected_text(selected_cam)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(
-                                            state.filter.camera.is_none(),
-                                            "All Cameras",
-                                        )
-                                        .clicked()
-                                    {
-                                        state.filter.camera = None;
-                                        changed = true;
-                                    }
-                                    for c in &state.camera_options {
-                                        let sel =
-                                            state.filter.camera.as_deref() == Some(c.as_str());
-                                        if ui.selectable_label(sel, c.as_str()).clicked() {
-                                            state.filter.camera = Some(c.clone());
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Lens");
-                            let selected_lens =
-                                state.filter.lens.as_deref().unwrap_or("All Lenses");
-                            egui::ComboBox::from_id_salt("lens_combo")
-                                .selected_text(selected_lens)
-                                .show_ui(ui, |ui| {
-                                    if ui
-                                        .selectable_label(state.filter.lens.is_none(), "All Lenses")
-                                        .clicked()
-                                    {
-                                        state.filter.lens = None;
-                                        changed = true;
-                                    }
-                                    for l in &state.lens_options {
-                                        let sel = state.filter.lens.as_deref() == Some(l.as_str());
-                                        if ui.selectable_label(sel, l.as_str()).clicked() {
-                                            state.filter.lens = Some(l.clone());
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                        });
-
-                        ui.horizontal(|ui| {
-                            ui.label("Rating");
-                            let rating_text = match state.filter.min_rating {
-                                0 => "Any Rating".to_string(),
-                                r => format!("{r}+ Stars"),
-                            };
-                            egui::ComboBox::from_id_salt("rating_combo")
-                                .selected_text(rating_text)
-                                .show_ui(ui, |ui| {
-                                    for r in 0..=5 {
-                                        let label = if r == 0 {
-                                            "Any Rating".to_string()
-                                        } else {
-                                            format!("{r}+ Stars")
-                                        };
-                                        let sel = state.filter.min_rating == r;
-                                        if ui.selectable_label(sel, label).clicked() {
-                                            state.filter.min_rating = r;
-                                            changed = true;
-                                        }
-                                    }
-                                });
-                        });
-
-                        ui.separator();
-
-                        // "FILE TYPE" segmented chips using SegmentedControl
-                        ui.label(
-                            egui::RichText::new("FILE TYPE")
-                                .font(FontId::proportional(10.5_f32))
-                                .color(theme::TEXT_DIM),
-                        );
-                        let chip_options = [
-                            (FileTypeChip::Raw, "RAW"),
-                            (FileTypeChip::Jpeg, "JPEG"),
-                            (FileTypeChip::Heic, "HEIC"),
-                            (FileTypeChip::Tiff, "TIFF"),
-                        ];
-                        let mut current_chip = state.filter.file_type.unwrap_or_default();
-                        if SegmentedControl::new(&mut current_chip, &chip_options)
-                            .ui(ui, "file_type_segmented")
-                            .changed()
-                        {
-                            state.filter.file_type = Some(current_chip);
-                            changed = true;
-                        }
-
-                        ui.separator();
-
-                        // "EXPOSURE RANGE" sliders: ISO, Aperture, Focal
-                        ui.label(
-                            egui::RichText::new("EXPOSURE RANGE")
-                                .font(FontId::proportional(10.5_f32))
-                                .color(theme::TEXT_DIM),
-                        );
-
-                        // ISO Slider
-                        let mut iso_val = state
-                            .filter
-                            .iso
-                            .map(|(lo, _)| lo as f32)
-                            .unwrap_or(100.0_f32);
-                        if ui
-                            .add(EguiSlider {
-                                label: "ISO",
-                                value: &mut iso_val,
-                                min: 100.0_f32,
-                                max: 12800.0_f32,
-                                default: 100.0_f32,
-                                step: 100.0_f32,
-                                decimals: 0,
-                                unit: "",
-                                bipolar: false,
-                                signed: false,
-                                custom_label_w: Some(60.0_f32),
-                            })
-                            .changed()
-                        {
-                            let v = iso_val as u32;
-                            state.filter.iso = Some((v, 12800));
-                            changed = true;
-                        }
-
-                        // Aperture Slider
-                        let mut ap_val = state.filter.aperture.map(|(lo, _)| lo).unwrap_or(1.4_f32);
-                        if ui
-                            .add(EguiSlider {
-                                label: "Aperture",
-                                value: &mut ap_val,
-                                min: 1.0_f32,
-                                max: 22.0_f32,
-                                default: 1.4_f32,
-                                step: 0.1_f32,
-                                decimals: 1,
-                                unit: "f/",
-                                bipolar: false,
-                                signed: false,
-                                custom_label_w: Some(60.0_f32),
-                            })
-                            .changed()
-                        {
-                            state.filter.aperture = Some((ap_val, 22.0_f32));
-                            changed = true;
-                        }
-
-                        // Focal Slider
-                        let mut focal_val =
-                            state.filter.focal.map(|(lo, _)| lo).unwrap_or(24.0_f32);
-                        if ui
-                            .add(EguiSlider {
-                                label: "Focal",
-                                value: &mut focal_val,
-                                min: 14.0_f32,
-                                max: 600.0_f32,
-                                default: 24.0_f32,
-                                step: 1.0_f32,
-                                decimals: 0,
-                                unit: "mm",
-                                bipolar: false,
-                                signed: false,
-                                custom_label_w: Some(60.0_f32),
-                            })
-                            .changed()
-                        {
-                            state.filter.focal = Some((focal_val, 600.0_f32));
-                            changed = true;
-                        }
-
-                        ui.separator();
-
-                        // Footer: "Apply Filters" (accent-filled) and "Close" buttons
-                        ui.horizontal(|ui| {
-                            let apply_btn = egui::Button::new(
-                                egui::RichText::new("Apply Filters").color(theme::ACCENT_TEXT),
-                            )
-                            .fill(theme::ACCENT_FILL);
-                            if ui.add(apply_btn).clicked() {
+                            let chip_options = [
+                                (FileTypeChip::Raw, "RAW"),
+                                (FileTypeChip::Jpeg, "JPEG"),
+                                (FileTypeChip::Heic, "HEIC"),
+                                (FileTypeChip::Tiff, "TIFF"),
+                            ];
+                            let mut current_chip = state.filter.file_type.unwrap_or_default();
+                            if SegmentedControl::new(&mut current_chip, &chip_options)
+                                .ui(ui, "file_type_segmented")
+                                .changed()
+                            {
+                                state.filter.file_type = Some(current_chip);
                                 changed = true;
-                                close_popup = true;
                             }
-                            if ui.button("Close").clicked() {
-                                close_popup = true;
-                            }
-                        });
-                    });
-            },
-        );
 
-        if close_popup {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
+                            ui.separator();
+
+                            // "EXPOSURE RANGE" sliders: ISO, Aperture, Focal
+                            ui.label(
+                                egui::RichText::new("EXPOSURE RANGE")
+                                    .font(FontId::proportional(10.5_f32))
+                                    .color(theme::TEXT_DIM),
+                            );
+
+                            // ISO Slider
+                            let mut iso_val = state
+                                .filter
+                                .iso
+                                .map(|(lo, _)| lo as f32)
+                                .unwrap_or(100.0_f32);
+                            if ui
+                                .add(EguiSlider {
+                                    label: "ISO",
+                                    value: &mut iso_val,
+                                    min: 100.0_f32,
+                                    max: 12800.0_f32,
+                                    default: 100.0_f32,
+                                    step: 100.0_f32,
+                                    decimals: 0,
+                                    unit: "",
+                                    bipolar: false,
+                                    signed: false,
+                                    custom_label_w: Some(60.0_f32),
+                                })
+                                .changed()
+                            {
+                                let v = iso_val as u32;
+                                state.filter.iso = Some((v, 12800));
+                                changed = true;
+                            }
+
+                            // Aperture Slider
+                            let mut ap_val =
+                                state.filter.aperture.map(|(lo, _)| lo).unwrap_or(1.4_f32);
+                            if ui
+                                .add(EguiSlider {
+                                    label: "Aperture",
+                                    value: &mut ap_val,
+                                    min: 1.0_f32,
+                                    max: 22.0_f32,
+                                    default: 1.4_f32,
+                                    step: 0.1_f32,
+                                    decimals: 1,
+                                    unit: "f/",
+                                    bipolar: false,
+                                    signed: false,
+                                    custom_label_w: Some(60.0_f32),
+                                })
+                                .changed()
+                            {
+                                state.filter.aperture = Some((ap_val, 22.0_f32));
+                                changed = true;
+                            }
+
+                            // Focal Slider
+                            let mut focal_val =
+                                state.filter.focal.map(|(lo, _)| lo).unwrap_or(24.0_f32);
+                            if ui
+                                .add(EguiSlider {
+                                    label: "Focal",
+                                    value: &mut focal_val,
+                                    min: 14.0_f32,
+                                    max: 600.0_f32,
+                                    default: 24.0_f32,
+                                    step: 1.0_f32,
+                                    decimals: 0,
+                                    unit: "mm",
+                                    bipolar: false,
+                                    signed: false,
+                                    custom_label_w: Some(60.0_f32),
+                                })
+                                .changed()
+                            {
+                                state.filter.focal = Some((focal_val, 600.0_f32));
+                                changed = true;
+                            }
+
+                            ui.separator();
+
+                            // Footer: "Apply Filters" (accent-filled) and "Close" buttons
+                            ui.horizontal(|ui| {
+                                let apply_btn = egui::Button::new(
+                                    egui::RichText::new("Apply Filters").color(theme::ACCENT_TEXT),
+                                )
+                                .fill(theme::ACCENT_FILL);
+                                if ui.add(apply_btn).clicked() {
+                                    changed = true;
+                                    close_popup = true;
+                                }
+                                if ui.button("Close").clicked() {
+                                    close_popup = true;
+                                }
+                            });
+                        });
+                });
+
+            // Close on outside click (button and popup both excluded) unless a
+            // ComboBox dropdown inside is open. A combo's dropdown area can extend
+            // past the popup's own Area rect, so a raw "click outside the popup"
+            // check would treat picking a combo option as an outside click and
+            // slam the whole Metadata popup shut — `any_popup_open` is true while
+            // that dropdown is showing, so we hold off closing until it settles.
+            let clicked_outside =
+                btn_resp.clicked_elsewhere() && area_resp.response.clicked_elsewhere();
+            let any_inner_popup_open = ui.memory(|m| m.any_popup_open());
+            let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+            if close_popup
+                || should_close_metadata_popup(
+                    clicked_outside,
+                    any_inner_popup_open,
+                    escape_pressed,
+                )
+            {
+                popup_open = false;
+            }
         }
+
+        ui.data_mut(|d| d.insert_temp(popup_id, popup_open));
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.allocate_ui_with_layout(
@@ -369,9 +405,10 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
     changed
 }
 
-/// Render the "Metadata" button with a small painted down-caret to the right.
+/// Render the "Metadata" button with a small painted caret to the right that
+/// reflects the popup's actual open state (points up while open, down while closed).
 /// Returns the `Response` for the text button (used to anchor + toggle the popup).
-fn show_metadata_button(ui: &mut egui::Ui, _popup_id: egui::Id) -> egui::Response {
+fn show_metadata_button(ui: &mut egui::Ui, is_open: bool) -> egui::Response {
     // Lay out text button + caret in a tight inline group.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 3.0_f32;
@@ -384,11 +421,25 @@ fn show_metadata_button(ui: &mut egui::Ui, _popup_id: egui::Id) -> egui::Respons
             rect.center(),
             CARET_HW - 1.0_f32,
             theme::TEXT_DIM,
-            true,
+            !is_open,
         );
         btn
     })
     .inner
+}
+
+/// Pure close-decision for the Metadata popup, factored out so it's testable
+/// without an `egui::Context`. `any_inner_popup_open` must reflect
+/// `ui.memory(|m| m.any_popup_open())` — a `ComboBox` nested inside the popup
+/// drives that same egui-global flag while its own dropdown is open, and a click
+/// that lands in that dropdown must NOT be treated as "clicked outside the
+/// popup" (that was the root cause of the popup closing on every combo click).
+fn should_close_metadata_popup(
+    clicked_outside: bool,
+    any_inner_popup_open: bool,
+    escape_pressed: bool,
+) -> bool {
+    escape_pressed || (clicked_outside && !any_inner_popup_open)
 }
 
 #[cfg(test)]
@@ -406,17 +457,48 @@ mod tests {
     }
 
     #[test]
-    fn metadata_filters_popup_toggle_state() {
+    fn metadata_popup_open_state_is_a_plain_bool_in_temp_data() {
+        // The Metadata popup no longer competes for egui's single global
+        // `Memory.popup` slot (that's the bug the ComboBoxes triggered); its
+        // open/closed state lives in `Ui::data` under its own persistent id and
+        // is untouched by `Memory::toggle_popup`.
         let ctx = Context::default();
         let popup_id = egui::Id::new("metadata_filters_popup");
 
-        assert!(!ctx.memory(|m| m.is_popup_open(popup_id)));
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(popup_id)), None);
+        ctx.data_mut(|d| d.insert_temp(popup_id, true));
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(popup_id)), Some(true));
 
-        ctx.memory_mut(|m| m.toggle_popup(popup_id));
-        assert!(ctx.memory(|m| m.is_popup_open(popup_id)));
+        // A ComboBox toggling the shared Memory popup slot must not affect it.
+        ctx.memory_mut(|m| m.toggle_popup(egui::Id::new("some_combo_box")));
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(popup_id)), Some(true));
+    }
 
-        ctx.memory_mut(|m| m.toggle_popup(popup_id));
-        assert!(!ctx.memory(|m| m.is_popup_open(popup_id)));
+    #[test]
+    fn should_close_metadata_popup_escape_always_closes() {
+        assert!(should_close_metadata_popup(false, false, true));
+        assert!(should_close_metadata_popup(false, true, true));
+        assert!(should_close_metadata_popup(true, true, true));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_outside_click_closes_when_no_inner_popup_open() {
+        assert!(should_close_metadata_popup(true, false, false));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_stays_open_while_combo_dropdown_is_open() {
+        // This is the exact interaction that used to close the popup before the
+        // fix: clicking a ComboBox option lands outside the popup's own Area
+        // rect, but the combo's dropdown is still open (`any_inner_popup_open`),
+        // so we must not close.
+        assert!(!should_close_metadata_popup(true, true, false));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_stays_open_with_no_signal() {
+        assert!(!should_close_metadata_popup(false, false, false));
+        assert!(!should_close_metadata_popup(false, true, false));
     }
 
     #[test]

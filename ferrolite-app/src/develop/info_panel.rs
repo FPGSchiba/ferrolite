@@ -67,7 +67,12 @@ fn extract_facts(state: &AppState) -> Option<crate::develop::info::ImageFacts> {
 
 /// Render the read-only left info panel contents.
 pub fn show(ui: &mut egui::Ui, state: &AppState) {
-    ui.set_width(300.0 - 24.0); // 300px total width minus 24px inner horizontal margin (12px left + 12px right)
+    // Fill whatever width the resizable SidePanel allocated this frame. Pinning
+    // this to a hardcoded constant fought the panel's drag-resize: egui persists
+    // the panel's next-frame width from this Ui's returned rect, so a fixed
+    // min==max width here overwrote the user's drag back to the constant every
+    // frame (the "snaps back" bug).
+    ui.set_width(ui.available_width());
 
     ui.label(
         egui::RichText::new("INFO")

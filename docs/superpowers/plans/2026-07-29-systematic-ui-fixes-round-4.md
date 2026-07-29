@@ -203,10 +203,22 @@ fn pill_docks_to_corner_when_overlay_hidden() {
   verbatim. Run both suites — FAIL.
 - [ ] **Step 2:** Implement `LibraryQuery` fields + SQL (`IN` list built with one `?`
   placeholder per entry; ranges as `BETWEEN ? AND ?`, skipping rows whose metadata column is
-  NULL). Check the actual images-table columns for lens/aperture/focal names first
-  (`ferrolite-catalog/src/schema.rs`) — if a needed column does not exist in the schema, STOP
-  and report BLOCKED (schema migration is out of scope for this task and needs coordinator
-  sign-off).
+  NULL).
+
+> **AMENDMENT (author-approved after the initial BLOCKED report — the schema has no
+> lens/aperture/focal columns and `kind` is 2-way):**
+> 1. **Schema v7 migration**: add `lens TEXT`, `aperture REAL`, `focal_length REAL`
+>    (nullable) to `images`, following the existing versioned-migration pattern in
+>    `ferrolite-catalog/src/schema.rs` (SCHEMA_VERSION 6 → 7).
+> 2. **Ingest persists them**: `NewImage::from_metadata`
+>    (`ferrolite-catalog/src/model.rs:105-132`) copies `lens`, `aperture`,
+>    `focal_length` from `ferrolite_decode::Metadata`; insert/update SQL carries the new
+>    columns.
+> 3. **File type = path extension**: no schema change. The SQL predicate matches on the
+>    lower-cased path extension; `FileTypeChip` becomes `{ Raw, Jpeg, Png, Tiff }`
+>    (HEIC dropped — not ingestable). `Raw` maps to the raw-extension list `scan.rs`
+>    accepts; `Jpeg` = `jpg`/`jpeg`; `Png` = `png`; `Tiff` = `tif`/`tiff`.
+> 4. Backfill of pre-v7 rows is **Task 14** (separate) — do NOT implement it here.
 - [ ] **Step 3:** Update `to_query` to forward everything; fix `FilterState` field fallout
   (compile errors in toolbar.rs are expected — leave the toolbar rendering single-choice for
   now by selecting into/out of the set for the current chip; Task 8 replaces the UI).
@@ -440,6 +452,36 @@ global label-column width and impose it on every row.
 - [ ] **Step 3:** Scoped gate on `ferrolite-app`.
 - [ ] **Step 4: Commit** `fix(settings): keybind labels align to one global column across
   sections`
+
+### Task 14: Metadata backfill job for pre-v7 catalog rows (author-approved amendment)
+
+**Files:**
+- Create: `ferrolite-app/src/library/meta_backfill.rs` (job spawn + batching)
+- Modify: `ferrolite-catalog` (a query listing image `(id, path)` where `lens IS NULL AND
+  aperture IS NULL AND focal_length IS NULL`, and an update setting the three columns)
+- Modify: `ferrolite-app/src/events.rs` + the event apply path (one new event delivering a
+  batch of backfilled rows)
+- Modify: `ferrolite-app/src/app.rs` or `state.rs` (one-shot spawn after catalog open)
+
+**Interfaces:**
+- Consumes: the existing EXIF read used by `develop/meta_read.rs`
+  (`ferrolite_decode` metadata request) and the Task-5 columns.
+- Produces: `spawn_meta_backfill(jobs, catalog/read_pool, tx, ctx) -> JobHandle` — a
+  Background-priority, cancellable job that walks NULL-metadata rows in batches (e.g. 64),
+  reads EXIF per file (skipping unreadable/missing files permanently by writing an empty
+  string / keeping NULL — decide and document), sends one event per batch; the UI-thread
+  handler writes the batch through the catalog writer and bumps `state.dirty` ONCE per batch
+  so active metadata filters refresh.
+
+- [ ] **Step 1: failing test** in ferrolite-catalog: the NULL-metadata listing returns
+  exactly the rows with all three columns NULL; the batch update sets them and removes rows
+  from the listing.
+- [ ] **Step 2:** Implement the catalog queries; then the job (Background priority,
+  cancellation token honored between files; never on the UI thread) and the event plumbing.
+  One-shot spawn per app run, after the catalog opens, only if the NULL-count is > 0.
+- [ ] **Step 3:** Scoped gate on `ferrolite-catalog` + `ferrolite-app`.
+- [ ] **Step 4: Commit** `feat(catalog): background EXIF backfill fills lens/aperture/focal
+  for pre-v7 rows`
 
 ---
 

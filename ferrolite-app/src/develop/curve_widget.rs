@@ -1,7 +1,8 @@
 //! Tone-curve adapter over the reusable `widgets::curve::curve_editor`. Adds a
 //! Master/R/G/B channel selector (tinted per channel) above the curve; each
 //! channel edits its own `PointCurve` (Master = the legacy `points`/`mode`).
-//! Parametric region controls live in the sub-panel (see `parametric` section).
+//! Parametric H/S/W/B region controls live in their own REGION TONES section
+//! (see `base_tabs::LightTab::show`), not here.
 //! Renders against a `ScopedEdit` (design 2026-07-28 §2, Phase 2b Task 3), so
 //! the same widget drives both the global Tone Curve and a selected mask's —
 //! writes go through `ScopedEdit::write`, which normalizes identity structures
@@ -9,8 +10,8 @@
 //! Active channel is UI-only state.
 
 use crate::develop::adjustment_panel::EditOutcome;
+use crate::develop::curve_math;
 use crate::develop::scope::{ScopedEdit, MASK_NONE_HINT};
-use crate::develop::{curve_math, curve_widget_parametric};
 use crate::theme;
 use crate::widgets::curve::{curve_editor, CurveStyle};
 use egui::Color32;
@@ -156,14 +157,6 @@ pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
         if let Some(o) = scoped.write(new_set, OpKind::ToneCurve, edit.commit) {
             out = Some(o);
         }
-    }
-
-    // Parametric region sub-panel (Task 7). Takes precedence only when it emits.
-    if let Some(param_out) = curve_widget_parametric::show(ui, scoped, &tc) {
-        if !param_out.commit {
-            scoped.adjusting.set(true);
-        }
-        out = Some(param_out);
     }
 
     out

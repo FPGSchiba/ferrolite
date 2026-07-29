@@ -7,7 +7,8 @@ use crate::develop::adjustments::{color_sliders, effects_sliders, light_sliders,
 use crate::develop::scope::{self, EditScope, ScopedEdit};
 use crate::develop::tool::{PanelTab, TabId};
 use crate::develop::{
-    curve_widget, grade_widget, hsl_widget, lens_caps_ui, lens_picker, ops_edit, vignette_mode,
+    curve_widget, curve_widget_parametric, grade_widget, hsl_widget, lens_caps_ui, lens_picker,
+    ops_edit, vignette_mode,
 };
 use crate::state::AppState;
 use crate::theme;
@@ -69,6 +70,39 @@ impl PanelTab for LightTab {
         if *open {
             if let Some(curve_out) = curve_widget::show(ui, &scoped) {
                 out = Some(curve_out);
+            }
+        }
+
+        ui.separator();
+        let open = if scope_is_mask {
+            &mut state.settings.mask_region_tones_open
+        } else {
+            &mut state.settings.region_tones_open
+        };
+        section_header(ui, "REGION TONES", open);
+        if *open {
+            ui.label(
+                egui::RichText::new(
+                    "Region-based curve tones — complements the Basic sliders, \
+                     which weight by pixel brightness.",
+                )
+                .color(theme::TEXT_FAINT)
+                .size(11.0_f32),
+            );
+            ui.add_space(4.0_f32);
+            match scoped.set() {
+                Some(set) => {
+                    let tc = set.tone_curve.clone();
+                    if let Some(param_out) = curve_widget_parametric::show(ui, &scoped, &tc) {
+                        if !param_out.commit {
+                            scoped.adjusting.set(true);
+                        }
+                        out = Some(param_out);
+                    }
+                }
+                None => {
+                    ui.label(egui::RichText::new(scope::MASK_NONE_HINT).color(theme::TEXT_FAINT));
+                }
             }
         }
 
@@ -793,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn test_all_eight_section_headers_bound_and_persist() {
+    fn test_all_section_headers_bound_and_persist() {
         let mut state = AppState::new().unwrap();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
@@ -803,6 +837,7 @@ mod tests {
         // Defaults should all be open (true)
         assert!(state.settings.basic_sliders_open);
         assert!(state.settings.tone_curve_open);
+        assert!(state.settings.region_tones_open);
         assert!(state.settings.color_hsl_open);
         assert!(state.settings.color_mix_open);
         assert!(state.settings.color_grading_open);
@@ -814,6 +849,7 @@ mod tests {
         // Toggle state settings fields
         state.settings.basic_sliders_open = false;
         state.settings.tone_curve_open = false;
+        state.settings.region_tones_open = false;
         state.settings.color_hsl_open = false;
         state.settings.color_mix_open = false;
         state.settings.color_grading_open = false;
@@ -834,6 +870,7 @@ mod tests {
         // Verify toggled booleans persisted after panel rendering
         assert!(!state.settings.basic_sliders_open);
         assert!(!state.settings.tone_curve_open);
+        assert!(!state.settings.region_tones_open);
         assert!(!state.settings.color_hsl_open);
         assert!(!state.settings.color_mix_open);
         assert!(!state.settings.color_grading_open);

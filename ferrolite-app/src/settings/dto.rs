@@ -383,6 +383,8 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub tone_curve_open: bool,
     #[serde(default = "default_true")]
+    pub region_tones_open: bool,
+    #[serde(default = "default_true")]
     pub color_grading_open: bool,
     #[serde(default = "default_true")]
     pub optics_open: bool,
@@ -392,6 +394,8 @@ pub struct Settings {
     pub mask_basic_sliders_open: bool,
     #[serde(default = "default_true")]
     pub mask_tone_curve_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_region_tones_open: bool,
     #[serde(default = "default_true")]
     pub mask_color_hsl_open: bool,
     #[serde(default = "default_true")]
@@ -433,10 +437,12 @@ impl Default for Settings {
             noise_reduction_open: true,
             dehaze_open: true,
             tone_curve_open: true,
+            region_tones_open: true,
             color_grading_open: true,
             optics_open: true,
             mask_basic_sliders_open: true,
             mask_tone_curve_open: true,
+            mask_region_tones_open: true,
             mask_color_hsl_open: true,
             mask_color_mix_open: true,
             mask_color_grading_open: true,
@@ -618,10 +624,12 @@ mod tests {
         assert!(default_settings.noise_reduction_open);
         assert!(default_settings.dehaze_open);
         assert!(default_settings.tone_curve_open);
+        assert!(default_settings.region_tones_open);
         assert!(default_settings.color_grading_open);
         assert!(default_settings.optics_open);
         assert!(default_settings.mask_basic_sliders_open);
         assert!(default_settings.mask_tone_curve_open);
+        assert!(default_settings.mask_region_tones_open);
         assert!(default_settings.mask_color_hsl_open);
         assert!(default_settings.mask_color_mix_open);
         assert!(default_settings.mask_color_grading_open);
@@ -645,10 +653,12 @@ mod tests {
             noise_reduction_open: false,
             dehaze_open: false,
             tone_curve_open: false,
+            region_tones_open: false,
             color_grading_open: false,
             optics_open: false,
             mask_basic_sliders_open: false,
             mask_tone_curve_open: false,
+            mask_region_tones_open: false,
             mask_color_hsl_open: false,
             mask_color_mix_open: false,
             mask_color_grading_open: false,

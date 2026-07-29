@@ -62,9 +62,9 @@ pub use tile_edit::TileEditPipeline;
 // same math for both the Light-stage engine node and per-mask layers now.
 pub use uniforms::{
     color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform,
-    parametric_curve_lut, sharpen_halo, tone_curve_luts, vignette_amount, ColorGradeUniform,
-    GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
-    MAX_SHARPEN_RADIUS,
+    parametric_curve_lut, sharpen_halo, sharpen_halo_doc, tone_curve_luts, vignette_amount,
+    ColorGradeUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
+    SharpenUniform, VignetteUniform, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
@@ -120,10 +120,16 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         // `sharpen.wgsl` (the retired fused 2D pass) stays in-tree as
         // reference math (see `sharpen_node.rs`'s doc) but is no longer
         // compiled here — `SharpenNode` (both pipelines) now dispatches the
-        // three passes below instead.
+        // passes below instead. `sharpen-apply-masked` (Phase 4 Task 4) is
+        // the per-mask-layer masked apply, only ever dispatched when a
+        // visible layer has its own active sharpen.
         ("sharpen-box-h", include_str!("shaders/sharpen_box_h.wgsl")),
         ("sharpen-box-v", include_str!("shaders/sharpen_box_v.wgsl")),
         ("sharpen-apply", include_str!("shaders/sharpen_apply.wgsl")),
+        (
+            "sharpen-apply-masked",
+            include_str!("shaders/sharpen_apply_masked.wgsl"),
+        ),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
         ("local-adjust", include_str!("shaders/local_adjust.wgsl")),

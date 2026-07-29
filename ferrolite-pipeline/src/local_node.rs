@@ -64,6 +64,37 @@ struct CachedMasks {
     masks: Vec<MaskBuffer>, // one per visible layer, in visible order
 }
 
+/// Phase 4 Task 4: a narrow handle exposing the Color-stage engine's last
+/// composited VISIBLE-layer masks to the downstream `SharpenNode`, so
+/// per-mask sharpen shares the SAME `MaskBuffer`s the engine already builds
+/// rather than re-compositing them a second time. The `usize` is the layer's
+/// index into `LocalAdjustments::layers` (NOT a visible-only index) — the
+/// downstream reader looks up that index's `adjustments.sharpen` in the SAME
+/// `Rc<RefCell<LocalAdjustments>>` the engine reads (shared, always current),
+/// so an index always resolves against the layer it was composited for.
+///
+/// **Freshness invariant.** Populated ONLY at the tail of a REAL
+/// `evaluate_color` run (never at construction, never proactively cleared
+/// from outside that function) — replaced wholesale each time (clear +
+/// refill), never incrementally patched. The graph's dirty-tracking can SKIP
+/// the Color engine's `evaluate()` on a call where `SharpenNode` itself is
+/// dirty and re-runs (e.g. a GLOBAL sharpen amount/radius-only change:
+/// `EditPipeline::set_stack` dirties `sharpen_id` directly without touching
+/// `local_adjust_id`, since global sharpen lives outside both engine
+/// segments). On such a skip this handle is simply left exactly as the last
+/// REAL `evaluate_color` run left it, which is always still valid: any
+/// change to the layer LIST (add/remove/reorder/visibility) or to a layer's
+/// own fields changes `LocalAdjustments`, which `set_stack` always diffs and
+/// dirties `local_adjust_id` for — so a real `evaluate_color` run (and a
+/// fresh handle) always precedes any `SharpenNode` evaluate that depends on
+/// layers this handle doesn't yet reflect. Do NOT add a reset anywhere
+/// outside `evaluate_color` itself — that would violate this invariant on
+/// exactly the skip case it exists for.
+#[derive(Default)]
+pub(crate) struct SharedMasks {
+    pub buffers: Vec<(usize, MaskBuffer)>,
+}
+
 /// True when any component of `def` samples the underlying pixel content
 /// (`LumaRange`/`ColorRange`) rather than being purely spatial (gradient/
 /// radial/brush/imported). Content-dependent components composite against
@@ -204,6 +235,14 @@ pub(crate) struct LocalAdjustmentsNode {
     // sample the tile's own content and spatial components map to full-image uv).
     tile: RefCell<Option<TileTransform>>,
     cache: RefCell<Option<CachedMasks>>,
+    // Phase 4 Task 4: the Color-stage engine's composited visible-layer masks,
+    // exposed to the downstream `SharpenNode` via this shared handle (see
+    // `SharedMasks`'s freshness invariant doc). Present on every instance
+    // (incl. the Light stage) for a uniform constructor signature, but only
+    // ever populated/read for the Color stage — the Light-stage constructor
+    // is handed a fresh, never-shared placeholder (mirrors `layers`' own
+    // placeholder pattern for the Light stage).
+    shared_masks: Rc<RefCell<SharedMasks>>,
     // Test hook: counts mask-composite rebuilds (proves adjustment-only
     // changes reuse the cache instead of re-compositing).
     rebuilds: std::cell::Cell<u32>,
@@ -252,6 +291,12 @@ impl LocalAdjustmentsNode {
         // own placeholder pattern for the Light stage.
         dehaze_params: Rc<Cell<ColorDehazeParams>>,
         dehaze_frame: Rc<Cell<TileFrame>>,
+        // Phase 4 Task 4: the shared composited-masks handle (see
+        // `SharedMasks`'s doc). The Light stage never populates/reads this
+        // (see `evaluate_light`) — callers pass a fresh, never-shared
+        // placeholder for that instance, mirroring `layers`'/`dehaze_params`'
+        // own placeholder pattern.
+        shared_masks: Rc<RefCell<SharedMasks>>,
     ) -> Self {
         let apply_bgl = ctx
             .device
@@ -391,6 +436,7 @@ impl LocalAdjustmentsNode {
             apply_buf_cursor: std::cell::Cell::new(0),
             tile: RefCell::new(None),
             cache: RefCell::new(None),
+            shared_masks,
             rebuilds: std::cell::Cell::new(0),
             evals: std::cell::Cell::new(0),
             stage,
@@ -742,6 +788,15 @@ impl LocalAdjustmentsNode {
         let dehaze_active = dehaze.amount != 0.0 && self.dehaze_has_transmission.get();
 
         if global_seg.is_identity() && !dehaze_active && layers.is_identity() {
+            // Phase 4 Task 4: `layers.is_identity()` is true here (no visible
+            // layer has ANY active adjustment — sharpen included, since
+            // `AdjustmentSet::is_identity` gates on `sharpen.amount == 0.0`
+            // too), so nothing exists for `SharpenNode` to read this
+            // evaluate — empty the handle rather than leaving a stale `Vec`
+            // from a previous real run (see `SharedMasks`'s freshness
+            // invariant: this is a REAL evaluate_color run, not a graph
+            // skip, so updating here is safe and correct).
+            *self.shared_masks.borrow_mut() = SharedMasks::default();
             return input.clone();
         }
 
@@ -756,6 +811,8 @@ impl LocalAdjustmentsNode {
         }
 
         if layers.is_identity() {
+            // Same reasoning as the top-of-function early return above.
+            *self.shared_masks.borrow_mut() = SharedMasks::default();
             return current;
         }
 
@@ -773,6 +830,19 @@ impl LocalAdjustmentsNode {
 
         let cur_defs: Vec<ferrolite_mask::MaskDefinition> =
             layers.visible_layers().map(|l| l.mask.clone()).collect();
+
+        // Phase 4 Task 4: each visible layer's RAW index into
+        // `LocalAdjustments::layers` (not a visible-only index), in the same
+        // order `visible_layers()`/`cur_defs`/`masks` iterate — this is what
+        // `SharedMasks` pairs with each composited buffer so `SharpenNode` can
+        // look the layer's own `adjustments.sharpen` back up by index.
+        let visible_indices: Vec<usize> = layers
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.visible)
+            .map(|(i, _)| i)
+            .collect();
 
         // The compositing cache is keyed on mask DEFINITIONS + dims (so an
         // adjustment-only change reuses it), but a content-dependent range
@@ -828,6 +898,20 @@ impl LocalAdjustmentsNode {
             self.cache.borrow().as_ref().unwrap().masks.clone()
         } else {
             composite_all()
+        };
+
+        // Phase 4 Task 4: refresh the shared handle for the downstream
+        // `SharpenNode` — see `SharedMasks`'s freshness invariant doc.
+        // Overwritten wholesale here every time this point is reached
+        // (whole-image cache hit or tile-fresh composite alike), paired with
+        // each visible layer's raw stack index. Cheap: `MaskBuffer::clone` is
+        // an `Arc` clone (mirrors `PipelineImage`'s own cheap-clone design).
+        *self.shared_masks.borrow_mut() = SharedMasks {
+            buffers: visible_indices
+                .iter()
+                .copied()
+                .zip(masks.iter().cloned())
+                .collect(),
         };
 
         for (layer, mask) in layers.visible_layers().zip(masks.iter()) {
@@ -1010,6 +1094,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
 
         // Reaching this line without a wgpu validation panic already proves the
@@ -1054,6 +1139,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
 
         let out1 = node.evaluate(&[&src]);
@@ -1107,6 +1193,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
 
         let _ = node.evaluate(&[&src]);
@@ -1187,6 +1274,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
 
         let out = node.evaluate(&[&src]);
@@ -1227,6 +1315,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
 
         let out = node.evaluate(&[&src]);
@@ -1270,6 +1359,7 @@ mod tests {
             Rc::new(RefCell::new(global.clone())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
 
         let out = node.evaluate(&[&src]);
@@ -1323,6 +1413,7 @@ mod tests {
             Rc::new(RefCell::new(global.clone())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
 
         let out = node.evaluate(&[&src]);
@@ -1370,6 +1461,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
         let out = node.evaluate(&[&src]);
         assert!(
@@ -1396,6 +1488,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
         let out = node.evaluate(&[&src]);
         assert!(
@@ -1447,6 +1540,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
         let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
         node.set_geometry(identity_geo);
@@ -1514,6 +1608,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
         let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
         node.set_geometry(identity_geo);
@@ -1622,6 +1717,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
         let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
         node.set_geometry(identity_geo);
@@ -1735,6 +1831,7 @@ mod tests {
             Rc::new(RefCell::new(AdjustmentSet::default())),
             dehaze_params,
             dehaze_frame,
+            Rc::new(RefCell::new(SharedMasks::default())),
         );
         let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
         node.set_geometry(identity_geo);

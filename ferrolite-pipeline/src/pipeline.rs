@@ -13,7 +13,7 @@ use crate::dehaze_node::{DehazeTransmissionNode, TransmissionParams};
 use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::{AdjustmentSet, LocalAdjustments};
-use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode};
+use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode, SharedMasks};
 use crate::nodes::{GeometryNode, PointOpNode, SourceNode, TileFrame, VignetteNode};
 use crate::op::OpStack;
 use crate::sharpen_node::SharpenNode;
@@ -81,6 +81,12 @@ pub struct EditPipeline {
     local_node: Rc<LocalAdjustmentsNode>,
     sharpen_id: NodeId,
     sharpen: Rc<Cell<SharpenUniform>>,
+    // Handle to `SharpenNode`, retained for the `sharpen_eval_count` test hook
+    // (Phase 4 Task 4 dirty-routing regression: a mask-layer sharpen-amount-
+    // only `set_stack` must still re-run this node). The graph owns its own
+    // `Box` for evaluation — mirrors `local_node`'s retention rationale.
+    #[cfg_attr(not(test), allow(dead_code))]
+    sharpen_node: Rc<SharpenNode>,
     geometry_id: NodeId,
     geometry: Rc<Cell<GeometryUniform>>,
     geometry_node: Rc<GeometryNode>,
@@ -137,6 +143,9 @@ impl EditPipeline {
             global_set.clone(),
             Rc::new(Cell::new(ColorDehazeParams::default())),
             Rc::new(Cell::new(TileFrame::default())),
+            // The Light stage never populates/reads the shared-masks handle
+            // (see `evaluate_light`) — a fresh, never-shared placeholder.
+            Rc::new(RefCell::new(SharedMasks::default())),
         ));
         let light_engine_id =
             graph.add_node(Box::new(light_engine_node.clone()), vec![vignette_id]);
@@ -187,6 +196,10 @@ impl EditPipeline {
         // `evaluate_color`). Its only graph input is `light_engine_id` directly
         // now that the standalone recovery node is gone.
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
+        // Phase 4 Task 4: the Color engine's composited-masks handle, shared
+        // with `SharpenNode` below (constructed with a clone of this same
+        // `Rc`) — see `SharedMasks`'s doc.
+        let shared_masks = Rc::new(RefCell::new(SharedMasks::default()));
         let local_node = Rc::new(LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             local_layers.clone(),
@@ -194,6 +207,7 @@ impl EditPipeline {
             global_set.clone(),
             color_dehaze_params.clone(),
             color_dehaze_frame,
+            shared_masks.clone(),
         ));
         // Geometry (crop/rotate) runs downstream of dehaze/color in this graph
         // (at `geometry_id`, the very end), so the fused recovery step always
@@ -205,8 +219,16 @@ impl EditPipeline {
         let local_adjust_id = graph.add_node(Box::new(local_node.clone()), vec![light_engine_id]);
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
-        let sharpen_node = SharpenNode::new(ctx.clone(), sharpen.clone());
-        let sharpen_id = graph.add_node(Box::new(sharpen_node), vec![local_adjust_id]);
+        // Phase 4 Task 4: `local_layers` (the SAME shared Rc the Color engine
+        // reads) so SharpenNode can look up each mask layer's own
+        // `adjustments.sharpen`, keyed by the index `shared_masks` carries.
+        let sharpen_node = Rc::new(SharpenNode::new(
+            ctx.clone(),
+            sharpen.clone(),
+            local_layers.clone(),
+            shared_masks.clone(),
+        ));
+        let sharpen_id = graph.add_node(Box::new(sharpen_node.clone()), vec![local_adjust_id]);
 
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
         let geometry = Rc::new(Cell::new(geo_uniform));
@@ -235,6 +257,7 @@ impl EditPipeline {
             local_node,
             sharpen_id,
             sharpen,
+            sharpen_node,
             geometry_id,
             geometry,
             geometry_node,
@@ -436,6 +459,17 @@ impl EditPipeline {
     #[cfg(test)]
     pub(crate) fn color_engine_eval_count(&self) -> u32 {
         self.local_node.eval_count()
+    }
+
+    /// Number of times `SharpenNode`'s `evaluate` has run (test hook; Phase 4
+    /// Task 4 dirty-routing regression): a mask-layer sharpen-amount-only
+    /// `set_stack` must still re-run this node (it's downstream of the Color
+    /// engine, which itself re-runs since a layer-list change always dirties
+    /// `local_adjust_id`), while the Color engine's mask-compositing CACHE
+    /// (`local_rebuild_count`) must stay untouched (mask defs didn't change).
+    #[cfg(test)]
+    pub(crate) fn sharpen_eval_count(&self) -> u32 {
+        self.sharpen_node.eval_count()
     }
 
     /// Number of times `DehazeTransmissionNode` has run its full multi-pass
@@ -645,6 +679,94 @@ mod edit_pipeline_tests {
             }],
         };
         OpStack::default().set_op(Op::LocalAdjustments(la))
+    }
+
+    /// A stack with one mask (a linear-gradient component, IDENTICAL across
+    /// every `amount`) whose adjustment set carries a per-mask `sharpen`
+    /// (Phase 4 Task 4).
+    fn masked_sharpen_stack(amount: f32, radius: u32) -> OpStack {
+        let la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: true,
+                mask: MaskDefinition {
+                    components: vec![(
+                        MaskComponent::LinearGradient {
+                            start: Vec2::new(0.0, 0.5),
+                            end: Vec2::new(1.0, 0.5),
+                        },
+                        CompositeMode::Add,
+                    )],
+                    invert: false,
+                },
+                adjustments: AdjustmentSet {
+                    sharpen: crate::op::Sharpen { amount, radius },
+                    ..Default::default()
+                },
+            }],
+        };
+        OpStack::default().set_op(Op::LocalAdjustments(la))
+    }
+
+    /// Phase 4 Task 4 dirty-routing regression: a mask-layer sharpen-AMOUNT-
+    /// only change (mask def AND radius unchanged) must NOT recomposite the
+    /// Color engine's masks (its cache stays keyed on mask defs, which didn't
+    /// change) — but `SharpenNode` must still re-evaluate (it reads the
+    /// layer's live `adjustments.sharpen.amount` fresh every time, and the
+    /// Color engine's own re-run, forced by the layers-list diff in
+    /// `set_stack`, refreshes the `SharedMasks` handle it depends on).
+    #[test]
+    fn mask_sharpen_amount_only_change_reuses_masks_but_reevaluates_sharpen() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        // Sharpen has zero effect on a FLAT source (blur == src everywhere,
+        // so `amount*(src-blur) == 0` regardless of amount) — needs real
+        // spatial variance, unlike the flat fixtures the exposure-only
+        // `masked_stack` tests use.
+        let (w, h) = (8u32, 8u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 0.2 } else { 0.8 };
+                px.extend_from_slice(&[v, v, v, 1.0]);
+            }
+        }
+        let src = LinearRgbaF32::new(w, h, px).unwrap();
+        let mut ep = EditPipeline::new(ctx, &src, masked_sharpen_stack(0.5, 2), IDENTITY);
+
+        let out1 = ep.render_to_image();
+        assert_eq!(
+            ep.local_rebuild_count(),
+            1,
+            "first evaluate composites the mask once"
+        );
+        assert_eq!(
+            ep.sharpen_eval_count(),
+            1,
+            "first evaluate runs SharpenNode once"
+        );
+
+        // Change ONLY the mask layer's sharpen amount; mask def AND radius
+        // are unchanged.
+        ep.set_stack(masked_sharpen_stack(1.5, 2));
+        let out2 = ep.render_to_image();
+        assert_eq!(
+            ep.local_rebuild_count(),
+            1,
+            "sharpen-amount-only change must REUSE the cached masks"
+        );
+        assert_eq!(
+            ep.sharpen_eval_count(),
+            2,
+            "sharpen-amount-only change must still re-run SharpenNode"
+        );
+        assert_ne!(
+            out1, out2,
+            "the new sharpen amount must actually change the rendered output"
+        );
     }
 
     /// Regression for the mask-adjustment lag: `set_stack` must NOT blanket-clear

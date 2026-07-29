@@ -316,11 +316,39 @@ pub fn sharpen_uniform(op: Option<Sharpen>) -> SharpenUniform {
 
 /// Halo (pixels) a tiled full-res sharpen pass must over-fetch. Zero when the
 /// op is absent or a no-op (amount 0). Consumed by Plan 3's tile producer.
+/// Global-only — see `sharpen_halo_doc` for the whole-document (Phase 4 Task
+/// 4, per-mask sharpen) version.
 pub fn sharpen_halo(op: Option<Sharpen>) -> u32 {
     match op {
         Some(s) if s.amount != 0.0 => s.radius.min(MAX_SHARPEN_RADIUS),
         _ => 0,
     }
+}
+
+/// Halo (pixels) a tiled full-res sharpen pass must over-fetch, across the
+/// WHOLE document: the max radius over the global `Sharpen` op (via
+/// `sharpen_halo`, when active — `amount != 0.0`) and every VISIBLE mask
+/// layer's own active sharpen (Phase 4 Task 4 — per-mask sharpen shares the
+/// separable blur machinery but each layer/the global op can carry its own
+/// radius, so the tiled halo must cover the LARGEST neighbourhood anyone will
+/// actually blur at, or a per-mask sharpen would read past the haloed tile's
+/// edge). Zero when nothing is active anywhere. Clamped to
+/// `MAX_SHARPEN_RADIUS` per contributor (mirrors `sharpen_halo`/
+/// `sharpen_uniform`'s own clamp). A hidden layer never counts, mirroring
+/// `LocalAdjustments::is_identity`'s `visible_layers()` filter /
+/// `EditDoc::dehaze_active_anywhere`'s same pattern. Use this (not the
+/// global-only `sharpen_halo`) for any rebuild/halo decision that must be
+/// aware of per-mask sharpen — `ferrolite-app`'s `needs_full_rebuild` and
+/// `TileEditPipeline::new`'s construction-time halo both do.
+pub fn sharpen_halo_doc(doc: &crate::op::OpStack) -> u32 {
+    let mut max_r = sharpen_halo(doc.sharpen());
+    for layer in doc.layers.iter().filter(|l| l.visible) {
+        let s = layer.adjustments.sharpen;
+        if s.amount != 0.0 {
+            max_r = max_r.max(s.radius.min(MAX_SHARPEN_RADIUS));
+        }
+    }
+    max_r
 }
 
 #[repr(C)]
@@ -1286,6 +1314,71 @@ mod tests {
         assert_eq!(sharpen_halo(Some(huge)), MAX_SHARPEN_RADIUS);
         // No wrap to negative.
         assert!(sharpen_uniform(Some(huge)).radius > 0);
+    }
+
+    #[test]
+    fn sharpen_halo_doc_is_max_of_global_and_visible_layer_radii() {
+        use crate::local::{AdjustmentSet, MaskLayer};
+        use crate::op::{EditDoc, Op, Sharpen};
+        use ferrolite_mask::MaskDefinition;
+
+        let layer = |amount: f32, radius: u32, visible: bool| MaskLayer {
+            name: "l".into(),
+            visible,
+            mask: MaskDefinition::default(),
+            adjustments: AdjustmentSet {
+                sharpen: Sharpen { amount, radius },
+                ..Default::default()
+            },
+        };
+
+        // Nothing active anywhere -> 0.
+        assert_eq!(sharpen_halo_doc(&EditDoc::default()), 0);
+
+        // Global only.
+        let global_only = EditDoc::default().set_op(Op::Sharpen(Sharpen {
+            amount: 0.5,
+            radius: 4,
+        }));
+        assert_eq!(sharpen_halo_doc(&global_only), 4);
+
+        // A visible layer's own active sharpen ALONE (global inactive).
+        let layer_only = EditDoc {
+            layers: vec![layer(0.5, 7, true)],
+            ..Default::default()
+        };
+        assert_eq!(sharpen_halo_doc(&layer_only), 7);
+
+        // Max of global + a smaller layer radius.
+        let mut mixed = global_only.clone();
+        mixed.layers = vec![layer(0.5, 2, true)];
+        assert_eq!(sharpen_halo_doc(&mixed), 4);
+
+        // Max of global + a LARGER layer radius.
+        let mut mixed2 = global_only.clone();
+        mixed2.layers = vec![layer(0.5, 9, true)];
+        assert_eq!(sharpen_halo_doc(&mixed2), 9);
+
+        // A hidden layer never counts, even with a huge radius.
+        let hidden = EditDoc {
+            layers: vec![layer(0.5, 50, false)],
+            ..Default::default()
+        };
+        assert_eq!(sharpen_halo_doc(&hidden), 0);
+
+        // A layer with radius but zero amount contributes nothing.
+        let zero_amount = EditDoc {
+            layers: vec![layer(0.0, 50, true)],
+            ..Default::default()
+        };
+        assert_eq!(sharpen_halo_doc(&zero_amount), 0);
+
+        // Clamped to MAX_SHARPEN_RADIUS.
+        let huge_layer = EditDoc {
+            layers: vec![layer(0.5, u32::MAX, true)],
+            ..Default::default()
+        };
+        assert_eq!(sharpen_halo_doc(&huge_layer), MAX_SHARPEN_RADIUS);
     }
 
     #[test]

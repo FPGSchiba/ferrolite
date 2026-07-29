@@ -375,10 +375,13 @@ pub fn color_sliders() -> &'static [SliderSpec] {
 /// `global_ready: false, mask_ready: false` on all four rows — noise
 /// reduction has no GPU pass wired in any scope yet, so it renders honestly
 /// greyed everywhere (replacing the pre-registry enabled-but-dead sliders).
-/// Sharpen/Dehaze are `global_ready: true, mask_ready: false` — live today
-/// only on the global `AdjustmentSet` (`ops_edit::set_sharpen`/`set_dehaze`'s
-/// former data path, now reached through `scoped.write`); per-mask arrives
-/// with the per-mask neighborhood passes (Phase 4). The Sharpen "Detail"
+/// Sharpen (both Amount and Radius — Phase 4 Task 4) is
+/// `global_ready: true, mask_ready: true`: `SharpenNode` shares the separable
+/// blur machinery and reads each visible mask layer's OWN
+/// `adjustments.sharpen` via the Color engine's composited-masks handle
+/// (`SharedMasks`, `local_node.rs`), so unlike Dehaze's radius (which shapes
+/// ONE shared whole-image transmission map) a mask layer carries its own
+/// independent radius — both fields are fully per-mask. The Sharpen "Detail"
 /// slider from the pre-registry hand-rolled block is dropped here: it mapped
 /// to no field and no planned shader parameter (YAGNI — the registry makes
 /// re-adding trivial once a shader defines it).
@@ -397,9 +400,9 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         set: |s, v| s.sharpen.amount = v,
         kind: ferrolite_pipeline::OpKind::Sharpen,
         global_ready: true,
-        mask_ready: false,
+        mask_ready: true,
         global_reason: "",
-        mask_reason: "Per-mask Sharpening arrives with the per-mask neighborhood passes (Phase 4)",
+        mask_reason: "",
     },
     SliderSpec {
         id: AdjustmentId("sharpen_radius"),
@@ -415,9 +418,9 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         set: |s, v| s.sharpen.radius = v.round() as u32,
         kind: ferrolite_pipeline::OpKind::Sharpen,
         global_ready: true,
-        mask_ready: false,
+        mask_ready: true,
         global_reason: "",
-        mask_reason: "Per-mask Sharpening arrives with the per-mask neighborhood passes (Phase 4)",
+        mask_reason: "",
     },
     SliderSpec {
         id: AdjustmentId("nr_luminance"),
@@ -683,10 +686,13 @@ mod tests {
             .iter()
             .filter(|s| s.id.0.starts_with("nr_"))
             .all(|s| !s.global_ready && !s.mask_ready));
+        // Phase 4 Task 4: per-mask sharpen — both Amount and Radius are
+        // mask-ready (unlike Dehaze's radius, a mask layer's sharpen radius
+        // is fully independent, not a shared whole-image parameter).
         assert!(specs
             .iter()
             .filter(|s| s.id.0.starts_with("sharpen"))
-            .all(|s| s.global_ready && !s.mask_ready));
+            .all(|s| s.global_ready && s.mask_ready));
         // Phase 4 Task 3: per-mask dehaze AMOUNT is live (reuses the shared
         // whole-image transmission map, blended per-layer); RADIUS stays
         // global-only (it shapes that one shared map, not exposed per-mask).

@@ -7,7 +7,7 @@
 //! whose `with_global`/`with_layer_adjustments` normalize identity structures
 //! away doc-side, same effect as the old identity-eliding helpers.
 
-use ferrolite_pipeline::{sharpen_halo, LensCorrection, Op, OpStack};
+use ferrolite_pipeline::{sharpen_halo_doc, LensCorrection, Op, OpStack};
 
 /// A `LensCorrection` with no matched lens AND every correction disabled is
 /// identity (nothing to bake, nothing to apply) → remove the op entirely so
@@ -73,6 +73,12 @@ pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32
 /// Color-only changes (and lens/vignette Amount-only changes) are applied via
 /// `TileEditPipeline::set_stack` / the lens-uniform setters without a rebuild.
 ///
+/// The sharpen halo uses `sharpen_halo_doc` (Phase 4 Task 4): the max radius
+/// over the global `Sharpen` op AND every visible mask layer's own active
+/// sharpen — a per-mask sharpen is a real per-pixel neighbourhood op with its
+/// own radius, so a layer-only sharpen change (global op absent/unchanged)
+/// must still force a rebuild when it changes the document-wide max.
+///
 /// Dehaze does NOT force a rebuild (ST-Task 3): `dehaze_halo` is now always 0
 /// (the tiled dehaze recovery samples a shared whole-image transmission, no
 /// per-tile neighbourhood), so an amount/radius change is a `set_stack`
@@ -80,7 +86,7 @@ pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32
 /// same as any other color op — never a `TileEditPipeline` rebuild.
 pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
     old.geometry() != new.geometry()
-        || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
+        || sharpen_halo_doc(old) != sharpen_halo_doc(new)
         || lens_rebuild_key(old) != lens_rebuild_key(new)
 }
 
@@ -248,5 +254,58 @@ mod tests {
         let on3 = dehaze_op(0.9, 16);
         assert!(!needs_full_rebuild(&on2, &on3), "radius change: no rebuild");
         assert!(!needs_full_rebuild(&on, &base), "dehaze off: no rebuild");
+    }
+
+    /// Phase 4 Task 4: a per-mask sharpen radius is a REAL per-pixel
+    /// neighbourhood op (its own separable blur), so a change to a visible
+    /// mask layer's sharpen — even with the GLOBAL sharpen op absent/
+    /// unchanged — must force a rebuild when it changes the document-wide
+    /// max halo (`sharpen_halo_doc`).
+    #[test]
+    fn mask_sharpen_forces_rebuild_via_halo() {
+        use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Sharpen};
+
+        let mask_layer = |amount: f32, radius: u32| LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "l".into(),
+                visible: true,
+                mask: Default::default(),
+                adjustments: AdjustmentSet {
+                    sharpen: Sharpen { amount, radius },
+                    ..Default::default()
+                },
+            }],
+        };
+
+        let base = OpStack::default();
+        let layer_sharpen = base.set_op(Op::LocalAdjustments(mask_layer(0.5, 5)));
+        assert!(
+            needs_full_rebuild(&base, &layer_sharpen),
+            "mask-only sharpen (global absent): halo change forces rebuild"
+        );
+
+        // A larger mask radius (global still absent) also forces a rebuild.
+        let layer_sharpen_bigger = base.set_op(Op::LocalAdjustments(mask_layer(0.5, 9)));
+        assert!(
+            needs_full_rebuild(&layer_sharpen, &layer_sharpen_bigger),
+            "mask sharpen radius growth forces rebuild"
+        );
+
+        // Amount-only change on the mask layer, radius unchanged: halo is
+        // unaffected (amount doesn't change the radius), so no rebuild.
+        let layer_sharpen_amt = base.set_op(Op::LocalAdjustments(mask_layer(0.9, 5)));
+        assert!(
+            !needs_full_rebuild(&layer_sharpen, &layer_sharpen_amt),
+            "mask sharpen amount-only: no halo change, no rebuild"
+        );
+
+        // A hidden mask layer's sharpen never contributes to the halo.
+        let mut hidden_la = mask_layer(0.5, 9);
+        hidden_la.layers[0].visible = false;
+        let hidden = base.set_op(Op::LocalAdjustments(hidden_la));
+        assert!(
+            !needs_full_rebuild(&base, &hidden),
+            "hidden mask layer's sharpen: no halo contribution, no rebuild"
+        );
     }
 }

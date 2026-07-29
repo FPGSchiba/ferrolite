@@ -63,12 +63,12 @@ use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::{AdjustmentSet, LocalAdjustments};
-use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode};
+use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode, SharedMasks};
 use crate::nodes::{GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode};
 use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
 use crate::sharpen_node::SharpenNode;
 use crate::uniforms::{
-    color_matrix_uniform, geometry_uniform, lens_halo_px, sharpen_halo, sharpen_uniform,
+    color_matrix_uniform, geometry_uniform, lens_halo_px, sharpen_halo_doc, sharpen_uniform,
     ColorMatrixUniform, LensUniform, SharpenUniform, VignetteUniform,
 };
 use ferrolite_lens::{VignetteMap, WarpGrid};
@@ -143,8 +143,13 @@ impl TileEditPipeline {
         let lc: Option<LensCorrection> = stack.lens_correction();
         // Dehaze contributes NO halo (ST-Task 3, `dehaze_halo` always 0): the
         // recovery is a per-pixel sample of a shared whole-image transmission,
-        // not a per-tile neighbourhood filter. Halo is just sharpen + lens-warp.
-        let halo = sharpen_halo(stack.sharpen()).max(lens_halo_px(lc.as_ref(), warp_grid));
+        // not a per-tile neighbourhood filter. Halo is `sharpen_halo_doc`
+        // (Phase 4 Task 4: the max radius over the global op AND every
+        // visible mask layer's own active sharpen — a per-mask sharpen is a
+        // REAL per-pixel neighbourhood op with its own radius, so the tile
+        // halo must cover the largest one anyone will actually blur at) plus
+        // the lens-warp halo.
+        let halo = sharpen_halo_doc(&stack).max(lens_halo_px(lc.as_ref(), warp_grid));
         let geometry = stack.geometry().unwrap_or(Geometry {
             crop: CropRect::full(),
             angle_deg: 0.0,
@@ -210,6 +215,9 @@ impl TileEditPipeline {
             global_set.clone(),
             Rc::new(Cell::new(ColorDehazeParams::default())),
             Rc::new(Cell::new(TileFrame::default())),
+            // The Light stage never populates/reads the shared-masks handle
+            // — a fresh, never-shared placeholder (mirrors `EditPipeline`).
+            Rc::new(RefCell::new(SharedMasks::default())),
         ));
         let light_engine_id =
             graph.add_node(Box::new(light_engine_node.clone()), vec![vignette_id]);
@@ -235,6 +243,13 @@ impl TileEditPipeline {
         // output-space origin (not a local per-tile identity origin) —
         // required for the source-UV mapping to be correct across tiles.
         let local_layers = Rc::new(RefCell::new(stack.local_adjustments().unwrap_or_default()));
+        // Phase 4 Task 4: the Color engine's composited-masks handle, shared
+        // with `SharpenNode` below. `produce_tile` unconditionally dirties
+        // `local_adjust_id` every call (see its doc), so `evaluate_color`
+        // always runs for real per tile — this handle carries THAT tile's
+        // own composited masks automatically, no extra per-tile plumbing
+        // needed here.
+        let shared_masks = Rc::new(RefCell::new(SharedMasks::default()));
         let local_node = Rc::new(LocalAdjustmentsNode::new_engine(
             ctx.clone(),
             local_layers.clone(),
@@ -242,6 +257,7 @@ impl TileEditPipeline {
             global_set.clone(),
             color_dehaze_params.clone(),
             frame.clone(),
+            shared_masks.clone(),
         ));
         let (geo_uniform, _, _) = geometry_uniform(stack.geometry(), src_w, src_h);
         local_node.set_geometry(geo_uniform);
@@ -250,7 +266,12 @@ impl TileEditPipeline {
 
         let sharpen = Rc::new(Cell::new(sharpen_uniform(stack.sharpen())));
         let sharpen_id = graph.add_node(
-            Box::new(SharpenNode::new(ctx.clone(), sharpen.clone())),
+            Box::new(SharpenNode::new(
+                ctx.clone(),
+                sharpen.clone(),
+                local_layers.clone(),
+                shared_masks.clone(),
+            )),
             vec![local_adjust_id],
         );
 

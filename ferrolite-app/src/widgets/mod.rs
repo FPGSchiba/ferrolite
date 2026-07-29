@@ -1,6 +1,7 @@
 pub mod chips;
 pub mod color_wheel;
 pub mod curve;
+pub mod range_slider;
 pub mod slider;
 pub mod tabs;
 pub mod tool_button;
@@ -13,6 +14,8 @@ pub use curve::{
     curve_editor, tone_curve_widget, CurveEdit, CurveStyle, ParametricCurveValues, ToneCurveEdit,
     ToneCurveTab,
 };
+#[allow(unused_imports)]
+pub use range_slider::RangeSlider;
 pub use slider::EguiSlider;
 #[allow(unused_imports)]
 pub use tabs::{tab_row, TabRow};

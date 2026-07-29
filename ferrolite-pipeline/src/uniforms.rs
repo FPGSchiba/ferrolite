@@ -575,18 +575,21 @@ pub struct LocalAdjustUniform {
     /// mask texture bound for a global pseudo-layer is never read). z: vibrance
     /// amount (rides in this vec4 rather than growing the struct again). w: pad.
     pub order_and_coverage: [f32; 4],
-    // ── Phase 4 Task 2 (fused engine): dehaze recovery fused as the FIRST step
-    // of `adjust()`, gated on `dehaze_amount_atmos.x != 0.0`. Zeroed by
-    // `local_adjust_uniform` for every call site (Light stage, per-mask
-    // layers); `LocalAdjustmentsNode::evaluate_color` overwrites these five
-    // fields ONLY on the uniform it builds for the global Color-stage
-    // pseudo-layer dispatch, and only when a `Dehaze` op is active AND a real
-    // shared transmission is bound — every other dispatch takes the identical
-    // zero-extra-work path the old (now-retired) `DehazeRecoveryNode` used for
-    // `amount == 0`/no transmission. Field shapes mirror that node's retired
-    // `RecoveryParams` exactly (minus `t0`, hardcoded as a WGSL const — never
-    // user-adjustable — and reflowed into vec4s since WGSL/std140 has no
-    // scalar/vec2 packing here).
+    // ── Phase 4 Task 2/3 (fused engine): dehaze recovery fused as the FIRST
+    // step of `adjust()`, gated on `dehaze_amount_atmos.x != 0.0`. Zeroed by
+    // `local_adjust_uniform` for every call site (Light stage, every mask
+    // layer); `LocalAdjustmentsNode::evaluate_color` overwrites these five
+    // fields on TWO kinds of dispatch: the global Color-stage pseudo-layer
+    // (Task 2, driven by the global `Dehaze` op's amount) and a per-mask-layer
+    // dispatch (Task 3, driven by THAT layer's own `dehaze.amount`) — in both
+    // cases only when the driving amount is non-zero AND a real shared
+    // transmission is bound. Every other dispatch (the Light stage, or a mask
+    // layer whose own amount is 0) takes the identical zero-extra-work path
+    // the old (now-retired) `DehazeRecoveryNode` used for `amount == 0`/no
+    // transmission. Field shapes mirror that node's retired `RecoveryParams`
+    // exactly (minus `t0`, hardcoded as a WGSL const — never user-adjustable —
+    // and reflowed into vec4s since WGSL/std140 has no scalar/vec2 packing
+    // here).
     /// x = dehaze amount (0 = inactive this dispatch); yzw = atmospheric
     /// light `A` (floored to `DEHAZE_ATMOS_MIN`).
     pub dehaze_amount_atmos: [f32; 4],
@@ -660,10 +663,11 @@ pub fn local_adjust_uniform(
             a.vibrance,
             0.0,
         ],
-        // Phase 4 Task 2: identity/inert by default at every call site — only
+        // Phase 4 Task 2/3: identity/inert by default at every call site — only
         // `LocalAdjustmentsNode::evaluate_color` overwrites these, and only for
-        // the global Color-stage pseudo-layer's own uniform instance (see the
-        // field doc on the struct).
+        // the global Color-stage pseudo-layer's uniform (Task 2) or a
+        // per-mask-layer's uniform whose own `dehaze.amount != 0.0` (Task 3) —
+        // see the field doc on the struct.
         dehaze_amount_atmos: [0.0; 4],
         dehaze_geo_m: [0.0; 4],
         dehaze_geo_off_src_dims: [0.0; 4],
@@ -806,20 +810,23 @@ fn hsl_bands_apply(c: [f32; 3], bands: &[[f32; 4]; 8]) -> [f32; 3] {
     [rgb[0] + excess[0], rgb[1] + excess[1], rgb[2] + excess[2]]
 }
 
-/// `light_color_apply` with the Phase 4 Task 2 dehaze recovery fused in as the
-/// first step of the color segment — mirrors `local_adjust.wgsl`'s
-/// `dehaze_recover_step` + `adjust()` exactly. `dehaze` is `Some((amount,
-/// atmos, t))` when recovery is active for THIS call: `t` is the
-/// ALREADY-REFINED transmission (what the shader's `trans` sample would
-/// return) — injected directly since a CPU caller has no GPU transmission
-/// texture to sample, exactly as `RecoveryParams`'s retired GPU parity tests
-/// injected a constant `q`. `None` (or `amount == 0.0`) is the identity path,
-/// matching the shader's `dehaze_amount_atmos.x == 0.0` gate. Only meaningful
-/// when `global_order` is true — the shader only ever populates the dehaze
-/// fields on the global Color-stage pseudo-layer's uniform (see
-/// `local_node.rs::evaluate_color`); every other caller keeps using
-/// `light_color_apply` (below), which is this function with `dehaze: None`
-/// and is therefore unaffected — no existing call site needs to change.
+/// `light_color_apply` with the Phase 4 Task 2/3 dehaze recovery fused in as
+/// the first step — mirrors `local_adjust.wgsl`'s `dehaze_recover_step` +
+/// `adjust()` exactly (the shader applies the recovery step first regardless
+/// of the `global_order`/mask-order flag, so this CPU reference does too).
+/// `dehaze` is `Some((amount, atmos, t))` when recovery is active for THIS
+/// call: `t` is the ALREADY-REFINED transmission (what the shader's `trans`
+/// sample would return) — injected directly since a CPU caller has no GPU
+/// transmission texture to sample, exactly as `RecoveryParams`'s retired GPU
+/// parity tests injected a constant `q`. `None` (or `amount == 0.0`) is the
+/// identity path, matching the shader's `dehaze_amount_atmos.x == 0.0` gate.
+/// Meaningful for EITHER `global_order`: the shader populates the dehaze
+/// fields on the global Color-stage pseudo-layer's uniform (Task 2,
+/// `global_order = true`) AND on a per-mask-layer's uniform whose own
+/// `dehaze.amount != 0.0` (Task 3, `global_order = false`) — see
+/// `local_node.rs::evaluate_color`. A caller with `dehaze: None` is this
+/// function with the identity path taken, so `light_color_apply` (below)
+/// remains unaffected for every existing call site.
 #[allow(dead_code)]
 pub fn light_color_apply_with_dehaze(
     rgb: [f32; 3],

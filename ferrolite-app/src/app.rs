@@ -892,17 +892,24 @@ impl FerroliteApp {
         let source_path = v.path.clone();
         let image_id = v.image_id;
         let stack = v.op_stack.clone();
-        // Only when dehaze is actually active does export need a transmission
+        // Only when dehaze is actually active anywhere in the document (the
+        // global op OR a visible mask layer's amount — Phase 4 Task 3, see
+        // `EditDoc::dehaze_active_anywhere`) does export need a transmission
         // source: the same CPU preview-tier selection `preview_tier_source` uses
         // (RAW: `raw_preview_source`; Standard: `preview_source`), passed as a
         // SNAPSHOT `Arc` — export builds its own bounded transmission from it on
         // the worker thread rather than sampling the live preview pipeline's
-        // texture (see `spawn_export`'s `transmission_source` doc).
-        let transmission_source = stack.dehaze().filter(|d| d.amount != 0.0).and_then(|_| {
-            v.raw_preview_source
-                .clone()
-                .or_else(|| v.preview_source.clone())
-        });
+        // texture (see `spawn_export`'s `transmission_source` doc). Widened past
+        // the old `stack.dehaze().filter(amount != 0.0)` global-only gate, which
+        // silently skipped this for a mask-only dehaze layer (global amount 0).
+        let transmission_source = stack
+            .dehaze_active_anywhere()
+            .then(|| {
+                v.raw_preview_source
+                    .clone()
+                    .or_else(|| v.preview_source.clone())
+            })
+            .flatten();
 
         // Default filename: source basename + new extension.
         let stem = source_path

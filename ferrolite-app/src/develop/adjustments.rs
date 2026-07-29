@@ -505,9 +505,9 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         set: |s, v| s.dehaze.amount = v,
         kind: ferrolite_pipeline::OpKind::Dehaze,
         global_ready: true,
-        mask_ready: false,
+        mask_ready: true,
         global_reason: "",
-        mask_reason: "Per-mask Dehaze arrives with the per-mask neighborhood passes (Phase 4)",
+        mask_reason: "",
     },
     SliderSpec {
         id: AdjustmentId("dehaze_radius"),
@@ -525,7 +525,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         global_ready: true,
         mask_ready: false,
         global_reason: "",
-        mask_reason: "Per-mask Dehaze arrives with the per-mask neighborhood passes (Phase 4)",
+        mask_reason: "Radius shapes the shared whole-image transmission — global only",
     },
 ];
 
@@ -685,8 +685,15 @@ mod tests {
             .all(|s| !s.global_ready && !s.mask_ready));
         assert!(specs
             .iter()
-            .filter(|s| s.id.0.starts_with("sharpen") || s.id.0.starts_with("dehaze"))
+            .filter(|s| s.id.0.starts_with("sharpen"))
             .all(|s| s.global_ready && !s.mask_ready));
+        // Phase 4 Task 3: per-mask dehaze AMOUNT is live (reuses the shared
+        // whole-image transmission map, blended per-layer); RADIUS stays
+        // global-only (it shapes that one shared map, not exposed per-mask).
+        let dehaze_amount = specs.iter().find(|s| s.id.0 == "dehaze_amount").unwrap();
+        assert!(dehaze_amount.global_ready && dehaze_amount.mask_ready);
+        let dehaze_radius = specs.iter().find(|s| s.id.0 == "dehaze_radius").unwrap();
+        assert!(dehaze_radius.global_ready && !dehaze_radius.mask_ready);
     }
 
     /// Registry invariant (design 2026-07-28 §6.2): every `AdjustmentId` across

@@ -150,8 +150,8 @@ impl EditPipeline {
         // full-res pass whenever both dehaze and a color-segment/mask edit are
         // active).
         let dehaze_atmos = estimate_atmospheric_light(source);
-        let transmission_params = Rc::new(Cell::new(TransmissionParams::from_op(
-            stack.dehaze(),
+        let transmission_params = Rc::new(Cell::new(TransmissionParams::from_stack(
+            &stack,
             dehaze_atmos,
         )));
         let dehaze_transmission_node = Rc::new(DehazeTransmissionNode::new(
@@ -326,14 +326,18 @@ impl EditPipeline {
             self.graph.mark_dirty(self.local_adjust_id);
         }
         *self.global_set.borrow_mut() = stack.global.clone();
-        // Phase 4 Task 2: route `radius`/`atmos` to the transmission node
-        // (dirtying it only when one of those actually changed) and
-        // `amount`/`atmos` to the Color-stage engine node's fused recovery
-        // step, independently — an amount-only change leaves the transmission
-        // MAP unchanged, so the (expensive) transmission node is NOT dirtied;
-        // the Color engine still re-runs (it now applies `amount`) because
-        // `color_dehaze_params` changed below.
-        let t = TransmissionParams::from_op(stack.dehaze(), self.dehaze_atmos);
+        // Phase 4 Task 2/3: route `radius`/`active-anywhere` to the
+        // transmission node (dirtying it only when one of those actually
+        // changed) and `amount`/`atmos` to the Color-stage engine node's fused
+        // recovery step, independently — an amount-only change (global OR
+        // per-mask) leaves the transmission MAP unchanged, so the (expensive)
+        // transmission node is NOT dirtied; the Color engine still re-runs
+        // (it now applies `amount`) because `color_dehaze_params` changed
+        // below (global) or the layers diff changed below (per-mask).
+        // `TransmissionParams::from_stack` widens `active` past the global-
+        // only `dehaze()` gate — see `EditDoc::dehaze_active_anywhere` — so a
+        // mask-only dehaze layer still gets a computed transmission map.
+        let t = TransmissionParams::from_stack(&stack, self.dehaze_atmos);
         if t != self.transmission_params.get() {
             self.transmission_params.set(t);
             self.graph.mark_dirty(self.dehaze_transmission_id);
@@ -817,8 +821,9 @@ mod edit_pipeline_tests {
     /// contrast) keep changing on every `set_stack`. Before this fix,
     /// `TransmissionParams` had no way to know dehaze was off, so ANY upstream
     /// change (which reaches this node only via the graph's dirty-propagation,
-    /// but `set_stack` also re-seeds `TransmissionParams` from `stack.dehaze()`
-    /// every call) looked identical to "dehaze just got enabled" and re-ran the
+    /// but `set_stack` also re-seeds `TransmissionParams` from the stack's
+    /// dehaze-active state every call) looked identical to "dehaze just got
+    /// enabled" and re-ran the
     /// full guided filter for nothing.
     #[test]
     fn no_dehaze_op_skips_transmission_passes() {
@@ -888,6 +893,61 @@ mod edit_pipeline_tests {
         ep.set_stack(stack);
         let _ = ep.evaluate();
         assert!(ep.transmission_texture().is_some());
+    }
+
+    /// Phase 4 Task 3: a MASK-ONLY dehaze layer (global `Dehaze` op absent, so
+    /// `stack.dehaze()` is `None`) must still get the shared whole-image
+    /// transmission computed — the wiring concern the task brief called out
+    /// explicitly: `TransmissionParams` used to gate purely on the global op,
+    /// so a mask-only dehaze amount would have silently never triggered the
+    /// transmission node, leaving the per-mask recovery step permanently
+    /// identity (no transmission bound). Constructed via `set_op` (not
+    /// `EditPipeline::new`) so the doc's default global radius still governs
+    /// (see `EditDoc::dehaze_active_anywhere` / `TransmissionParams::from_stack`).
+    #[test]
+    fn mask_only_dehaze_still_computes_transmission() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = LinearRgbaF32::new(32, 24, vec![0.5; 32 * 24 * 4]).unwrap();
+
+        let la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: AdjustmentSet {
+                    dehaze: crate::op::Dehaze {
+                        amount: 0.4,
+                        radius: 8,
+                    },
+                    ..Default::default()
+                },
+            }],
+        };
+        let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+        assert!(
+            stack.dehaze().is_none(),
+            "sanity: no GLOBAL dehaze op is present"
+        );
+        assert!(
+            stack.dehaze_active_anywhere(),
+            "sanity: the mask layer's dehaze amount activates the doc-wide gate"
+        );
+
+        let mut ep = EditPipeline::new(ctx, &src, stack, IDENTITY);
+        let _ = ep.evaluate();
+        assert_eq!(
+            ep.transmission_rebuild_count(),
+            1,
+            "a mask-only dehaze layer must compute the transmission map"
+        );
+        assert!(
+            ep.transmission_texture().is_some(),
+            "a mask-only dehaze layer must yield a bound transmission texture"
+        );
     }
 
     /// ST-Task 2 review fix (round 1), still exercised post-Phase-4-Task-2: a

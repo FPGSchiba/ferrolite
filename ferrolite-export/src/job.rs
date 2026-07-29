@@ -47,8 +47,10 @@ pub struct ExportRequest<'a> {
     /// samples the live preview `EditPipeline`'s transmission texture directly —
     /// export runs in a background job while the user may keep editing, and that
     /// texture's contents get overwritten on the next preview evaluate (a race).
-    /// `None` when the stack has no active dehaze (or no preview source has
-    /// decoded yet); the tiled recovery then stays a passthrough.
+    /// `None` when the stack has no active dehaze anywhere — global op OR any
+    /// visible mask layer's amount (Phase 4 Task 3, see
+    /// `EditDoc::dehaze_active_anywhere`) — or no preview source has decoded
+    /// yet; the tiled recovery then stays a passthrough.
     pub transmission_source: Option<&'a LinearRgbaF32>,
 }
 

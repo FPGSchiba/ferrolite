@@ -50,7 +50,6 @@ use crate::dehaze::{
     DEHAZE_GUIDED_EPS, DEHAZE_OMEGA,
 };
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
-use crate::op::Dehaze;
 use crate::MAX_DEHAZE_RADIUS;
 
 /// Single-channel intermediate plane format used by every transmission pass.
@@ -86,17 +85,19 @@ const _: () = assert!(std::mem::size_of::<PassUniform>().is_multiple_of(16));
 
 /// Public params for `DehazeTransmissionNode`, read from a shared `Cell` each
 /// `evaluate` (mirrors `PointOpNode`'s `Rc<Cell<U>>` pattern). `radius` is the
-/// block-min patch radius (`Dehaze::radius`, UNCLAMPED — the node defensively
-/// clamps to `MAX_DEHAZE_RADIUS` before use, since a prior review noted the
-/// pure `transmission_map`/its loops don't self-clamp). `atmos` is `[r,g,b,pad]`
-/// (floored to `DEHAZE_ATMOS_MIN` by `from_op`). `omega`/`eps` mirror
-/// `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`. `active` is 1 when a `Dehaze` op with
-/// non-zero `amount` is present, else 0 — see `from_op` and
-/// `DehazeTransmissionNode::evaluate`'s early-return gate. CRITICAL: `active`
-/// deliberately does NOT carry the `amount` magnitude — it only flips on the
-/// zero<->nonzero transition, so an amount-only drag (0.5 -> 0.9) leaves this
-/// whole struct unchanged and `EditPipeline::set_stack` does not dirty this
-/// node (see `amount_change_does_not_recompute_transmission`).
+/// GLOBAL op's block-min patch radius (`Dehaze::radius`, UNCLAMPED — the node
+/// defensively clamps to `MAX_DEHAZE_RADIUS` before use, since a prior review
+/// noted the pure `transmission_map`/its loops don't self-clamp). `atmos` is
+/// `[r,g,b,pad]` (floored to `DEHAZE_ATMOS_MIN` by `from_stack`). `omega`/`eps`
+/// mirror `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`. `active` is 1 when dehaze is
+/// active ANYWHERE in the document (global op OR any visible mask layer's
+/// amount — Phase 4 Task 3, see `EditDoc::dehaze_active_anywhere`), else 0 —
+/// see `from_stack` and `DehazeTransmissionNode::evaluate`'s early-return
+/// gate. CRITICAL: `active` deliberately does NOT carry any amount's
+/// magnitude — it only flips on the zero<->nonzero transition, so an
+/// amount-only drag (0.5 -> 0.9, global or per-mask) leaves this whole struct
+/// unchanged and `EditPipeline::set_stack` does not dirty this node (see
+/// `amount_change_does_not_recompute_transmission`).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct TransmissionParams {
@@ -115,17 +116,24 @@ const _: () = assert!(std::mem::size_of::<TransmissionParams>() == 32);
 const _: () = assert!(std::mem::size_of::<TransmissionParams>().is_multiple_of(16));
 
 impl TransmissionParams {
-    /// Seed from the op's `radius`/`amount` and the whole-image atmospheric
-    /// light (QS-Task 4). `radius`/`atmos` are independent of `amount` —
-    /// `EditPipeline::set_stack` only rebuilds these (and dirties
+    /// Seed from the FULL document (Phase 4 Task 3) — not just the global
+    /// `Dehaze` op — since per-mask dehaze amounts share this ONE whole-image
+    /// transmission map too: `active` is true when the global op is active OR
+    /// any visible mask layer's `dehaze.amount != 0.0` (see
+    /// `EditDoc::dehaze_active_anywhere`), so the map is computed even when
+    /// the global amount is 0. `radius` always comes from the GLOBAL op's
+    /// radius field — per-mask radius is not exposed; every layer recovers
+    /// from the SAME shared map — and `AdjustmentSet`'s `Dehaze::default()`
+    /// already carries `DEHAZE_DEFAULT_RADIUS`, so a stack with no global op
+    /// (or one whose amount is 0) still seeds a sane default radius rather
+    /// than 0. `radius`/`atmos` are independent of `active`'s magnitude
+    /// (QS-Task 4): `EditPipeline::set_stack` only rebuilds these (and dirties
     /// `DehazeTransmissionNode`) when `radius`, `atmos`, or the active
     /// zero<->nonzero transition actually changes, so an amount-magnitude-only
-    /// drag never re-seeds (and never dirties) this node.
-    pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
-        let radius = op.map(|d| d.radius).unwrap_or(0) as i32;
-        let active = u32::from(op.is_some_and(|d| d.amount != 0.0));
+    /// drag (global OR per-mask) never re-seeds (and never dirties) this node.
+    pub(crate) fn from_stack(stack: &crate::op::OpStack, atmos: [f32; 3]) -> Self {
         Self {
-            radius,
+            radius: stack.global.dehaze.radius as i32,
             atmos: [
                 atmos[0].max(DEHAZE_ATMOS_MIN),
                 atmos[1].max(DEHAZE_ATMOS_MIN),
@@ -134,7 +142,7 @@ impl TransmissionParams {
             ],
             omega: DEHAZE_OMEGA,
             eps: DEHAZE_GUIDED_EPS,
-            active,
+            active: u32::from(stack.dehaze_active_anywhere()),
         }
     }
 }

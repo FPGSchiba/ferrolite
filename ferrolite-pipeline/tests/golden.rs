@@ -4,10 +4,10 @@ use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_pipeline::{
     blit_to_rgba8, dehaze_recover, estimate_atmospheric_light, transmission_mip_level_count,
-    transmission_working_dims, upload_source, Aspect, ColorGrade, Contrast, CropRect, CurveMode,
-    Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, Op,
-    OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve, WhiteBalance,
-    DEHAZE_DEFAULT_RADIUS,
+    transmission_working_dims, upload_source, AdjustmentSet, Aspect, ColorGrade, Contrast,
+    CropRect, CurveMode, Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel,
+    Hsl, HslBand, LocalAdjustments, MaskLayer, Op, OpStack, ParametricCurve, PointCurve, Sharpen,
+    TileEditPipeline, ToneCurve, WhiteBalance, DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -693,6 +693,110 @@ fn dehaze_tiled_matches_whole_image() {
     assert!(
         max_diff <= SEAM_TOL,
         "per-tile dehaze diverged from whole-image (diff {max_diff}) at {max_loc:?} — shared transmission wiring broken?"
+    );
+}
+
+// Phase 4 Task 3: the SAME tile-vs-whole-image parity as
+// `dehaze_tiled_matches_whole_image` above, but for a MASK-LAYER dehaze
+// amount with NO global `Dehaze` op (so `stack.dehaze()` is `None` — only
+// `EditDoc::dehaze_active_anywhere()` is true, via the layer). Proves the
+// full chain end-to-end at the tiled tier: the transmission is computed
+// (Task 3's pipeline.rs wiring fix), handed to the tile producer via the
+// SAME `set_shared_transmission` call the global case uses, and the
+// per-mask-layer dispatch (Task 3's `local_node.rs`/`local_adjust.wgsl`
+// change) actually consumes it identically to the whole-image tier. Uses a
+// FULL mask (`MaskDefinition::default()`, coverage 1.0 everywhere) so the
+// comparison isolates the shared-transmission wiring, not partial-mask
+// blending (covered separately by `local_node.rs`'s
+// `mask_layer_dehaze_amount_changes_only_masked_pixels`).
+#[test]
+fn mask_only_dehaze_tiled_matches_whole_image() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Same seam-sensitive sawtooth-ripple fixture as `dehaze_tiled_matches_whole_image`
+    // (see that test's doc for why: a flat/simple gradient's dark channel is
+    // insensitive to a broken shared-transmission wiring).
+    let (iw, ih) = (480u32, 256u32);
+    let src = {
+        let mut px = Vec::with_capacity((iw * ih * 4) as usize);
+        for _y in 0..ih {
+            for x in 0..iw {
+                let r = (x % 16) as f32 / 16.0 * 0.8;
+                px.extend_from_slice(&[r, 0.9, 0.9, 1.0]);
+            }
+        }
+        LinearRgbaF32::new(iw, ih, px).expect("dehaze seam fixture length")
+    };
+    let radius = 12u32;
+    let amount = 2.0f32; // aggressive, mirrors the global test's sensitivity rationale
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "dehaze-mask".into(),
+            visible: true,
+            mask: ferrolite_mask::MaskDefinition::default(), // full coverage
+            adjustments: AdjustmentSet {
+                dehaze: Dehaze { amount, radius },
+                ..Default::default()
+            },
+        }],
+    };
+    let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+    assert!(stack.dehaze().is_none(), "sanity: no global Dehaze op");
+    assert!(
+        stack.dehaze_active_anywhere(),
+        "sanity: the mask layer's amount activates the doc-wide gate"
+    );
+    let atmos = estimate_atmospheric_light(&src);
+
+    let mut whole = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+    let shared_transmission = whole.transmission_texture();
+    assert!(
+        shared_transmission.is_some(),
+        "a mask-only dehaze layer must still yield a shared transmission texture"
+    );
+
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    tep.set_dehaze_atmos(atmos);
+    tep.set_shared_transmission(shared_transmission);
+
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let mut max_diff = 0.0f32;
+    let mut max_loc = (0u32, 0u32, 0usize);
+    for tx in 0..2u32 {
+        let tile = tep.produce_tile(TileCoord {
+            lod: 0,
+            x: tx,
+            y: 0,
+        });
+        let tile_lin = common::read_tile_linear(&ctx, &tile);
+        for ly in 0..TILE_SIZE {
+            for lx in 0..TILE_SIZE {
+                let gx = tx * TILE_SIZE + lx;
+                let gy = ly;
+                if gx >= iw || gy >= ih {
+                    continue;
+                }
+                let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
+                let wi = ((gy * iw + gx) * 4) as usize;
+                for c in 0..3 {
+                    let d = (tile_lin[ti + c] - whole_lin[wi + c]).abs();
+                    if d > max_diff {
+                        max_diff = d;
+                        max_loc = (gx, gy, c);
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("mask-only dehaze tile-seam max linear diff = {max_diff} at {max_loc:?}");
+    assert!(
+        max_diff <= SEAM_TOL,
+        "per-tile mask-only dehaze diverged from whole-image (diff {max_diff}) at {max_loc:?}"
     );
 }
 

@@ -546,6 +546,23 @@ impl EditDoc {
     pub fn dehaze(&self) -> Option<Dehaze> {
         (!self.global.dehaze.is_identity()).then_some(self.global.dehaze)
     }
+    /// True when dehaze recovery is active ANYWHERE in the document: the
+    /// global `Dehaze` op, or any VISIBLE mask layer's `dehaze.amount`
+    /// (Phase 4 Task 3 — per-mask dehaze reuses the shared whole-image
+    /// transmission map). Callers that used to gate a dehaze-dependent action
+    /// on `self.dehaze().is_some()` alone (transmission-map computation,
+    /// export's transmission-source selection) must widen to this instead —
+    /// otherwise a mask-only dehaze layer (global amount 0, so `dehaze()`
+    /// returns `None`) silently gets no transmission to recover from. A
+    /// hidden layer never counts, mirroring `LocalAdjustments::is_identity`'s
+    /// `visible_layers()` filter.
+    pub fn dehaze_active_anywhere(&self) -> bool {
+        self.dehaze().is_some()
+            || self
+                .layers
+                .iter()
+                .any(|l| l.visible && l.adjustments.dehaze.amount != 0.0)
+    }
     pub fn tone_curve(&self) -> Option<ToneCurve> {
         (!self.global.tone_curve.is_identity()).then(|| self.global.tone_curve.clone())
     }
@@ -1173,6 +1190,72 @@ mod tests {
         );
         assert_eq!(d.contrast(), Some(Contrast { amount: 0.1 }));
         assert!(d.tone_curve().is_some());
+    }
+
+    /// Phase 4 Task 3 (TDD Step 1): `dehaze_active_anywhere` must widen past
+    /// the global-only `dehaze()` gate — a mask-only dehaze layer (global
+    /// amount 0) still needs the shared transmission map computed.
+    #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
+    #[allow(clippy::field_reassign_with_default)]
+    fn dehaze_active_anywhere_covers_global_and_mask_layers() {
+        use ferrolite_mask::MaskDefinition;
+
+        // Nothing active anywhere.
+        assert!(!EditDoc::default().dehaze_active_anywhere());
+
+        // Global dehaze active, no layers.
+        let global_active = EditDoc::default().set_op(Op::Dehaze(Dehaze {
+            amount: 0.5,
+            radius: 8,
+        }));
+        assert!(global_active.dehaze_active_anywhere());
+
+        // A VISIBLE mask layer with a non-zero dehaze amount, global amount 0.
+        let mut layer_adjustments = AdjustmentSet::default();
+        layer_adjustments.dehaze.amount = 0.3;
+        let mask_active = EditDoc::default().set_op(Op::LocalAdjustments(LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: layer_adjustments.clone(),
+            }],
+        }));
+        assert!(
+            mask_active.dehaze_active_anywhere(),
+            "a visible mask layer's non-zero dehaze amount alone must activate the gate"
+        );
+
+        // Same layer, but HIDDEN: must not count.
+        let mask_hidden = EditDoc::default().set_op(Op::LocalAdjustments(LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: false,
+                mask: MaskDefinition::default(),
+                adjustments: layer_adjustments,
+            }],
+        }));
+        assert!(
+            !mask_hidden.dehaze_active_anywhere(),
+            "a hidden layer's dehaze amount must not activate the gate"
+        );
+
+        // A layer with a zero dehaze amount (but other adjustments) does not
+        // activate the gate on its own.
+        let mask_inert = EditDoc::default().set_op(Op::LocalAdjustments(LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "m".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: AdjustmentSet {
+                    exposure: 0.4,
+                    ..Default::default()
+                },
+            }],
+        }));
+        assert!(!mask_inert.dehaze_active_anywhere());
     }
 
     #[test]

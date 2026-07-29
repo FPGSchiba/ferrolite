@@ -651,6 +651,32 @@ impl LocalAdjustmentsNode {
         self.ctx.queue.submit([enc.finish()]);
         dst
     }
+
+    /// Overwrite `u`'s dehaze fields for a dispatch with the fused recovery
+    /// step active, from THIS node's shared geometry/frame (mirrors the
+    /// retired `DehazeRecoveryNode`'s per-dispatch uniform fill). Phase 4
+    /// Task 3: shared by BOTH the global Color-stage pseudo-layer dispatch
+    /// (`evaluate_color`'s first `apply`) and a per-mask-layer dispatch (the
+    /// layer loop below) — the two differ only in WHICH `amount` drives the
+    /// step (the global op's vs. `layer.adjustments.dehaze.amount`) and
+    /// nothing else: geometry, frame, and atmospheric light are whole-image
+    /// properties shared by every dispatch, never per-layer. Callers must
+    /// gate on `amount != 0.0 && self.dehaze_has_transmission.get()`
+    /// themselves before calling this — it unconditionally overwrites.
+    fn fill_dehaze_uniform(&self, u: &mut LocalAdjustUniform, amount: f32, atmos: [f32; 4]) {
+        let geo = self.dehaze_geometry.get();
+        let frame = self.dehaze_frame.get();
+        u.dehaze_amount_atmos = [amount, atmos[0], atmos[1], atmos[2]];
+        u.dehaze_geo_m = geo.m;
+        u.dehaze_geo_off_src_dims = [geo.off[0], geo.off[1], geo.src_dims[0], geo.src_dims[1]];
+        u.dehaze_frame = [
+            frame.origin[0],
+            frame.origin[1],
+            frame.full_dims[0],
+            frame.full_dims[1],
+        ];
+        u.dehaze_out_dims_flags = [geo.out_dims[0], geo.out_dims[1], 1.0, 0.0];
+    }
 }
 
 impl Node<PipelineImage> for LocalAdjustmentsNode {
@@ -695,6 +721,11 @@ impl LocalAdjustmentsNode {
     /// those ops run INSIDE this node as the pseudo-layer dispatch below,
     /// reproducing that same content means sampling `current` after it runs,
     /// not the node's now-pre-color-segment `input`.
+    ///
+    /// **Phase 4 Task 3:** the per-mask-layer loop's `apply` call ALSO gets
+    /// the fused dehaze recovery step as the first part of its `adjust()`,
+    /// driven by that layer's own `adjustments.dehaze.amount` (not the global
+    /// op) — see the loop body + `fill_dehaze_uniform`'s doc.
     fn evaluate_color(&self, input: &PipelineImage) -> PipelineImage {
         let global_seg = self.global_set.borrow().color_segment();
         let layers = self.layers.borrow();
@@ -718,24 +749,7 @@ impl LocalAdjustmentsNode {
         if !global_seg.is_identity() || dehaze_active {
             let mut u = local_adjust_uniform(&global_seg, true, true);
             if dehaze_active {
-                let geo = self.dehaze_geometry.get();
-                let frame = self.dehaze_frame.get();
-                u.dehaze_amount_atmos = [
-                    dehaze.amount,
-                    dehaze.atmos[0],
-                    dehaze.atmos[1],
-                    dehaze.atmos[2],
-                ];
-                u.dehaze_geo_m = geo.m;
-                u.dehaze_geo_off_src_dims =
-                    [geo.off[0], geo.off[1], geo.src_dims[0], geo.src_dims[1]];
-                u.dehaze_frame = [
-                    frame.origin[0],
-                    frame.origin[1],
-                    frame.full_dims[0],
-                    frame.full_dims[1],
-                ];
-                u.dehaze_out_dims_flags = [geo.out_dims[0], geo.out_dims[1], 1.0, 0.0];
+                self.fill_dehaze_uniform(&mut u, dehaze.amount, dehaze.atmos);
             }
             let lut = local_layer_lut(&global_seg);
             current = self.apply(&current, &self.full_coverage_mask, u, &lut);
@@ -817,7 +831,22 @@ impl LocalAdjustmentsNode {
         };
 
         for (layer, mask) in layers.visible_layers().zip(masks.iter()) {
-            let u = local_adjust_uniform(&layer.adjustments, false, false);
+            let mut u = local_adjust_uniform(&layer.adjustments, false, false);
+            // Phase 4 Task 3: per-mask dehaze recovery, driven by THIS layer's
+            // own `dehaze.amount` (per-mask radius is not exposed — every
+            // layer recovers from the SAME shared whole-image transmission
+            // map/atmos as the global pseudo-layer, reused via
+            // `self.dehaze_params.get().atmos`). Gated exactly like the
+            // pseudo-layer dispatch above (`amount != 0.0 &&
+            // dehaze_has_transmission`), so a layer with a zero (identity)
+            // dehaze amount — every existing fixture — takes NONE of this and
+            // keeps `u`'s dehaze fields at `local_adjust_uniform`'s all-zero
+            // default, i.e. bit-identical to pre-Task-3 output.
+            let layer_amount = layer.adjustments.dehaze.amount;
+            if layer_amount != 0.0 && self.dehaze_has_transmission.get() {
+                let atmos = self.dehaze_params.get().atmos;
+                self.fill_dehaze_uniform(&mut u, layer_amount, atmos);
+            }
             let lut = local_layer_lut(&layer.adjustments);
             current = self.apply(&current, mask, u, &lut);
         }
@@ -836,9 +865,9 @@ mod tests {
     use super::*;
     use crate::local::{AdjustmentSet, MaskLayer};
     use crate::nodes::upload_source;
-    use crate::op::{ColorGrade, GradeWheel, Hsl, ToneCurve};
+    use crate::op::{ColorGrade, Dehaze, GradeWheel, Hsl, ToneCurve};
     use ferrolite_image::LinearRgbaF32;
-    use ferrolite_mask::MaskDefinition;
+    use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Vec2 as MVec2};
 
     /// Tiny 8x8 display-linear gradient source, uploaded to a GPU texture.
     fn gradient_source(ctx: &GpuContext) -> PipelineImage {
@@ -1495,5 +1524,245 @@ mod tests {
             Arc::ptr_eq(&out.texture, &src.texture),
             "amount == 0.0 must add zero dispatches even with a real transmission bound"
         );
+    }
+
+    /// Pure-Rust CPU reference for `linear_gradient.wgsl`'s analytic mask
+    /// formula (whole-image path: `uv_scale = [1,1]`, `uv_offset = [0,0]`),
+    /// used to compute the EXACT per-pixel mask value the GPU compositor
+    /// produces for a `MaskComponent::LinearGradient` — needed to build a
+    /// correct expected buffer for a PARTIALLY-masked layer (every other
+    /// dehaze parity test in this module uses a full, all-ones mask, so it
+    /// never needed this).
+    fn linear_gradient_mask_value(
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        start: (f32, f32),
+        end: (f32, f32),
+    ) -> f32 {
+        let uv = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+        let axis = (end.0 - start.0, end.1 - start.1);
+        let len2 = axis.0 * axis.0 + axis.1 * axis.1;
+        if len2 <= 1e-12 {
+            return 0.0;
+        }
+        let dot = (uv.0 - start.0) * axis.0 + (uv.1 - start.1) * axis.1;
+        (dot / len2).clamp(0.0, 1.0)
+    }
+
+    /// Phase 4 Task 3 Step 1 (TDD): a mask layer with a non-zero
+    /// `dehaze.amount` over a synthetic (constant) transmission changes ONLY
+    /// pixels the mask actually covers. `start`/`end` are chosen so columns
+    /// x=0..3 get an EXACT 0.0 mask (unmasked — must be bit-identical to the
+    /// layer's input) and x=4..7 get a partial (non-zero, non-one) mask
+    /// (masked — must match the CPU reference, mask-order, blended by that
+    /// exact mask value). The transmission is a spatially-CONSTANT `q`
+    /// (sidesteps the LOD-independent sampling's own bilinear-blend math,
+    /// already covered by `radius_change_propagates_to_recovered_output` at
+    /// the pipeline level), isolating the per-mask WIRING under test: uniform
+    /// fill (`fill_dehaze_uniform`) + the shader's existing mix-by-mask.
+    #[test]
+    fn mask_layer_dehaze_amount_changes_only_masked_pixels() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+        let (w, h) = (src.width, src.height);
+
+        let q = 0.6f32;
+        let mut trans_px = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            trans_px.extend_from_slice(&[q, q, q, 1.0]);
+        }
+        let trans_img = LinearRgbaF32::new(w, h, trans_px).expect("transmission fixture");
+        let gpu_trans = upload_source(&ctx, &trans_img);
+
+        let atmos = [0.9f32, 0.9, 0.9];
+        let amount = 0.5f32;
+        // uv.x < 0.5 (columns 0..3) clamps to exactly 0.0; uv.x in (0.5, 1.0)
+        // (columns 4..7) gives a partial, non-clamped value — end.x = 1.5 is
+        // past the image's uv range, so no column reaches an exact 1.0 either.
+        let (start, end) = ((0.5, 0.5), (1.5, 0.5));
+        let layer_adjustments = AdjustmentSet {
+            dehaze: Dehaze { amount, radius: 8 },
+            ..Default::default()
+        };
+        let la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "dehaze-mask".into(),
+                visible: true,
+                mask: MaskDefinition {
+                    components: vec![(
+                        MaskComponent::LinearGradient {
+                            start: MVec2::new(start.0, start.1),
+                            end: MVec2::new(end.0, end.1),
+                        },
+                        CompositeMode::Add,
+                    )],
+                    invert: false,
+                },
+                adjustments: layer_adjustments.clone(),
+            }],
+        };
+        let dehaze_params = Rc::new(Cell::new(ColorDehazeParams {
+            amount: 0.0, // global dehaze inactive — only the LAYER's amount drives this
+            atmos: [atmos[0], atmos[1], atmos[2], 0.0],
+        }));
+        let dehaze_frame = Rc::new(Cell::new(TileFrame {
+            origin: [0.0, 0.0],
+            full_dims: [w as f32, h as f32],
+        }));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(la)),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
+        );
+        let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
+        node.set_geometry(identity_geo);
+        node.set_shared_transmission(Some(gpu_trans.texture.clone()));
+
+        let out = node.evaluate(&[&src]);
+        let out_px = read_pixels(&ctx, &out);
+
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 4) as usize;
+                let rgb = [x as f32 / w as f32, y as f32 / h as f32, 0.25];
+                let m = linear_gradient_mask_value(x, y, w, h, start, end);
+                if m == 0.0 {
+                    for c in 0..3 {
+                        assert!(
+                            (out_px[idx + c] - rgb[c]).abs() < 1e-5,
+                            "unmasked pixel ({x},{y}) channel {c}: got {}, want bit-identical \
+                             input {}",
+                            out_px[idx + c],
+                            rgb[c]
+                        );
+                    }
+                } else {
+                    let adjusted = crate::uniforms::light_color_apply_with_dehaze(
+                        rgb,
+                        &layer_adjustments,
+                        false,
+                        Some((amount, atmos, q)),
+                    );
+                    let want = [
+                        rgb[0] + (adjusted[0] - rgb[0]) * m,
+                        rgb[1] + (adjusted[1] - rgb[1]) * m,
+                        rgb[2] + (adjusted[2] - rgb[2]) * m,
+                    ];
+                    for c in 0..3 {
+                        assert!(
+                            (out_px[idx + c] - want[c]).abs() < 5e-3,
+                            "masked pixel ({x},{y}) channel {c}: got {}, want {}",
+                            out_px[idx + c],
+                            want[c]
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Phase 4 Task 3: the SAME partially-masked layer as above but with the
+    /// layer's `dehaze.amount` at identity (0.0) — even with a real shared
+    /// transmission bound — must reproduce the plain (no-dehaze) CPU
+    /// reference `light_color_apply` exactly (mask order), proving the
+    /// per-layer gate (`layer_amount != 0.0 && dehaze_has_transmission`) keeps
+    /// a zero-amount layer's uniform byte-identical to pre-Task-3, i.e. the
+    /// bound transmission never leaks into an inactive layer's output.
+    #[test]
+    fn mask_layer_zero_dehaze_amount_ignores_bound_transmission() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let src = gradient_source(&ctx);
+        let (w, h) = (src.width, src.height);
+
+        let mut trans_px = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..(w * h) {
+            trans_px.extend_from_slice(&[0.6f32, 0.6, 0.6, 1.0]);
+        }
+        let trans_img = LinearRgbaF32::new(w, h, trans_px).expect("transmission fixture");
+        let gpu_trans = upload_source(&ctx, &trans_img);
+
+        let (start, end) = ((0.5, 0.5), (1.5, 0.5));
+        let layer_adjustments = AdjustmentSet {
+            exposure: 0.2,
+            dehaze: Dehaze {
+                amount: 0.0,
+                radius: 8,
+            },
+            ..Default::default()
+        };
+        let la = LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "dehaze-mask-inactive".into(),
+                visible: true,
+                mask: MaskDefinition {
+                    components: vec![(
+                        MaskComponent::LinearGradient {
+                            start: MVec2::new(start.0, start.1),
+                            end: MVec2::new(end.0, end.1),
+                        },
+                        CompositeMode::Add,
+                    )],
+                    invert: false,
+                },
+                adjustments: layer_adjustments.clone(),
+            }],
+        };
+        let dehaze_params = Rc::new(Cell::new(ColorDehazeParams {
+            amount: 0.0,
+            atmos: [0.9, 0.9, 0.9, 0.0],
+        }));
+        let dehaze_frame = Rc::new(Cell::new(TileFrame {
+            origin: [0.0, 0.0],
+            full_dims: [w as f32, h as f32],
+        }));
+        let node = LocalAdjustmentsNode::new_engine(
+            ctx.clone(),
+            Rc::new(RefCell::new(la)),
+            EngineStage::Color,
+            Rc::new(RefCell::new(AdjustmentSet::default())),
+            dehaze_params,
+            dehaze_frame,
+        );
+        let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
+        node.set_geometry(identity_geo);
+        node.set_shared_transmission(Some(gpu_trans.texture.clone()));
+
+        let out = node.evaluate(&[&src]);
+        let out_px = read_pixels(&ctx, &out);
+
+        for y in 0..h {
+            for x in 0..w {
+                let idx = ((y * w + x) * 4) as usize;
+                let rgb = [x as f32 / w as f32, y as f32 / h as f32, 0.25];
+                let m = linear_gradient_mask_value(x, y, w, h, start, end);
+                let adjusted = crate::uniforms::light_color_apply(rgb, &layer_adjustments, false);
+                let want = [
+                    rgb[0] + (adjusted[0] - rgb[0]) * m,
+                    rgb[1] + (adjusted[1] - rgb[1]) * m,
+                    rgb[2] + (adjusted[2] - rgb[2]) * m,
+                ];
+                for c in 0..3 {
+                    assert!(
+                        (out_px[idx + c] - want[c]).abs() < 5e-3,
+                        "pixel ({x},{y}) channel {c}: got {}, want {}",
+                        out_px[idx + c],
+                        want[c]
+                    );
+                }
+            }
+        }
     }
 }

@@ -26,10 +26,11 @@ struct P {
     // force full coverage (skip the mask sample entirely, m = 1.0); z =
     // vibrance amount (0 = identity); w = pad.
     order_and_coverage: vec4<f32>,
-    // Phase 4 Task 2: dehaze recovery fused as the FIRST step of `adjust()`,
+    // Phase 4 Task 2/3: dehaze recovery fused as the FIRST step of `adjust()`,
     // ported EXACTLY from the retired `DehazeRecoveryNode`'s
     // `dehaze_recovery.wgsl`. Zero (identity) at every call site except the
-    // global Color-stage pseudo-layer's own dispatch — see
+    // global Color-stage pseudo-layer's own dispatch (Task 2) and a per-mask
+    // layer whose OWN `dehaze.amount != 0.0` (Task 3) — see
     // `dehaze_recover_step`'s doc.
     dehaze_amount_atmos: vec4<f32>,   // x = amount, yzw = atmos
     dehaze_geo_m: vec4<f32>,          // row-major 2x2 output->source mapping
@@ -175,15 +176,16 @@ fn grade_apply(c: vec3<f32>) -> vec3<f32> {
     return c + tint + vec3<f32>(lum);
 }
 
-// Phase 4 Task 2: dehaze recovery, ported EXACTLY from the retired
+// Phase 4 Task 2/3: dehaze recovery, ported EXACTLY from the retired
 // `DehazeRecoveryNode`'s `dehaze_recovery.wgsl` (source-UV mapping incl. the
 // LOD-independent `frame_origin`/`full_dims` normalization, the mip-aware
 // transmission LOD pick, and the `t0` floor). Identity when `dehaze_amount_atmos.x
-// == 0.0` (no active Dehaze op) or `has_transmission == 0.0` (the node's 1x1
-// neutral fallback is bound — no real transmission computed/bound yet), so
-// every non-global-pseudo-layer dispatch (Light stage, per-mask layers, whose
-// uniform never has these fields populated — see `LocalAdjustUniform`'s doc)
-// takes this cheap early-out and pays for nothing beyond the branch.
+// == 0.0` (no active Dehaze op for THIS dispatch — the global pseudo-layer's
+// op or a mask layer's own `dehaze.amount`) or `has_transmission == 0.0` (the
+// node's 1x1 neutral fallback is bound — no real transmission computed/bound
+// yet), so the Light stage (never populates these fields) and any mask layer
+// with a zero (identity) dehaze amount take this cheap early-out and pay for
+// nothing beyond the branch.
 fn dehaze_recover_step(rgb: vec3<f32>, xy: vec2<i32>) -> vec3<f32> {
     let amount = p.dehaze_amount_atmos.x;
     let has_transmission = p.dehaze_out_dims_flags.z;

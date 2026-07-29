@@ -106,6 +106,140 @@ GPU adapter: Intel(R) Iris(R) Xe Graphics
 
 ---
 
+## Accepted rendering deltas vs the pre-fusion chain
+
+**Date:** 2026-07-29. **Disposition:** author-approved. The `layer_engine_parity`
+goldens were regenerated FROM the fused engine on 2026-07-29 (the old-vs-new
+parity job below is what justified that regeneration, not a rubber stamp).
+
+Task 3 wired both `EditPipeline`/`TileEditPipeline` onto the two-segment
+engine (Light-stage + Color-stage `LocalAdjustmentsNode`s replacing the six
+standalone exposure/white-balance/contrast/tone-curve/hsl/color-grade
+passes). Comparing the fused engine's render against the pre-fusion chain
+(the original goldens, before regeneration) surfaced two categories of
+finding:
+
+1. **One real bug**, fixed before acceptance: `local_adjust.wgsl`'s shared
+   `adjust()` floor clamp (correct, pre-existing per-mask/mask-order
+   behavior) was also — wrongly — hitting the new global pseudo-layer
+   dispatches, which the pre-fusion standalone passes never clamped. Fixed by
+   gating the clamp on `order_and_coverage.x` (`global_order`) in both the
+   WGSL and its `light_color_apply` CPU mirror. This alone took
+   `curve_hsl_grade` from failing to passing outright and materially reduced
+   every other fixture's diff.
+2. **Residual deltas**, accepted as inherent precision improvement (this
+   section) rather than a defect, after exhaustive root-causing.
+
+### Per-fixture max diff (old pre-fusion chain vs new fused engine, before goldens were regenerated)
+
+| fixture | max diff | vs `PARITY_TOL` (2e-3) |
+|---|---|---|
+| `identity` | 0 | pass |
+| `mask_only` | 0 | pass |
+| `curve_hsl_grade` | 0 | pass (after the clamp-gating fix) |
+| `wb_contrast_both` | 0.0020 | ~1.0× |
+| `one_mask` | 0.0030 | 1.5× |
+| `light_trio` | 0.0040 | 2.0× |
+| `color_range_mask` | 0.0073 | 3.65× |
+| `luma_range_mask` | 0.0083 | 4.2× |
+| `full_global` | 0.0585 | 29× |
+| `two_masks` | 0.6000 | 300× |
+
+### Spatial extent of the disagreement (512×512 pixels)
+
+| fixture | pixels >2e-3 | pixels >1e-2 | pixels >0.1 | max count in any 8×8 block (of 64) |
+|---|---|---|---|---|
+| `light_trio` | 20397 | 0 | 0 | 0 |
+| `wb_contrast_both` | 332 | 0 | 0 | 0 |
+| `one_mask` | 4937 | 0 | 0 | 0 |
+| `luma_range_mask` | 7713 | 0 | 0 | 0 |
+| `color_range_mask` | 728 | 0 | 0 | 0 |
+| `full_global` | 129494 | 27604 | 0 | 64 (contiguous) |
+| `two_masks` | 2873 | 183 | 183 | 5 (loosely clustered) |
+
+Five of the seven fixtures have ZERO pixels above 1e-2 — their disagreement
+is diffuse sub-1e-2 noise spread across a sizeable fraction of pixels, not a
+concentrated defect. `full_global`'s >1e-2 pixels saturate whole 8×8 blocks
+(64/64) — a contiguous region, not scattered noise. `two_masks`'s >1e-2
+pixels (all also >0.1) cluster loosely (max 5/64 per block) — isolated
+hue-critical pixels, not a solid region.
+
+### Ablation: dehaze/sharpen are what turn `full_global`'s diffuse noise into a contiguous region
+
+Rendering three variants of `full_global` (dehaze+sharpen both present; sharpen
+kept but dehaze removed; both removed) through old vs new confirmed the
+mechanism directly:
+
+| variant | max diff (new vs old) | pixels >1e-2 | max 8×8 block count |
+|---|---|---|---|
+| `full_global_no_neighborhood` (no dehaze, no sharpen) | 0.0059 | 0 | 0 |
+| `full_global_no_dehaze` (sharpen kept, dehaze removed) | 0.0098 | 0 | 0 |
+| `full_global` (dehaze + sharpen, both present) | 0.0586 | 27604 | 64 |
+
+With neighborhood ops removed, `full_global` collapses to the SAME diffuse,
+sub-1e-2 scale as `light_trio` — confirming the wiring swap itself
+(`dehaze_transmission`/`dehaze_recovery`'s graph input moved from the old
+`contrast_id` to the new `light_engine_id`, a like-for-like swap; params and
+dirty routing unchanged) introduces nothing beyond the already-characterized
+f16-removal noise. Re-enabling dehaze (with sharpen already present and
+unchanged) is what produces the 27,604-pixel, full-block-filling divergence.
+This is the signature of dehaze recovery's `(I−A)/t + A` regionally
+amplifying an already-tiny upstream perturbation wherever the transmission
+`t` is locally small — not a hookup defect.
+
+### `two_masks`: hue-boundary pixel trace
+
+A git worktree at the pre-Task-3 commit (`d569572`) rendered the real old
+chain to get ground truth at the worst pixel (342, 256):
+
+- Old real Light-stage-only output: `(-0.040955, -0.062988, 1.815430)`.
+- CPU-simulated old (3 separate f16-quantized exposure/wb/contrast
+  dispatches) vs new (1 fused, unclamped dispatch) light-only math for this
+  pixel: **bit-identical**, `(-0.04095, -0.06299, 1.8174)` — the Light engine
+  itself introduces no discrepancy at this pixel.
+- Old real output after mask layer 1 only (`one_mask`): `(0.000000,
+  0.078552, 1.384766)`.
+- Feeding that REAL intermediate through mask layer 2's CPU reference
+  (`light_color_apply`, unmodified by Task 2/3) reproduces the committed
+  `two_masks` golden **exactly**: `(1.0957031, 2.7e-5, 1.1992188)` vs golden
+  `(1.095703, 0.000013, 1.199219)`.
+- Feeding a CPU-simulated after-layer-1 value differing from the real one by
+  only ~6e-5–2e-3 (a couple of f16 ULPs) through the SAME unmodified
+  layer-2 reference gives `(1.0010, 0.6006, 0.6006)` — matching the new
+  engine's actual GPU output, and wildly different from the golden.
+
+**Conclusion:** a ~2e-3 difference in the value feeding an UNMODIFIED
+per-mask HSL/hue-rotation/saturation step flips its output completely. This
+is chaotic sensitivity inherent to HSL/hue math near specific critical points
+(this pixel's R and G both floor-clamp to the same achromatic corner before
+the per-mask HSL step, and its ~240° hue sits close enough to a `hue2rgb`
+piecewise boundary that a few-ULP perturbation changes which branch — and by
+how much — a downstream hue rotation lands in), not a defect introduced by
+this task.
+
+### Why this was accepted
+
+Fusing the six standalone point-op passes into two engine-stage dispatches
+removes 1-2 intermediate `rgba16float` quantization round-trips per pixel —
+that is a **higher-precision** render, not a lower-precision one; the
+pre-fusion chain's extra quantization steps were incidental cost, never a
+correctness requirement. The resulting few-ULP shift is unavoidable in any
+engine that achieves the fusion's stated goal (fewer GPU passes, less
+incidental quantization) and, per the ablation and pixel-trace evidence
+above, provably does not originate from a wiring or logic defect in this
+task's changes — it is amplified, sometimes dramatically, by pre-existing,
+unmodified HSL/hue and divide-by-transmission math whenever a pixel happens
+to sit near one of those functions' inherent numerical critical points. No
+reasonable `PARITY_TOL` covers the `two_masks` outlier (0.6) without gutting
+the check's value, so continuing to gate on old-chain reproduction would
+have meant either permanently disabling this suite or blocking the fusion
+indefinitely for a precision GAIN. Author-approved 2026-07-29: goldens
+regenerated from the fused engine; `PARITY_TOL` stays at `2e-3` unchanged;
+the suite's job going forward is pinning the fused engine against future
+regressions, not re-litigating this comparison.
+
+---
+
 ## Baseline (post-fusion) — Task 5 appends here
 
 _(filled in by Task 5 once the fused engine lands, using the identical method

@@ -1,14 +1,27 @@
 //! Shared parity fixtures + 16-bit-PNG golden helpers for the fused-layer-engine
 //! phase (design doc `2026-07-28-unified-engine-phase3-fused-layers`).
 //!
-//! Task 1 (this file) renders `fixture_docs()` through the CURRENT (pre-fusion)
-//! `EditPipeline` chain and commits the results as goldens under
-//! `tests/golden/layer_engine/`. Later fusion tasks (2-3+) must reproduce these
-//! goldens within `PARITY_TOL` — that is the whole point of committing them
-//! before any engine code changes. Keep this module's path
+//! **History:** Task 1 originally rendered `fixture_docs()` through the
+//! pre-fusion `EditPipeline` chain and committed the results as goldens under
+//! `tests/golden/layer_engine/`, so Tasks 2-3 could prove the new two-segment
+//! engine reproduced them within `PARITY_TOL`. That old-vs-new parity job
+//! completed 2026-07-29 — it caught a real bug (the shared `adjust()` shader's
+//! floor clamp wrongly hitting the new global pseudo-layer dispatches) and
+//! forced the post-global-color-segment mask-compositing fix. The residual
+//! deltas it then measured (up to 0.6 on `two_masks`) were root-caused to
+//! inherent floating-point/hue-domain sensitivity from removing intermediate
+//! `rgba16float` round-trips and adjudicated as an accepted precision
+//! improvement, not a defect (author-approved 2026-07-29; full evidence in
+//! `docs/benchmarks/2026-07-28-phase3-fused-engine.md`'s "Accepted rendering
+//! deltas vs the pre-fusion chain" section). The goldens here were then
+//! regenerated FROM the fused engine.
+//!
+//! **Going forward**, `fixture_docs()`/these goldens pin the FUSED engine
+//! against future drift, not fusion-vs-pre-fusion parity — a regression here
+//! means the fused engine's own output changed. Keep this module's path
 //! (`ferrolite-pipeline/tests/common/layer_engine.rs`, reached via
-//! `mod common; common::layer_engine::...`) stable so those tasks can import it
-//! unchanged.
+//! `mod common; common::layer_engine::...`) stable so future tasks can import
+//! it unchanged.
 #![allow(dead_code)]
 
 use ferrolite_image::LinearRgbaF32;

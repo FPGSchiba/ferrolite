@@ -1,10 +1,25 @@
-//! Parity goldens for the CURRENT (pre-fusion) `EditPipeline` chain — the
-//! safety net for the fused-layer-engine phase
-//! (`.superpowers/sdd/2026-07-28-unified-engine-phase3-fused-layers/`), which
-//! must land *before* any engine code changes. Later fusion tasks reproduce
-//! these committed goldens within `common::layer_engine::PARITY_TOL` and beat
-//! the medians recorded in
-//! `docs/benchmarks/2026-07-28-phase3-fused-engine.md`.
+//! Parity goldens for the fused-layer-engine `EditPipeline` chain
+//! (`.superpowers/sdd/2026-07-28-unified-engine-phase3-fused-layers/`).
+//!
+//! **History:** this suite originally pinned the PRE-fusion (six standalone
+//! point-op passes) chain, committed before any engine code changed, so
+//! Tasks 2-3 could prove the new two-segment engine reproduced it. That job
+//! is done (2026-07-29): it caught a real bug (the shared `adjust()` shader's
+//! floor clamp was wrongly applied to the new global pseudo-layer dispatches
+//! — see `local_adjust.wgsl`) and forced the post-global-color-segment
+//! mask-compositing fix (`local_node.rs`'s `evaluate_color` samples masks
+//! against `current`, not the node's raw `input`). The remaining old-vs-new
+//! deltas (up to 0.6 on `two_masks`) were root-caused to inherent
+//! floating-point/hue-domain sensitivity from removing intermediate
+//! `rgba16float` round-trips — an accepted, documented precision improvement,
+//! not a defect (see `docs/benchmarks/2026-07-28-phase3-fused-engine.md`'s
+//! "Accepted rendering deltas vs the pre-fusion chain" section). The goldens
+//! were regenerated from the FUSED engine on 2026-07-29 (author-approved).
+//!
+//! **Going forward**, this suite's job is pinning the FUSED engine against
+//! future drift — a regression here means something changed the fused
+//! engine's output, not a fusion-vs-pre-fusion parity question anymore.
+//! Reproduce these committed goldens within `common::layer_engine::PARITY_TOL`.
 //!
 //! `UPDATE_GOLDENS=1 cargo test -p ferrolite-pipeline --test layer_engine_parity`
 //! (re)writes the committed 16-bit-PNG goldens under

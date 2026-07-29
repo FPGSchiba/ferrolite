@@ -817,10 +817,10 @@ mod edit_pipeline_tests {
 
     /// QS-Task 4: an `amount`-only dehaze edit must reuse the cached refined
     /// transmission map (the expensive multi-pass guided filter) and re-run
-    /// only the cheap recovery/blend node; a `radius` change must recompute the
-    /// transmission map. This is the "amount drag skips transmission" proof
-    /// that motivated splitting the old single-pass dehaze `PointOpNode` into
-    /// `DehazeTransmissionNode` + `DehazeRecoveryNode`.
+    /// only the cheap recovery/blend step in the Color-stage engine node; a
+    /// `radius` change must recompute the transmission map. This is the "amount
+    /// drag skips transmission" proof that motivated keeping the transmission
+    /// computation separate (now with the recovery fused into the Color-stage).
     #[test]
     fn amount_change_does_not_recompute_transmission() {
         let Some(ctx) = GpuContext::headless() else {

@@ -332,7 +332,7 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 /// texture at a normalized UV (built once in each node's `new`, never per-evaluate).
 /// `pub(crate)`: also reused by `local_node.rs`'s Color-stage engine node
 /// (Phase 4 Task 2 — the fused dehaze recovery samples the shared transmission
-/// the same way the retired `DehazeRecoveryNode` did).
+/// bilinearly, mirroring the recovered approach).
 pub(crate) fn linear_clamp_sampler(ctx: &GpuContext) -> wgpu::Sampler {
     ctx.device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("dehaze-linear-clamp-sampler"),
@@ -949,13 +949,13 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         let src = inputs[0];
         let raw = self.params.get();
 
-        // Dehaze is off (no `Dehaze` op, or `amount == 0`): `DehazeRecoveryNode`
-        // ignores this node's output entirely in that case (passthrough), so
-        // running the ~8-pass guided filter here would be pure waste. This is
-        // the QS-Task-4 regression fix — `amount`'s magnitude is deliberately
-        // NOT part of `TransmissionParams` (see its doc), so this gate only
-        // flips on the zero<->nonzero transition, preserving the amount-drag
-        // cache proven by `amount_change_does_not_recompute_transmission`.
+        // Dehaze is off (no `Dehaze` op, or `amount == 0`): the Color-stage
+        // engine node's fused recovery ignores this node's output entirely in
+        // that case (passthrough), so running the ~8-pass guided filter here
+        // would be pure waste. This is the QS-Task-4 regression fix — `amount`'s
+        // magnitude is deliberately NOT part of `TransmissionParams` (see its doc),
+        // so this gate only flips on the zero<->nonzero transition, preserving
+        // the amount-drag cache proven by `amount_change_does_not_recompute_transmission`.
         // Cloning `PipelineImage` is an `Arc` clone (cheap); no compute passes
         // run and the rebuild-count test hook is NOT bumped.
         if raw.active == 0 {
@@ -966,8 +966,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         // input dims) — the transmission map is low-frequency, so this bounds
         // the fifteen `R32Float` intermediate planes' VRAM regardless of the
         // full input size (the QS-Task fix for the full-res preview-tier OOM).
-        // `DehazeRecoveryNode` upsamples this smaller `out` back to the image
-        // resolution via a bilinear sample (see `dehaze_recovery.wgsl`).
+        // The Color-stage engine node's fused recovery upsamples this smaller
+        // `out` back to the image resolution via a bilinear sample.
         let (w, h) = (src.width, src.height);
         let (ww, wh, scale) = transmission_working_dims(w, h);
         self.ensure_intermediates(ww, wh);

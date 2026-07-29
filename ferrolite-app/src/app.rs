@@ -415,7 +415,10 @@ impl FerroliteApp {
         // `None` only in headless tests (production always populates both
         // alongside a `Full` insert — see `apply_pyramid_ready`); a `None` here
         // falls back to the display-only tail below, same as a `Display` hit.
-        let full_installed = full
+        // The success flag is intentionally unused: whether or not the sharp
+        // tier installed from the cache, `spawn_full` still re-runs (see the
+        // `full_requested` note below).
+        let _full_installed = full
             .as_ref()
             .and_then(|f| Some((f.pyramid.as_ref()?, f.tile_source.as_ref()?, f)))
             .is_some_and(|(pyramid, tile_source, f)| {
@@ -435,17 +438,20 @@ impl FerroliteApp {
                 // The cached display texture serves the instant fit/preview reveal.
                 // For RAW the SHARP tier must still stream in behind it so 1:1 zoom
                 // sharpens exactly as a normal open does (the sparse full pyramid) —
-                // RAW has no separate full-res display tier — UNLESS `full_installed`
-                // (below) already installed that sharp tier from the cache. For
+                // RAW has no separate full-res display tier — unless the `Full` hit
+                // above already installed that sharp tier from the cache. For
                 // Standard the cached display texture IS already the full-resolution
                 // image (warm-cached ONLY when full-res, see `warm_insert_display`'s
                 // `full_res` gate), so there is no sharper tier left to stream either
                 // way. Therefore, mirroring `apply_preview_cache_hit`:
-                //  - `warm_revealed` skips the now-redundant tier-1 preview (the RAW
-                //    embedded-JPEG reveal) AND the redundant Standard heavy JPEG
-                //    re-decode in `drive_viewer`; RAW's tier-2 pyramid decode chain
-                //    there still runs on a `Display`-only hit (ungated — it must, RAW
-                //    has no other route to 1:1 sharpness).
+                //  - `warm_revealed` skips the now-redundant tier-1 RAW embedded-JPEG
+                //    reveal, and makes the heavy re-decodes below run in
+                //    RESTORE-ONLY mode: the warm cache holds only GPU artifacts, so
+                //    the retained CPU sources (`preview_source` /
+                //    `raw_preview_source`) and the preview `EditPipeline` must be
+                //    re-decoded or edits on a warm-revealed image silently stop
+                //    rendering — but their handlers skip the holder re-install and
+                //    view re-fit a cold open performs.
                 //  - Mark the disk preview-cache read already-resolved so the
                 //    debounced tier-2 step fires DIRECTLY, without the disk read
                 //    re-installing a lower-res 2048px holder over the warm texture,
@@ -455,24 +461,23 @@ impl FerroliteApp {
                 //  - Clear `idle` so the drive loop stays alive one more beat: RAW
                 //    returns to idle on pyramid convergence (`drive_viewer`'s
                 //    `full_converged` gate, which `install_full_pipeline` also feeds
-                //    on a `Full` hit); Standard has nothing left to converge on, so
-                //    `drive_viewer`'s gated branch sets `idle` back to `true`
-                //    immediately once the debounce elapses — NOT a per-frame spin
-                //    either way.
+                //    on a `Full` hit); Standard settles it in `apply_preview_ready`'s
+                //    warm branch once the restore decode lands.
                 v.warm_revealed = true;
                 v.idle = false;
                 v.cache_read_requested = true;
                 v.cache_resolved = true;
                 v.cache_write_back = false;
-                if full_installed {
-                    // The sparse full pipeline is already installed from the cache
-                    // (`full_ready` was set inside `install_full_pipeline`) — mark
-                    // the tier-2 pyramid decode as already-requested so
-                    // `drive_viewer`'s `heavy_pending` gate does not resubmit
-                    // `spawn_full` (RAW-only; `full_requested` is otherwise unused
-                    // for Standard, which never submits a pyramid job).
-                    v.full_requested = true;
-                }
+                // NOTE (`full_installed`): the sparse full pipeline is installed
+                // from the cache (`full_ready` set inside `install_full_pipeline`),
+                // but `full_requested` is deliberately NOT set — `spawn_full` must
+                // still re-run (debounced, off-thread) because the warm cache holds
+                // only GPU artifacts: the retained CPU source (`raw_preview_source`)
+                // and the preview `EditPipeline` are gone, and without them edits on
+                // a warm-revealed RAW silently stop rendering. `apply_full_decoded`
+                // detects this case (`warm_revealed && full_ready`) and ONLY
+                // restores those two — no holder re-install, no view re-fit, no
+                // duplicate pyramid build.
             }
         }
         true
@@ -1887,21 +1892,21 @@ impl eframe::App for FerroliteApp {
                                 v.full_handle = Some(h);
                                 v.full_requested = true;
                             }
-                        } else if !v.warm_revealed {
+                        } else {
                             // Standard: the heavy tier-1 IS the full-res JPG decode.
                             // This also runs after a cache HIT (`heavy_pending` is
                             // `!preview_requested`, still true post-hit) — the 2048px
                             // reveal from `apply_preview_cache_hit` shows first, then
                             // this streams in the full-res 1:1 detail.
                             //
-                            // Gated on `!v.warm_revealed`: unlike RAW, Standard has no
-                            // separate pyramid tier (`spawn_full`/the pyramid are
-                            // RAW-only) — a Standard image's full-resolution display
-                            // texture IS the sharp 1:1 artifact. A warm display hit
-                            // (`try_warm_reveal`) already installed that full-res
-                            // texture (warm-cached ONLY when full-res — see
-                            // `warm_insert_display`'s `full_res` gate), so re-decoding
-                            // here would just reproduce what is already on screen.
+                            // Runs on a warm display hit too — NOT for display (the
+                            // warm texture is already the full-res edited render) but
+                            // to restore the retained `preview_source` the warm cache
+                            // cannot hold (it keeps only GPU artifacts): without it
+                            // the lazy preview `EditPipeline` can never be built and
+                            // edits on a warm-revealed image silently stop rendering.
+                            // `apply_preview_ready` skips the redundant reveal for the
+                            // warm case (no holder re-install, no view re-fit).
                             let h = viewer::load::spawn_preview(
                                 &self.state.jobs,
                                 &self.state.tx,
@@ -1912,17 +1917,6 @@ impl eframe::App for FerroliteApp {
                             );
                             v.preview_handle = Some(h);
                             v.preview_requested = true;
-                        } else {
-                            // Warm Standard hit: skip the redundant decode (see
-                            // above). Nothing will call `reveal_srgb_preview` /
-                            // `install_preview_holder` for this open, so there is no
-                            // other path left to converge `idle` — settle it here,
-                            // mirroring what `install_preview_holder` does for a tier-1
-                            // reveal with no tier-2 to wait on. Also mark
-                            // `preview_requested` so `heavy_pending` clears and this
-                            // branch is not re-entered every frame.
-                            v.preview_requested = true;
-                            v.idle = true;
                         }
                     }
                 } else {

@@ -48,6 +48,34 @@ pub fn present_source(
     }
 }
 
+/// Whether the off-screen compose+swap may run this frame.
+///
+/// `converged` = the sparse pool reports every needed tile resident;
+/// `opstack_version` = the app-side edit counter (bumped on EVERY
+/// `set_preview_and_full`, including each mid-drag frame);
+/// `full_synced_version` = the value of `opstack_version` at the last point the
+/// full-res producer was actually (re)synced to the stack (deferred to commit
+/// while a slider drag is in progress — the OOM lever);
+/// `key_matches_current` = `present_key` already equals the current
+/// `(opstack_version, view)` (front is already composed for this exact state).
+///
+/// The `opstack_version == full_synced_version` term is the mid-drag freeze
+/// guard: while a drag defers the full-res tier, the pool's residency is
+/// checked against its own FROZEN version, so `converged` stays true for
+/// pre-drag tiles. Composing then would stamp those STALE tiles "valid" for
+/// the new version and mask the live preview — the "no live edits until
+/// release" / pan-zoom raw-flash regression. Blocking the swap keeps
+/// `present_key` at the pre-drag version, so `front_valid` goes false and the
+/// presenter falls back to the live preview for the whole drag.
+pub fn swap_allowed(
+    converged: bool,
+    opstack_version: u64,
+    full_synced_version: u64,
+    key_matches_current: bool,
+) -> bool {
+    converged && opstack_version == full_synced_version && !key_matches_current
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +139,34 @@ mod tests {
             present_source(false, false, true, false, 1.0),
             PresentSource::Preview
         );
+    }
+
+    /// The no-live-edits regression: mid-drag the deferral leaves the producer
+    /// at the last committed version while `opstack_version` bumps every moved
+    /// frame — the pool's `converged` is checked against its own frozen version
+    /// and lies. The swap MUST stay blocked for the whole drag (else stale
+    /// tiles get stamped valid and mask the live preview).
+    #[test]
+    fn unsynced_producer_blocks_swap_even_when_converged() {
+        assert!(!swap_allowed(true, 6, 5, false));
+    }
+
+    /// Commit re-syncs the producer (`full_synced_version == opstack_version`);
+    /// a stale key (edit or view change) then swaps exactly once.
+    #[test]
+    fn synced_producer_with_stale_key_swaps() {
+        assert!(swap_allowed(true, 6, 6, false));
+    }
+
+    /// No re-swap churn when `front` is already composed for the current state.
+    #[test]
+    fn matching_key_never_reswaps() {
+        assert!(!swap_allowed(true, 6, 6, true));
+    }
+
+    /// An unconverged pool never swaps, synced or not.
+    #[test]
+    fn unconverged_never_swaps() {
+        assert!(!swap_allowed(false, 6, 6, false));
     }
 }

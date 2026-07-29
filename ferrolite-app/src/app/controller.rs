@@ -280,6 +280,18 @@ impl AppController {
         // the previous preview source and no longer applies.
         v.mask_overlay_input = None;
 
+        // Warm-revealed open: the cached (already-edited) display texture is on
+        // screen — this decode ran ONLY to restore the retained source so the
+        // lazy preview `EditPipeline` can be built on the first edit
+        // (`set_preview_and_full`; without a source, edits on a warm-revealed
+        // image silently stopped rendering). Re-running the reveal below would
+        // re-install the holder and re-fit the view seconds after the instant
+        // warm reveal. Standard has nothing left to converge on — settle idle.
+        if v.warm_revealed {
+            v.idle = true;
+            return;
+        }
+
         // RAW: do NOT reveal the embedded JPEG. Keep the spinner up until the
         // color-managed raw render is built at full-decode (`apply_full_decoded`),
         // so the reveal comes from the same pipeline as the sparse full — a
@@ -360,6 +372,13 @@ impl AppController {
         }
         v.color_profile = color_profile.clone();
         let is_raw = v.kind == ferrolite_image::FileKind::Raw;
+        // Warm `Full` hit: the sparse pipeline was installed from the cache, but
+        // the warm cache holds only GPU artifacts — the retained CPU source
+        // (`raw_preview_source`) and the preview `EditPipeline` are gone, and
+        // without them edits silently stop rendering. This decode re-ran ONLY to
+        // restore those two; the tail below returns early before the cold-open
+        // holder install / view re-fit / pyramid build / write-backs.
+        let warm_refresh = v.warm_revealed && v.full_ready;
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -459,6 +478,26 @@ impl AppController {
         } else {
             None
         };
+
+        // Warm restore-only tail: hand the on-screen single texture to the
+        // just-rebuilt live preview pipeline (the same edited render the warm
+        // texture already shows) and stop — the warm reveal already installed
+        // the holder/view, the cached sparse full pipeline is producing, and
+        // the pyramid build / write-back / warm-insert tails below are for
+        // cold opens only.
+        if warm_refresh {
+            if let Some((tex, dims)) = raw_preview.as_ref() {
+                let mut renderer = rs.renderer.write();
+                if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
+                    if g.image_id == image_id {
+                        g.preview
+                            .update_single_from_texture(std::sync::Arc::clone(tex), *dims);
+                    }
+                }
+            }
+            app.mark_histogram_dirty();
+            return;
+        }
 
         // Build ONLY the rung-1 reveal preview VT here (cheap). The sparse full VT
         // (and the GPU edit pyramid) are built off the UI thread — both are CPU
@@ -870,6 +909,7 @@ impl AppController {
             // this producer was built from `v.op_stack`.
             v.full_stack = v.op_stack.clone();
             v.full_ready = true;
+            v.full_synced_version = v.opstack_version;
             version = v.opstack_version.max(1);
         }
 
@@ -1137,6 +1177,7 @@ impl AppController {
             // this producer was rebuilt from `shown`.
             v.full_stack = shown.clone();
             v.opstack_version = v.opstack_version.wrapping_add(1);
+            v.full_synced_version = v.opstack_version;
             let version = v.opstack_version;
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
@@ -1383,6 +1424,7 @@ impl AppController {
             // Record the stack the producer now reflects — the rebuild baseline for
             // the next commit (see the `full_stack` field doc + the block comment).
             v.full_stack = shown.clone();
+            v.full_synced_version = v.opstack_version;
             let version = v.opstack_version;
             let image_id = v.image_id;
             let mut renderer = rs.renderer.write();
@@ -1659,6 +1701,7 @@ impl AppController {
             producer.set_color_matrix(cam);
         }
         v.opstack_version = v.opstack_version.wrapping_add(1);
+        v.full_synced_version = v.opstack_version;
         let version = v.opstack_version;
         let image_id = v.image_id;
         {

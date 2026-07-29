@@ -136,6 +136,16 @@ pub struct ViewerState {
     /// observing a `!converged` frame), which is why edits and the split now show
     /// without a zoom nudge.
     pub present_key: Option<(u64, ferrolite_vt::ViewTransform)>,
+    /// The `opstack_version` at the last point the full-res producer was
+    /// actually (re)synced to the stack — advanced ONLY where the producer
+    /// syncs (`install_full_pipeline`, `set_preview_and_full`'s commit branch,
+    /// the lens-bake / color-matrix rebuild handlers), never on the mid-drag
+    /// preview-only path. The compose+swap requires
+    /// `full_synced_version == opstack_version` (`present::swap_allowed`):
+    /// while a drag defers the full tier this lags behind, blocking the swap
+    /// so stale pre-drag tiles can't be stamped valid over the live preview
+    /// (the no-live-edits / pan-zoom raw-flash regression).
+    pub full_synced_version: u64,
     /// Seconds elapsed into the active crossfade.
     pub crossfade_elapsed: f32,
     /// Terminal state: nothing more will load (preview failed AND/OR full failed,
@@ -377,6 +387,7 @@ impl ViewerState {
             full_ready: false,
             crossfading: false,
             present_key: None,
+            full_synced_version: 0,
             crossfade_elapsed: 0.0,
             idle: false,
             showing_full: false,

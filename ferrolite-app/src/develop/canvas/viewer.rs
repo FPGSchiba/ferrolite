@@ -138,6 +138,7 @@ impl Viewer {
             let cur_view = v.view;
             let cur_viewport = v.viewport;
             let cur_version = v.opstack_version;
+            let cur_synced = v.full_synced_version;
             let cur_present_key = v.present_key;
             let mut renderer = rs.renderer.write();
 
@@ -186,7 +187,17 @@ impl Viewer {
                         converged = full.is_converged(&cur_view, cur_viewport);
                     }
 
-                    if converged && cur_present_key != Some((cur_version, cur_view)) {
+                    // `swap_allowed` (present.rs): mid-drag the producer is
+                    // deferred (`cur_synced` lags `cur_version`), and the pool's
+                    // `converged` is checked against its own frozen version —
+                    // composing then would stamp STALE pre-drag tiles valid over
+                    // the live preview. Swap only when the producer is synced.
+                    if crate::viewer::present::swap_allowed(
+                        converged,
+                        cur_version,
+                        cur_synced,
+                        cur_present_key == Some((cur_version, cur_view)),
+                    ) {
                         let mut enc =
                             g.ctx
                                 .device

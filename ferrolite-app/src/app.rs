@@ -789,24 +789,40 @@ impl FerroliteApp {
     /// Background job to regenerate its Library thumbnail from the in-memory
     /// stack, then clear the flag so re-entrant frames do not double-spawn.
     /// Called at every "leave Develop for this image" transition. No-op when
-    /// there is no viewer, no session edits, or no GPU render state.
+    /// there is no viewer or no session edits.
+    ///
+    /// The flag is cleared ONLY once the job is actually spawned (gated
+    /// through `thumb_regen::on_leave_decision`, not cleared unconditionally
+    /// up front): `frame.wgpu_render_state()` can come back `None` on a given
+    /// frame (e.g. a transient window-resize/chrome interaction), and
+    /// `edits_dirty` is the only signal that ever re-triggers this regen. A
+    /// clear-before-spawn ordering would silently strand the image on its
+    /// pre-edit thumbnail forever the first time that frame's GPU state is
+    /// missing, with nothing left to retry it short of the manual "Regenerate
+    /// thumbnail" context-menu action. See `on_leave_decision`'s doc comment.
     pub(crate) fn maybe_regen_on_leave(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let (image_id, path, kind, stack) = {
-            let Some(v) = self.state.viewer.as_mut() else {
-                return;
-            };
-            if !crate::develop::thumb_regen::should_regenerate_on_leave(v.edits_dirty) {
-                return;
-            }
-            // Clear before spawning so an edge-triggered re-check this frame
-            // (e.g. module switch) cannot enqueue a duplicate job.
-            v.edits_dirty = false;
-            (v.image_id, v.path.clone(), v.kind, v.op_stack.clone())
-        };
-        let Some(rs) = frame.wgpu_render_state() else {
-            // No GPU this frame: keep the existing thumbnail. An on-demand
-            // "Regenerate thumbnail" can recover it later.
+        let Some(v) = self.state.viewer.as_ref() else {
             return;
+        };
+        let rs = frame.wgpu_render_state();
+        let (spawn, new_edits_dirty) =
+            crate::develop::thumb_regen::on_leave_decision(v.edits_dirty, rs.is_some());
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.edits_dirty = new_edits_dirty;
+        }
+        if !spawn {
+            return;
+        }
+        // `on_leave_decision` only returns `spawn == true` when `rs.is_some()`
+        // was true above, so this is guaranteed to be `Some`.
+        let rs = rs.expect("on_leave_decision only spawns when a render state is present");
+        let (image_id, path, kind, stack) = {
+            let v = self
+                .state
+                .viewer
+                .as_ref()
+                .expect("checked at function entry");
+            (v.image_id, v.path.clone(), v.kind, v.op_stack.clone())
         };
         let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
         let cam =

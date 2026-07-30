@@ -248,6 +248,10 @@ pub enum Aspect {
     ThreeTwo,
     FourThree,
     SixteenNine,
+    /// 5:4 landscape (1.25) — the crop panel's aspect-chip row's sixth preset
+    /// (design 2026-07-29 §C3 / V2 README:69). Added after the chip row shipped
+    /// with a stopgap "not backed yet" placeholder for this ratio.
+    FiveFour,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]

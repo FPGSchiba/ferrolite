@@ -227,6 +227,7 @@ pub fn aspect_ratio(aspect: Aspect, img_w: u32, img_h: u32) -> Option<f32> {
         Aspect::ThreeTwo => Some(3.0 / 2.0),
         Aspect::FourThree => Some(4.0 / 3.0),
         Aspect::SixteenNine => Some(16.0 / 9.0),
+        Aspect::FiveFour => Some(5.0 / 4.0),
         Aspect::Original => {
             if img_h == 0 {
                 None
@@ -319,6 +320,12 @@ mod tests {
     fn aspect_ratio_maps_presets() {
         assert_eq!(aspect_ratio(Aspect::Square, 6000, 4000), Some(1.0));
         assert_eq!(aspect_ratio(Aspect::ThreeTwo, 6000, 4000), Some(1.5));
+        assert_eq!(aspect_ratio(Aspect::FourThree, 6000, 4000), Some(4.0 / 3.0));
+        assert_eq!(
+            aspect_ratio(Aspect::SixteenNine, 6000, 4000),
+            Some(16.0 / 9.0)
+        );
+        assert_eq!(aspect_ratio(Aspect::FiveFour, 6000, 4000), Some(1.25));
         assert_eq!(aspect_ratio(Aspect::Free, 6000, 4000), None);
         assert_eq!(aspect_ratio(Aspect::Original, 6000, 4000), Some(1.5));
     }

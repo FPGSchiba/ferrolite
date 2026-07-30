@@ -68,15 +68,12 @@ fn geometry_edit(stack: &OpStack, new_geo: Geometry, commit: bool) -> EditOutcom
 
 /// The aspect chip row's (label, backing-preset) pairs, in spec order:
 /// Original / 1:1 / 4:3 / 3:2 / 16:9 / 5:4 / Custom (design 2026-07-29 §C3 /
-/// V2 README:69). `None` marks a chip with no real `Aspect` value behind it:
-/// - "5:4" has no backing `Aspect` variant — adding one is a pipeline
-///   (`ferrolite-pipeline`) change, out of scope for this panel-only task.
-///   Rendered for visual/mockup parity with a hover explanation; clicking it
-///   is a no-op.
-/// - "Custom" is selected-state only per spec: shown active when the current
-///   aspect matches none of the five ratio-backed chips (i.e. `Aspect::Free`),
-///   but clicking it does nothing — `Free` is reached via the Aspect combo
-///   above, not this chip.
+/// V2 README:69). Every ratio-named chip has a real backing `Aspect` value and
+/// is fully clickable. `None` marks "Custom": selected-state only per spec —
+/// shown active when the current aspect matches none of the six ratio-backed
+/// chips (i.e. `Aspect::Free`), but clicking it does nothing — `Free` is
+/// reached via the Aspect combo above, or by dragging the crop handles to a
+/// non-preset ratio, not by clicking this chip.
 fn aspect_chip_specs() -> [(&'static str, Option<Aspect>); 7] {
     [
         ("Original", Some(Aspect::Original)),
@@ -84,7 +81,7 @@ fn aspect_chip_specs() -> [(&'static str, Option<Aspect>); 7] {
         ("4:3", Some(Aspect::FourThree)),
         ("3:2", Some(Aspect::ThreeTwo)),
         ("16:9", Some(Aspect::SixteenNine)),
-        ("5:4", None),
+        ("5:4", Some(Aspect::FiveFour)),
         ("Custom", None),
     ]
 }
@@ -101,15 +98,15 @@ fn aspect_chip_row(ui: &mut egui::Ui, current: Aspect) -> Option<Aspect> {
         for (label, value) in aspect_chip_specs() {
             let is_active = match value {
                 Some(a) => current == a,
-                None if label == "Custom" => current == Aspect::Free,
-                None => false,
+                None => current == Aspect::Free,
             };
             let resp = crate::widgets::chips::chip_button(ui, label, is_active);
             match value {
                 Some(a) if resp.clicked() && !is_active => picked = Some(a),
-                None if label == "5:4" => {
+                None => {
                     resp.on_hover_text(
-                        "5:4 isn't available yet \u{2014} no matching Aspect preset in the pipeline",
+                        "Shown when the crop uses a free ratio \u{2014} set any ratio by \
+                         dragging the crop handles",
                     );
                 }
                 _ => {}
@@ -166,6 +163,7 @@ impl PanelTab for CropTab {
                         Aspect::ThreeTwo,
                         Aspect::FourThree,
                         Aspect::SixteenNine,
+                        Aspect::FiveFour,
                     ] {
                         ui.selectable_value(&mut aspect, a, format!("{a:?}"));
                     }
@@ -184,7 +182,11 @@ impl PanelTab for CropTab {
             }
 
             ui.add_space(6.0);
-            if let Some(new_aspect) = aspect_chip_row(ui, geo.aspect) {
+            // `aspect` (this frame's combo value), not `geo.aspect` (the
+            // pre-frame value): the combo may have just changed `aspect` above
+            // in this same frame, and the chip row must reflect that
+            // immediately rather than lagging it by a frame.
+            if let Some(new_aspect) = aspect_chip_row(ui, aspect) {
                 let new_geo = Geometry {
                     aspect: new_aspect,
                     ..geo
@@ -317,12 +319,14 @@ mod tests {
         assert!(state.settings.crop_geometry_open);
     }
 
-    /// Step 1 (Task 6): the aspect chip row's spec-mandated shape — proves by
-    /// construction that "5:4" and "Custom" can never write aspect state (the
-    /// `show()` wiring only ever handles the `Some(a)` arm), independent of any
+    /// Step 1 (Task 6, updated in the review-fix round): the aspect chip row's
+    /// spec-mandated shape — every ratio chip (including "5:4", now backed by
+    /// `Aspect::FiveFour`) maps to a real preset and is clickable; "Custom" is
+    /// the only chip that can never write aspect state (the `show()` wiring
+    /// only ever handles the `Some(a)` arm for it), independent of any
     /// pixel-position synthetic click.
     #[test]
-    fn aspect_chip_specs_match_the_spec_row_and_flag_unbacked_chips() {
+    fn aspect_chip_specs_match_the_spec_row_and_only_custom_is_unbacked() {
         let specs = aspect_chip_specs();
         let labels: Vec<&str> = specs.iter().map(|(l, _)| *l).collect();
         assert_eq!(
@@ -334,7 +338,11 @@ mod tests {
         assert_eq!(specs[2].1, Some(Aspect::FourThree));
         assert_eq!(specs[3].1, Some(Aspect::ThreeTwo));
         assert_eq!(specs[4].1, Some(Aspect::SixteenNine));
-        assert!(specs[5].1.is_none(), "5:4 has no backing Aspect preset yet");
+        assert_eq!(
+            specs[5].1,
+            Some(Aspect::FiveFour),
+            "5:4 is a real preset now"
+        );
         assert!(specs[6].1.is_none(), "Custom is selected-state only");
     }
 

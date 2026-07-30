@@ -363,6 +363,16 @@ pub struct GeometryUniform {
     /// Output-pixel origin added to `gid` before the transform, so a tile pass can
     /// render a sub-region of the output image. Whole-image path uses `[0,0]`.
     pub out_origin: [f32; 2],
+    /// Source-normalized clamp rect for `base_uv`: `[min_u, min_v, max_u, max_v]`
+    /// -- the crop sub-rect (§ `geometry_uniform`'s `cx/cy/cw/ch`), inset by half
+    /// a source texel on each side. Spec C2 part 2: the geometry sampler used to
+    /// clamp to the WHOLE source texture, so a rotated crop's out-of-bounds
+    /// corners smeared the FRAME's edge texel outward; clamping `base_uv` to
+    /// THIS rect instead means an out-of-crop sample clamps to the crop's own
+    /// edge. A full-frame (no-crop) `Geometry` gets the half-texel-inset FULL
+    /// rect here, so un-cropped rendering (including rotation past the frame
+    /// edge) is byte-identical to before this field existed.
+    pub crop_bounds: [f32; 4],
 }
 
 /// Crop + rotate as a sampling transform. Returns the uniform plus the output
@@ -409,6 +419,8 @@ pub fn geometry_uniform(
         crop_center[1] - (m[2] * out_center[0] + m[3] * out_center[1]),
     ];
 
+    let crop_bounds = crop_uv_bounds(cx, cy, cw, ch, sw, sh);
+
     (
         GeometryUniform {
             m,
@@ -416,10 +428,42 @@ pub fn geometry_uniform(
             src_dims: [sw, sh],
             out_dims: [out_w as f32, out_h as f32],
             out_origin: [0.0, 0.0],
+            crop_bounds,
         },
         out_w,
         out_h,
     )
+}
+
+/// The source-normalized clamp rect `[min_u, min_v, max_u, max_v]` for a crop
+/// `(cx, cy, cw, ch)` (already-clamped normalized fractions, as produced in
+/// `geometry_uniform`) against a `(sw, sh)` source: the crop rect inset by half
+/// a source texel on each side, so `base_uv` clamped to it samples the crop's
+/// own edge texel rather than reading past it. Degenerates gracefully for a
+/// crop narrower than one texel (min/max collapse to the rect's midline
+/// instead of crossing over) so `min <= max` always holds.
+fn crop_uv_bounds(cx: f32, cy: f32, cw: f32, ch: f32, sw: f32, sh: f32) -> [f32; 4] {
+    let half_u = 0.5 / sw;
+    let half_v = 0.5 / sh;
+    let mid_u = cx + cw * 0.5;
+    let mid_v = cy + ch * 0.5;
+    let min_u = (cx + half_u).min(mid_u);
+    let max_u = (cx + cw - half_u).max(mid_u);
+    let min_v = (cy + half_v).min(mid_v);
+    let max_v = (cy + ch - half_v).max(mid_v);
+    [min_u, min_v, max_u, max_v]
+}
+
+/// CPU mirror of `geometry.wgsl`'s `base_uv` clamp: `clamp(uv, bounds.xy,
+/// bounds.zw)`. Kept as a standalone pure fn (not folded into a full CPU
+/// resample) so parity tests can assert the clamped coordinate directly,
+/// matching the pattern of this module's other CPU references (e.g.
+/// `sample_lut`, `hsl_bands_apply`) that mirror one WGSL step exactly.
+pub fn clamp_uv_to_crop_bounds(uv: [f32; 2], crop_bounds: [f32; 4]) -> [f32; 2] {
+    [
+        uv[0].clamp(crop_bounds[0], crop_bounds[2]),
+        uv[1].clamp(crop_bounds[1], crop_bounds[3]),
+    ]
 }
 
 /// A per-tile geometry-head uniform: identical `m`/`off`/`src_dims` to
@@ -1530,6 +1574,104 @@ mod tests {
     fn geometry_uniform_default_out_origin_is_zero() {
         let (u, _, _) = geometry_uniform(None, 64, 48);
         assert_eq!(u.out_origin, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn geometry_uniform_size_is_16_byte_aligned() {
+        // WGSL uniform buffers require the whole struct's size to be a
+        // multiple of its largest member's alignment (16, from `m: vec4`).
+        assert_eq!(std::mem::size_of::<GeometryUniform>() % 16, 0);
+    }
+
+    #[test]
+    fn geometry_uniform_full_frame_crop_bounds_is_half_texel_inset() {
+        // Spec C2 part 2: a full-frame (no crop) `Geometry` must populate
+        // `crop_bounds` with the half-texel-inset FULL rect -- exactly what a
+        // ClampToEdge + bilinear sampler already computes internally for an
+        // out-of-[0,1] coordinate -- so un-cropped rendering (including
+        // rotation past the frame edge) is byte-identical to before this
+        // field existed.
+        let (u, _, _) = geometry_uniform(None, 64, 48);
+        let half_u = 0.5 / 64.0;
+        let half_v = 0.5 / 48.0;
+        assert!((u.crop_bounds[0] - half_u).abs() < 1e-6);
+        assert!((u.crop_bounds[1] - half_v).abs() < 1e-6);
+        assert!((u.crop_bounds[2] - (1.0 - half_u)).abs() < 1e-6);
+        assert!((u.crop_bounds[3] - (1.0 - half_v)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn geometry_uniform_clamps_base_uv_to_crop_not_frame() {
+        // The bug (spec C2 part 2): the geometry sampler used to clamp
+        // `base_uv` against the WHOLE source texture, so a rotated crop's
+        // out-of-bounds corners read (and, past the true frame edge,
+        // duplicated) content from the FRAME's edge rather than the crop's
+        // own edge. This CPU reference mirrors the WGSL clamp
+        // (`clamp_uv_to_crop_bounds`) exactly and asserts the clamped
+        // coordinate lands on the CROP rect's edge, not at the whole-texture
+        // edge (0.0/1.0).
+        use crate::op::{Aspect, CropRect, Geometry};
+
+        let src_w = 200u32;
+        let src_h = 200u32;
+        let sw = src_w as f32;
+        let sh = src_h as f32;
+
+        // A crop with real margin on every side (60px on each edge of a
+        // 200x200 frame) rotated 45 degrees, so a corner maps outside the
+        // crop rect while remaining well inside the whole frame -- i.e. this
+        // is NOT the old "reaches past the frame edge" case; it isolates the
+        // "clamp to crop, not frame" behavior change on its own.
+        let geo = Geometry {
+            crop: CropRect {
+                x: 0.3,
+                y: 0.3,
+                w: 0.4,
+                h: 0.4,
+            },
+            angle_deg: 45.0,
+            aspect: Aspect::Free,
+        };
+        let (u, _, _) = geometry_uniform(Some(geo), src_w, src_h);
+
+        // The output's top-left texel center, mapped through the uniform's
+        // own m/off (mirrors the WGSL `sx`/`sy` computation exactly).
+        let po = [0.5_f32, 0.5];
+        let sx = u.m[0] * po[0] + u.m[1] * po[1] + u.off[0];
+        let sy = u.m[2] * po[0] + u.m[3] * po[1] + u.off[1];
+        let raw_uv = [sx / sw, sy / sh];
+
+        // Sanity: this corner's raw coordinate must actually fall outside the
+        // crop rect (below `min_v`) for the assertion below to be meaningful,
+        // while still landing inside the full [0,1] frame -- proving the
+        // clamp is doing real work even with frame slack to spare.
+        assert!(
+            raw_uv[1] < u.crop_bounds[1],
+            "test setup: expected the rotated corner ({raw_uv:?}) below the \
+             crop's min_v ({}); adjust the fixture",
+            u.crop_bounds[1]
+        );
+        assert!(
+            raw_uv[1] > 0.0,
+            "test setup: corner should stay inside the whole frame (raw {raw_uv:?})"
+        );
+
+        let clamped = clamp_uv_to_crop_bounds(raw_uv, u.crop_bounds);
+
+        // Clamped to the CROP's own edge...
+        assert!(
+            (clamped[1] - u.crop_bounds[1]).abs() < 1e-6,
+            "clamped v {} did not land on the crop edge {}",
+            clamped[1],
+            u.crop_bounds[1]
+        );
+        // ...NOT the whole source texture's edge (0.0) -- the bug this task
+        // fixes.
+        assert!(
+            clamped[1] > 0.01,
+            "clamped to the FRAME edge (~0.0) instead of the crop edge ({})",
+            u.crop_bounds[1]
+        );
     }
 
     #[test]

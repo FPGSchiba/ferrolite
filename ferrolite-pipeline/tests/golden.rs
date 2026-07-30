@@ -511,6 +511,98 @@ fn full_seven_op_stack_matches_golden() {
     common::assert_golden(&pixels, 58, 43, "full_seven_op_stack.png");
 }
 
+/// The `sRGB` OETF `blit_to_rgba8` applies to the display-linear pipeline
+/// output (mirrors `blit.wgsl`'s `linear_to_srgb` exactly), so a corner's
+/// expected `Rgba8` value can be predicted directly from its (clamped)
+/// source-normalized coordinate against `common::gradient`'s exact
+/// `[x/w, y/h, 0.25, 1.0]` formula.
+fn srgb_u8(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (v * 255.0).round() as u8
+}
+
+#[test]
+fn rotated_crop_edge_is_not_smeared() {
+    // Spec C2 part 2: a rotated crop's out-of-bounds corner used to clamp
+    // against the WHOLE source texture, so it read (and duplicated) the
+    // FRAME's edge texel -- e.g. a crop with real margin on every side would
+    // still show the image's absolute corner color, unrelated to the crop's
+    // own local content. This asserts the fixed geometry pass instead clamps
+    // to the CROP's own edge.
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // A gradient fixture, cropped to a 0.4x0.4 region with a real 5% margin
+    // to the frame on every side, rotated 45 degrees. The output's bottom-left
+    // corner (0, out_h-1) maps to a raw source coordinate whose `u` (x/w) is
+    // NEGATIVE -- i.e. past the whole FRAME's left edge, not merely past the
+    // crop's -- so this exercises exactly the old clamp-to-frame bug.
+    let src = common::gradient(200, 200);
+    let stack = OpStack::default().set_op(Op::Geometry(Geometry {
+        crop: CropRect {
+            x: 0.05,
+            y: 0.05,
+            w: 0.4,
+            h: 0.4,
+        },
+        angle_deg: 45.0,
+        aspect: Aspect::Free,
+    }));
+    let mut pipe = EditPipeline::new(ctx, &src, stack, IDENTITY);
+    let pixels = pipe.render_to_image();
+    let (out_w, out_h) = (80u32, 80u32);
+    let px = |x: u32, y: u32| -> &[u8] {
+        let i = ((y * out_w + x) * 4) as usize;
+        &pixels[i..i + 4]
+    };
+    let corner = px(0, out_h - 1);
+
+    // The bug's signature: clamped to the FRAME's absolute edge (u == 0.0,
+    // the image's true left column) rather than the crop's own edge.
+    let frame_edge_r = srgb_u8(0.0);
+    // The fix: clamped to the crop's own left edge (u == crop.x, inset half a
+    // source texel), which for this fixture (u == x/w) is a clearly
+    // different, non-zero color -- NOT a duplicate of the frame's edge.
+    let crop_edge_r = srgb_u8(0.05 + 0.5 / 200.0);
+
+    assert!(
+        corner[1].abs_diff(srgb_u8(0.25)) <= 4,
+        "corner G {} unexpected (v should be un-clamped, ~{})",
+        corner[1],
+        srgb_u8(0.25)
+    );
+    assert!(
+        corner[0].abs_diff(crop_edge_r) <= 4,
+        "corner R {} did not land on the crop's own edge (expected ~{crop_edge_r}) \
+         -- clamp_uv_to_crop_bounds should pin `u` to `crop_bounds[0]`",
+        corner[0]
+    );
+    assert!(
+        corner[0].abs_diff(frame_edge_r) > 8,
+        "corner R {} matches the FRAME's edge color (~{frame_edge_r}) -- this is \
+         the smear artifact this task fixes: the sample clamped to the whole \
+         source texture instead of the crop's own sub-rect",
+        corner[0]
+    );
+
+    // Full-row/column sanity: the crop's own top row (unaffected by the
+    // corner clamp) must still vary smoothly -- i.e. this fix does not
+    // introduce a NEW flat/duplicate band elsewhere in the output.
+    let top_row = |x: u32| px(x, 0);
+    assert_ne!(
+        top_row(out_w / 2),
+        top_row(out_w / 2 - 1),
+        "interior top-row neighbors are byte-identical -- unexpected duplicate"
+    );
+}
+
 const SEAM_TOL: f32 = 0.02; // display-linear; absorbs f16 + the head resample.
 
 #[test]

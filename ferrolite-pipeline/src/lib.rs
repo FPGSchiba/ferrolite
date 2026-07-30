@@ -61,10 +61,10 @@ pub use tile_edit::TileEditPipeline;
 // they backed are gone — `local_adjust_uniform`/`LocalAdjustUniform` cover the
 // same math for both the Light-stage engine node and per-mask layers now.
 pub use uniforms::{
-    color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform,
-    parametric_curve_lut, sharpen_halo, sharpen_halo_doc, tone_curve_luts, vignette_amount,
-    ColorGradeUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
-    SharpenUniform, VignetteUniform, MAX_SHARPEN_RADIUS,
+    clamp_uv_to_crop_bounds, color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px,
+    lens_uniform, parametric_curve_lut, sharpen_halo, sharpen_halo_doc, tone_curve_luts,
+    vignette_amount, ColorGradeUniform, GeometryUniform, HslUniform, LensUniform,
+    LocalAdjustUniform, SharpenUniform, VignetteUniform, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

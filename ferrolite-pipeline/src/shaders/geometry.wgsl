@@ -23,6 +23,12 @@ struct P {
     src_dims: vec2<f32>,
     out_dims: vec2<f32>,
     out_origin: vec2<f32>,
+    // Source-normalized clamp rect for base_uv: min_u,min_v,max_u,max_v — the
+    // crop sub-rect inset by half a source texel, so an out-of-crop rotated
+    // sample clamps to the CROP's edge instead of reading past it into (and
+    // duplicating) the frame's own edge texel. Full-frame geometry carries the
+    // half-texel-inset FULL rect here, so un-cropped rendering is unchanged.
+    crop_bounds: vec4<f32>,
 };
 @group(0) @binding(2) var<uniform> p: P;
 @group(0) @binding(3) var samp: sampler;
@@ -78,7 +84,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let po = p.out_origin + vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5);
     let sx = p.m.x * po.x + p.m.y * po.y + p.off.x;
     let sy = p.m.z * po.x + p.m.w * po.y + p.off.y;
-    let base_uv = vec2<f32>(sx, sy) / p.src_dims;
+    // Clamp to the crop sub-rect (not the whole source texture) so a rotated
+    // crop's out-of-bounds corners smear the CROP's own edge rather than the
+    // frame's — see the `crop_bounds` field doc on `struct P`.
+    let base_uv = clamp(
+        vec2<f32>(sx, sy) / p.src_dims,
+        p.crop_bounds.xy,
+        p.crop_bounds.zw,
+    );
 
     if (lens.use_warp == 0u) {
         // Regression path: byte-identical to the pre-lens single-sample geometry.

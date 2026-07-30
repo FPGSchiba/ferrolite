@@ -4,15 +4,16 @@
 
 use std::sync::Arc;
 
-use ferrolite_color::WorkingSpace;
+use ferrolite_color::{mul_vec3, output_oetf, working_to_output, WorkingSpace};
 use ferrolite_export::{render_tiled, BitDepth, PixelData};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_jobs::CancelToken;
 use ferrolite_lens::{load_bundled, LensDb};
 use ferrolite_pipeline::{
-    estimate_atmospheric_light, Correction, Dehaze, EditPipeline, GpuPyramidSource, LensCorrection,
-    Op, OpStack,
+    clamp_uv_to_crop_bounds, estimate_atmospheric_light, geometry_src_px, geometry_uniform, Aspect,
+    Correction, CropRect, Dehaze, EditPipeline, Geometry, GpuPyramidSource, LensCorrection, Op,
+    OpStack,
 };
 
 const TOL: i32 = 6; // absorbs f16 + tile-edge resample (Spec 2 SEAM_TOL rationale)
@@ -344,4 +345,164 @@ fn export_renders_dehaze() {
         "dehaze should affect a substantial region ({changed}/{} bytes)",
         a.len()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Task 8 (plan crop-overhaul, spec C4 verification): the export path actually
+// RENDERS keystone. `TileEditPipeline`'s geometry head builds its per-tile
+// uniform from the SAME `geometry_uniform`/`geometry_tile_uniform` helpers the
+// preview `EditPipeline` uses (`ferrolite-pipeline/src/tile_edit.rs`), and
+// `geometry_tile_uniform` copies the homography rows (`h0`/`h1`/`h2`) straight
+// from the whole-image `geometry_uniform` unchanged — only `out_dims`/
+// `out_origin` differ per tile. So keystone is expected to reach export with
+// no separate/divergent geometry path. This proves it two ways: (a) a
+// keystone-active export differs from the keystone-0 export of the same crop,
+// and (b) a handful of probe pixels match the pipeline's own CPU homography
+// reference (`geometry_uniform` + `geometry_src_px` +
+// `clamp_uv_to_crop_bounds`), exactly mirroring
+// `ferrolite-pipeline/tests/golden.rs`'s
+// `geometry_keystone_gpu_matches_cpu_homography_reference` for the preview
+// path.
+// ---------------------------------------------------------------------------
+
+/// A crop with keystone_v = `kv` (keystone_h left at 0 — one axis is enough to
+/// exercise the projective homography path end-to-end).
+fn keystone_crop_stack(kv: f32) -> OpStack {
+    OpStack::default().set_op(Op::Geometry(Geometry {
+        crop: CropRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.8,
+            h: 0.8,
+        },
+        angle_deg: 0.0,
+        aspect: Aspect::Free,
+        keystone_v: kv,
+        keystone_h: 0.0,
+    }))
+}
+
+#[test]
+fn export_renders_keystone() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let (w, h) = (600u32, 500u32);
+    let img = probe(w, h);
+    let ctx = Arc::new(ctx);
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &img));
+    let cancel = CancelToken::new();
+
+    let stack = keystone_crop_stack(0.5);
+    let flat_stack = keystone_crop_stack(0.0);
+
+    let keystoned = render_tiled(
+        &ctx,
+        &pyramid,
+        &stack,
+        IDENTITY,
+        WorkingSpace::Srgb,
+        WorkingSpace::Srgb,
+        None,
+        BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+        None,
+        &cancel,
+        &mut |_, _| {},
+    )
+    .expect("keystoned render");
+
+    let flat = render_tiled(
+        &ctx,
+        &pyramid,
+        &flat_stack,
+        IDENTITY,
+        WorkingSpace::Srgb,
+        WorkingSpace::Srgb,
+        None,
+        BitDepth::Eight,
+        ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+        None,
+        &cancel,
+        &mut |_, _| {},
+    )
+    .expect("flat render");
+
+    // Keystone warps within the crop's unit square; it never changes the
+    // crop's output extent (see `geometry_uniform`'s doc comment).
+    assert_eq!(
+        (keystoned.width, keystoned.height),
+        (flat.width, flat.height),
+        "keystone must not change the exported crop's output dimensions"
+    );
+    let PixelData::Eight(a) = keystoned.data else {
+        panic!("expected 8-bit keystoned")
+    };
+    let PixelData::Eight(b) = flat.data else {
+        panic!("expected 8-bit flat")
+    };
+    assert_eq!(a.len(), b.len());
+
+    let mut max_diff = 0i32;
+    let mut changed = 0usize;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let d = (*x as i32 - *y as i32).abs();
+        max_diff = max_diff.max(d);
+        if d > 0 {
+            changed += 1;
+        }
+    }
+    eprintln!("export keystone-vs-flat max diff = {max_diff}, changed bytes = {changed}");
+    assert!(
+        max_diff > 2,
+        "keystone must visibly change the exported render (max diff {max_diff}) — \
+         did render_tiled/TileEditPipeline drop the homography rows?"
+    );
+    assert!(
+        changed > a.len() / 10,
+        "keystone should affect a substantial region ({changed}/{} bytes)",
+        a.len()
+    );
+
+    // CPU homography reference at a few probe pixels. `probe()` is a perfect
+    // linear ramp (r = x/w, g = y/h), so bilinear sampling at any in-bounds uv
+    // reproduces the ramp exactly (same trick as the pipeline golden's
+    // `common::gradient`): value = uv - half a source texel.
+    let (u, out_w, out_h) = geometry_uniform(stack.geometry(), w, h);
+    assert_eq!(
+        (out_w, out_h),
+        (keystoned.width, keystoned.height),
+        "geometry_uniform's out dims must agree with the export's"
+    );
+    let color_m = working_to_output(WorkingSpace::Srgb, WorkingSpace::Srgb);
+    const TOL_PROBE: i32 = 6; // f16 export path + tile-edge resample, per TOL above
+    let probes = [
+        (0u32, 0u32),
+        (out_w / 2, 0),
+        (out_w - 1, 0),
+        (0, out_h / 2),
+        (out_w / 2, out_h / 2),
+        (out_w - 1, out_h - 1),
+    ];
+    for (px, py) in probes {
+        let po = [px as f32 + 0.5, py as f32 + 0.5];
+        let s = geometry_src_px(&u, po);
+        let uv = clamp_uv_to_crop_bounds([s[0] / w as f32, s[1] / h as f32], u.crop_bounds);
+        let r_lin = uv[0] - 0.5 / w as f32;
+        let g_lin = uv[1] - 0.5 / h as f32;
+        let enc = mul_vec3(&color_m, &[r_lin, g_lin, 0.35]);
+        let quantize =
+            |v: f32| (output_oetf(WorkingSpace::Srgb, v).clamp(0.0, 1.0) * 255.0).round() as i32;
+        let expected = [quantize(enc[0]), quantize(enc[1]), quantize(enc[2])];
+        let di = ((py * out_w + px) * 3) as usize;
+        for (c, exp_c) in expected.iter().enumerate() {
+            let got = a[di + c] as i32;
+            let diff = (got - exp_c).abs();
+            assert!(
+                diff <= TOL_PROBE,
+                "probe ({px},{py}) channel {c}: got {got}, expected {exp_c} (diff {diff})"
+            );
+        }
+    }
 }

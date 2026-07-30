@@ -459,6 +459,7 @@ fn geometry_crop_rotate_matches_golden() {
         },
         angle_deg: 10.0,
         aspect: Aspect::Free,
+        ..Default::default()
     }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
@@ -504,6 +505,7 @@ fn full_seven_op_stack_matches_golden() {
             },
             angle_deg: 3.0,
             aspect: Aspect::Free,
+            ..Default::default()
         }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
@@ -554,6 +556,7 @@ fn rotated_crop_edge_is_not_smeared() {
         },
         angle_deg: 45.0,
         aspect: Aspect::Free,
+        ..Default::default()
     }));
     let mut pipe = EditPipeline::new(ctx, &src, stack, IDENTITY);
     let pixels = pipe.render_to_image();

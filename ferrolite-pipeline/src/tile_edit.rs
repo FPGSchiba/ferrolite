@@ -65,7 +65,7 @@ use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
 use crate::local::{AdjustmentSet, LocalAdjustments};
 use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode, SharedMasks};
 use crate::nodes::{GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode};
-use crate::op::{Aspect, CropRect, Geometry, LensCorrection, OpStack};
+use crate::op::{LensCorrection, OpStack};
 use crate::sharpen_node::SharpenNode;
 use crate::uniforms::{
     color_matrix_uniform, geometry_uniform, lens_halo_px, sharpen_halo_doc, sharpen_uniform,
@@ -150,11 +150,7 @@ impl TileEditPipeline {
         // halo must cover the largest one anyone will actually blur at) plus
         // the lens-warp halo.
         let halo = sharpen_halo_doc(&stack).max(lens_halo_px(lc.as_ref(), warp_grid));
-        let geometry = stack.geometry().unwrap_or(Geometry {
-            crop: CropRect::full(),
-            angle_deg: 0.0,
-            aspect: Aspect::Original,
-        });
+        let geometry = stack.geometry().unwrap_or_default();
         let request = Rc::new(Cell::new(TileRequest {
             coord: TileCoord { lod: 0, x: 0, y: 0 },
             halo,

@@ -204,8 +204,39 @@ mod tests {
             crop: ferrolite_pipeline::CropRect::full(),
             angle_deg: 5.0,
             aspect: ferrolite_pipeline::Aspect::Free,
+            ..Default::default()
         }));
         assert!(needs_full_rebuild(&base, &geo), "geometry change: rebuild");
+    }
+
+    /// Plan `crop-overhaul` C4 Task 4: keystone is a geometry-tier change,
+    /// same treatment as `angle_deg` — a keystone-only edit (crop/angle/aspect
+    /// unchanged) must still force the full-res `TileEditPipeline` rebuild.
+    #[test]
+    fn needs_full_rebuild_on_keystone_only_change() {
+        let base = OpStack::default().set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            crop: ferrolite_pipeline::CropRect::full(),
+            angle_deg: 0.0,
+            aspect: ferrolite_pipeline::Aspect::Original,
+            keystone_v: 0.0,
+            keystone_h: 0.0,
+        }));
+        let keystone_v_only = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            keystone_v: 0.3,
+            ..base.geometry().unwrap()
+        }));
+        assert!(
+            needs_full_rebuild(&base, &keystone_v_only),
+            "keystone_v-only change: rebuild"
+        );
+        let keystone_h_only = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            keystone_h: -0.4,
+            ..base.geometry().unwrap()
+        }));
+        assert!(
+            needs_full_rebuild(&base, &keystone_h_only),
+            "keystone_h-only change: rebuild"
+        );
     }
 
     #[test]

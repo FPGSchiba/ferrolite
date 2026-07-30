@@ -277,6 +277,38 @@ pub struct Geometry {
     /// Rotation in degrees about the crop center. 0 = identity.
     pub angle_deg: f32,
     pub aspect: Aspect,
+    /// Manual vertical keystone (perspective) correction, normalized [-1, 1].
+    /// 0 = identity. New in Plan `crop-overhaul` C4 — `#[serde(default)]` so
+    /// sidecars written before this feature deserialize with 0.0 (unchanged).
+    #[serde(default)]
+    pub keystone_v: f32,
+    /// Manual horizontal keystone (perspective) correction, normalized [-1, 1].
+    /// 0 = identity. Same back-compat treatment as `keystone_v`.
+    #[serde(default)]
+    pub keystone_h: f32,
+}
+
+impl Default for Geometry {
+    /// Full-frame crop, no rotation, original aspect, no keystone — identity.
+    fn default() -> Self {
+        Self {
+            crop: CropRect::full(),
+            angle_deg: 0.0,
+            aspect: Aspect::Original,
+            keystone_v: 0.0,
+            keystone_h: 0.0,
+        }
+    }
+}
+
+impl Geometry {
+    /// True when this op has no effect (crop is full-frame, no rotation,
+    /// original aspect, and no keystone). Single source of truth so the
+    /// crop tool's identity check and any future doc-level consumer cannot
+    /// drift on what "no geometry edit" means.
+    pub fn is_identity(&self) -> bool {
+        *self == Geometry::default()
+    }
 }
 
 /// One color-grading wheel: a hue-sat tint direction plus a luminance offset.
@@ -771,6 +803,7 @@ mod tests {
             crop: CropRect::full(),
             angle_deg: 2.0,
             aspect: Aspect::Original,
+            ..Default::default()
         };
         let d = EditDoc::default().set_op(Op::Geometry(g));
         assert_eq!(d.geometry(), Some(g));
@@ -808,6 +841,7 @@ mod tests {
                 },
                 angle_deg: 5.0,
                 aspect: Aspect::Free,
+                ..Default::default()
             }));
         assert_eq!(d.tone_curve().unwrap().points.len(), 3);
         assert_eq!(d.hsl().unwrap().bands[0].hue, 0.1);
@@ -858,6 +892,7 @@ mod tests {
             crop: CropRect::full(),
             angle_deg: 3.0,
             aspect: Aspect::Original,
+            ..Default::default()
         };
         let d = EditDoc::default()
             .set_op(Op::Geometry(g))
@@ -1365,5 +1400,63 @@ mod tests {
             d,
             "no panic, unchanged doc"
         );
+    }
+
+    // ── Plan `crop-overhaul` C4 Task 4: Geometry keystone fields ──
+
+    #[test]
+    fn geometry_default_is_identity() {
+        assert!(Geometry::default().is_identity());
+        assert_eq!(Geometry::default().keystone_v, 0.0);
+        assert_eq!(Geometry::default().keystone_h, 0.0);
+    }
+
+    #[test]
+    fn geometry_keystone_serde_round_trips() {
+        let g = Geometry {
+            crop: CropRect::full(),
+            angle_deg: 0.0,
+            aspect: Aspect::Original,
+            keystone_v: 0.35,
+            keystone_h: -0.6,
+        };
+        let s = serde_json::to_string(&g).unwrap();
+        let back: Geometry = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, g);
+        assert_eq!(back.keystone_v, 0.35);
+        assert_eq!(back.keystone_h, -0.6);
+    }
+
+    #[test]
+    fn geometry_old_payload_without_keystone_fields_deserializes_to_zero() {
+        // Sidecar written before this feature has no `keystone_v`/`keystone_h` keys.
+        let json = r#"{
+            "crop": { "x": 0.1, "y": 0.1, "w": 0.8, "h": 0.8 },
+            "angle_deg": 5.0,
+            "aspect": "Free"
+        }"#;
+        let g: Geometry = serde_json::from_str(json).unwrap();
+        assert_eq!(g.keystone_v, 0.0);
+        assert_eq!(g.keystone_h, 0.0);
+        assert_eq!(g.angle_deg, 5.0);
+        assert_eq!(g.aspect, Aspect::Free);
+    }
+
+    #[test]
+    fn geometry_is_identity_false_when_keystone_nonzero() {
+        let base = Geometry::default();
+        assert!(base.is_identity());
+
+        let v_only = Geometry {
+            keystone_v: 0.2,
+            ..base
+        };
+        assert!(!v_only.is_identity(), "nonzero keystone_v is an edit");
+
+        let h_only = Geometry {
+            keystone_h: -0.2,
+            ..base
+        };
+        assert!(!h_only.is_identity(), "nonzero keystone_h is an edit");
     }
 }

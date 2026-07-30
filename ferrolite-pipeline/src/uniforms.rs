@@ -3,7 +3,7 @@
 //! shader). Display-linear space; the sRGB OETF lives only in the display/blit
 //! shader. No GPU here — fully unit-tested.
 
-use crate::op::{Aspect, CropRect, Geometry, Hsl, LensCorrection, Sharpen};
+use crate::op::{Geometry, Hsl, LensCorrection, Sharpen};
 use ferrolite_lens::{lens_halo, WarpGrid};
 
 /// Mid-grey pivot (display-linear) about which contrast scales. Placeholder
@@ -385,11 +385,7 @@ pub fn geometry_uniform(
 ) -> (GeometryUniform, u32, u32) {
     let sw = src_w as f32;
     let sh = src_h as f32;
-    let geo = op.unwrap_or(Geometry {
-        crop: CropRect::full(),
-        angle_deg: 0.0,
-        aspect: Aspect::Original,
-    });
+    let geo = op.unwrap_or_default();
 
     let cx = geo.crop.x.clamp(0.0, 1.0);
     let cy = geo.crop.y.clamp(0.0, 1.0);
@@ -1455,6 +1451,7 @@ mod tests {
                 },
                 angle_deg: 0.0,
                 aspect: Aspect::Free,
+                ..Default::default()
             }),
             64,
             48,
@@ -1475,6 +1472,7 @@ mod tests {
                 crop: CropRect::full(),
                 angle_deg: 90.0,
                 aspect: Aspect::Original,
+                ..Default::default()
             }),
             64,
             48,
@@ -1517,6 +1515,7 @@ mod tests {
                 },
                 angle_deg,
                 aspect: Aspect::Free,
+                ..Default::default()
             };
             let (u, out_w, out_h) = geometry_uniform(Some(geo), src_w, src_h);
             let out_w = out_w as f32;
@@ -1631,6 +1630,7 @@ mod tests {
             },
             angle_deg: 45.0,
             aspect: Aspect::Free,
+            ..Default::default()
         };
         let (u, _, _) = geometry_uniform(Some(geo), src_w, src_h);
 

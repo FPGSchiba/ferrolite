@@ -83,6 +83,7 @@ mod tests {
             },
             angle_deg: 0.0,
             aspect: Aspect::Free,
+            ..Default::default()
         };
         approx(
             display_to_source(Some(geo), 100, 100, (0.0, 0.0)),
@@ -105,6 +106,7 @@ mod tests {
             crop: CropRect::full(),
             angle_deg: 90.0,
             aspect: Aspect::Original,
+            ..Default::default()
         };
         approx(
             display_to_source(Some(geo), 100, 100, (0.5, 0.5)),
@@ -129,6 +131,7 @@ mod tests {
             },
             angle_deg: 0.0,
             aspect: Aspect::Free,
+            ..Default::default()
         };
         for &(ox, oy) in &[(0.0f32, 0.0f32), (1.0, 1.0), (0.3, 0.6)] {
             let src = display_to_source(Some(geo), 100, 100, (ox, oy));
@@ -146,6 +149,7 @@ mod tests {
             crop: CropRect::full(),
             angle_deg: 30.0,
             aspect: Aspect::Original,
+            ..Default::default()
         };
         let src = display_to_source(Some(geo), 120, 90, (0.4, 0.55));
         let back = source_to_display(Some(geo), 120, 90, src);

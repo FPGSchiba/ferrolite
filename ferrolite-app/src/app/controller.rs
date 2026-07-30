@@ -1252,6 +1252,8 @@ impl AppController {
                         crop: ferrolite_pipeline::CropRect::full(),
                         angle_deg: g.angle_deg,
                         aspect: g.aspect,
+                        keystone_v: g.keystone_v,
+                        keystone_h: g.keystone_h,
                     },
                 ));
             }

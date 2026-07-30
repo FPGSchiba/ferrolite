@@ -61,11 +61,7 @@ impl PanelTab for CropTab {
         // Moved verbatim from adjustment_panel.rs's former "Geometry" CollapsingHeader
         // body. `crop_active` is NOT set here — the app derives it from whether this
         // tool is the active tool (ToolState.active == Crop), not from section state.
-        let geo = stack.geometry().unwrap_or(Geometry {
-            crop: ferrolite_pipeline::CropRect::full(),
-            angle_deg: 0.0,
-            aspect: Aspect::Original,
-        });
+        let geo = stack.geometry().unwrap_or_default();
         let mut angle = geo.angle_deg;
         let r = ui.add(EguiSlider {
             label: "Angle",
@@ -100,11 +96,10 @@ impl PanelTab for CropTab {
                 crop: geo.crop,
                 angle_deg: angle,
                 aspect,
+                keystone_v: geo.keystone_v,
+                keystone_h: geo.keystone_h,
             };
-            let s = if new_geo.angle_deg == 0.0
-                && new_geo.aspect == Aspect::Original
-                && new_geo.crop == ferrolite_pipeline::CropRect::full()
-            {
+            let s = if new_geo.is_identity() {
                 stack.reset(OpKind::Geometry)
             } else {
                 stack.set_op(Op::Geometry(new_geo))

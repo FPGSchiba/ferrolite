@@ -53,6 +53,8 @@ mod tests {
                 },
                 angle_deg: 2.5,
                 aspect: Aspect::SixteenNine,
+                keystone_v: 0.15,
+                keystone_h: -0.2,
             }));
         let text = serialize(&d);
         assert_eq!(deserialize(&text), Some(d));

@@ -5,7 +5,7 @@
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::crop_math::{self, Handle};
 use crate::theme;
-use ferrolite_pipeline::{Aspect, CropRect, Geometry, Op, OpKind, OpStack};
+use ferrolite_pipeline::{Geometry, Op, OpKind, OpStack};
 
 const HANDLE_R: f32 = 0.03; // normalized hit radius
 
@@ -15,11 +15,7 @@ pub fn show(
     stack: &OpStack,
     aspect_dims: (u32, u32),
 ) -> Option<EditOutcome> {
-    let geo = stack.geometry().unwrap_or(Geometry {
-        crop: CropRect::full(),
-        angle_deg: 0.0,
-        aspect: Aspect::Original,
-    });
+    let geo = stack.geometry().unwrap_or_default();
     let crop = geo.crop;
     let to_screen = |nx: f32, ny: f32| {
         egui::pos2(
@@ -124,6 +120,8 @@ pub fn show(
             crop: new_crop,
             angle_deg: geo.angle_deg,
             aspect: geo.aspect,
+            keystone_v: geo.keystone_v,
+            keystone_h: geo.keystone_h,
         };
         return Some(EditOutcome {
             stack: stack.set_op(Op::Geometry(new_geo)),

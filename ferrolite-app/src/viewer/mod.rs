@@ -136,6 +136,16 @@ pub struct ViewerState {
     /// observing a `!converged` frame), which is why edits and the split now show
     /// without a zoom nudge.
     pub present_key: Option<(u64, ferrolite_vt::ViewTransform)>,
+    /// The `opstack_version` at the last point the full-res producer was
+    /// actually (re)synced to the stack — advanced ONLY where the producer
+    /// syncs (`install_full_pipeline`, `set_preview_and_full`'s commit branch,
+    /// the lens-bake / color-matrix rebuild handlers), never on the mid-drag
+    /// preview-only path. The compose+swap requires
+    /// `full_synced_version == opstack_version` (`present::swap_allowed`):
+    /// while a drag defers the full tier this lags behind, blocking the swap
+    /// so stale pre-drag tiles can't be stamped valid over the live preview
+    /// (the no-live-edits / pan-zoom raw-flash regression).
+    pub full_synced_version: u64,
     /// Seconds elapsed into the active crossfade.
     pub crossfade_elapsed: f32,
     /// Terminal state: nothing more will load (preview failed AND/OR full failed,
@@ -377,6 +387,7 @@ impl ViewerState {
             full_ready: false,
             crossfading: false,
             present_key: None,
+            full_synced_version: 0,
             crossfade_elapsed: 0.0,
             idle: false,
             showing_full: false,
@@ -605,10 +616,18 @@ pub fn apply_pan(view: ViewTransform, drag_delta: (f32, f32)) -> ViewTransform {
 /// first pixel; `present_source` is returned so the caller can gate repaints on
 /// an active crossfade.
 ///
-/// When `interactive == false` (e.g. the crop tool is active) the canvas
-/// pan/zoom/double-click interaction is SKIPPED entirely — the drag interaction
-/// is not even registered — so the crop overlay is the sole input target over
-/// this area. The image still renders (viewport recorded + paint callback added).
+/// When `interactive == false` the canvas pan/zoom/double-click interaction is
+/// normally SKIPPED entirely (e.g. mid-crossfade split compare). The CROP tool
+/// is the exception (QoL: pan/zoom must keep working while cropping): with
+/// `state.crop_active` the canvas interact IS registered — scroll-wheel zoom
+/// works exactly as in normal mode, and drags reaching this widget pan. The
+/// crop overlay registers its own interact over `image_rect` LATER in the
+/// frame (`develop/canvas/viewer.rs` draws tool overlays after this paint), so
+/// egui's later-wins hit-testing gives the overlay every drag that starts ON
+/// the image — no id fight — and the overlay itself routes drags that start
+/// outside the crop rect back to pan (`CropOverlayAction::Pan`). This interact
+/// therefore only ever receives crop-mode drags that start in the letterbox
+/// area outside the image. Double-click fit/1:1 stays normal-mode-only.
 pub fn paint(
     ui: &mut egui::Ui,
     state: &mut ViewerState,
@@ -630,13 +649,15 @@ pub fn paint(
     state.viewport = viewport;
 
     // Pointer interaction over the canvas: drag pans, scroll zooms about cursor.
-    // Skipped when non-interactive so the crop overlay owns input over this area
-    // (no competing `viewer-canvas` drag registered, no scroll/drag read).
+    // Skipped when non-interactive — EXCEPT in crop mode, where pan/zoom must
+    // coexist with the crop overlay (see the fn doc comment: the overlay is
+    // registered later, so it wins every drag starting on the image; this
+    // interact gets the letterbox drags, and scroll zoom works everywhere).
     // `interacting` records a pan/zoom/double-click THIS frame, which forces the
     // present source back to the smooth preview (the composed `front` is stale
     // for the new transform until the pool reconverges).
     let mut interacting = false;
-    if interactive && state.loaded {
+    if (interactive || state.crop_active) && state.loaded {
         let resp = ui.interact(
             rect,
             ui.id().with(("viewer-canvas", state.image_id)),
@@ -651,7 +672,21 @@ pub fn paint(
         }
         let scroll = ui.input(|i| i.raw_scroll_delta.y);
         if scroll.abs() > f32::EPSILON {
-            if let Some(pos) = resp.hover_pos() {
+            // In crop mode the crop overlay (registered later, over the image)
+            // is the TOPMOST hovered widget, so `resp.hover_pos()` is `None`
+            // over the image and scroll-zoom would only work in the letterbox.
+            // `contains_pointer()` stays true through same-layer overlap while
+            // still respecting occlusion by real overlay Areas (histogram /
+            // info pill), so zoom-about-cursor works across the whole canvas.
+            // Normal mode keeps the stricter `hover_pos()` gate unchanged.
+            let zoom_pos = if state.crop_active {
+                resp.contains_pointer()
+                    .then(|| ui.ctx().pointer_hover_pos())
+                    .flatten()
+            } else {
+                resp.hover_pos()
+            };
+            if let Some(pos) = zoom_pos {
                 let cursor = (pos.x - rect.left(), pos.y - rect.top());
                 // Normalize wheel notches (~50px) into the apply_zoom step scale.
                 state.view = apply_zoom(state.view, scroll / 50.0, cursor, viewport);
@@ -660,8 +695,10 @@ pub fn paint(
                 interacting = true;
             }
         }
-        // Double-click toggles between fit-to-screen and 1:1 (zoom = 1.0, centered).
-        if resp.double_clicked() {
+        // Double-click toggles between fit-to-screen and 1:1 (zoom = 1.0,
+        // centered). Normal mode only — in crop mode a double-click inside the
+        // rect is (potentially) the start of a crop gesture, not a view jump.
+        if interactive && resp.double_clicked() {
             if let Some(dims) = state.image_dims {
                 let fit = ferrolite_vt::ViewTransform::fit(dims, viewport);
                 // If already near the fit zoom, switch to 1:1; otherwise fit.

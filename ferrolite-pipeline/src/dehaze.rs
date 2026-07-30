@@ -1,9 +1,10 @@
-//! Pure Dark Channel Prior (He et al.) dehaze math — no GPU. The GPU passes
-//! (`dehaze_node.rs`'s `DehazeTransmissionNode` + `DehazeRecoveryNode`) mirror
-//! `transmission_map`/`dehaze_recover` exactly; the atmospheric light `A` is a
-//! whole-image estimate computed once (design §5.3) and handed to every tile as
-//! a uniform. `dehaze_recover` is the reusable transform the future per-mask
-//! path (design §7) will call unchanged (design §2.5).
+//! Pure Dark Channel Prior (He et al.) dehaze math — no GPU. The GPU pass
+//! (`dehaze_node.rs`'s `DehazeTransmissionNode`) mirrors `transmission_map` exactly;
+//! the atmospheric light `A` is a whole-image estimate computed once (design §5.3)
+//! and handed to every tile as a uniform. The recovery (amount/atmos-only blend) is
+//! fused into the Color-stage engine node in `local_node.rs` and samples the
+//! shared transmission to produce the output. `dehaze_recover` is the reusable
+//! transform the future per-mask path (design §7) will call unchanged (design §2.5).
 
 use crate::op::Dehaze;
 use ferrolite_image::LinearRgbaF32;
@@ -18,8 +19,8 @@ pub const MAX_DEHAZE_RADIUS: u32 = 64;
 /// Haze-retention factor ω (design §5.2, step 3): keep a little haze for realism.
 pub(crate) const DEHAZE_OMEGA: f32 = 0.95;
 /// Transmission floor t₀ (design §5.2, step 4): avoids divide-by-~0 noise blow-up.
-/// `pub(crate)` (not just module-private): `DehazeRecoveryNode`'s `RecoveryParams`
-/// (QS-Task 4) seeds this same constant.
+/// `pub(crate)` (not just module-private): the fused recovery in the Color-stage
+/// engine node (QS-Task 4) uses this same constant.
 pub(crate) const DEHAZE_T0: f32 = 0.1;
 /// The identity-safe atmospheric light used before a real estimate is available
 /// (e.g. `TileEditPipeline` before `set_dehaze_atmos`, or a no-dehaze export).
@@ -27,8 +28,8 @@ pub(crate) const DEHAZE_T0: f32 = 0.1;
 /// ever a placeholder for the no-op case.
 pub const DEHAZE_ATMOS_NEUTRAL: [f32; 3] = [1.0, 1.0, 1.0];
 /// Floor each `A` channel to this to keep the `I/A` and `/max(t,t0)` divisions finite.
-/// `pub(crate)` (not just module-private): `DehazeTransmissionNode`/`DehazeRecoveryNode`'s
-/// `TransmissionParams`/`RecoveryParams` (QS-Task 4) floor the same way.
+/// `pub(crate)` (not just module-private): `DehazeTransmissionNode` and the fused
+/// recovery in the Color-stage engine node (QS-Task 4) floor the same way.
 pub(crate) const DEHAZE_ATMOS_MIN: f32 = 1e-3;
 /// Cap on pixels scanned by `estimate_atmospheric_light` (it subsamples above
 /// this). Bounds the CPU cost to sub-millisecond regardless of image size so it
@@ -302,10 +303,10 @@ pub fn transmission_sample_lod(trans_w: f32, trans_h: f32, full_w: f32, full_h: 
 /// Before ST-Task 3, `TileEditPipeline` computed its own per-tile transmission
 /// (the ~14-pass guided-filter dark-channel map), which needed the op's patch
 /// radius plus the guided-filter window fetched across tile borders to stay
-/// seamless — hence a `7r` halo. That per-tile transmission is gone: the tiled
-/// `DehazeRecoveryNode` now just SAMPLES a shared whole-image transmission
-/// (computed once by the whole-image `EditPipeline`, source-space, bilinearly
-/// upsampled) at each pixel's own source UV. A per-pixel sample has no
+/// seamless — hence a `7r` halo. That per-tile transmission is gone: the recovery
+/// (now fused in the Color-stage engine node) just SAMPLES a shared whole-image
+/// transmission (computed once by the whole-image `EditPipeline`, source-space,
+/// bilinearly upsampled) at each pixel's own source UV. A per-pixel sample has no
 /// neighbourhood to over-fetch — the guided filter's neighbourhood is entirely
 /// contained in the whole-image computation, off the tiled path — so the tiled
 /// tier contributes no halo for dehaze (mirrors why `LocalAdjustments`, another

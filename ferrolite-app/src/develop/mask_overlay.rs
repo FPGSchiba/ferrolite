@@ -91,6 +91,18 @@ fn u32_to_rad_handle(v: u32) -> RadHandle {
 // not scope creep), so a wider params struct wasn't worth the churn for the
 // single caller (`develop/tools/mask.rs`, which already spreads them from a
 // tuple).
+/// Whether the red coverage tint may draw: overlay toggled on, no slider drag
+/// in progress, AND a selection that is valid against THIS stack's layers. The
+/// selection gate is load-bearing: the tint texture (`overlay_tex`) is an
+/// app-global egui texture that outlives image switches, and the rebuild path
+/// early-outs (leaving it stale) whenever no valid mask is selected — so a
+/// fresh viewer (`selected: None`, `overlay_on: true` by default) would
+/// otherwise paint the PREVIOUS image's mask over the new image.
+fn coverage_tint_visible(mask: &MaskUiState, stack: &OpStack) -> bool {
+    let layer_count = crate::develop::mask_edit::layers(stack).layers.len();
+    mask.overlay_on && !mask.adjusting && mask.selected.is_some_and(|i| i < layer_count)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -105,7 +117,7 @@ pub fn show(
     // Fill: stretch the coverage texture over the image rect with alpha blend.
     // Suppressed while `adjusting` (a Light+Color slider of this mask is being
     // dragged) so the user sees the actual effect instead of the red tint.
-    if mask.overlay_on && !mask.adjusting {
+    if coverage_tint_visible(mask, stack) {
         if let Some(tex_id) = overlay_tex {
             ui.painter().image(
                 tex_id,
@@ -712,6 +724,62 @@ fn route_color_eyedropper(
             SWATCH_R,
             color,
             egui::Stroke::new(1.0_f32, theme::BG_BASE),
+        );
+    }
+}
+
+#[cfg(test)]
+mod overlay_visibility_tests {
+    use super::*;
+    use crate::develop::mask_edit;
+    use ferrolite_pipeline::OpStack;
+
+    fn stack_with_one_mask() -> OpStack {
+        mask_edit::create_mask(&OpStack::default(), "M".into())
+    }
+
+    #[test]
+    fn tint_requires_a_validated_selection() {
+        let mut mask = MaskUiState::default(); // overlay_on: true, selected: None
+        let one_mask = stack_with_one_mask();
+        let empty = OpStack::default();
+
+        // The stale-texture bug: overlay_on defaults true on a fresh viewer, so
+        // without a selection gate the previous image's app-global tint texture
+        // would draw over a mask-less image.
+        assert!(
+            !coverage_tint_visible(&mask, &empty),
+            "no selection ⇒ no tint (fresh viewer after image switch)"
+        );
+
+        mask.selected = Some(0);
+        assert!(
+            coverage_tint_visible(&mask, &one_mask),
+            "valid selection ⇒ tint draws"
+        );
+        assert!(
+            !coverage_tint_visible(&mask, &empty),
+            "selection stale against a mask-less stack ⇒ no tint"
+        );
+
+        mask.selected = Some(3);
+        assert!(
+            !coverage_tint_visible(&mask, &one_mask),
+            "out-of-range selection ⇒ no tint"
+        );
+
+        mask.selected = Some(0);
+        mask.adjusting = true;
+        assert!(
+            !coverage_tint_visible(&mask, &one_mask),
+            "adjusting suppresses the tint (unchanged behavior)"
+        );
+
+        mask.adjusting = false;
+        mask.overlay_on = false;
+        assert!(
+            !coverage_tint_visible(&mask, &one_mask),
+            "overlay toggled off ⇒ no tint (unchanged behavior)"
         );
     }
 }

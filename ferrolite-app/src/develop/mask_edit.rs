@@ -97,10 +97,6 @@ pub fn set_component(
     write(stack, la)
 }
 
-pub fn set_adjustments(stack: &OpStack, idx: usize, a: AdjustmentSet) -> OpStack {
-    edit_layer(stack, idx, |l| l.adjustments = a)
-}
-
 /// The mask definition AS IT WOULD BE with `tentative` folded in at `mode` after the
 /// existing `base` components — used to preview an in-progress "add component"
 /// (Task 6) without touching the committed `OpStack`.
@@ -188,7 +184,7 @@ pub fn new_brush_layer(stack: &OpStack, mask_idx: usize) -> OpStack {
 mod tests {
     use super::*;
     use ferrolite_mask::{CompositeMode, MaskComponent, Vec2};
-    use ferrolite_pipeline::{AdjustmentSet, OpKind, OpStack};
+    use ferrolite_pipeline::{OpKind, OpStack};
 
     fn brush() -> MaskComponent {
         MaskComponent::Brush { strokes: vec![] }
@@ -287,17 +283,6 @@ mod tests {
             same2, s,
             "out-of-range mask_idx returns the stack unchanged"
         );
-    }
-
-    #[test]
-    fn set_adjustments_replaces_the_layers_set() {
-        let s = create_mask(&OpStack::default(), "m".into());
-        let a = AdjustmentSet {
-            exposure: 0.5,
-            ..Default::default()
-        };
-        let s = set_adjustments(&s, 0, a);
-        assert_eq!(layers(&s).layers[0].adjustments.exposure, 0.5);
     }
 
     #[test]

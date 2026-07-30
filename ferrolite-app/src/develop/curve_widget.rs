@@ -1,17 +1,21 @@
 //! Tone-curve adapter over the reusable `widgets::curve::curve_editor`. Adds a
 //! Master/R/G/B channel selector (tinted per channel) above the curve; each
 //! channel edits its own `PointCurve` (Master = the legacy `points`/`mode`).
-//! Parametric region controls live in the sub-panel (see `parametric` section).
-//! The whole `ToneCurve` is routed through `ops_edit::set_tone_curve`, which
-//! drops the op when everything is identity. Active channel is UI-only state.
+//! Parametric H/S/W/B region controls live in their own REGION TONES section
+//! (see `base_tabs::LightTab::show`), not here.
+//! Renders against a `ScopedEdit` (design 2026-07-28 §2, Phase 2b Task 3), so
+//! the same widget drives both the global Tone Curve and a selected mask's —
+//! writes go through `ScopedEdit::write`, which normalizes identity structures
+//! away on the doc side. `MaskNone` renders a faint hint and returns `None`.
+//! Active channel is UI-only state.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::ops_edit::set_tone_curve;
-use crate::develop::{curve_math, curve_widget_parametric};
+use crate::develop::curve_math;
+use crate::develop::scope::{ScopedEdit, MASK_NONE_HINT};
 use crate::theme;
 use crate::widgets::curve::{curve_editor, CurveStyle};
 use egui::Color32;
-use ferrolite_pipeline::{CurveMode, OpKind, OpStack, PointCurve, ToneCurve};
+use ferrolite_pipeline::{CurveMode, OpKind, PointCurve, ToneCurve};
 
 /// Which tone-curve channel the editor is currently editing.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,8 +96,12 @@ fn with_channel(
     tc
 }
 
-pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
-    let tc = stack.tone_curve().unwrap_or_default();
+pub fn show(ui: &mut egui::Ui, scoped: &ScopedEdit) -> Option<EditOutcome> {
+    let Some(set) = scoped.set() else {
+        ui.label(egui::RichText::new(MASK_NONE_HINT).color(theme::TEXT_FAINT));
+        return None;
+    };
+    let tc = set.tone_curve.clone();
     let channel_id = ui.id().with("tone_curve_channel");
     let mut channel = read_channel(ui, channel_id);
 
@@ -131,6 +139,12 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
         display_mode,
         &channel_style(channel),
     ) {
+        // Set adjusting whenever a curve point is being dragged (not committed),
+        // before checking for identity to ensure we suppress the mask overlay
+        // during mid-drag pauses.
+        if !edit.commit {
+            scoped.adjusting.set(true);
+        }
         // Reset OR an edit that lands on identity → clear this channel.
         let new_points = if edit.reset || curve_math::is_identity(&edit.points) {
             Vec::new()
@@ -138,16 +152,11 @@ pub fn show(ui: &mut egui::Ui, stack: &OpStack) -> Option<EditOutcome> {
             edit.points
         };
         let new_tc = with_channel(tc.clone(), channel, new_points, edit.mode);
-        out = Some(EditOutcome {
-            stack: set_tone_curve(stack, new_tc),
-            kind: OpKind::ToneCurve,
-            commit: edit.commit,
-        });
-    }
-
-    // Parametric region sub-panel (Task 7). Takes precedence only when it emits.
-    if let Some(param_out) = curve_widget_parametric::show(ui, stack, &tc) {
-        out = Some(param_out);
+        let mut new_set = set.clone();
+        new_set.tone_curve = new_tc;
+        if let Some(o) = scoped.write(new_set, OpKind::ToneCurve, edit.commit) {
+            out = Some(o);
+        }
     }
 
     out

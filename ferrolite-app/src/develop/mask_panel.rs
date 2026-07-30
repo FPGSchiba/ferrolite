@@ -1,15 +1,17 @@
 //! Develop right-panel Masks section (design §9.2): the masks list + Create,
-//! per-row visibility / invert / rename / delete, and selection. The selected
-//! mask's Light+Color set + component tools live in `selected_section` (Task 8).
-//! Discrete actions emit a committed `EditOutcome` (kind = LocalAdjustments);
-//! the app pushes one history entry each (per-gesture sealing, Task 3).
+//! per-row visibility / invert / rename / delete, and selection. The Light/
+//! Color/Effects adjustments for the selected mask are edited through the
+//! shared scoped base tabs above this block (Task 6) — this module only owns
+//! mask management: create/overlay, the mask list, and the component-tools
+//! entry point. Discrete actions emit a committed `EditOutcome` (kind =
+//! LocalAdjustments); the app pushes one history entry each (per-gesture
+//! sealing, Task 3).
 
 use crate::develop::adjustment_panel::EditOutcome;
 use crate::develop::mask_edit;
 use crate::develop::mask_ui::MaskUiState;
 use crate::settings::keymap::{Action, Keymap};
 use crate::theme;
-use crate::widgets::slider::EguiSlider;
 use ferrolite_pipeline::{OpKind, OpStack};
 
 /// Brush-radius slider bounds (fraction of the image's smaller edge). Shared
@@ -147,7 +149,9 @@ pub fn show(
     }
 
     ui.add_space(6.0);
-    // Selected-mask section (component tools + Light+Color) — Task 8.
+    // Selected-mask component tools (component count, Components window link,
+    // New Brush Layer). Light/Color/Effects adjustments live in the shared
+    // scoped base tabs above this block (Task 6).
     if let Some(idx) = mask.selected {
         if idx < la.layers.len() {
             if let Some(o) = selected_section(ui, stack, mask, idx, keymap) {
@@ -159,10 +163,12 @@ pub fn show(
     out
 }
 
-/// The selected mask's Light/Color adjustments + a link to the Components
-/// window (design §9.2). Component creation (type picker, brush/luma/color
-/// params, add buttons) lives in `mask_components_modal` (Task 5) — this
-/// section only shows the component count and a button to open that window.
+/// The selected mask's component tools: component count, a link to the
+/// Components window, and "New Brush Layer" (design §9.2). Component creation
+/// (type picker, brush/luma/color params, add buttons) lives in
+/// `mask_components_modal` (Task 5). Light/Color/Effects adjustments for the
+/// selected mask are no longer rendered here — they're the shared scoped base
+/// tabs above this block in `tool_panel::show` (Task 6).
 pub(crate) fn selected_section(
     ui: &mut egui::Ui,
     stack: &OpStack,
@@ -202,233 +208,5 @@ pub(crate) fn selected_section(
         }
     });
 
-    ui.separator();
-
-    // ── Light + Color adjustments (each slider carries its own reset column) ──
-    let mut a = layer.adjustments;
-    let mut changed = false;
-    let mut commit_now = false;
-    let mut adjusting = false;
-    let slider = |ui: &mut egui::Ui,
-                  label: &str,
-                  v: &mut f32,
-                  min: f32,
-                  max: f32,
-                  bip: bool,
-                  changed: &mut bool,
-                  commit_now: &mut bool,
-                  adjusting: &mut bool| {
-        let r = ui.add(EguiSlider {
-            label,
-            value: v,
-            min,
-            max,
-            default: 0.0,
-            step: 0.01,
-            decimals: 2,
-            unit: "",
-            bipolar: bip,
-            signed: bip,
-        });
-        if r.dragged() {
-            *adjusting = true;
-        }
-        if r.changed() {
-            *changed = true;
-            if r.drag_stopped() || !r.dragged() {
-                *commit_now = true;
-            }
-        }
-    };
-
-    ui.label(
-        egui::RichText::new("Light")
-            .size(11.0)
-            .color(theme::TEXT_DIM),
-    );
-    slider(
-        ui,
-        "Exposure",
-        &mut a.exposure,
-        -5.0,
-        5.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Contrast",
-        &mut a.contrast,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Highlights",
-        &mut a.highlights,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Shadows",
-        &mut a.shadows,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Whites",
-        &mut a.whites,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Blacks",
-        &mut a.blacks,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-
-    ui.label(
-        egui::RichText::new("Color")
-            .size(11.0)
-            .color(theme::TEXT_DIM),
-    );
-    slider(
-        ui,
-        "Temp",
-        &mut a.temp,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Tint",
-        &mut a.tint,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Saturation",
-        &mut a.saturation,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    slider(
-        ui,
-        "Hue",
-        &mut a.hue,
-        -1.0,
-        1.0,
-        true,
-        &mut changed,
-        &mut commit_now,
-        &mut adjusting,
-    );
-    // "Color" swatch amount (RGB picked via the swatch below).
-    let mut amt = a.color.amount;
-    let r = ui.add(EguiSlider {
-        label: "Color",
-        value: &mut amt,
-        min: 0.0,
-        max: 1.0,
-        default: 0.0,
-        step: 0.01,
-        decimals: 2,
-        unit: "",
-        bipolar: false,
-        signed: false,
-    });
-    if r.dragged() {
-        adjusting = true;
-    }
-    if r.changed() {
-        a.color.amount = amt;
-        changed = true;
-        if r.drag_stopped() || !r.dragged() {
-            commit_now = true;
-        }
-    }
-    let mut rgb = [a.color.r, a.color.g, a.color.b];
-    if ui.color_edit_button_rgb(&mut rgb).changed() {
-        a.color.r = rgb[0];
-        a.color.g = rgb[1];
-        a.color.b = rgb[2];
-        changed = true;
-        commit_now = true;
-    }
-    mask.adjusting = adjusting;
-
-    // ── Reserved neighborhood controls: greyed, hover reason (design §9.2) ──
-    ui.add_space(4.0);
-    ui.label(
-        egui::RichText::new("Effects")
-            .size(11.0)
-            .color(theme::TEXT_DIM),
-    );
-    for name in ["Texture", "Clarity", "Dehaze", "Sharpness", "Noise"] {
-        let mut dummy = 0.0f32;
-        ui.add_enabled_ui(false, |ui| {
-            ui.add(EguiSlider {
-                label: name,
-                value: &mut dummy,
-                min: -1.0,
-                max: 1.0,
-                default: 0.0,
-                step: 0.01,
-                decimals: 2,
-                unit: "",
-                bipolar: true,
-                signed: true,
-            });
-        })
-        .response
-        .on_hover_text("Coming in a later phase (needs neighborhood processing)");
-    }
-
-    if changed {
-        out = Some(EditOutcome {
-            stack: mask_edit::set_adjustments(stack, idx, a),
-            kind: OpKind::LocalAdjustments,
-            commit: commit_now,
-        });
-    }
     out
 }

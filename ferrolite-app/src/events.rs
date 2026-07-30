@@ -187,6 +187,17 @@ pub enum AppEvent {
         level: crate::notifications::Level,
         message: String,
     },
+    /// One Task-14 background-backfill batch finished off-thread
+    /// (`library::meta_backfill::spawn_meta_backfill`): up to `BATCH_SIZE`
+    /// resolved `lens`/`aperture`/`focal_length` reads for pre-v7-ingest rows.
+    /// Unlike other metadata writes (`metadata::spawn_metadata_write`, which
+    /// locks the writer from the job thread), this catalog write happens HERE
+    /// in `apply`, on the UI thread: it ties exactly one `state.dirty` bump
+    /// to exactly one delivered batch, so an active metadata range/lens
+    /// filter refreshes once per batch as the backfill progresses.
+    MetaBackfillReady {
+        results: Vec<ferrolite_catalog::BackfillResult>,
+    },
 }
 
 /// Owned fields of a delivered `AppEvent::WarmSourceReady`, queued onto
@@ -337,6 +348,10 @@ impl std::fmt::Debug for AppEvent {
                 .field("level", level)
                 .field("message", message)
                 .finish(),
+            AppEvent::MetaBackfillReady { results } => f
+                .debug_struct("MetaBackfillReady")
+                .field("batch_len", &results.len())
+                .finish(),
         }
     }
 }
@@ -378,6 +393,24 @@ impl AppState {
                 // that finds the texture gone (e.g. evicted from the LRU cache)
                 // can request it again instead of being stuck sticky-missing.
                 self.thumb_missing.remove(&image_id);
+                // Keep the in-memory grid row's cell-aspect source (`thumb_w`/
+                // `thumb_h`, see `ImageRecord::thumb_w`) in sync with what was
+                // just persisted, so an edited-thumbnail regen's new (cropped)
+                // aspect shows immediately without a full library reload — and
+                // an un-cropped re-edit correctly restores the original aspect.
+                // Only bumps `images_rev` (rebuilding the grid's justified-rows
+                // layout) when the aspect actually changed: an ordinary
+                // lazy-load re-decode reports the SAME dims already cached from
+                // the initial `thumbnails`-joined query, so this is a no-op on
+                // the hot scroll path and only fires for a genuine crop/geometry
+                // edit.
+                if let Some(rec) = self.images.iter_mut().find(|r| r.id == image_id) {
+                    if rec.thumb_w != Some(w) || rec.thumb_h != Some(h) {
+                        rec.thumb_w = Some(w);
+                        rec.thumb_h = Some(h);
+                        self.images_rev = self.images_rev.wrapping_add(1);
+                    }
+                }
                 Some((image_id, rgba, w, h))
             }
             AppEvent::ThumbFailed { image_id } => {
@@ -491,6 +524,34 @@ impl AppState {
                     .push(level, message, std::time::Instant::now());
                 None
             }
+            AppEvent::MetaBackfillReady { results } => {
+                // Deliberately on the UI thread (see the variant's doc
+                // comment): locks the same writer every other catalog
+                // mutation uses, then bumps `dirty` exactly once so any
+                // active lens/aperture/focal filter re-queries with the
+                // freshly-backfilled rows visible. A write failure (e.g. a
+                // disk error) is surfaced as a toast rather than silently
+                // dropped; the rows simply stay NULL and are picked up
+                // again by a later launch's backfill pass.
+                let write_result = self
+                    .writer
+                    .lock()
+                    .expect("writer")
+                    .apply_metadata_backfill_batch(&results);
+                if let Err(e) = write_result {
+                    self.notify(
+                        crate::notifications::Level::Error,
+                        format!("metadata backfill write failed: {e}"),
+                    );
+                }
+                // Refresh the cached camera/lens/ISO/date aggregates once per
+                // batch so newly-recovered lenses show up in the Lens filter
+                // dropdown without a restart. Bounded by distinct-value
+                // count, so this is cheap even across many batches.
+                self.reload_vocab();
+                self.dirty = true;
+                None
+            }
         }
     }
 }
@@ -556,6 +617,77 @@ mod tests {
         assert!(
             !s.thumb_pending.contains(&7),
             "ThumbReady must clear the pending marker even for lazy-load"
+        );
+    }
+
+    /// Minimal `ImageRecord` fixture for the `thumb_w`/`thumb_h` sync tests.
+    fn rec(id: i64, thumb_w: Option<u32>, thumb_h: Option<u32>) -> ferrolite_catalog::ImageRecord {
+        ferrolite_catalog::ImageRecord {
+            id,
+            folder_id: 1,
+            filename: "x.nef".into(),
+            width: Some(4000),
+            height: Some(3000),
+            orientation: ferrolite_image::Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: ferrolite_catalog::DecodeStatus::Done,
+            kind: ferrolite_catalog::FileKind::Raw,
+            rating: ferrolite_image::Rating::default(),
+            flag: ferrolite_image::Flag::None,
+            has_edits: false,
+            thumb_w,
+            thumb_h,
+        }
+    }
+
+    /// A crop-driven regen reports NEW (cropped) thumbnail dims: the grid row's
+    /// `thumb_w`/`thumb_h` (its cell-aspect source, see `library::grid::
+    /// cell_aspect`) must update in place, and `images_rev` must bump so the
+    /// justified-rows layout rebuilds with the new aspect — without this, the
+    /// grid would keep showing the pre-crop aspect until a full library reload.
+    #[test]
+    fn thumb_ready_updates_thumb_dims_and_bumps_images_rev_on_change() {
+        let mut s = AppState::for_test();
+        s.images = vec![rec(7, Some(400), Some(300))];
+        let rev_before = s.images_rev;
+
+        s.apply(AppEvent::ThumbReady {
+            image_id: 7,
+            rgba: vec![0; 120 * 200 * 4],
+            w: 120,
+            h: 200,
+        });
+
+        let updated = s.images.iter().find(|r| r.id == 7).unwrap();
+        assert_eq!(updated.thumb_w, Some(120));
+        assert_eq!(updated.thumb_h, Some(200));
+        assert_ne!(
+            s.images_rev, rev_before,
+            "images_rev must bump so the grid layout cache rebuilds for the new aspect"
+        );
+    }
+
+    /// An ordinary lazy-load scroll re-decode reports the SAME dims already
+    /// cached (from the initial `thumbnails`-joined query) — this must be a
+    /// no-op for `images_rev` so scrolling never triggers a full grid layout
+    /// rebuild per cell.
+    #[test]
+    fn thumb_ready_does_not_bump_images_rev_when_dims_unchanged() {
+        let mut s = AppState::for_test();
+        s.images = vec![rec(7, Some(120), Some(200))];
+        let rev_before = s.images_rev;
+
+        s.apply(AppEvent::ThumbReady {
+            image_id: 7,
+            rgba: vec![0; 120 * 200 * 4],
+            w: 120,
+            h: 200,
+        });
+
+        assert_eq!(
+            s.images_rev, rev_before,
+            "unchanged thumb dims must not bump images_rev (no layout rebuild on ordinary lazy-load)"
         );
     }
 
@@ -755,5 +887,59 @@ mod tests {
         let mut s = AppState::for_test();
         s.notify(Level::Info, "12 photos indexed");
         assert_eq!(s.notifications.iter_newest_first().count(), 1);
+    }
+
+    /// `MetaBackfillReady` writes through the catalog writer HERE, on the UI
+    /// thread inside `apply` (unlike `metadata::spawn_metadata_write`, which
+    /// writes from a job thread) — see the variant's doc comment. This test
+    /// exercises that write end-to-end: seed a NULL-metadata row via the same
+    /// writer `AppState::for_test` sets up, fold the event, then confirm the
+    /// backlog count dropped to zero and `dirty` was bumped.
+    #[test]
+    fn meta_backfill_ready_writes_batch_through_writer_and_marks_dirty() {
+        let mut s = AppState::for_test();
+        let image_id = {
+            let db = s.writer.lock().unwrap();
+            let folder = db.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+            db.upsert_image(&ferrolite_catalog::NewImage::pending(
+                folder,
+                "a.nef".into(),
+                1,
+                1,
+                ferrolite_catalog::FileKind::Raw,
+                0,
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            s.writer
+                .lock()
+                .unwrap()
+                .metadata_backfill_pending_count()
+                .unwrap(),
+            1
+        );
+
+        s.dirty = false;
+        let out = s.apply(AppEvent::MetaBackfillReady {
+            results: vec![ferrolite_catalog::BackfillResult {
+                id: image_id,
+                lens: Some("50mm f/1.8".to_string()),
+                aperture: Some(1.8),
+                focal_length: Some(50.0),
+            }],
+        });
+        assert_eq!(out, None);
+        assert!(s.dirty, "MetaBackfillReady must bump dirty once per batch");
+        assert_eq!(
+            s.writer
+                .lock()
+                .unwrap()
+                .metadata_backfill_pending_count()
+                .unwrap(),
+            0,
+            "the backfilled row must drop out of the NULL-metadata backlog"
+        );
+        assert!(s.notifications.is_empty(), "a clean write raises no toast");
     }
 }

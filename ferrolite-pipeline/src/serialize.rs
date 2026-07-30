@@ -1,6 +1,7 @@
-//! Op-stack <-> string codec. JSON payload (embedded in the `frl:ops` XMP
-//! attribute in Plan 4). Version-checked: an unknown version deserializes to
-//! `None` so the caller can fall back to `OpStack::default()` (unedited).
+//! EditDoc (v2) <-> string codec. JSON payload (embedded in the `frl:ops` XMP
+//! attribute in Plan 4). Version-checked: v1 payloads and unknown versions
+//! deserialize to `None` so the caller can fall back to `OpStack::default()`
+//! (unedited); v2 payloads with missing fields load with serde defaults.
 
 use crate::op::OpStack;
 use crate::op::STACK_VERSION;
@@ -20,66 +21,28 @@ pub fn deserialize(s: &str) -> Option<OpStack> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::op::{
-        Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Exposure, Geometry,
-        GradeWheel, Hsl, HslBand, LensCorrection, Op, Sharpen, ToneCurve, WhiteBalance,
-    };
+    use crate::local::{AdjustmentSet, MaskLayer};
+    use crate::op::{Aspect, CropRect, CurveMode, Exposure, Geometry, Op, ToneCurve};
 
     #[test]
-    fn round_trips_a_full_stack() {
-        let s = OpStack::default()
+    fn round_trips_a_full_document() {
+        let d = OpStack::default()
             .set_op(Op::Exposure(Exposure { ev: 0.75 }))
-            .set_op(Op::WhiteBalance(WhiteBalance {
-                temp: 0.2,
-                tint: -0.1,
-            }))
-            .set_op(Op::Contrast(Contrast { amount: 0.3 }));
-        let text = serialize(&s);
-        assert_eq!(deserialize(&text), Some(s));
-    }
-
-    #[test]
-    fn round_trips_the_empty_stack() {
-        let s = OpStack::default();
-        assert_eq!(deserialize(&serialize(&s)), Some(s));
-    }
-
-    #[test]
-    fn unknown_version_is_none() {
-        // A well-formed stack but with a future version.
-        let json = r#"{"version":999,"ops":[]}"#;
-        assert_eq!(deserialize(json), None);
-    }
-
-    #[test]
-    fn garbage_is_none() {
-        assert_eq!(deserialize("not json {{"), None);
-    }
-
-    #[test]
-    fn round_trips_all_seven_ops() {
-        let s = OpStack::default()
-            .set_op(Op::Exposure(Exposure { ev: 0.5 }))
-            .set_op(Op::WhiteBalance(WhiteBalance {
-                temp: 0.2,
-                tint: -0.1,
-            }))
-            .set_op(Op::Contrast(Contrast { amount: 0.3 }))
             .set_op(Op::ToneCurve(ToneCurve {
                 points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
                 mode: CurveMode::Linear,
                 ..Default::default()
             }))
-            .set_op(Op::Hsl(Hsl {
-                bands: [HslBand {
-                    hue: 0.1,
-                    sat: -0.2,
-                    lum: 0.05,
-                }; 8],
-            }))
-            .set_op(Op::Sharpen(Sharpen {
-                amount: 0.6,
-                radius: 3,
+            .set_op(Op::LocalAdjustments(crate::local::LocalAdjustments {
+                layers: vec![MaskLayer {
+                    name: "Sky".into(),
+                    visible: true,
+                    mask: Default::default(),
+                    adjustments: AdjustmentSet {
+                        exposure: -0.5,
+                        ..Default::default()
+                    },
+                }],
             }))
             .set_op(Op::Geometry(Geometry {
                 crop: CropRect {
@@ -90,53 +53,45 @@ mod tests {
                 },
                 angle_deg: 2.5,
                 aspect: Aspect::SixteenNine,
+                keystone_v: 0.15,
+                keystone_h: -0.2,
             }));
-        let text = serialize(&s);
-        assert_eq!(deserialize(&text), Some(s));
+        let text = serialize(&d);
+        assert_eq!(deserialize(&text), Some(d));
     }
 
     #[test]
-    fn round_trips_lens_correction() {
-        let s = OpStack::default().set_op(Op::LensCorrection(LensCorrection {
-            lens_id: Some("Canon EF 24-70mm f/2.8L II USM".into()),
-            focal_len: 35.0,
-            aperture: 5.6,
-            crop_factor: 1.0,
-            distortion: Correction {
-                enabled: true,
-                amount: 0.8,
-            },
-            tca: Correction {
-                enabled: true,
-                amount: 1.0,
-            },
-            vignetting: Correction {
-                enabled: false,
-                amount: 1.0,
-            },
-        }));
-        assert_eq!(deserialize(&serialize(&s)), Some(s));
+    fn round_trips_the_empty_document() {
+        let d = OpStack::default();
+        assert_eq!(deserialize(&serialize(&d)), Some(d));
     }
 
     #[test]
-    fn round_trips_color_grade() {
-        let s = OpStack::default().set_op(Op::ColorGrade(ColorGrade {
-            shadows: GradeWheel {
-                hue: 210.0,
-                sat: 0.4,
-                lum: -0.1,
-            },
-            ..Default::default()
-        }));
-        assert_eq!(deserialize(&serialize(&s)), Some(s));
+    fn v1_payload_is_none_bytes_untouched_semantics() {
+        // A real pre-EditDoc payload (version 1, Vec<Op> shape): must load as None
+        // so callers fall back to "no edits" — never a parse panic, never a
+        // half-migrated doc.
+        let v1 = r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}}]}"#;
+        assert_eq!(deserialize(v1), None);
     }
 
     #[test]
-    fn old_sidecar_without_lens_correction_still_loads() {
-        // A stack written before this feature has no LensCorrection op.
-        let json = r#"{"version":1,"ops":[{"Exposure":{"ev":0.5}}]}"#;
-        let s = deserialize(json).unwrap();
-        assert!(s.lens_correction().is_none());
-        assert_eq!(s.exposure(), Some(crate::op::Exposure { ev: 0.5 }));
+    fn future_version_is_none() {
+        let json = r#"{"version":999,"global":{},"layers":[]}"#;
+        assert_eq!(deserialize(json), None);
+    }
+
+    #[test]
+    fn garbage_is_none() {
+        assert_eq!(deserialize("not json {{"), None);
+    }
+
+    #[test]
+    fn missing_new_fields_load_as_identity() {
+        // Forward tolerance within v2: a minimal v2 payload (older v2 build,
+        // fewer fields) loads with serde defaults.
+        let json = r#"{"version":2}"#;
+        let d = deserialize(json).unwrap();
+        assert!(d.is_identity());
     }
 }

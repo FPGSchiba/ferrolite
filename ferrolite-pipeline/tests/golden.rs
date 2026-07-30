@@ -3,11 +3,12 @@ mod common;
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_pipeline::{
-    blit_to_rgba8, dehaze_recover, estimate_atmospheric_light, transmission_mip_level_count,
-    transmission_working_dims, upload_source, Aspect, ColorGrade, Contrast, CropRect, CurveMode,
-    Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, Op,
-    OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve, WhiteBalance,
-    DEHAZE_DEFAULT_RADIUS,
+    blit_to_rgba8, clamp_uv_to_crop_bounds, dehaze_recover, estimate_atmospheric_light,
+    geometry_src_px, geometry_uniform, transmission_mip_level_count, transmission_working_dims,
+    upload_source, AdjustmentSet, Aspect, ColorGrade, Contrast, CropRect, CurveMode, Dehaze,
+    EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, LocalAdjustments,
+    MaskLayer, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve,
+    WhiteBalance, DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -459,11 +460,92 @@ fn geometry_crop_rotate_matches_golden() {
         },
         angle_deg: 10.0,
         aspect: Aspect::Free,
+        ..Default::default()
     }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     // out dims = round(0.8 * 64) x round(0.8 * 48) = 51 x 38.
     common::assert_golden(&pixels, 51, 38, "geometry_crop_rotate.png");
+}
+
+/// The keystone parity/golden fixture (plan `crop-overhaul` C4 Task 5):
+/// kv = 0.5, kh = -0.3 on top of a real crop + rotation.
+fn keystone_fixture_stack() -> OpStack {
+    OpStack::default().set_op(Op::Geometry(Geometry {
+        crop: CropRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.8,
+            h: 0.8,
+        },
+        angle_deg: 10.0,
+        aspect: Aspect::Free,
+        keystone_v: 0.5,
+        keystone_h: -0.3,
+    }))
+}
+
+#[test]
+fn geometry_keystone_matches_golden() {
+    // Plan `crop-overhaul` C4 Task 5: the committed keystone golden
+    // (`geometry_keystone.png`, authored with UPDATE_GOLDEN=1 on the dev GPU)
+    // pins the projective geometry pass — kv/kh + crop + rotation.
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let mut pipe = EditPipeline::new(
+        Arc::new(ctx),
+        &common::gradient(W, H),
+        keystone_fixture_stack(),
+        IDENTITY,
+    );
+    let pixels = pipe.render_to_image();
+    // Keystone does not change the output extent: out dims stay the crop's,
+    // round(0.8 * 64) x round(0.8 * 48) = 51 x 38.
+    common::assert_golden(&pixels, 51, 38, "geometry_keystone.png");
+}
+
+#[test]
+fn geometry_keystone_gpu_matches_cpu_homography_reference() {
+    // Brief test (c): CPU/GPU parity on kv=0.5, kh=-0.3 + crop + rotation.
+    // The CPU side predicts every output pixel analytically through the SAME
+    // uniform the GPU consumes: `geometry_src_px` (the homography mirror) →
+    // normalize → `clamp_uv_to_crop_bounds` → evaluate `common::gradient`'s
+    // exact linear formula at the sampled coordinate (bilinear sampling of a
+    // linear ramp is the ramp itself, so texel value at uv is `uv − half
+    // texel`) → the blit's sRGB OETF.
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = keystone_fixture_stack();
+    let mut pipe = EditPipeline::new(
+        Arc::new(ctx),
+        &common::gradient(W, H),
+        stack.clone(),
+        IDENTITY,
+    );
+    let pixels = pipe.render_to_image();
+
+    let (u, out_w, out_h) = geometry_uniform(stack.geometry(), W, H);
+    assert_eq!((out_w, out_h), (51, 38));
+    let mut expected = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for y in 0..out_h {
+        for x in 0..out_w {
+            let po = [x as f32 + 0.5, y as f32 + 0.5];
+            let s = geometry_src_px(&u, po);
+            let uv = clamp_uv_to_crop_bounds([s[0] / W as f32, s[1] / H as f32], u.crop_bounds);
+            let r = uv[0] - 0.5 / W as f32;
+            let g = uv[1] - 0.5 / H as f32;
+            expected.extend_from_slice(&[srgb_u8(r), srgb_u8(g), srgb_u8(0.25), 255]);
+        }
+    }
+    let diff = common::max_abs_diff(&pixels, &expected);
+    assert!(
+        diff <= 4,
+        "keystone GPU render diverged from the CPU homography reference (diff {diff})"
+    );
 }
 
 #[test]
@@ -504,11 +586,105 @@ fn full_seven_op_stack_matches_golden() {
             },
             angle_deg: 3.0,
             aspect: Aspect::Free,
+            ..Default::default()
         }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
     // out dims = round(0.9*64) x round(0.9*48) = 58 x 43.
     common::assert_golden(&pixels, 58, 43, "full_seven_op_stack.png");
+}
+
+/// The `sRGB` OETF `blit_to_rgba8` applies to the display-linear pipeline
+/// output (mirrors `blit.wgsl`'s `linear_to_srgb` exactly), so a corner's
+/// expected `Rgba8` value can be predicted directly from its (clamped)
+/// source-normalized coordinate against `common::gradient`'s exact
+/// `[x/w, y/h, 0.25, 1.0]` formula.
+fn srgb_u8(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (v * 255.0).round() as u8
+}
+
+#[test]
+fn rotated_crop_edge_is_not_smeared() {
+    // Spec C2 part 2: a rotated crop's out-of-bounds corner used to clamp
+    // against the WHOLE source texture, so it read (and duplicated) the
+    // FRAME's edge texel -- e.g. a crop with real margin on every side would
+    // still show the image's absolute corner color, unrelated to the crop's
+    // own local content. This asserts the fixed geometry pass instead clamps
+    // to the CROP's own edge.
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // A gradient fixture, cropped to a 0.4x0.4 region with a real 5% margin
+    // to the frame on every side, rotated 45 degrees. The output's bottom-left
+    // corner (0, out_h-1) maps to a raw source coordinate whose `u` (x/w) is
+    // NEGATIVE -- i.e. past the whole FRAME's left edge, not merely past the
+    // crop's -- so this exercises exactly the old clamp-to-frame bug.
+    let src = common::gradient(200, 200);
+    let stack = OpStack::default().set_op(Op::Geometry(Geometry {
+        crop: CropRect {
+            x: 0.05,
+            y: 0.05,
+            w: 0.4,
+            h: 0.4,
+        },
+        angle_deg: 45.0,
+        aspect: Aspect::Free,
+        ..Default::default()
+    }));
+    let mut pipe = EditPipeline::new(ctx, &src, stack, IDENTITY);
+    let pixels = pipe.render_to_image();
+    let (out_w, out_h) = (80u32, 80u32);
+    let px = |x: u32, y: u32| -> &[u8] {
+        let i = ((y * out_w + x) * 4) as usize;
+        &pixels[i..i + 4]
+    };
+    let corner = px(0, out_h - 1);
+
+    // The bug's signature: clamped to the FRAME's absolute edge (u == 0.0,
+    // the image's true left column) rather than the crop's own edge.
+    let frame_edge_r = srgb_u8(0.0);
+    // The fix: clamped to the crop's own left edge (u == crop.x, inset half a
+    // source texel), which for this fixture (u == x/w) is a clearly
+    // different, non-zero color -- NOT a duplicate of the frame's edge.
+    let crop_edge_r = srgb_u8(0.05 + 0.5 / 200.0);
+
+    assert!(
+        corner[1].abs_diff(srgb_u8(0.25)) <= 4,
+        "corner G {} unexpected (v should be un-clamped, ~{})",
+        corner[1],
+        srgb_u8(0.25)
+    );
+    assert!(
+        corner[0].abs_diff(crop_edge_r) <= 4,
+        "corner R {} did not land on the crop's own edge (expected ~{crop_edge_r}) \
+         -- clamp_uv_to_crop_bounds should pin `u` to `crop_bounds[0]`",
+        corner[0]
+    );
+    assert!(
+        corner[0].abs_diff(frame_edge_r) > 8,
+        "corner R {} matches the FRAME's edge color (~{frame_edge_r}) -- this is \
+         the smear artifact this task fixes: the sample clamped to the whole \
+         source texture instead of the crop's own sub-rect",
+        corner[0]
+    );
+
+    // Full-row/column sanity: the crop's own top row (unaffected by the
+    // corner clamp) must still vary smoothly -- i.e. this fix does not
+    // introduce a NEW flat/duplicate band elsewhere in the output.
+    let top_row = |x: u32| px(x, 0);
+    assert_ne!(
+        top_row(out_w / 2),
+        top_row(out_w / 2 - 1),
+        "interior top-row neighbors are byte-identical -- unexpected duplicate"
+    );
 }
 
 const SEAM_TOL: f32 = 0.02; // display-linear; absorbs f16 + the head resample.
@@ -693,6 +869,110 @@ fn dehaze_tiled_matches_whole_image() {
     assert!(
         max_diff <= SEAM_TOL,
         "per-tile dehaze diverged from whole-image (diff {max_diff}) at {max_loc:?} — shared transmission wiring broken?"
+    );
+}
+
+// Phase 4 Task 3: the SAME tile-vs-whole-image parity as
+// `dehaze_tiled_matches_whole_image` above, but for a MASK-LAYER dehaze
+// amount with NO global `Dehaze` op (so `stack.dehaze()` is `None` — only
+// `EditDoc::dehaze_active_anywhere()` is true, via the layer). Proves the
+// full chain end-to-end at the tiled tier: the transmission is computed
+// (Task 3's pipeline.rs wiring fix), handed to the tile producer via the
+// SAME `set_shared_transmission` call the global case uses, and the
+// per-mask-layer dispatch (Task 3's `local_node.rs`/`local_adjust.wgsl`
+// change) actually consumes it identically to the whole-image tier. Uses a
+// FULL mask (`MaskDefinition::default()`, coverage 1.0 everywhere) so the
+// comparison isolates the shared-transmission wiring, not partial-mask
+// blending (covered separately by `local_node.rs`'s
+// `mask_layer_dehaze_amount_changes_only_masked_pixels`).
+#[test]
+fn mask_only_dehaze_tiled_matches_whole_image() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Same seam-sensitive sawtooth-ripple fixture as `dehaze_tiled_matches_whole_image`
+    // (see that test's doc for why: a flat/simple gradient's dark channel is
+    // insensitive to a broken shared-transmission wiring).
+    let (iw, ih) = (480u32, 256u32);
+    let src = {
+        let mut px = Vec::with_capacity((iw * ih * 4) as usize);
+        for _y in 0..ih {
+            for x in 0..iw {
+                let r = (x % 16) as f32 / 16.0 * 0.8;
+                px.extend_from_slice(&[r, 0.9, 0.9, 1.0]);
+            }
+        }
+        LinearRgbaF32::new(iw, ih, px).expect("dehaze seam fixture length")
+    };
+    let radius = 12u32;
+    let amount = 2.0f32; // aggressive, mirrors the global test's sensitivity rationale
+    let la = LocalAdjustments {
+        layers: vec![MaskLayer {
+            name: "dehaze-mask".into(),
+            visible: true,
+            mask: ferrolite_mask::MaskDefinition::default(), // full coverage
+            adjustments: AdjustmentSet {
+                dehaze: Dehaze { amount, radius },
+                ..Default::default()
+            },
+        }],
+    };
+    let stack = OpStack::default().set_op(Op::LocalAdjustments(la));
+    assert!(stack.dehaze().is_none(), "sanity: no global Dehaze op");
+    assert!(
+        stack.dehaze_active_anywhere(),
+        "sanity: the mask layer's amount activates the doc-wide gate"
+    );
+    let atmos = estimate_atmospheric_light(&src);
+
+    let mut whole = EditPipeline::new(ctx.clone(), &src, stack.clone(), IDENTITY);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+    let shared_transmission = whole.transmission_texture();
+    assert!(
+        shared_transmission.is_some(),
+        "a mask-only dehaze layer must still yield a shared transmission texture"
+    );
+
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, stack, IDENTITY, None, None);
+    tep.set_dehaze_atmos(atmos);
+    tep.set_shared_transmission(shared_transmission);
+
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let mut max_diff = 0.0f32;
+    let mut max_loc = (0u32, 0u32, 0usize);
+    for tx in 0..2u32 {
+        let tile = tep.produce_tile(TileCoord {
+            lod: 0,
+            x: tx,
+            y: 0,
+        });
+        let tile_lin = common::read_tile_linear(&ctx, &tile);
+        for ly in 0..TILE_SIZE {
+            for lx in 0..TILE_SIZE {
+                let gx = tx * TILE_SIZE + lx;
+                let gy = ly;
+                if gx >= iw || gy >= ih {
+                    continue;
+                }
+                let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
+                let wi = ((gy * iw + gx) * 4) as usize;
+                for c in 0..3 {
+                    let d = (tile_lin[ti + c] - whole_lin[wi + c]).abs();
+                    if d > max_diff {
+                        max_diff = d;
+                        max_loc = (gx, gy, c);
+                    }
+                }
+            }
+        }
+    }
+    eprintln!("mask-only dehaze tile-seam max linear diff = {max_diff} at {max_loc:?}");
+    assert!(
+        max_diff <= SEAM_TOL,
+        "per-tile mask-only dehaze diverged from whole-image (diff {max_diff}) at {max_loc:?}"
     );
 }
 

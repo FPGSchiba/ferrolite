@@ -2,8 +2,13 @@
 //! multi-pass `Node<PipelineImage>`. Mirrors `crate::dehaze::transmission_map`
 //! (separable dark-channel block-min + guided-filter refinement) exactly, on
 //! the GPU. Independent of `amount`: the `Graph`'s dirty-caching means an
-//! amount-only drag (handled by the future `DehazeRecoveryNode`, QS-Task 3)
-//! never re-triggers this node's (relatively) expensive multi-pass evaluate.
+//! amount-only drag never re-triggers this node's (relatively) expensive
+//! multi-pass evaluate — Phase 4 Task 2 fused the amount/atmos recovery+blend
+//! step directly into `local_node.rs`'s Color-stage engine node (the retired
+//! `DehazeRecoveryNode` used to be a separate cheap single-pass node here;
+//! see that node's git history / `dehaze_recovery.wgsl`, kept in-tree as
+//! reference math for `local_adjust.wgsl`'s port), so this file now only
+//! computes the transmission map.
 //!
 //! Pass structure (mirrors `transmission_map` step-by-step; see that fn's doc
 //! for the reference math):
@@ -30,8 +35,9 @@
 //! passes that read a plane a previous pass wrote (or reused as scratch).
 //!
 //! Wired into `EditPipeline` (QS-Task 4; whole-image preview tier) AND
-//! `TileEditPipeline` (QS-Task 5; tiled full-res tier), both between `contrast`
-//! and `tone_curve` — the old single-pass `dehaze.wgsl` `PointOpNode` is gone.
+//! `TileEditPipeline` (QS-Task 5; tiled full-res tier), both fed from the
+//! Light-stage engine node's output — the old single-pass `dehaze.wgsl`
+//! `PointOpNode` is gone.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -41,12 +47,9 @@ use ferrolite_gpu::{GpuContext, Node};
 
 use crate::dehaze::{
     guided_radius, transmission_mip_level_count, transmission_working_dims, DEHAZE_ATMOS_MIN,
-    DEHAZE_GUIDED_EPS, DEHAZE_OMEGA, DEHAZE_T0,
+    DEHAZE_GUIDED_EPS, DEHAZE_OMEGA,
 };
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
-use crate::nodes::TileFrame;
-use crate::op::Dehaze;
-use crate::uniforms::GeometryUniform;
 use crate::MAX_DEHAZE_RADIUS;
 
 /// Single-channel intermediate plane format used by every transmission pass.
@@ -82,17 +85,19 @@ const _: () = assert!(std::mem::size_of::<PassUniform>().is_multiple_of(16));
 
 /// Public params for `DehazeTransmissionNode`, read from a shared `Cell` each
 /// `evaluate` (mirrors `PointOpNode`'s `Rc<Cell<U>>` pattern). `radius` is the
-/// block-min patch radius (`Dehaze::radius`, UNCLAMPED — the node defensively
-/// clamps to `MAX_DEHAZE_RADIUS` before use, since a prior review noted the
-/// pure `transmission_map`/its loops don't self-clamp). `atmos` is `[r,g,b,pad]`
-/// (floored to `DEHAZE_ATMOS_MIN` by `from_op`). `omega`/`eps` mirror
-/// `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`. `active` is 1 when a `Dehaze` op with
-/// non-zero `amount` is present, else 0 — see `from_op` and
-/// `DehazeTransmissionNode::evaluate`'s early-return gate. CRITICAL: `active`
-/// deliberately does NOT carry the `amount` magnitude — it only flips on the
-/// zero<->nonzero transition, so an amount-only drag (0.5 -> 0.9) leaves this
-/// whole struct unchanged and `EditPipeline::set_stack` does not dirty this
-/// node (see `amount_change_does_not_recompute_transmission`).
+/// GLOBAL op's block-min patch radius (`Dehaze::radius`, UNCLAMPED — the node
+/// defensively clamps to `MAX_DEHAZE_RADIUS` before use, since a prior review
+/// noted the pure `transmission_map`/its loops don't self-clamp). `atmos` is
+/// `[r,g,b,pad]` (floored to `DEHAZE_ATMOS_MIN` by `from_stack`). `omega`/`eps`
+/// mirror `DEHAZE_OMEGA`/`DEHAZE_GUIDED_EPS`. `active` is 1 when dehaze is
+/// active ANYWHERE in the document (global op OR any visible mask layer's
+/// amount — Phase 4 Task 3, see `EditDoc::dehaze_active_anywhere`), else 0 —
+/// see `from_stack` and `DehazeTransmissionNode::evaluate`'s early-return
+/// gate. CRITICAL: `active` deliberately does NOT carry any amount's
+/// magnitude — it only flips on the zero<->nonzero transition, so an
+/// amount-only drag (0.5 -> 0.9, global or per-mask) leaves this whole struct
+/// unchanged and `EditPipeline::set_stack` does not dirty this node (see
+/// `amount_change_does_not_recompute_transmission`).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct TransmissionParams {
@@ -111,17 +116,24 @@ const _: () = assert!(std::mem::size_of::<TransmissionParams>() == 32);
 const _: () = assert!(std::mem::size_of::<TransmissionParams>().is_multiple_of(16));
 
 impl TransmissionParams {
-    /// Seed from the op's `radius`/`amount` and the whole-image atmospheric
-    /// light (QS-Task 4). `radius`/`atmos` are independent of `amount` —
-    /// `EditPipeline::set_stack` only rebuilds these (and dirties
+    /// Seed from the FULL document (Phase 4 Task 3) — not just the global
+    /// `Dehaze` op — since per-mask dehaze amounts share this ONE whole-image
+    /// transmission map too: `active` is true when the global op is active OR
+    /// any visible mask layer's `dehaze.amount != 0.0` (see
+    /// `EditDoc::dehaze_active_anywhere`), so the map is computed even when
+    /// the global amount is 0. `radius` always comes from the GLOBAL op's
+    /// radius field — per-mask radius is not exposed; every layer recovers
+    /// from the SAME shared map — and `AdjustmentSet`'s `Dehaze::default()`
+    /// already carries `DEHAZE_DEFAULT_RADIUS`, so a stack with no global op
+    /// (or one whose amount is 0) still seeds a sane default radius rather
+    /// than 0. `radius`/`atmos` are independent of `active`'s magnitude
+    /// (QS-Task 4): `EditPipeline::set_stack` only rebuilds these (and dirties
     /// `DehazeTransmissionNode`) when `radius`, `atmos`, or the active
     /// zero<->nonzero transition actually changes, so an amount-magnitude-only
-    /// drag never re-seeds (and never dirties) this node.
-    pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
-        let radius = op.map(|d| d.radius).unwrap_or(0) as i32;
-        let active = u32::from(op.is_some_and(|d| d.amount != 0.0));
+    /// drag (global OR per-mask) never re-seeds (and never dirties) this node.
+    pub(crate) fn from_stack(stack: &crate::op::OpStack, atmos: [f32; 3]) -> Self {
         Self {
-            radius,
+            radius: stack.global.dehaze.radius as i32,
             atmos: [
                 atmos[0].max(DEHAZE_ATMOS_MIN),
                 atmos[1].max(DEHAZE_ATMOS_MIN),
@@ -130,132 +142,37 @@ impl TransmissionParams {
             ],
             omega: DEHAZE_OMEGA,
             eps: DEHAZE_GUIDED_EPS,
-            active,
+            active: u32::from(stack.dehaze_active_anywhere()),
         }
     }
 }
 
-/// Public params for `DehazeRecoveryNode`, read from a shared `Cell` each
-/// `evaluate`. `amount` drives the blend from I toward the recovered J
-/// (amount >= 0) or toward the hazed version (amount < 0). `t0` is the transmission
-/// floor (DEHAZE_T0), `atmos` is `[r,g,b,pad]`. Field order MIRRORS the WGSL
-/// `struct P` in `dehaze_recovery.wgsl` exactly (both must be 16-byte aligned).
-///
-/// ST-Task 2: this struct also carries the geometry (`geo_m`/`geo_off`/
-/// `src_dims`), `frame_origin`/`full_dims`, `out_dims`, and `has_transmission`
-/// fields the shader needs for its LOD-independent source-UV sampling of the
-/// externally-set shared transmission — but on THIS shared/pipeline-visible
-/// `Cell<RecoveryParams>` those fields are inert placeholders, always the
-/// zeroed default `from_op` produces. `set_geometry`/`set_shared_transmission`
-/// (on `DehazeRecoveryNode`) store the real values in node-private `Cell`s
-/// instead, and `evaluate` merges them into a FRESH, evaluate-local
-/// `RecoveryParams` (base amount/t0/atmos from this Cell + the real
-/// geo/frame/has_transmission from the node-private state) before uploading
-/// it — mirroring `VignetteNode::evaluate`'s merge of its `params` Cell with
-/// the separate `TileFrame`. This keeps a `set_stack`-driven
-/// `self.recovery_params.set(RecoveryParams::from_op(..))` reseed (amount/t0/
-/// atmos only) from ever clobbering the geometry/transmission-binding state.
-#[repr(C)]
-#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct RecoveryParams {
-    pub amount: f32,
-    pub t0: f32,
-    pub pad0: f32,
-    pub pad1: f32,
-    pub atmos: [f32; 4],
-    /// Row-major 2×2 output→source mapping (mirrors `GeometryUniform::m`).
-    /// Inert on the shared Cell (see struct doc) — real value lives in
-    /// `DehazeRecoveryNode`'s private `geometry` Cell.
-    pub geo_m: [f32; 4],
-    /// Source-pixel translation (mirrors `GeometryUniform::off`). Inert here.
-    pub geo_off: [f32; 2],
-    /// Source dims the shared transmission is aligned to. Inert here.
-    pub src_dims: [f32; 2],
-    /// This pass's output-space frame origin (from the shared `TileFrame`).
-    /// Inert here — refreshed from `DehazeRecoveryNode::frame` every evaluate.
-    pub frame_origin: [f32; 2],
-    /// The full output image size AT THIS LOD (from the shared `TileFrame`) —
-    /// makes `frame_origin + gid` LOD-independent when normalized against it
-    /// (see the shader's file doc for the near-black-when-zoomed-out fix).
-    /// Inert here — refreshed from `DehazeRecoveryNode::frame` every evaluate.
-    pub full_dims: [f32; 2],
-    /// The LEVEL-0 output image dims (mirrors `GeometryUniform::out_dims`,
-    /// from `set_geometry`) — re-expands the LOD-independent normalized pixel
-    /// back to the level-0 output-pixel space `geo_m`/`geo_off` expect. Inert
-    /// on the shared Cell — real value lives in `DehazeRecoveryNode`'s private
-    /// `geometry` Cell.
-    pub out_dims: [f32; 2],
-    /// 1 when a real shared transmission is bound (`set_shared_transmission`),
-    /// else 0 (default 1×1 neutral texture) — gates the shader's sample.
-    /// Inert here — refreshed from `DehazeRecoveryNode::has_transmission`.
-    pub has_transmission: u32,
-    pub pad2: u32,
-}
-
-const _: () = assert!(std::mem::size_of::<RecoveryParams>() == 96);
-const _: () = assert!(std::mem::size_of::<RecoveryParams>().is_multiple_of(16));
-
-impl RecoveryParams {
-    /// Seed from the op's `amount` and the whole-image atmospheric light
-    /// (QS-Task 4). Independent of `radius` — an amount-only drag re-seeds
-    /// only these params (and dirties `DehazeRecoveryNode`), leaving the
-    /// cached `DehazeTransmissionNode` output untouched. `geo_m`/`geo_off`/
-    /// `src_dims`/`frame_origin`/`has_transmission` are zeroed placeholders
-    /// (see struct doc) — `DehazeRecoveryNode::evaluate` never reads them from
-    /// this instance for those fields.
-    pub(crate) fn from_op(op: Option<Dehaze>, atmos: [f32; 3]) -> Self {
-        let amount = op.map(|d| d.amount).unwrap_or(0.0);
-        Self {
-            amount,
-            t0: DEHAZE_T0,
-            pad0: 0.0,
-            pad1: 0.0,
-            atmos: [
-                atmos[0].max(DEHAZE_ATMOS_MIN),
-                atmos[1].max(DEHAZE_ATMOS_MIN),
-                atmos[2].max(DEHAZE_ATMOS_MIN),
-                0.0,
-            ],
-            geo_m: [0.0; 4],
-            geo_off: [0.0; 2],
-            src_dims: [0.0; 2],
-            frame_origin: [0.0; 2],
-            full_dims: [0.0; 2],
-            out_dims: [0.0; 2],
-            has_transmission: 0,
-            pad2: 0,
-        }
-    }
-}
-
-/// Output→source geometry mapping held internally by `DehazeRecoveryNode`
-/// (set via `set_geometry`, merged into the uniform at each `evaluate`). Kept
-/// OUT of the pipeline-visible `RecoveryParams` cell (see that struct's doc) so
-/// a `set_stack`-driven `RecoveryParams::from_op` reseed can never clobber it.
-/// `out_dims` is the LEVEL-0 output dims (`GeometryUniform::out_dims`) — see
-/// `RecoveryParams::out_dims`'s doc for why the LOD-independent source-UV
-/// mapping needs it alongside the shared `TileFrame`'s `full_dims`.
-#[derive(Clone, Copy)]
-struct RecoveryGeometry {
-    m: [f32; 4],
-    off: [f32; 2],
-    src_dims: [f32; 2],
-    out_dims: [f32; 2],
-}
-
-impl Default for RecoveryGeometry {
-    /// Identity mapping over a nominal 1×1 source. Harmless even if `evaluate`
-    /// runs before the first `set_geometry` call: `has_transmission` (default
-    /// 0, from the neutral-texture fallback) gates the shader's sample, so this
-    /// mapping is never actually used for real math in that state.
-    fn default() -> Self {
-        Self {
-            m: [1.0, 0.0, 0.0, 1.0],
-            off: [0.0, 0.0],
-            src_dims: [1.0, 1.0],
-            out_dims: [1.0, 1.0],
-        }
-    }
+/// Every bind group one full transmission evaluate dispatches, prebuilt ONCE
+/// and reused until the input texture identity, the output texture, or the
+/// working dims change (profiled: rebuilding all ~17 bind groups + ~16 texture
+/// views per evaluate was the pipeline's single largest CPU-encode cost on an
+/// exposure drag with dehaze active). Everything referenced is persistent: the
+/// `Intermediates` planes, the two uniform buffers (whose CONTENTS are still
+/// written fresh via `queue.write_buffer` each evaluate — cached binds don't
+/// pin stale params), the sampler, and the cached `out` texture's mip views.
+struct CachedBinds {
+    /// `Arc::as_ptr` identity of the source texture the `dark` bind samples.
+    src_ptr: usize,
+    /// `Arc::as_ptr` identity of the `out` texture the q/mip binds write.
+    out_ptr: usize,
+    /// Working dims the `Intermediates` these binds reference were built for.
+    dims: (u32, u32),
+    dark: wgpu::BindGroup,
+    min_h: wgpu::BindGroup,
+    min_v: wgpu::BindGroup,
+    products: wgpu::BindGroup,
+    /// `(h, v)` bind pair per guided-filter box run, in dispatch order:
+    /// `mean_g, mean_p, corr_g, corr_gp, mean_a, mean_b`.
+    boxes: [(wgpu::BindGroup, wgpu::BindGroup); 6],
+    guided_ab: wgpu::BindGroup,
+    guided_q: wgpu::BindGroup,
+    /// One bind per mip level 1..N (reads level-1, writes level).
+    mips: Vec<wgpu::BindGroup>,
 }
 
 /// All fifteen `R32Float` intermediate planes, keyed on `(w, h)` and
@@ -413,7 +330,10 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 /// Linear, clamp-to-edge sampler shared by the passes that bilinearly sample a
 /// texture at a normalized UV (built once in each node's `new`, never per-evaluate).
-fn linear_clamp_sampler(ctx: &GpuContext) -> wgpu::Sampler {
+/// `pub(crate)`: also reused by `local_node.rs`'s Color-stage engine node
+/// (Phase 4 Task 2 — the fused dehaze recovery samples the shared transmission
+/// bilinearly, mirroring the recovered approach).
+pub(crate) fn linear_clamp_sampler(ctx: &GpuContext) -> wgpu::Sampler {
     ctx.device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("dehaze-linear-clamp-sampler"),
         address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -537,6 +457,9 @@ pub(crate) struct DehazeTransmissionNode {
 
     intermediates: RefCell<Option<Intermediates>>,
     out: RefCell<Option<PipelineImage>>,
+    // Prebuilt bind groups for one full evaluate (see `CachedBinds`), rebuilt
+    // only when the source/out texture identity or the working dims change.
+    binds: RefCell<Option<CachedBinds>>,
     // Test hook: counts full multi-pass evaluates (QS-Task 4 asserts an
     // amount-only change on the downstream recovery node does NOT bump this).
     rebuilds: Cell<u32>,
@@ -691,6 +614,7 @@ impl DehazeTransmissionNode {
             mip_pipeline,
             intermediates: RefCell::new(None),
             out: RefCell::new(None),
+            binds: RefCell::new(None),
             rebuilds: Cell::new(0),
         }
     }
@@ -788,48 +712,235 @@ impl DehazeTransmissionNode {
             })
     }
 
-    /// Run the box_h -> box_v pair (radius = guided radius, via `uniform_box`)
-    /// over `input`, writing the normalized box mean into `output`, using
-    /// `self`'s single reusable `box_scratch` plane as the H-pass landing spot.
-    #[allow(clippy::too_many_arguments)]
-    fn box_filter(
-        &self,
-        enc: &mut wgpu::CommandEncoder,
-        label: &str,
-        input: &wgpu::TextureView,
-        scratch: &wgpu::TextureView,
-        output: &wgpu::TextureView,
-        w: u32,
-        h: u32,
-    ) {
-        let h_bind = self.plane_bind(
-            input,
-            scratch,
-            &self.uniform_box,
-            &format!("{label}-h-bind"),
+    /// Build (or reuse) the full evaluate's bind-group set (see `CachedBinds`).
+    /// Rebuilds only when the source texture identity, the `out` texture, or
+    /// the working dims changed — the steady state of a slider drag reuses the
+    /// whole set with zero view/bind-group creation.
+    fn ensure_binds(&self, src: &PipelineImage, out: &PipelineImage) {
+        let src_ptr = Arc::as_ptr(&src.texture) as usize;
+        let out_ptr = Arc::as_ptr(&out.texture) as usize;
+        let intermediates = self.intermediates.borrow();
+        let im = intermediates.as_ref().expect("intermediates allocated");
+        {
+            let cur = self.binds.borrow();
+            if matches!(&*cur, Some(b) if b.src_ptr == src_ptr
+                && b.out_ptr == out_ptr
+                && b.dims == im.dims)
+            {
+                return;
+            }
+        }
+
+        let src_view = view(&src.texture);
+        let dc0_view = view(&im.dc0);
+        let guide_view = view(&im.guide);
+        let dc_h_view = view(&im.dc_h);
+        let praw_view = view(&im.praw);
+        let gg_view = view(&im.gg);
+        let gp_view = view(&im.gp);
+        let box_scratch_view = view(&im.box_scratch);
+        let mean_g_view = view(&im.mean_g);
+        let mean_p_view = view(&im.mean_p);
+        let corr_g_view = view(&im.corr_g);
+        let corr_gp_view = view(&im.corr_gp);
+        let a_view = view(&im.a);
+        let b_view = view(&im.b);
+        let mean_a_view = view(&im.mean_a);
+        let mean_b_view = view(&im.mean_b);
+        // Level 0 only: `out` carries a mip chain, and a storage bind must
+        // target a single level. Levels 1..N get their own binds below.
+        let out_view = mip_view(&out.texture, 0);
+
+        let dark = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-dark-bind"),
+                layout: &self.dark_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&dc0_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&guide_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.uniform_min.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            });
+        let min_h = self.plane_bind(
+            &dc0_view,
+            &dc_h_view,
+            &self.uniform_min,
+            "dehaze-min-h-bind",
         );
-        dispatch(
-            enc,
-            &format!("{label}-h"),
-            &self.box_h_pipeline,
-            &h_bind,
-            w,
-            h,
+        let min_v = self.plane_bind(
+            &dc_h_view,
+            &praw_view,
+            &self.uniform_min,
+            "dehaze-min-v-bind",
         );
-        let v_bind = self.plane_bind(
-            scratch,
-            output,
-            &self.uniform_box,
-            &format!("{label}-v-bind"),
-        );
-        dispatch(
-            enc,
-            &format!("{label}-v"),
-            &self.box_v_pipeline,
-            &v_bind,
-            w,
-            h,
-        );
+        let products = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-products-bind"),
+                layout: &self.products_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&guide_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&praw_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&gg_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&gp_view),
+                    },
+                ],
+            });
+        // (input, output) per guided-filter box run, in dispatch order; each
+        // becomes an (input->scratch H, scratch->output V) bind pair.
+        let box_io: [(&wgpu::TextureView, &wgpu::TextureView, &str); 6] = [
+            (&guide_view, &mean_g_view, "dehaze-box-mean-g"),
+            (&praw_view, &mean_p_view, "dehaze-box-mean-p"),
+            (&gg_view, &corr_g_view, "dehaze-box-corr-g"),
+            (&gp_view, &corr_gp_view, "dehaze-box-corr-gp"),
+            (&a_view, &mean_a_view, "dehaze-box-mean-a"),
+            (&b_view, &mean_b_view, "dehaze-box-mean-b"),
+        ];
+        let boxes = box_io.map(|(input, output, label)| {
+            (
+                self.plane_bind(
+                    input,
+                    &box_scratch_view,
+                    &self.uniform_box,
+                    &format!("{label}-h-bind"),
+                ),
+                self.plane_bind(
+                    &box_scratch_view,
+                    output,
+                    &self.uniform_box,
+                    &format!("{label}-v-bind"),
+                ),
+            )
+        });
+        let guided_ab = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-guided-ab-bind"),
+                layout: &self.guided_ab_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&mean_g_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&mean_p_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&corr_g_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&corr_gp_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&a_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.uniform_box.as_entire_binding(),
+                    },
+                ],
+            });
+        let guided_q = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dehaze-guided-q-bind"),
+                layout: &self.guided_q_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&mean_a_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&mean_b_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&guide_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&out_view),
+                    },
+                ],
+            });
+        let mips = (1..out.texture.mip_level_count())
+            .map(|level| {
+                let src_mip = mip_view(&out.texture, level - 1);
+                let dst_mip = mip_view(&out.texture, level);
+                self.ctx
+                    .device
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("dehaze-transmission-mip-bind"),
+                        layout: &self.mip_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&src_mip),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&dst_mip),
+                            },
+                        ],
+                    })
+            })
+            .collect();
+
+        *self.binds.borrow_mut() = Some(CachedBinds {
+            src_ptr,
+            out_ptr,
+            dims: im.dims,
+            dark,
+            min_h,
+            min_v,
+            products,
+            boxes,
+            guided_ab,
+            guided_q,
+            mips,
+        });
     }
 }
 
@@ -838,13 +949,13 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         let src = inputs[0];
         let raw = self.params.get();
 
-        // Dehaze is off (no `Dehaze` op, or `amount == 0`): `DehazeRecoveryNode`
-        // ignores this node's output entirely in that case (passthrough), so
-        // running the ~8-pass guided filter here would be pure waste. This is
-        // the QS-Task-4 regression fix — `amount`'s magnitude is deliberately
-        // NOT part of `TransmissionParams` (see its doc), so this gate only
-        // flips on the zero<->nonzero transition, preserving the amount-drag
-        // cache proven by `amount_change_does_not_recompute_transmission`.
+        // Dehaze is off (no `Dehaze` op, or `amount == 0`): the Color-stage
+        // engine node's fused recovery ignores this node's output entirely in
+        // that case (passthrough), so running the ~8-pass guided filter here
+        // would be pure waste. This is the QS-Task-4 regression fix — `amount`'s
+        // magnitude is deliberately NOT part of `TransmissionParams` (see its doc),
+        // so this gate only flips on the zero<->nonzero transition, preserving
+        // the amount-drag cache proven by `amount_change_does_not_recompute_transmission`.
         // Cloning `PipelineImage` is an `Arc` clone (cheap); no compute passes
         // run and the rebuild-count test hook is NOT bumped.
         if raw.active == 0 {
@@ -855,8 +966,8 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         // input dims) — the transmission map is low-frequency, so this bounds
         // the fifteen `R32Float` intermediate planes' VRAM regardless of the
         // full input size (the QS-Task fix for the full-res preview-tier OOM).
-        // `DehazeRecoveryNode` upsamples this smaller `out` back to the image
-        // resolution via a bilinear sample (see `dehaze_recovery.wgsl`).
+        // The Color-stage engine node's fused recovery upsamples this smaller
+        // `out` back to the image resolution via a bilinear sample.
         let (w, h) = (src.width, src.height);
         let (ww, wh, scale) = transmission_working_dims(w, h);
         self.ensure_intermediates(ww, wh);
@@ -903,28 +1014,12 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             .queue
             .write_buffer(&self.uniform_box, 0, bytemuck::bytes_of(&box_uniform));
 
-        let intermediates = self.intermediates.borrow();
-        let im = intermediates.as_ref().expect("allocated above");
-
-        let src_view = view(&src.texture);
-        let dc0_view = view(&im.dc0);
-        let guide_view = view(&im.guide);
-        let dc_h_view = view(&im.dc_h);
-        let praw_view = view(&im.praw);
-        let gg_view = view(&im.gg);
-        let gp_view = view(&im.gp);
-        let box_scratch_view = view(&im.box_scratch);
-        let mean_g_view = view(&im.mean_g);
-        let mean_p_view = view(&im.mean_p);
-        let corr_g_view = view(&im.corr_g);
-        let corr_gp_view = view(&im.corr_gp);
-        let a_view = view(&im.a);
-        let b_view = view(&im.b);
-        let mean_a_view = view(&im.mean_a);
-        let mean_b_view = view(&im.mean_b);
-        // Level 0 only: `out` now carries a mip chain, and a storage bind must
-        // target a single level. Levels 1..N are filled by the mip loop below.
-        let out_view = mip_view(&out.texture, 0);
+        // Prebuilt bind groups (rebuilt only on source/out/dims change — see
+        // `CachedBinds`); the uniform CONTENTS above are refreshed every
+        // evaluate regardless, so cached binds never pin stale params.
+        self.ensure_binds(src, &out);
+        let binds = self.binds.borrow();
+        let b = binds.as_ref().expect("built above");
 
         let mut enc = self
             .ctx
@@ -934,245 +1029,101 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
             });
 
         // 1. dark channel + guide.
-        let dark_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-dark-bind"),
-                layout: &self.dark_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&dc0_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&guide_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.uniform_min.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-dark-channel",
             &self.dark_pipeline,
-            &dark_bind,
+            &b.dark,
             ww,
             wh,
         );
 
         // 2. separable block-min (H then V, folding in the praw transform).
-        let min_h_bind = self.plane_bind(
-            &dc0_view,
-            &dc_h_view,
-            &self.uniform_min,
-            "dehaze-min-h-bind",
-        );
         dispatch(
             &mut enc,
             "dehaze-min-h",
             &self.min_h_pipeline,
-            &min_h_bind,
+            &b.min_h,
             ww,
             wh,
-        );
-        let min_v_bind = self.plane_bind(
-            &dc_h_view,
-            &praw_view,
-            &self.uniform_min,
-            "dehaze-min-v-bind",
         );
         dispatch(
             &mut enc,
             "dehaze-min-v",
             &self.min_v_pipeline,
-            &min_v_bind,
+            &b.min_v,
             ww,
             wh,
         );
 
         // 3. products gg = guide^2, gp = guide*praw.
-        let products_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-products-bind"),
-                layout: &self.products_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&guide_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&praw_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&gg_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&gp_view),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-products",
             &self.products_pipeline,
-            &products_bind,
+            &b.products,
             ww,
             wh,
         );
 
-        // 4. guided-filter box means/correlations (reusing box_h/box_v).
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-g",
-            &guide_view,
-            &box_scratch_view,
-            &mean_g_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-p",
-            &praw_view,
-            &box_scratch_view,
-            &mean_p_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-corr-g",
-            &gg_view,
-            &box_scratch_view,
-            &corr_g_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-corr-gp",
-            &gp_view,
-            &box_scratch_view,
-            &corr_gp_view,
-            ww,
-            wh,
-        );
+        // 4. guided-filter box means/correlations (mean_g, mean_p, corr_g,
+        // corr_gp — `boxes[..4]`), each an H pass into the shared scratch then
+        // a V pass into its output plane.
+        for (h_bind, v_bind) in &b.boxes[..4] {
+            dispatch(
+                &mut enc,
+                "dehaze-box-h",
+                &self.box_h_pipeline,
+                h_bind,
+                ww,
+                wh,
+            );
+            dispatch(
+                &mut enc,
+                "dehaze-box-v",
+                &self.box_v_pipeline,
+                v_bind,
+                ww,
+                wh,
+            );
+        }
 
         // 5. guided-filter linear coefficients a, b.
-        let guided_ab_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-guided-ab-bind"),
-                layout: &self.guided_ab_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&mean_g_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mean_p_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&corr_g_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&corr_gp_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&a_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(&b_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: self.uniform_box.as_entire_binding(),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-guided-ab",
             &self.guided_ab_pipeline,
-            &guided_ab_bind,
+            &b.guided_ab,
             ww,
             wh,
         );
 
-        // 6. box filter a, b -> mean_a, mean_b (reusing box_h/box_v again).
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-a",
-            &a_view,
-            &box_scratch_view,
-            &mean_a_view,
-            ww,
-            wh,
-        );
-        self.box_filter(
-            &mut enc,
-            "dehaze-box-mean-b",
-            &b_view,
-            &box_scratch_view,
-            &mean_b_view,
-            ww,
-            wh,
-        );
+        // 6. box filter a, b -> mean_a, mean_b (`boxes[4..]`).
+        for (h_bind, v_bind) in &b.boxes[4..] {
+            dispatch(
+                &mut enc,
+                "dehaze-box-h",
+                &self.box_h_pipeline,
+                h_bind,
+                ww,
+                wh,
+            );
+            dispatch(
+                &mut enc,
+                "dehaze-box-v",
+                &self.box_v_pipeline,
+                v_bind,
+                ww,
+                wh,
+            );
+        }
 
         // 7. combine into the final refined transmission q.
-        let guided_q_bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-guided-q-bind"),
-                layout: &self.guided_q_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&mean_a_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&mean_b_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&guide_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&out_view),
-                    },
-                ],
-            });
         dispatch(
             &mut enc,
             "dehaze-guided-q",
             &self.guided_q_pipeline,
-            &guided_q_bind,
+            &b.guided_q,
             ww,
             wh,
         );
@@ -1182,35 +1133,15 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
         // barrier between the guided-q write of level 0 and the first read
         // here, and between each successive level, since they are distinct
         // subresources of the same texture within this one command buffer.
-        let mip_levels = out.texture.mip_level_count();
         let (mut lw, mut lh) = (ww, wh);
-        for level in 1..mip_levels {
+        for mip_bind in &b.mips {
             let dw = (lw / 2).max(1);
             let dh = (lh / 2).max(1);
-            let src_mip = mip_view(&out.texture, level - 1);
-            let dst_mip = mip_view(&out.texture, level);
-            let mip_bind = self
-                .ctx
-                .device
-                .create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("dehaze-transmission-mip-bind"),
-                    layout: &self.mip_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&src_mip),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&dst_mip),
-                        },
-                    ],
-                });
             dispatch(
                 &mut enc,
                 "dehaze-transmission-mip",
                 &self.mip_pipeline,
-                &mip_bind,
+                mip_bind,
                 dw,
                 dh,
             );
@@ -1228,326 +1159,6 @@ impl Node<PipelineImage> for DehazeTransmissionNode {
 /// handle for the rebuild-count test hook while a boxed clone lives in the
 /// graph).
 impl Node<PipelineImage> for Rc<DehazeTransmissionNode> {
-    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
-        (**self).evaluate(inputs)
-    }
-}
-
-/// Recovery + blend node (ST-Task 2): takes the original image `I` (its ONLY
-/// graph input) and samples an EXTERNALLY-supplied shared transmission texture
-/// (source space, `set_shared_transmission`) at each output pixel's SOURCE UV —
-/// the geometry mapping (`set_geometry`) plus the shared `TileFrame`'s output-
-/// space origin, mirroring exactly what `GeometryHeadNode` used to resample the
-/// source for this tile/image. This lets the tiled tier (ST-Task 3) bind ONE
-/// whole-image transmission instead of computing it per tile. Mirrors the pure
-/// `dehaze_recover` reference exactly (the CPU reference takes `dark` derived
-/// as `(1-q)/DEHAZE_OMEGA`; the shader takes `q` directly).
-pub(crate) struct DehazeRecoveryNode {
-    ctx: Arc<GpuContext>,
-    // amount/t0/atmos only — see `RecoveryParams`'s doc for why the geo/frame/
-    // has_transmission fields on THIS cell are inert placeholders.
-    params: Rc<Cell<RecoveryParams>>,
-    geometry: Cell<RecoveryGeometry>,
-    /// Shared with the tiled tier's `GeometryHeadNode`/`VignetteNode` (the head
-    /// writes this each evaluate); a dedicated default-origin `Rc` on the
-    /// whole-image tier (no per-tile frame there). Read for `frame_origin`.
-    frame: Rc<Cell<TileFrame>>,
-    pipeline: wgpu::ComputePipeline,
-    bgl: wgpu::BindGroupLayout,
-    uniform_buf: wgpu::Buffer,
-    // Linear, clamp-to-edge sampler for the shared transmission's source-UV
-    // sample. Built once here, never per-evaluate (CLAUDE.md GPU rule).
-    sampler: wgpu::Sampler,
-    // 1x1 neutral fallback (source-space) transmission so the bind group always
-    // validates before `set_shared_transmission` is ever called (or after it is
-    // cleared back to `None`); `has_transmission` is false in that state, so the
-    // shader passes `I` through regardless of this texture's (unused) content.
-    neutral_tex: Arc<wgpu::Texture>,
-    shared_tex: RefCell<Arc<wgpu::Texture>>,
-    shared_view: RefCell<wgpu::TextureView>,
-    has_transmission: Cell<bool>,
-    out: RefCell<Option<PipelineImage>>,
-}
-
-impl DehazeRecoveryNode {
-    pub(crate) fn new(
-        ctx: Arc<GpuContext>,
-        params: Rc<Cell<RecoveryParams>>,
-        frame: Rc<Cell<TileFrame>>,
-    ) -> Self {
-        let device = &ctx.device;
-
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("dehaze-recovery-uniform"),
-            size: std::mem::size_of::<RecoveryParams>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Bind layout unchanged from the two-graph-input version: 0 = img
-        // texture (loaded 1:1), 1 = the shared transmission (SAMPLED, source
-        // space — ST-Task 2, set via `set_shared_transmission` rather than a
-        // graph edge), 2 = dst storage, 3 = uniform, 4 = filtering sampler.
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("dehaze-recovery-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: PIPELINE_FORMAT,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                sampler_entry(4),
-            ],
-        });
-
-        let module = ctx.shader_module(
-            "dehaze-recovery",
-            include_str!("shaders/dehaze_recovery.wgsl"),
-        );
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("dehaze-recovery"),
-            bind_group_layouts: &[&bgl],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("dehaze-recovery"),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: "main",
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        let sampler = linear_clamp_sampler(&ctx);
-
-        let neutral_tex = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("dehaze-recovery-neutral-transmission"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: PIPELINE_FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        }));
-        let neutral_view = neutral_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-        Self {
-            ctx,
-            params,
-            geometry: Cell::new(RecoveryGeometry::default()),
-            frame,
-            pipeline,
-            bgl,
-            uniform_buf,
-            sampler,
-            neutral_tex: neutral_tex.clone(),
-            shared_tex: RefCell::new(neutral_tex),
-            shared_view: RefCell::new(neutral_view),
-            has_transmission: Cell::new(false),
-            out: RefCell::new(None),
-        }
-    }
-
-    /// Bind (or clear) the externally-supplied shared transmission texture
-    /// (source space; e.g. `DehazeTransmissionNode::current_output_texture()`).
-    /// `None` falls back to the 1×1 neutral texture with `has_transmission =
-    /// 0`, so the shader passes `I` through. Rebuilds only the cached view —
-    /// NEVER the pipeline (CLAUDE.md GPU rule). A no-op when `tex` is already
-    /// the currently-bound texture (`Arc` pointer equality), so the owning
-    /// pipeline can call this unconditionally every evaluate.
-    pub(crate) fn set_shared_transmission(&self, tex: Option<Arc<wgpu::Texture>>) {
-        let next = tex.unwrap_or_else(|| self.neutral_tex.clone());
-        if Arc::ptr_eq(&self.shared_tex.borrow(), &next) {
-            return;
-        }
-        let view = next.create_view(&wgpu::TextureViewDescriptor::default());
-        self.has_transmission
-            .set(!Arc::ptr_eq(&next, &self.neutral_tex));
-        *self.shared_view.borrow_mut() = view;
-        *self.shared_tex.borrow_mut() = next;
-    }
-
-    /// Set the output→source geometry mapping (`m`/`off`/`src_dims`/`out_dims`
-    /// from the full `GeometryUniform` — `out_origin` is ignored, since this
-    /// node gets its own output-space origin from the shared `TileFrame`
-    /// instead). `out_dims` is the LEVEL-0 output dims and, together with the
-    /// `TileFrame`'s per-LOD `full_dims`, makes the shader's source-UV mapping
-    /// LOD-independent (see `RecoveryParams::out_dims`'s doc) — it used to be
-    /// dropped here, which was the near-black-when-zoomed-out-past-fit bug's
-    /// root cause. Stored OUTSIDE the pipeline-visible `RecoveryParams` cell
-    /// (see that struct's doc) so a `set_stack`-driven `RecoveryParams::from_op`
-    /// reseed can never clobber it.
-    pub(crate) fn set_geometry(&self, g: GeometryUniform) {
-        self.geometry.set(RecoveryGeometry {
-            m: g.m,
-            off: g.off,
-            src_dims: g.src_dims,
-            out_dims: g.out_dims,
-        });
-    }
-
-    fn ensure_out(&self, w: u32, h: u32) -> PipelineImage {
-        let mut out = self.out.borrow_mut();
-        if out.as_ref().map(|o| (o.width, o.height)) != Some((w, h)) {
-            let tex = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("dehaze-recovery-out"),
-                size: wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: PIPELINE_FORMAT,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
-            *out = Some(PipelineImage {
-                texture: Arc::new(tex),
-                width: w,
-                height: h,
-            });
-        }
-        out.as_ref().unwrap().clone()
-    }
-}
-
-impl Node<PipelineImage> for DehazeRecoveryNode {
-    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
-        let img = inputs[0];
-        let (w, h) = (img.width, img.height);
-        let out = self.ensure_out(w, h);
-
-        // Merge the amount/t0/atmos base (dirty-tracked, from the pipeline) with
-        // this node's own geometry/frame/has_transmission state (see
-        // `RecoveryParams`'s doc) into a fresh, evaluate-local uniform.
-        let base = self.params.get();
-        let geo = self.geometry.get();
-        let frame = self.frame.get();
-        let uniform = RecoveryParams {
-            amount: base.amount,
-            t0: base.t0,
-            pad0: 0.0,
-            pad1: 0.0,
-            atmos: base.atmos,
-            geo_m: geo.m,
-            geo_off: geo.off,
-            src_dims: geo.src_dims,
-            frame_origin: frame.origin,
-            full_dims: frame.full_dims,
-            out_dims: geo.out_dims,
-            has_transmission: u32::from(self.has_transmission.get()),
-            pad2: 0,
-        };
-        self.ctx
-            .queue
-            .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniform));
-
-        let img_view = img
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let trans_view = self.shared_view.borrow();
-        let out_view = out
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bind = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("dehaze-recovery-bind"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&img_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&trans_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&out_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
-            });
-
-        let mut enc = self
-            .ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("dehaze-recovery"),
-            });
-
-        {
-            let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("dehaze-recovery"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
-        }
-
-        self.ctx.queue.submit([enc.finish()]);
-        out
-    }
-}
-
-/// Delegating `Node` impl so a `DehazeRecoveryNode` can be shared via `Rc`.
-impl Node<PipelineImage> for Rc<DehazeRecoveryNode> {
     fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
         (**self).evaluate(inputs)
     }
@@ -1723,225 +1334,5 @@ mod tests {
             out.width < w && out.height < h,
             "a {w}x{h} input must actually be downsampled, not just clamped to itself"
         );
-    }
-
-    /// Read all four RGBA channels as f32 (for recovery node test).
-    fn read_rgba_channels(ctx: &GpuContext, img: &PipelineImage) -> Vec<[f32; 4]> {
-        let (w, h) = (img.width, img.height);
-        let bpp = 8u32; // RGBA16F
-        let bpr_unpadded = w * bpp;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let bpr_padded = bpr_unpadded.div_ceil(align) * align;
-        let buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("dehaze-recovery-test-readback"),
-            size: (bpr_padded * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = ctx
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: &img.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::ImageCopyBuffer {
-                buffer: &buf,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bpr_padded),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-        ctx.queue.submit([enc.finish()]);
-        let slice = buf.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        ctx.device.poll(wgpu::Maintain::Wait);
-        let data = slice.get_mapped_range();
-        let mut out = vec![[0.0f32; 4]; (w * h) as usize];
-        for row in 0..h {
-            let start = (row * bpr_padded) as usize;
-            for x in 0..w {
-                // Each RGBA16F texel is 8 bytes (4 channels × 2 bytes).
-                let o = start + (x * 4) as usize * 2;
-                let r = half::f16::from_le_bytes([data[o], data[o + 1]]).to_f32();
-                let g = half::f16::from_le_bytes([data[o + 2], data[o + 3]]).to_f32();
-                let b = half::f16::from_le_bytes([data[o + 4], data[o + 5]]).to_f32();
-                let a = half::f16::from_le_bytes([data[o + 6], data[o + 7]]).to_f32();
-                out[(row * w + x) as usize] = [r, g, b, a];
-            }
-        }
-        drop(data);
-        buf.unmap();
-        out
-    }
-
-    /// ST-Task 2 Step 1 (TDD): a recovery node with a small constant-`q` shared
-    /// transmission + identity `GeometryUniform` + a `TileFrame { origin: [0,0],
-    /// full_dims: [w,h] }` must reproduce `recovery_node_matches_dehaze_recover`'s
-    /// old two-graph-input behavior exactly — identity geometry means source UV
-    /// == output UV == local UV, so a constant `q` yields the same result as
-    /// before (within the same 2e-3 tolerance).
-    #[test]
-    fn recovery_samples_shared_transmission_identity_geometry() {
-        let Some(ctx) = GpuContext::headless() else {
-            eprintln!("no GPU adapter; skipping (expected in headless CI)");
-            return;
-        };
-        let ctx = Arc::new(ctx);
-        let (w, h) = (16u32, 16u32);
-
-        // Simple test image: grey, all pixels same.
-        let mut img_pixels = Vec::with_capacity((w * h * 4) as usize);
-        for _ in 0..(w * h) {
-            img_pixels.extend_from_slice(&[0.5f32, 0.5, 0.5, 1.0]);
-        }
-        let img = LinearRgbaF32::new(w, h, img_pixels).expect("test image");
-        let gpu_img = upload_source(&ctx, &img);
-
-        // Constant transmission texture: fill with a constant q value.
-        // We'll test with q=0.5 (bright), q=0.8 (foggy), and q=0.3 (dark).
-        let test_cases = vec![
-            (0.5f32, "mid-transmission"),
-            (0.8f32, "high-transmission"),
-            (0.3f32, "low-transmission"),
-        ];
-
-        let a = [0.9f32, 0.9, 0.9];
-        const DEHAZE_T0: f32 = 0.1;
-        use crate::dehaze::dehaze_recover;
-
-        let (identity_geo, _, _) = crate::uniforms::geometry_uniform(None, w, h);
-        let frame = Rc::new(Cell::new(TileFrame {
-            origin: [0.0, 0.0],
-            full_dims: [w as f32, h as f32],
-        }));
-
-        for (q_val, case_name) in test_cases {
-            // Create constant transmission texture.
-            let mut trans_pixels = Vec::with_capacity((w * h * 4) as usize);
-            for _ in 0..(w * h) {
-                trans_pixels.extend_from_slice(&[q_val, q_val, q_val, 1.0]);
-            }
-            let trans_img = LinearRgbaF32::new(w, h, trans_pixels).expect("transmission image");
-            let gpu_trans = upload_source(&ctx, &trans_img);
-
-            // Test amount = 0 (identity), positive, and negative.
-            for amount in [0.0f32, 0.5, -0.5] {
-                let params = Rc::new(Cell::new(RecoveryParams::from_op(
-                    Some(crate::op::Dehaze { amount, radius: 0 }),
-                    a,
-                )));
-                // `from_op` derives `t0` from `DEHAZE_T0`'s crate constant, not the
-                // test-local shadow above; overwrite it to match this test's
-                // reference computation exactly (both currently equal 0.1, but stay
-                // explicit rather than relying on that coincidence).
-                params.set(RecoveryParams {
-                    t0: DEHAZE_T0,
-                    ..params.get()
-                });
-
-                let node = DehazeRecoveryNode::new(ctx.clone(), params, frame.clone());
-                node.set_geometry(identity_geo);
-                node.set_shared_transmission(Some(gpu_trans.texture.clone()));
-                let gpu_out = node.evaluate(&[&gpu_img]);
-
-                let gpu_result = read_rgba_channels(&ctx, &gpu_out);
-
-                // Reference: for each pixel, compute the expected output.
-                // The CPU reference dehaze_recover takes dark = (1 - q) / DEHAZE_OMEGA,
-                // while the GPU shader takes q directly.
-                let orig_px = [0.5f32, 0.5, 0.5];
-                let dark = (1.0 - q_val) / DEHAZE_OMEGA;
-                let expected = dehaze_recover(orig_px, dark, a, amount);
-
-                // Compare all pixels (they should all be identical since input is constant).
-                for (i, &gpu_px) in gpu_result.iter().enumerate() {
-                    let gpu_rgb = [gpu_px[0], gpu_px[1], gpu_px[2]];
-                    for c in 0..3 {
-                        let diff = (gpu_rgb[c] - expected[c]).abs();
-                        assert!(
-                            diff < 2e-3,
-                            "recovery_samples_shared_transmission_identity_geometry ({}, amount={}, pixel {}, channel {}):\n\
-                             GPU={:.6}, CPU={:.6}, diff={:.6}",
-                            case_name, amount, i, c, gpu_rgb[c], expected[c], diff
-                        );
-                    }
-                    // Alpha should pass through unchanged.
-                    assert!(
-                        (gpu_px[3] - 1.0).abs() < 1e-6,
-                        "alpha mismatch at pixel {}",
-                        i
-                    );
-                }
-                eprintln!(
-                    "recovery_samples_shared_transmission_identity_geometry: {} amount={} PASS",
-                    case_name, amount
-                );
-            }
-        }
-    }
-
-    /// Regression guard for the ST-Task 2 rework: with NO shared transmission
-    /// ever bound (`set_shared_transmission` never called — the node stays on
-    /// its default 1×1 neutral texture), `has_transmission` must be 0 and the
-    /// shader must pass `I` through unchanged, even with a nonzero `amount`.
-    #[test]
-    fn recovery_passthrough_when_no_shared_transmission_bound() {
-        let Some(ctx) = GpuContext::headless() else {
-            eprintln!("no GPU adapter; skipping (expected in headless CI)");
-            return;
-        };
-        let ctx = Arc::new(ctx);
-        let (w, h) = (8u32, 8u32);
-        let mut img_pixels = Vec::with_capacity((w * h * 4) as usize);
-        for _ in 0..(w * h) {
-            img_pixels.extend_from_slice(&[0.4f32, 0.6, 0.2, 1.0]);
-        }
-        let img = LinearRgbaF32::new(w, h, img_pixels).expect("test image");
-        let gpu_img = upload_source(&ctx, &img);
-
-        let frame = Rc::new(Cell::new(TileFrame::default()));
-        let params = Rc::new(Cell::new(RecoveryParams::from_op(
-            Some(crate::op::Dehaze {
-                amount: 0.7,
-                radius: 0,
-            }),
-            [0.9, 0.9, 0.9],
-        )));
-        let node = DehazeRecoveryNode::new(ctx.clone(), params, frame);
-        // No `set_shared_transmission` call: stays at the default 1x1 neutral
-        // texture, `has_transmission` stays false.
-        let out = node.evaluate(&[&gpu_img]);
-        let result = read_rgba_channels(&ctx, &out);
-        // Tolerance loosened to absorb the rgba16float storage round-trip (not
-        // exact for arbitrary f32 inputs), same order as this module's other
-        // GPU-vs-reference tolerances (2e-3).
-        for &px in &result {
-            assert!(
-                (px[0] - 0.4).abs() < 2e-3,
-                "must pass through unchanged: R (got {})",
-                px[0]
-            );
-            assert!(
-                (px[1] - 0.6).abs() < 2e-3,
-                "must pass through unchanged: G (got {})",
-                px[1]
-            );
-            assert!(
-                (px[2] - 0.2).abs() < 2e-3,
-                "must pass through unchanged: B (got {})",
-                px[2]
-            );
-        }
     }
 }

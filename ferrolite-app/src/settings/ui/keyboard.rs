@@ -167,6 +167,36 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
             bottom: 0.0,
         })
         .show(ui, |ui| {
+            // `egui::Grid` auto-sizes its columns per instance, and we draw one
+            // Grid per group (so each group can `ui.end_row()` independently) —
+            // left unchecked, that means each section's label column aligns to
+            // its own longest action name instead of a single shared width
+            // across the whole tab. Measure every action's label ONCE, up
+            // front, at the same font the rows render with (`TextStyle::Body`,
+            // what `Label`'s default `FontSelection::Default` resolves to), and
+            // force every row's label cell to that width via `add_sized` in
+            // `draw_row` below. ~50 short strings — cheap enough to remeasure
+            // every frame, so we don't bother caching it.
+            let label_font = egui::TextStyle::Body.resolve(ui.style());
+            let label_w = GROUPS
+                .iter()
+                .flat_map(|(_, actions)| actions.iter())
+                .map(|action| {
+                    ui.fonts(|fonts| {
+                        fonts
+                            .layout_no_wrap(
+                                action.label().to_string(),
+                                label_font.clone(),
+                                egui::Color32::PLACEHOLDER,
+                            )
+                            .size()
+                            .x
+                    })
+                })
+                .fold(0.0_f32, f32::max)
+                .ceil()
+                + 4.0;
+
             for (group_name, actions) in GROUPS {
                 ui.label(
                     egui::RichText::new(*group_name)
@@ -180,7 +210,7 @@ pub(super) fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
                     .striped(false)
                     .show(ui, |ui| {
                         for action in *actions {
-                            draw_row(ui, settings, *action, &mut listen, &mut changed);
+                            draw_row(ui, settings, *action, &mut listen, &mut changed, label_w);
                             ui.end_row();
                         }
                     });
@@ -207,13 +237,21 @@ fn draw_row(
     action: Action,
     listen: &mut ListenState,
     changed: &mut bool,
+    label_w: f32,
 ) {
     let is_listening = listen.action == Some(action);
     let default_chord = Keymap::defaults().chord(action);
     let current_chord = settings.keymap.chord(action);
     let is_modified = current_chord != default_chord;
 
-    ui.label(action.label());
+    // Fixed-width, left-aligned label cell (see `draw`'s `label_w` comment) so
+    // this column lines up across every group's independently-sized `Grid`,
+    // not just within this one.
+    let row_h = ui.text_style_height(&egui::TextStyle::Body);
+    ui.add_sized(
+        [label_w, row_h],
+        egui::Label::new(action.label()).halign(egui::Align::Min),
+    );
 
     let button_label = if is_listening {
         "Press a key…".to_string()

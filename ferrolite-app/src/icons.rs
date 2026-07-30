@@ -38,12 +38,14 @@ pub const FLAG_FILL: &str = pf::FLAG; // pick flag filled — font_fill()
 pub const FLAG_REJECT: &str = p::PROHIBIT; // reject — font()
 pub const CARET_DOWN: &str = p::CARET_DOWN;
 pub const CARET_UP: &str = p::CARET_UP;
+pub const CARET_RIGHT: &str = p::CARET_RIGHT;
 pub const OVERLAY_ON: &str = p::EYE;
 pub const OVERLAY_OFF: &str = p::EYE_SLASH;
 pub const WARNING: &str = p::WARNING;
 pub const INFO: &str = p::INFO;
 pub const NOTIFY_ERROR: &str = p::WARNING_OCTAGON; // error toast glyph
 pub const CLOSE: &str = p::X; // toast dismiss button
+pub const CROP_FLIP_ORIENTATION: &str = p::ARROWS_CLOCKWISE; // crop panel's landscape<->portrait toggle
 
 /// The regular icon font. `add_to_fonts(Regular)` put Phosphor Regular into the
 /// `Proportional` family's fallback chain, so its PUA codepoints resolve here.
@@ -87,12 +89,14 @@ mod tests {
             ("FLAG_REJECT", FLAG_REJECT),
             ("CARET_DOWN", CARET_DOWN),
             ("CARET_UP", CARET_UP),
+            ("CARET_RIGHT", CARET_RIGHT),
             ("OVERLAY_ON", OVERLAY_ON),
             ("OVERLAY_OFF", OVERLAY_OFF),
             ("WARNING", WARNING),
             ("INFO", INFO),
             ("NOTIFY_ERROR", NOTIFY_ERROR),
             ("CLOSE", CLOSE),
+            ("CROP_FLIP_ORIENTATION", CROP_FLIP_ORIENTATION),
         ] {
             assert!(!s.is_empty(), "icon alias {name} is empty");
         }

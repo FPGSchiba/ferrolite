@@ -2,10 +2,11 @@
 //! writer (`Catalog`) and the read pool (`ReadPool`) share one implementation.
 
 use crate::error::CatalogError;
-use crate::model::{DecodeStatus, ImageRecord};
+use crate::model::{BackfillCandidate, DecodeStatus, ImageRecord};
 use crate::thumbnail::Thumbnail;
 use ferrolite_image::{Color, FileKind, Flag, Orientation, Rating, TagId};
 use rusqlite::{Connection, OptionalExtension};
+use std::path::PathBuf;
 
 pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     let orientation_exif: Option<i64> = row.get(5)?;
@@ -28,17 +29,31 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
         rating: Rating::from_i64(rating),
         flag: Flag::from_i64(flag),
         has_edits: has_edits != 0,
+        thumb_w: row.get::<_, Option<i64>>(13)?.map(|v| v as u32),
+        thumb_h: row.get::<_, Option<i64>>(14)?.map(|v| v as u32),
     })
 }
 
 pub(crate) const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
-                          capture_time, iso, decode_status, kind, rating, flag, has_edits";
+                          capture_time, iso, decode_status, kind, rating, flag, has_edits,
+                          thumbnails.w, thumbnails.h";
+
+/// Every `IMAGE_COLS` query joins the `thumbnails` table (1:1 on `image_id`,
+/// so this never fans out a row) to surface `thumb_w`/`thumb_h` — the actual
+/// persisted thumbnail's own dimensions, which is the only dimension pair
+/// that reflects a crop/geometry edit after a thumbnail regen (see
+/// `ImageRecord::thumb_w` doc comment). `LEFT JOIN` so a row with no
+/// thumbnail yet (freshly-scanned `Pending`) still returns, with `thumb_w`/
+/// `thumb_h` as `NULL`.
+pub(crate) const THUMB_JOIN: &str = " LEFT JOIN thumbnails ON thumbnails.image_id = images.id";
 
 pub(crate) fn list_images(
     conn: &Connection,
     folder_id: i64,
 ) -> Result<Vec<ImageRecord>, CatalogError> {
-    let sql = format!("SELECT {IMAGE_COLS} FROM images WHERE folder_id = ?1 ORDER BY filename");
+    let sql = format!(
+        "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE folder_id = ?1 ORDER BY filename"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params![folder_id], row_to_record)?;
     let mut out = Vec::new();
@@ -53,7 +68,9 @@ pub(crate) fn image_by_name(
     folder_id: i64,
     filename: &str,
 ) -> Result<Option<ImageRecord>, CatalogError> {
-    let sql = format!("SELECT {IMAGE_COLS} FROM images WHERE folder_id = ?1 AND filename = ?2");
+    let sql = format!(
+        "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE folder_id = ?1 AND filename = ?2"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map(rusqlite::params![folder_id, filename], row_to_record)?;
     Ok(match rows.next() {
@@ -133,7 +150,7 @@ pub(crate) fn list_images_recursive(
              UNION ALL
              SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
          )
-         SELECT {IMAGE_COLS} FROM images
+         SELECT {IMAGE_COLS} FROM images{THUMB_JOIN}
          WHERE folder_id IN (SELECT id FROM subtree)
          ORDER BY filename"
     );
@@ -209,17 +226,35 @@ pub(crate) fn collections_for_images(
     Ok(map)
 }
 
+pub(crate) fn collection_image_counts(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<i64, usize>, CatalogError> {
+    let mut map: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let mut stmt = conn
+        .prepare("SELECT collection_id, COUNT(*) FROM collection_images GROUP BY collection_id")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, usize>(1)?))
+    })?;
+    for r in rows {
+        let (coll_id, count) = r?;
+        map.insert(coll_id, count);
+    }
+    Ok(map)
+}
+
 pub(crate) fn list_collections(
     conn: &Connection,
 ) -> Result<Vec<crate::model::CollectionRecord>, CatalogError> {
-    let mut stmt = conn
-        .prepare("SELECT id, name, color, sort_order FROM collections ORDER BY sort_order, name")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, color, sort_order, parent_id FROM collections ORDER BY sort_order, name",
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok(crate::model::CollectionRecord {
             id: row.get(0)?,
             name: row.get(1)?,
             color: Color::from_packed(row.get::<_, i64>(2)? as u32),
             sort_order: row.get(3)?,
+            parent_id: row.get(4)?,
         })
     })?;
     let mut out = Vec::new();
@@ -227,6 +262,18 @@ pub(crate) fn list_collections(
         out.push(r?);
     }
     Ok(out)
+}
+
+pub(crate) fn update_collection_parent(
+    conn: &Connection,
+    id: i64,
+    parent_id: Option<i64>,
+) -> Result<(), CatalogError> {
+    conn.execute(
+        "UPDATE collections SET parent_id = ?1 WHERE id = ?2",
+        rusqlite::params![parent_id, id],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>, CatalogError> {
@@ -253,6 +300,23 @@ pub(crate) fn list_folders(conn: &Connection) -> Result<Vec<crate::FolderRecord>
 pub(crate) fn distinct_cameras(conn: &Connection) -> Result<Vec<String>, CatalogError> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT camera_model FROM images WHERE camera_model IS NOT NULL ORDER BY camera_model",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Sorted distinct non-null, non-empty lens names for the filter toolbar's
+/// Lens dropdown. Excludes the empty-string "attempted, found nothing"
+/// backfill sentinel (see `apply_metadata_backfill_batch`'s doc comment) in
+/// addition to NULL, so an unresolved/unreadable lens never appears in the
+/// dropdown as a spurious blank entry.
+pub(crate) fn distinct_lenses(conn: &Connection) -> Result<Vec<String>, CatalogError> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT lens FROM images WHERE lens IS NOT NULL AND lens != '' ORDER BY lens",
     )?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     let mut out = Vec::new();
@@ -290,7 +354,9 @@ pub(crate) fn images_by_ids(
 ) -> Result<Vec<ImageRecord>, CatalogError> {
     // Preserve the input order; skip ids that no longer exist.
     let mut out = Vec::with_capacity(ids.len());
-    let mut stmt = conn.prepare(&format!("SELECT {IMAGE_COLS} FROM images WHERE id = ?1"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE id = ?1"
+    ))?;
     for &id in ids {
         let mut rows = stmt.query_map(rusqlite::params![id], row_to_record)?;
         if let Some(r) = rows.next() {
@@ -298,6 +364,68 @@ pub(crate) fn images_by_ids(
         }
     }
     Ok(out)
+}
+
+/// Images whose `lens`, `aperture`, and `focal_length` are ALL still NULL —
+/// the Task-14 background-backfill backlog: exactly the pre-v7-ingest set
+/// (see `schema.rs`'s v7 migration note) plus any row a backfill pass hasn't
+/// reached yet. A row that WAS attempted and found nothing is written back
+/// with `lens = ''` (empty string, not NULL — see
+/// `Catalog::apply_metadata_backfill_batch`), so it no longer has `lens IS
+/// NULL` and drops out of this predicate on its own — it is never retried on
+/// a later launch.
+///
+/// `after_id` + `ORDER BY images.id ASC` makes repeated calls within one
+/// backfill job walk the backlog forward deterministically. This matters
+/// because the write-back for a batch happens later, on the UI thread (see
+/// `ferrolite-app`'s `meta_backfill` job) — without the id cursor, a second
+/// call issued before that write lands would just re-fetch the same NULL
+/// rows instead of making progress.
+pub(crate) fn images_needing_metadata_backfill(
+    conn: &Connection,
+    after_id: i64,
+    limit: i64,
+) -> Result<Vec<BackfillCandidate>, CatalogError> {
+    let mut stmt = conn.prepare(
+        "SELECT images.id, folders.path, images.filename, images.kind
+         FROM images JOIN folders ON folders.id = images.folder_id
+         WHERE images.id > ?1
+           AND images.lens IS NULL AND images.aperture IS NULL AND images.focal_length IS NULL
+         ORDER BY images.id ASC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(rusqlite::params![after_id, limit], |row| {
+        let folder_path: String = row.get(1)?;
+        let filename: String = row.get(2)?;
+        let kind: i64 = row.get(3)?;
+        Ok(BackfillCandidate {
+            id: row.get(0)?,
+            path: PathBuf::from(folder_path).join(filename),
+            kind: FileKind::from_i64(kind),
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// Count of rows still awaiting the Task-14 backfill (same predicate as
+/// `images_needing_metadata_backfill`). The backfill job (`ferrolite-app`'s
+/// `meta_backfill::spawn_meta_backfill`) is submitted unconditionally every
+/// launch (`meta_backfill::spawn_once`); this count is checked as the job's
+/// first off-thread step (`has_backlog`), so a fully-backfilled catalog does
+/// exactly one `COUNT(*)` and returns, never reaching the per-row listing or
+/// EXIF re-reads.
+pub(crate) fn metadata_backfill_pending_count(conn: &Connection) -> Result<i64, CatalogError> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM images
+         WHERE lens IS NULL AND aperture IS NULL AND focal_length IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n)
 }
 
 pub(crate) fn date_bounds(conn: &Connection) -> Result<Option<(String, String)>, CatalogError> {

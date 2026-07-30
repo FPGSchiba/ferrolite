@@ -129,7 +129,7 @@ pub struct FullEntry {
 /// Result of consulting the cache for a key.
 pub enum WarmHit {
     Full {
-        full: FullEntry,
+        full: Box<FullEntry>,
         display: DisplayEntry,
     },
     Display(DisplayEntry),
@@ -193,7 +193,7 @@ impl WarmCache {
             if let Some(d) = self.display.get_mut(&key) {
                 d.touched = now;
                 return WarmHit::Full {
-                    full,
+                    full: Box::new(full),
                     display: d.entry.clone(),
                 };
             }

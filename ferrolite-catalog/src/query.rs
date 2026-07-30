@@ -3,9 +3,44 @@
 
 use crate::error::CatalogError;
 use crate::model::ImageRecord;
-use crate::queries::IMAGE_COLS;
+use crate::queries::{IMAGE_COLS, THUMB_JOIN};
 use ferrolite_image::{Flag, TagId};
 use rusqlite::{types::Value, Connection};
+use std::collections::BTreeSet;
+
+/// A file-type filter chip. HEIC is not a member: `ferrolite-catalog`'s scanner
+/// (`scan.rs`) never recognizes `.heic`/`.heif` as an ingestable extension, so a
+/// chip for it could never match a row.
+///
+/// Matching is by lower-cased path extension (`filename`), not the `kind`
+/// column: `kind` is only a 2-way `FileKind::{Raw, Standard}` split and cannot
+/// distinguish Jpeg/Png/Tiff from each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum FileTypeChip {
+    #[default]
+    Raw,
+    Jpeg,
+    Png,
+    Tiff,
+}
+
+impl FileTypeChip {
+    /// Lower-cased, dot-less path extensions this chip matches. The ONE place
+    /// the extension<->chip mapping lives, shared by the SQL predicate builder
+    /// (`LibraryQuery::compile`, below) and any UI that renders/describes a
+    /// chip — see `ferrolite-app/src/library/toolbar.rs`.
+    ///
+    /// `Raw`'s list is `scan.rs`'s own `RAW_EXTS` (not a duplicated copy), so
+    /// the ingest classifier and this filter can never drift apart.
+    pub fn extensions(self) -> &'static [&'static str] {
+        match self {
+            FileTypeChip::Raw => crate::scan::RAW_EXTS,
+            FileTypeChip::Jpeg => &["jpg", "jpeg"],
+            FileTypeChip::Png => &["png"],
+            FileTypeChip::Tiff => &["tif", "tiff"],
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -48,7 +83,7 @@ pub struct TagFilter {
     pub mode: TagMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LibraryQuery {
     pub scope: Scope,
     pub search: Option<String>,
@@ -57,7 +92,11 @@ pub struct LibraryQuery {
     pub flags: Vec<Flag>,
     pub tags: TagFilter,
     pub camera: Option<String>,
+    pub lens: Option<String>,
+    pub file_types: BTreeSet<FileTypeChip>,
     pub iso: Option<(u32, u32)>,
+    pub aperture: Option<(f32, f32)>,
+    pub focal: Option<(f32, f32)>,
     pub date: Option<(String, String)>,
 }
 
@@ -77,7 +116,11 @@ impl Default for LibraryQuery {
                 mode: TagMode::Any,
             },
             camera: None,
+            lens: None,
+            file_types: BTreeSet::new(),
             iso: None,
+            aperture: None,
+            focal: None,
             date: None,
         }
     }
@@ -104,7 +147,7 @@ impl LibraryQuery {
         // RecentlyAdded short-circuits scope + ordering.
         if let Scope::RecentlyAdded { limit } = self.scope {
             let sql = format!(
-                "SELECT {IMAGE_COLS} FROM images WHERE added_at IS NOT NULL \
+                "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE added_at IS NOT NULL \
                  ORDER BY added_at DESC LIMIT ?"
             );
             params.push(Value::Integer(limit));
@@ -200,10 +243,51 @@ impl LibraryQuery {
             params.push(Value::Text(cam.clone()));
         }
 
+        if let Some(lens) = &self.lens {
+            // NULL `lens` rows (unread/unsupported metadata, or ingested before
+            // the v7 migration — see schema.rs) are excluded, same as any other
+            // active metadata filter.
+            where_clauses.push("lens = ?".into());
+            params.push(Value::Text(lens.clone()));
+        }
+
+        if !self.file_types.is_empty() {
+            // Matches on the lower-cased path extension (`filename`), not the
+            // 2-way `kind` column — see `FileTypeChip::extensions`. One `LIKE`
+            // per accepted extension across every selected chip, OR'd together
+            // and parenthesized so it composes correctly with the `AND`-joined
+            // clauses around it.
+            let exts: Vec<&'static str> = self
+                .file_types
+                .iter()
+                .flat_map(|chip| chip.extensions().iter().copied())
+                .collect();
+            let ph = vec!["LOWER(filename) LIKE ?"; exts.len()].join(" OR ");
+            where_clauses.push(format!("({ph})"));
+            for ext in exts {
+                params.push(Value::Text(format!("%.{ext}")));
+            }
+        }
+
         if let Some((lo, hi)) = self.iso {
             where_clauses.push("iso BETWEEN ? AND ?".into());
             params.push(Value::Integer(lo as i64));
             params.push(Value::Integer(hi as i64));
+        }
+
+        if let Some((lo, hi)) = self.aperture {
+            // NULL `aperture` rows are excluded (standard SQL BETWEEN
+            // behavior — same NULL-exclusion note as `lens`, above).
+            where_clauses.push("aperture BETWEEN ? AND ?".into());
+            params.push(Value::Real(lo as f64));
+            params.push(Value::Real(hi as f64));
+        }
+
+        if let Some((lo, hi)) = self.focal {
+            // NULL `focal_length` rows are excluded, same as `aperture`.
+            where_clauses.push("focal_length BETWEEN ? AND ?".into());
+            params.push(Value::Real(lo as f64));
+            params.push(Value::Real(hi as f64));
         }
 
         if let Some((from, to)) = &self.date {
@@ -212,7 +296,7 @@ impl LibraryQuery {
             params.push(Value::Text(to.clone()));
         }
 
-        let mut sql = format!("{prefix}SELECT {IMAGE_COLS} FROM images{joins}");
+        let mut sql = format!("{prefix}SELECT {IMAGE_COLS} FROM images{THUMB_JOIN}{joins}");
         if !where_clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));
@@ -403,5 +487,109 @@ mod tests {
         let (sql, params) = q.compile();
         assert!(sql.contains("flag IN (?)"), "sql: {sql}");
         assert_eq!(params, vec![Value::Integer(0)]);
+    }
+
+    #[test]
+    fn lens_filter_compiles_to_eq_param() {
+        let q = LibraryQuery {
+            lens: Some("50mm f/1.8".into()),
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("lens = ?"), "sql: {sql}");
+        assert_eq!(params, vec![Value::Text("50mm f/1.8".into())]);
+    }
+
+    #[test]
+    fn no_lens_filter_omits_predicate() {
+        let (sql, _) = base().compile();
+        assert!(!sql.contains("lens"), "sql: {sql}");
+    }
+
+    #[test]
+    fn aperture_range_compiles_to_between() {
+        let q = LibraryQuery {
+            aperture: Some((2.8, 11.0)),
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("aperture BETWEEN ? AND ?"), "sql: {sql}");
+        assert_eq!(
+            params,
+            vec![Value::Real(2.8_f32 as f64), Value::Real(11.0_f32 as f64)]
+        );
+    }
+
+    #[test]
+    fn focal_range_compiles_to_between() {
+        let q = LibraryQuery {
+            focal: Some((24.0, 70.0)),
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("focal_length BETWEEN ? AND ?"), "sql: {sql}");
+        assert_eq!(
+            params,
+            vec![Value::Real(24.0_f32 as f64), Value::Real(70.0_f32 as f64)]
+        );
+    }
+
+    #[test]
+    fn empty_file_types_omits_predicate() {
+        let (sql, _) = base().compile();
+        assert!(!sql.contains("LOWER(filename)"), "sql: {sql}");
+    }
+
+    #[test]
+    fn file_types_compile_to_ored_like_with_one_param_per_extension() {
+        let mut file_types = BTreeSet::new();
+        file_types.insert(FileTypeChip::Jpeg);
+        file_types.insert(FileTypeChip::Png);
+        let q = LibraryQuery {
+            file_types,
+            ..base()
+        };
+        let (sql, params) = q.compile();
+        assert!(sql.contains("LOWER(filename) LIKE ?"), "sql: {sql}");
+        // Jpeg -> jpg,jpeg (2 exts) + Png -> png (1 ext) = 3 placeholders/params.
+        assert_eq!(params.len(), 3);
+        assert!(params.contains(&Value::Text("%.jpg".into())));
+        assert!(params.contains(&Value::Text("%.jpeg".into())));
+        assert!(params.contains(&Value::Text("%.png".into())));
+    }
+
+    #[test]
+    fn file_type_chip_extension_mapping_is_exhaustive_and_disjoint() {
+        // The "ONE place" mapping (`FileTypeChip::extensions`) must cover every
+        // chip with a non-empty, mutually exclusive extension list so a file
+        // never matches two chips and the Raw list never drifts from the
+        // scanner's own `RAW_EXTS`.
+        let all = [
+            FileTypeChip::Raw,
+            FileTypeChip::Jpeg,
+            FileTypeChip::Png,
+            FileTypeChip::Tiff,
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        for chip in all {
+            let exts = chip.extensions();
+            assert!(!exts.is_empty(), "{chip:?} has no extensions");
+            for e in exts {
+                assert!(
+                    !seen.contains(e),
+                    "extension {e} claimed by more than one chip"
+                );
+                seen.push(e);
+            }
+        }
+        assert_eq!(FileTypeChip::Raw.extensions(), crate::scan::RAW_EXTS);
+        assert_eq!(FileTypeChip::Jpeg.extensions(), &["jpg", "jpeg"]);
+        assert_eq!(FileTypeChip::Png.extensions(), &["png"]);
+        assert_eq!(FileTypeChip::Tiff.extensions(), &["tif", "tiff"]);
+    }
+
+    #[test]
+    fn file_type_chip_default_is_raw() {
+        assert_eq!(FileTypeChip::default(), FileTypeChip::Raw);
     }
 }

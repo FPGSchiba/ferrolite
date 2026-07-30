@@ -2,8 +2,14 @@
 //! op-stack edit helpers + undo/redo history, and off-thread frl:ops persistence.
 
 pub mod adjustment_panel;
+// Registry core for Tasks 3-6 (the base tabs rebuilt on scoped editing).
+// `SliderSpec::id` is now read outside tests too (Task 5's `EffectsTab::show`
+// filters `effects_sliders()` by `id.0` prefix per section), so the module is
+// fully consumed by the bin target.
+pub mod adjustments;
 pub mod base_tabs;
 pub mod cache;
+pub mod canvas;
 pub mod coverage;
 pub mod crop_math;
 pub mod crop_overlay;
@@ -16,7 +22,7 @@ pub mod history;
 pub mod hsl_widget;
 pub mod info;
 pub mod info_overlay;
-pub mod info_tab;
+pub mod info_panel;
 pub mod lens_bake;
 pub mod lens_caps_ui;
 pub mod lens_match;
@@ -32,6 +38,7 @@ pub mod meta_read;
 pub mod ops_edit;
 pub mod ops_persist;
 pub mod preview_cache;
+pub mod scope;
 pub mod split;
 pub mod thumb_regen;
 pub mod tool;

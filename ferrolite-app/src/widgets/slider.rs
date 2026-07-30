@@ -63,6 +63,15 @@ pub struct EguiSlider<'a> {
     pub unit: &'a str,
     pub bipolar: bool,
     pub signed: bool,
+    pub custom_label_w: Option<f32>,
+}
+
+impl<'a> EguiSlider<'a> {
+    #[allow(dead_code)]
+    pub fn label_width(mut self, w: f32) -> Self {
+        self.custom_label_w = Some(w);
+        self
+    }
 }
 
 use crate::theme;
@@ -92,9 +101,19 @@ impl<'a> Widget for EguiSlider<'a> {
         // the label column entirely so the track spans the full width
         // instead of reserving `LABEL_W` for nothing. Value + reset columns
         // are unaffected either way (per-control reset stays load-bearing).
-        let label_w = if self.label.is_empty() { 0.0 } else { LABEL_W };
+        let label_w = if self.label.is_empty() {
+            0.0
+        } else {
+            self.custom_label_w.unwrap_or(LABEL_W)
+        };
         let track_left = rect.left() + label_w + 8.0;
-        let track_right = rect.right() - VALUE_W - 8.0 - RESET_W;
+        let default_right_m = VALUE_W + 12.0 + RESET_W + 8.0;
+        let right_m = if let Some(custom_w) = self.custom_label_w {
+            custom_w + 8.0
+        } else {
+            default_right_m
+        };
+        let track_right = rect.right() - right_m;
         let track_w = (track_right - track_left).max(1.0);
         let mid_y = rect.center().y;
         let reset_rect = egui::Rect::from_min_max(
@@ -340,5 +359,35 @@ mod tests {
     #[test]
     fn parse_entry_accepts_leading_plus_sign() {
         assert_eq!(parse_entry("+0.5", -1.0, 1.0, 0.0), Some(0.5));
+    }
+
+    #[test]
+    fn slider_builder_sets_custom_label_w() {
+        let mut v = 0.0;
+        let s = super::EguiSlider {
+            label: "Test",
+            value: &mut v,
+            min: 0.0,
+            max: 100.0,
+            default: 0.0,
+            step: 1.0,
+            decimals: 0,
+            unit: "",
+            bipolar: false,
+            signed: false,
+            custom_label_w: None,
+        }
+        .label_width(120.0);
+
+        assert_eq!(s.custom_label_w, Some(120.0));
+    }
+
+    #[test]
+    fn slider_track_right_clearance_math() {
+        let rect_right = 300.0;
+        let track_right = rect_right - super::VALUE_W - 12.0 - super::RESET_W - 8.0;
+        // Total right side clearance reserved from rect.right():
+        // VALUE_W (48px) + 12px gap + RESET_W (16px) + 8px right clearance = 84px total
+        assert_eq!(rect_right - track_right, 84.0);
     }
 }

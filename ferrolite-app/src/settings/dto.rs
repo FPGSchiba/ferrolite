@@ -329,6 +329,184 @@ pub fn resolve(
     }
 }
 
+// ── Settings ────────────────────────────────────────────────────────────────
+pub fn default_true() -> bool {
+    true
+}
+
+pub fn default_panel_width() -> f32 {
+    300.0
+}
+
+pub fn default_filmstrip_height() -> f32 {
+    96.0
+}
+
+/// Root persisted settings document. Every field defaults so older/partial
+/// files load cleanly (forward/backward tolerant).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub keymap: super::keymap::Keymap,
+    pub export: PersistedExport,
+    pub filter: PersistedFilter,
+    pub working_space: PersistedWorkingSpace,
+    pub grid_size: f32,
+    #[serde(default = "default_filmstrip_height")]
+    pub filmstrip_height: f32,
+    #[serde(default = "default_panel_width")]
+    pub right_panel_width: f32,
+    #[serde(default = "default_panel_width")]
+    pub info_panel_width: f32,
+    pub confirm_remove: bool,
+    pub show_histogram: bool,
+    pub show_info_overlay: bool,
+    #[serde(default)]
+    pub show_info_panel: bool,
+    pub show_tool_palette: bool,
+    pub restore_session: bool,
+    pub last_module: PersistedModule,
+    pub last_folder: Option<std::path::PathBuf>,
+    pub display_profile: PersistedDisplayProfile,
+    #[serde(default = "default_true")]
+    pub basic_sliders_open: bool,
+    #[serde(default = "default_true")]
+    pub color_hsl_open: bool,
+    #[serde(default = "default_true")]
+    pub color_mix_open: bool,
+    #[serde(default = "default_true")]
+    pub sharpening_open: bool,
+    #[serde(default = "default_true")]
+    pub noise_reduction_open: bool,
+    #[serde(default = "default_true")]
+    pub dehaze_open: bool,
+    #[serde(default = "default_true")]
+    pub tone_curve_open: bool,
+    #[serde(default = "default_true")]
+    pub region_tones_open: bool,
+    #[serde(default = "default_true")]
+    pub color_grading_open: bool,
+    #[serde(default = "default_true")]
+    pub optics_open: bool,
+    // per-scope disclosure state (spec §3 / V2 README): Mask scope remembers
+    // its own open/closed sections independently of Adjust's flags above.
+    #[serde(default = "default_true")]
+    pub mask_basic_sliders_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_tone_curve_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_region_tones_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_color_hsl_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_color_mix_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_color_grading_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_sharpening_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_noise_reduction_open: bool,
+    #[serde(default = "default_true")]
+    pub mask_dehaze_open: bool,
+    // Crop tool's dedicated panel (design 2026-07-29 §C3 / V2 README:69) — the
+    // panel that replaces the shared Light/Color/Effects tabs while Crop is
+    // active. Only one scope exists (Crop is never mask-scoped), so there is
+    // no `mask_crop_*` counterpart.
+    #[serde(default = "default_true")]
+    pub crop_transform_open: bool,
+    #[serde(default = "default_true")]
+    pub crop_geometry_open: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            keymap: super::keymap::Keymap::defaults(),
+            export: PersistedExport::default(),
+            filter: PersistedFilter::default(),
+            working_space: PersistedWorkingSpace::default(),
+            grid_size: 46.0,
+            filmstrip_height: default_filmstrip_height(),
+            right_panel_width: default_panel_width(),
+            info_panel_width: default_panel_width(),
+            confirm_remove: true,
+            show_histogram: true,
+            show_info_overlay: false,
+            show_info_panel: false,
+            show_tool_palette: true,
+            restore_session: false,
+            last_module: PersistedModule::default(),
+            last_folder: None,
+            display_profile: PersistedDisplayProfile::default(),
+            basic_sliders_open: true,
+            color_hsl_open: true,
+            color_mix_open: true,
+            sharpening_open: true,
+            noise_reduction_open: true,
+            dehaze_open: true,
+            tone_curve_open: true,
+            region_tones_open: true,
+            color_grading_open: true,
+            optics_open: true,
+            mask_basic_sliders_open: true,
+            mask_tone_curve_open: true,
+            mask_region_tones_open: true,
+            mask_color_hsl_open: true,
+            mask_color_mix_open: true,
+            mask_color_grading_open: true,
+            mask_sharpening_open: true,
+            mask_noise_reduction_open: true,
+            mask_dehaze_open: true,
+            crop_transform_open: true,
+            crop_geometry_open: true,
+        }
+    }
+}
+
+/// Number of section-disclosure (`*_open`) flags in `Settings` — see
+/// `disclosure_snapshot`. Kept as a named constant so the snapshot array size
+/// and the coverage test share one source of truth.
+pub const DISCLOSURE_FLAG_COUNT: usize = 21;
+
+/// Snapshot of EVERY section-disclosure flag on `Settings` (both the Adjust
+/// scope and its per-scope Mask counterpart — see the `mask_*_open` fields'
+/// doc comment). Callers diff two snapshots taken across a frame to detect
+/// whether ANY disclosure toggle changed, so the settings-dirty flag can be
+/// set once regardless of which specific section was (dis)closed — see
+/// `FerroliteApp`'s Develop tool-panel frame, which used to hand-diff only 3
+/// of these fields and silently missed the rest.
+///
+/// Order is arbitrary — only whole-array equality matters. If you add a new
+/// section-disclosure field to `Settings`, add it here too: the
+/// `disclosure_snapshot_covers_every_open_field` test below fails otherwise
+/// (it counts the matching field declarations in this file's own source),
+/// which is exactly the tripwire this helper exists to provide.
+pub fn disclosure_snapshot(s: &Settings) -> [bool; DISCLOSURE_FLAG_COUNT] {
+    [
+        s.basic_sliders_open,
+        s.color_hsl_open,
+        s.color_mix_open,
+        s.sharpening_open,
+        s.noise_reduction_open,
+        s.dehaze_open,
+        s.tone_curve_open,
+        s.region_tones_open,
+        s.color_grading_open,
+        s.optics_open,
+        s.mask_basic_sliders_open,
+        s.mask_tone_curve_open,
+        s.mask_region_tones_open,
+        s.mask_color_hsl_open,
+        s.mask_color_mix_open,
+        s.mask_color_grading_open,
+        s.mask_sharpening_open,
+        s.mask_noise_reduction_open,
+        s.mask_dehaze_open,
+        s.crop_transform_open,
+        s.crop_geometry_open,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +662,96 @@ mod tests {
                 m
             );
         }
+    }
+
+    #[test]
+    fn settings_layout_fields_defaults_and_json_roundtrip() {
+        let default_settings = Settings::default();
+        assert!(!default_settings.show_info_panel);
+        assert_eq!(default_settings.filmstrip_height, 96.0);
+        assert_eq!(default_settings.right_panel_width, 300.0);
+        assert_eq!(default_settings.info_panel_width, 300.0);
+        assert!(default_settings.basic_sliders_open);
+        assert!(default_settings.color_hsl_open);
+        assert!(default_settings.color_mix_open);
+        assert!(default_settings.sharpening_open);
+        assert!(default_settings.noise_reduction_open);
+        assert!(default_settings.dehaze_open);
+        assert!(default_settings.tone_curve_open);
+        assert!(default_settings.region_tones_open);
+        assert!(default_settings.color_grading_open);
+        assert!(default_settings.optics_open);
+        assert!(default_settings.mask_basic_sliders_open);
+        assert!(default_settings.mask_tone_curve_open);
+        assert!(default_settings.mask_region_tones_open);
+        assert!(default_settings.mask_color_hsl_open);
+        assert!(default_settings.mask_color_mix_open);
+        assert!(default_settings.mask_color_grading_open);
+        assert!(default_settings.mask_sharpening_open);
+        assert!(default_settings.mask_noise_reduction_open);
+        assert!(default_settings.mask_dehaze_open);
+        assert!(default_settings.crop_transform_open);
+        assert!(default_settings.crop_geometry_open);
+
+        let empty_json = "{}";
+        let parsed: Settings = serde_json::from_str(empty_json).expect("deserialize empty json");
+        assert_eq!(parsed, default_settings);
+
+        let custom = Settings {
+            show_info_panel: true,
+            filmstrip_height: 140.0,
+            right_panel_width: 350.0,
+            info_panel_width: 250.0,
+            basic_sliders_open: false,
+            color_hsl_open: false,
+            color_mix_open: false,
+            sharpening_open: false,
+            noise_reduction_open: false,
+            dehaze_open: false,
+            tone_curve_open: false,
+            region_tones_open: false,
+            color_grading_open: false,
+            optics_open: false,
+            mask_basic_sliders_open: false,
+            mask_tone_curve_open: false,
+            mask_region_tones_open: false,
+            mask_color_hsl_open: false,
+            mask_color_mix_open: false,
+            mask_color_grading_open: false,
+            mask_sharpening_open: false,
+            mask_noise_reduction_open: false,
+            mask_dehaze_open: false,
+            crop_transform_open: false,
+            crop_geometry_open: false,
+            ..Settings::default()
+        };
+
+        let serialized = serde_json::to_string(&custom).expect("serialize custom settings");
+        let deserialized: Settings =
+            serde_json::from_str(&serialized).expect("deserialize custom settings");
+        assert_eq!(deserialized, custom);
+    }
+
+    /// Tripwire for `disclosure_snapshot`: counts field declarations of the
+    /// shape `<name>_open: bool,` in this file's own source (a new `*_open`
+    /// field on `Settings` adds exactly one more such declaration — note the
+    /// trailing `,` + newline, so this can't self-match the prose describing
+    /// it) and asserts it matches `DISCLOSURE_FLAG_COUNT` / the snapshot
+    /// array's length. A future section's disclosure flag can no longer
+    /// silently fall out of the settings-dirty tracking the way
+    /// `tone_curve_open` / `color_grading_open` / `optics_open`-only
+    /// hand-diffing once did.
+    #[test]
+    fn disclosure_snapshot_covers_every_open_field() {
+        let field_declarations = include_str!("dto.rs").matches("_open: bool,\n").count();
+        assert_eq!(
+            field_declarations, DISCLOSURE_FLAG_COUNT,
+            "a `*_open` field was added to/removed from Settings without updating \
+             DISCLOSURE_FLAG_COUNT and disclosure_snapshot"
+        );
+        assert_eq!(
+            disclosure_snapshot(&Settings::default()).len(),
+            DISCLOSURE_FLAG_COUNT
+        );
     }
 }

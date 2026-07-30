@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 /// Bump this and add a `if version < N { ... }` block when the schema changes.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Apply migrations using the SQLite `user_version` pragma. Idempotent.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -75,7 +75,8 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
                  id         INTEGER PRIMARY KEY,
                  name       TEXT NOT NULL UNIQUE,
                  color      INTEGER NOT NULL,
-                 sort_order INTEGER NOT NULL DEFAULT 0
+                 sort_order INTEGER NOT NULL DEFAULT 0,
+                 parent_id  INTEGER REFERENCES collections(id) ON DELETE CASCADE
              );
              CREATE TABLE collection_images (
                  collection_id INTEGER NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
@@ -108,12 +109,47 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         version = 5;
     }
 
+    if version < 6 {
+        if !has_column(conn, "collections", "parent_id")? {
+            conn.execute_batch(
+                "ALTER TABLE collections ADD COLUMN parent_id INTEGER REFERENCES collections(id) ON DELETE CASCADE;",
+            )?;
+        }
+        version = 6;
+    }
+
+    if version < 7 {
+        // Lens name + aperture (f-number) + focal length (mm), read from EXIF/RAW
+        // metadata at ingest time. Nullable: absent on unsupported cameras/lenses
+        // and on every row ingested before this migration (backfill is Task 14,
+        // out of scope here — pre-v7 rows simply read back NULL and are excluded
+        // by an active range/lens filter, same as any other NULL metadata column).
+        conn.execute_batch(
+            "ALTER TABLE images ADD COLUMN lens TEXT;
+             ALTER TABLE images ADD COLUMN aperture REAL;
+             ALTER TABLE images ADD COLUMN focal_length REAL;",
+        )?;
+        version = 7;
+    }
+
     debug_assert_eq!(
         version, SCHEMA_VERSION,
         "every migration block must advance `version` to SCHEMA_VERSION"
     );
     conn.pragma_update(None, "user_version", version)?;
     Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(0)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -140,7 +176,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, super::SCHEMA_VERSION);
-        assert_eq!(super::SCHEMA_VERSION, 5);
+        assert_eq!(super::SCHEMA_VERSION, 7);
 
         let img = table_columns(&conn, "images");
         assert!(img.contains(&"flag".to_string()));
@@ -148,6 +184,12 @@ mod tests {
         assert!(
             img.contains(&"has_edits".to_string()),
             "has_edits column added"
+        );
+
+        let coll_cols = table_columns(&conn, "collections");
+        assert!(
+            coll_cols.contains(&"parent_id".to_string()),
+            "parent_id column added to collections"
         );
 
         for t in ["tags", "image_tags", "collections", "collection_images"] {
@@ -176,5 +218,21 @@ mod tests {
         assert!(cols.contains(&"image_id".to_string()));
         assert!(cols.contains(&"position".to_string()));
         assert!(cols.contains(&"added_at".to_string()));
+    }
+
+    #[test]
+    fn migrate_creates_v7_lens_aperture_focal_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::migrate(&conn).unwrap();
+        let cols = table_columns(&conn, "images");
+        assert!(cols.contains(&"lens".to_string()), "lens column added");
+        assert!(
+            cols.contains(&"aperture".to_string()),
+            "aperture column added"
+        );
+        assert!(
+            cols.contains(&"focal_length".to_string()),
+            "focal_length column added"
+        );
     }
 }

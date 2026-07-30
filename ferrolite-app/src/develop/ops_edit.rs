@@ -1,71 +1,49 @@
 //! Pure helpers: map a UI value to a new immutable `OpStack`. A value at its
 //! identity default REMOVES the op so `is_identity()`/`has_edits` stay correct.
+//!
+//! Tone curve and color grade no longer route through dedicated `set_*`
+//! helpers here (Phase 2b Task 3): both are now `AdjustmentSet` fields written
+//! via the scoped-edit path (`crate::develop::scope::ScopedEdit::write`),
+//! whose `with_global`/`with_layer_adjustments` normalize identity structures
+//! away doc-side, same effect as the old identity-eliding helpers.
 
-use ferrolite_pipeline::{
-    sharpen_halo, ColorGrade, Contrast, Dehaze, Exposure, LensCorrection, Op, OpStack, Sharpen,
-    ToneCurve, WhiteBalance,
-};
+use ferrolite_pipeline::{sharpen_halo_doc, LensCorrection, Op, OpStack};
 
-pub fn set_exposure(s: &OpStack, ev: f32) -> OpStack {
-    if ev == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Exposure)
+/// The stack whose render the viewer should SHOW this frame — the single
+/// source of truth for what extent the preview tier evaluates to:
+///
+/// * before/after: the identity stack (the "before" image);
+/// * crop mode (`crop_active`): the live stack with the crop FORCED FULL —
+///   rotation/aspect/keystone stay applied so the Angle slider rotates live,
+///   but the crop rectangle is represented by the overlay drawn over the
+///   full image, so the render must be the FULL (uncropped) extent;
+/// * otherwise: the live stack unchanged (crop applied → cropped extent).
+///
+/// Entering/leaving crop mode therefore CHANGES the shown extent (full ↔
+/// cropped), which is why the crop-mode transition must also re-frame the
+/// view to the newly shown dims (see the `SetPreviewAndFull` handler in
+/// `app.rs`) — leaving the old fit made re-editing a crop open visibly
+/// more zoomed-in than the tool was left (the fit belonged to the smaller
+/// cropped extent) and desynced the overlay's `image_dims`-derived hit
+/// geometry from what was actually displayed.
+pub fn shown_stack(stack: &OpStack, before_after: bool, crop_active: bool) -> OpStack {
+    let mut shown = if before_after {
+        OpStack::default()
     } else {
-        s.set_op(Op::Exposure(Exposure { ev }))
+        stack.clone()
+    };
+    if crop_active {
+        if let Some(g) = shown.geometry() {
+            shown = shown.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+                crop: ferrolite_pipeline::CropRect::full(),
+                angle_deg: g.angle_deg,
+                aspect: g.aspect,
+                keystone_v: g.keystone_v,
+                keystone_h: g.keystone_h,
+            }));
+        }
     }
-}
-
-pub fn set_white_balance(s: &OpStack, temp: f32, tint: f32) -> OpStack {
-    if temp == 0.0 && tint == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::WhiteBalance)
-    } else {
-        s.set_op(Op::WhiteBalance(WhiteBalance { temp, tint }))
-    }
-}
-
-pub fn set_contrast(s: &OpStack, amount: f32) -> OpStack {
-    if amount == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Contrast)
-    } else {
-        s.set_op(Op::Contrast(Contrast { amount }))
-    }
-}
-
-pub fn set_sharpen(s: &OpStack, amount: f32, radius: u32) -> OpStack {
-    if amount == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Sharpen)
-    } else {
-        s.set_op(Op::Sharpen(Sharpen { amount, radius }))
-    }
-}
-
-pub fn set_dehaze(s: &OpStack, amount: f32, radius: u32) -> OpStack {
-    if amount == 0.0 {
-        s.reset(ferrolite_pipeline::OpKind::Dehaze)
-    } else {
-        s.set_op(Op::Dehaze(Dehaze { amount, radius }))
-    }
-}
-
-/// Set the tone curve, or REMOVE the op entirely when the whole curve (Master +
-/// R/G/B + parametric) is identity — so `is_identity()`/`has_edits` stay correct,
-/// mirroring every other `set_*` helper here.
-pub fn set_tone_curve(s: &OpStack, tc: ToneCurve) -> OpStack {
-    if tc.is_identity() {
-        s.reset(ferrolite_pipeline::OpKind::ToneCurve)
-    } else {
-        s.set_op(Op::ToneCurve(tc))
-    }
-}
-
-/// Set the color grade, or REMOVE the op entirely when every wheel is neutral
-/// (no tint, no lum) — so `is_identity()`/`has_edits` stay correct, mirroring
-/// every other `set_*` helper here.
-pub fn set_color_grade(s: &OpStack, cg: ColorGrade) -> OpStack {
-    if cg.is_identity() {
-        s.reset(ferrolite_pipeline::OpKind::ColorGrade)
-    } else {
-        s.set_op(Op::ColorGrade(cg))
-    }
+    shown
 }
 
 /// A `LensCorrection` with no matched lens AND every correction disabled is
@@ -132,6 +110,12 @@ pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32
 /// Color-only changes (and lens/vignette Amount-only changes) are applied via
 /// `TileEditPipeline::set_stack` / the lens-uniform setters without a rebuild.
 ///
+/// The sharpen halo uses `sharpen_halo_doc` (Phase 4 Task 4): the max radius
+/// over the global `Sharpen` op AND every visible mask layer's own active
+/// sharpen — a per-mask sharpen is a real per-pixel neighbourhood op with its
+/// own radius, so a layer-only sharpen change (global op absent/unchanged)
+/// must still force a rebuild when it changes the document-wide max.
+///
 /// Dehaze does NOT force a rebuild (ST-Task 3): `dehaze_halo` is now always 0
 /// (the tiled dehaze recovery samples a shared whole-image transmission, no
 /// per-tile neighbourhood), so an amount/radius change is a `set_stack`
@@ -139,14 +123,68 @@ pub fn lens_bake_key(s: &OpStack) -> (Option<String>, bool, bool, bool, u32, u32
 /// same as any other color op — never a `TileEditPipeline` rebuild.
 pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
     old.geometry() != new.geometry()
-        || sharpen_halo(old.sharpen()) != sharpen_halo(new.sharpen())
+        || sharpen_halo_doc(old) != sharpen_halo_doc(new)
         || lens_rebuild_key(old) != lens_rebuild_key(new)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferrolite_pipeline::{Op, OpStack};
+    use ferrolite_pipeline::{Dehaze, Op, OpStack, Sharpen};
+
+    fn cropped_rotated_stack() -> OpStack {
+        OpStack::default().set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            crop: ferrolite_pipeline::CropRect {
+                x: 0.1,
+                y: 0.1,
+                w: 0.5,
+                h: 0.5,
+            },
+            angle_deg: 7.5,
+            ..Default::default()
+        }))
+    }
+
+    /// The refit-dims choice (crop re-edit bug): entering crop mode shows the
+    /// FULL extent — the shown stack's crop must be forced full while rotation
+    /// (and the rest of the geometry) stays applied.
+    #[test]
+    fn shown_stack_in_crop_mode_forces_crop_full_but_keeps_rotation() {
+        let stack = cropped_rotated_stack();
+        let shown = shown_stack(&stack, false, true);
+        let g = shown.geometry().expect("geometry kept");
+        assert_eq!(
+            (g.crop.x, g.crop.y, g.crop.w, g.crop.h),
+            (0.0, 0.0, 1.0, 1.0),
+            "crop forced full while the tool is active"
+        );
+        assert_eq!(g.angle_deg, 7.5, "rotation stays live in crop mode");
+        // The LIVE stack is untouched (immutability) — only the shown copy changes.
+        assert_eq!(stack.geometry().unwrap().crop.w, 0.5);
+    }
+
+    /// Leaving crop mode shows the CROPPED extent again: the shown stack is
+    /// the live stack unchanged.
+    #[test]
+    fn shown_stack_outside_crop_mode_keeps_the_crop() {
+        let stack = cropped_rotated_stack();
+        let shown = shown_stack(&stack, false, false);
+        assert_eq!(
+            shown.geometry().unwrap().crop,
+            stack.geometry().unwrap().crop,
+            "at rest the cropped extent is shown"
+        );
+    }
+
+    /// Before/after shows the identity render; crop mode is then a no-op on
+    /// it (no geometry op to force full).
+    #[test]
+    fn shown_stack_before_after_is_identity_even_in_crop_mode() {
+        let stack = cropped_rotated_stack();
+        let shown = shown_stack(&stack, true, true);
+        assert!(shown.is_identity());
+        assert!(shown.geometry().is_none());
+    }
 
     #[test]
     fn set_lens_correction_removes_when_unmatched_and_all_off() {
@@ -176,35 +214,6 @@ mod tests {
         };
         let s2 = set_lens_correction(&OpStack::default(), on);
         assert!(s2.lens_correction().is_some());
-    }
-
-    #[test]
-    fn set_exposure_adds_then_identity_removes() {
-        let s = set_exposure(&OpStack::default(), 0.5);
-        assert_eq!(s.exposure().unwrap().ev, 0.5);
-        let s2 = set_exposure(&s, 0.0);
-        assert!(s2.exposure().is_none(), "identity ev removes the op");
-        assert!(s2.is_identity());
-    }
-
-    #[test]
-    fn set_white_balance_identity_when_both_zero() {
-        let s = set_white_balance(&OpStack::default(), 0.0, 0.0);
-        assert!(s.white_balance().is_none());
-    }
-
-    #[test]
-    fn set_sharpen_identity_when_amount_zero() {
-        let s = set_sharpen(&OpStack::default(), 0.0, 3);
-        assert!(s.sharpen().is_none(), "zero amount = no sharpen");
-        let s = set_sharpen(&OpStack::default(), 0.4, 2);
-        assert_eq!(
-            s.sharpen(),
-            Some(ferrolite_pipeline::Sharpen {
-                amount: 0.4,
-                radius: 2
-            })
-        );
     }
 
     #[test]
@@ -270,20 +279,55 @@ mod tests {
 
     #[test]
     fn needs_full_rebuild_on_geometry_and_halo_only() {
-        let base = set_exposure(&OpStack::default(), 0.5);
-        let color_only = set_contrast(&base, 0.3);
+        use ferrolite_pipeline::{Contrast, Exposure};
+        let base = OpStack::default().set_op(Op::Exposure(Exposure { ev: 0.5 }));
+        let color_only = base.set_op(Op::Contrast(Contrast { amount: 0.3 }));
         assert!(
             !needs_full_rebuild(&base, &color_only),
             "color ops: no rebuild"
         );
-        let sharper = set_sharpen(&base, 0.5, 5);
+        let sharper = base.set_op(Op::Sharpen(Sharpen {
+            amount: 0.5,
+            radius: 5,
+        }));
         assert!(needs_full_rebuild(&base, &sharper), "halo change: rebuild");
         let geo = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
             crop: ferrolite_pipeline::CropRect::full(),
             angle_deg: 5.0,
             aspect: ferrolite_pipeline::Aspect::Free,
+            ..Default::default()
         }));
         assert!(needs_full_rebuild(&base, &geo), "geometry change: rebuild");
+    }
+
+    /// Plan `crop-overhaul` C4 Task 4: keystone is a geometry-tier change,
+    /// same treatment as `angle_deg` — a keystone-only edit (crop/angle/aspect
+    /// unchanged) must still force the full-res `TileEditPipeline` rebuild.
+    #[test]
+    fn needs_full_rebuild_on_keystone_only_change() {
+        let base = OpStack::default().set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            crop: ferrolite_pipeline::CropRect::full(),
+            angle_deg: 0.0,
+            aspect: ferrolite_pipeline::Aspect::Original,
+            keystone_v: 0.0,
+            keystone_h: 0.0,
+        }));
+        let keystone_v_only = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            keystone_v: 0.3,
+            ..base.geometry().unwrap()
+        }));
+        assert!(
+            needs_full_rebuild(&base, &keystone_v_only),
+            "keystone_v-only change: rebuild"
+        );
+        let keystone_h_only = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            keystone_h: -0.4,
+            ..base.geometry().unwrap()
+        }));
+        assert!(
+            needs_full_rebuild(&base, &keystone_h_only),
+            "keystone_h-only change: rebuild"
+        );
     }
 
     #[test]
@@ -317,182 +361,73 @@ mod tests {
     }
 
     #[test]
-    fn set_tone_curve_identity_removes_the_op() {
-        use ferrolite_pipeline::ToneCurve;
-        let s = set_tone_curve(&OpStack::default(), ToneCurve::default());
-        assert!(s.tone_curve().is_none(), "fully-identity curve = no op");
-        assert!(s.is_identity());
-    }
-
-    #[test]
-    fn set_tone_curve_master_edit_sets_the_op() {
-        use ferrolite_pipeline::{CurveMode, ToneCurve};
-        let tc = ToneCurve {
-            points: vec![(0.0, 0.0), (0.5, 0.3), (1.0, 1.0)],
-            mode: CurveMode::Smooth,
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc.clone());
-        assert_eq!(s.tone_curve(), Some(tc));
-    }
-
-    #[test]
-    fn set_tone_curve_channel_only_edit_is_kept() {
-        use ferrolite_pipeline::{CurveMode, PointCurve, ToneCurve};
-        let tc = ToneCurve {
-            blue: PointCurve {
-                points: vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)],
-                mode: CurveMode::Linear,
-            },
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc);
-        assert!(
-            s.tone_curve().is_some(),
-            "a blue-only curve is not identity"
-        );
-    }
-
-    #[test]
-    fn set_tone_curve_parametric_only_edit_is_kept() {
-        use ferrolite_pipeline::{ParametricCurve, ToneCurve};
-        let tc = ToneCurve {
-            parametric: ParametricCurve {
-                highlights: -0.5,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc);
-        assert!(s.tone_curve().is_some());
-    }
-
-    #[test]
-    fn set_tone_curve_split_only_edit_is_kept() {
-        // Regression: a parametric SPLIT moved off default (zero regions) must
-        // keep the op so the split slider persists instead of snapping back.
-        use ferrolite_pipeline::{ParametricCurve, ToneCurve};
-        let tc = ToneCurve {
-            parametric: ParametricCurve {
-                midtone_split: 0.65,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let s = set_tone_curve(&OpStack::default(), tc);
-        assert!(
-            s.tone_curve().is_some(),
-            "a split-only parametric edit must not be elided"
-        );
-    }
-
-    #[test]
-    fn set_color_grade_blending_or_balance_only_edit_is_kept() {
-        // Regression: Blending/Balance moved off default (neutral wheels) must
-        // keep the op so those sliders persist instead of snapping back.
-        use ferrolite_pipeline::ColorGrade;
-        let s = set_color_grade(
-            &OpStack::default(),
-            ColorGrade {
-                blending: 0.8,
-                ..Default::default()
-            },
-        );
-        assert!(
-            s.color_grade().is_some(),
-            "a blending-only grade edit must not be elided"
-        );
-        let s2 = set_color_grade(
-            &OpStack::default(),
-            ColorGrade {
-                balance: -0.4,
-                ..Default::default()
-            },
-        );
-        assert!(
-            s2.color_grade().is_some(),
-            "a balance-only grade edit must not be elided"
-        );
-    }
-
-    #[test]
-    fn set_color_grade_identity_removes_the_op() {
-        use ferrolite_pipeline::ColorGrade;
-        let s = set_color_grade(&OpStack::default(), ColorGrade::default());
-        assert!(s.color_grade().is_none(), "neutral grade = no op");
-        assert!(s.is_identity());
-    }
-
-    #[test]
-    fn set_color_grade_tinted_wheel_sets_the_op() {
-        use ferrolite_pipeline::{ColorGrade, GradeWheel};
-        let cg = ColorGrade {
-            highlights: GradeWheel {
-                hue: 40.0,
-                sat: 0.3,
-                lum: 0.0,
-            },
-            ..Default::default()
-        };
-        let s = set_color_grade(&OpStack::default(), cg);
-        assert_eq!(s.color_grade(), Some(cg));
-    }
-
-    #[test]
-    fn set_color_grade_lum_only_is_kept() {
-        use ferrolite_pipeline::{ColorGrade, GradeWheel};
-        let cg = ColorGrade {
-            global: GradeWheel {
-                hue: 0.0,
-                sat: 0.0,
-                lum: 0.25,
-            },
-            ..Default::default()
-        };
-        let s = set_color_grade(&OpStack::default(), cg);
-        assert!(
-            s.color_grade().is_some(),
-            "a lum-only grade is not identity"
-        );
-    }
-
-    #[test]
-    fn set_dehaze_identity_when_amount_zero() {
-        // Radius alone (amount 0) creates no op.
-        let s = set_dehaze(&OpStack::default(), 0.0, 8);
-        assert!(s.dehaze().is_none(), "zero amount = no dehaze op");
-        let s = set_dehaze(&OpStack::default(), 0.5, 8);
-        assert_eq!(
-            s.dehaze(),
-            Some(ferrolite_pipeline::Dehaze {
-                amount: 0.5,
-                radius: 8
-            })
-        );
-        // Negative (add-haze) is a real edit too.
-        let s = set_dehaze(&OpStack::default(), -0.3, 12);
-        assert_eq!(
-            s.dehaze(),
-            Some(ferrolite_pipeline::Dehaze {
-                amount: -0.3,
-                radius: 12
-            })
-        );
-    }
-
-    #[test]
     fn dehaze_changes_never_force_a_rebuild() {
         // ST-Task 3: `dehaze_halo` is always 0 — the tiled dehaze recovery
         // samples a shared whole-image transmission (no per-tile
         // neighbourhood), so enabling/disabling dehaze, an amount-only change,
         // and a radius change are all `set_stack`-only, same as a color op.
         let base = OpStack::default();
-        let on = set_dehaze(&base, 0.5, 8);
+        let dehaze_op =
+            |amount: f32, radius: u32| base.set_op(Op::Dehaze(Dehaze { amount, radius }));
+        let on = dehaze_op(0.5, 8);
         assert!(!needs_full_rebuild(&base, &on), "dehaze on: no rebuild");
-        let on2 = set_dehaze(&base, 0.9, 8);
+        let on2 = dehaze_op(0.9, 8);
         assert!(!needs_full_rebuild(&on, &on2), "amount-only: no rebuild");
-        let on3 = set_dehaze(&base, 0.9, 16);
+        let on3 = dehaze_op(0.9, 16);
         assert!(!needs_full_rebuild(&on2, &on3), "radius change: no rebuild");
         assert!(!needs_full_rebuild(&on, &base), "dehaze off: no rebuild");
+    }
+
+    /// Phase 4 Task 4: a per-mask sharpen radius is a REAL per-pixel
+    /// neighbourhood op (its own separable blur), so a change to a visible
+    /// mask layer's sharpen — even with the GLOBAL sharpen op absent/
+    /// unchanged — must force a rebuild when it changes the document-wide
+    /// max halo (`sharpen_halo_doc`).
+    #[test]
+    fn mask_sharpen_forces_rebuild_via_halo() {
+        use ferrolite_pipeline::{AdjustmentSet, LocalAdjustments, MaskLayer, Sharpen};
+
+        let mask_layer = |amount: f32, radius: u32| LocalAdjustments {
+            layers: vec![MaskLayer {
+                name: "l".into(),
+                visible: true,
+                mask: Default::default(),
+                adjustments: AdjustmentSet {
+                    sharpen: Sharpen { amount, radius },
+                    ..Default::default()
+                },
+            }],
+        };
+
+        let base = OpStack::default();
+        let layer_sharpen = base.set_op(Op::LocalAdjustments(mask_layer(0.5, 5)));
+        assert!(
+            needs_full_rebuild(&base, &layer_sharpen),
+            "mask-only sharpen (global absent): halo change forces rebuild"
+        );
+
+        // A larger mask radius (global still absent) also forces a rebuild.
+        let layer_sharpen_bigger = base.set_op(Op::LocalAdjustments(mask_layer(0.5, 9)));
+        assert!(
+            needs_full_rebuild(&layer_sharpen, &layer_sharpen_bigger),
+            "mask sharpen radius growth forces rebuild"
+        );
+
+        // Amount-only change on the mask layer, radius unchanged: halo is
+        // unaffected (amount doesn't change the radius), so no rebuild.
+        let layer_sharpen_amt = base.set_op(Op::LocalAdjustments(mask_layer(0.9, 5)));
+        assert!(
+            !needs_full_rebuild(&layer_sharpen, &layer_sharpen_amt),
+            "mask sharpen amount-only: no halo change, no rebuild"
+        );
+
+        // A hidden mask layer's sharpen never contributes to the halo.
+        let mut hidden_la = mask_layer(0.5, 9);
+        hidden_la.layers[0].visible = false;
+        let hidden = base.set_op(Op::LocalAdjustments(hidden_la));
+        assert!(
+            !needs_full_rebuild(&base, &hidden),
+            "hidden mask layer's sharpen: no halo contribution, no rebuild"
+        );
     }
 }

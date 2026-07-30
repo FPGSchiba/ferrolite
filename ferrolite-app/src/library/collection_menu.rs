@@ -38,6 +38,15 @@ pub fn removable_collections(
         .collect()
 }
 
+/// Create a sub-collection for a parent collection set.
+pub fn create_sub_collection(
+    writer: &ferrolite_catalog::Catalog,
+    parent_id: i64,
+    name: &str,
+) -> Result<i64, ferrolite_catalog::CatalogError> {
+    writer.create_collection_with_parent(name, ferrolite_image::Color::default(), Some(parent_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +59,7 @@ mod tests {
             name: format!("c{id}"),
             color: Default::default(),
             sort_order: id,
+            parent_id: None,
         }
     }
 
@@ -70,5 +80,19 @@ mod tests {
         m.insert(10, vec![1]);
         m.insert(11, vec![1, 2]);
         assert_eq!(removable_collections(&all, &[10, 11], &m), vec![1, 2]);
+    }
+
+    #[test]
+    fn sub_collection_creation_sets_parent_id() {
+        let cat = ferrolite_catalog::Catalog::open_in_memory().unwrap();
+        let parent_id = cat
+            .create_collection("Parent Set", Default::default())
+            .unwrap();
+        let sub_id = create_sub_collection(&cat, parent_id, "Sub Collection").unwrap();
+
+        let collections = cat.list_collections().unwrap();
+        let sub = collections.iter().find(|c| c.id == sub_id).unwrap();
+        assert_eq!(sub.parent_id, Some(parent_id));
+        assert_eq!(sub.name, "Sub Collection");
     }
 }

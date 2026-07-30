@@ -33,6 +33,19 @@ impl EditTileProducer {
         self.pipeline.set_color_matrix(m);
     }
 
+    /// The geometry-applied OUTPUT dims this producer renders tiles in (the
+    /// rounded crop extent baked at construction). The single source of truth
+    /// for the full tier's logical size: whenever a producer is (re)installed,
+    /// the sparse VT's logical dims must be re-pointed at THIS value
+    /// (`VirtualTexture::set_sparse_image_dims`) so the display/compose
+    /// transform, the shader's extent clip, and the convergence needed-set all
+    /// agree with the preview tier's cropped output — a mismatch presents as a
+    /// wrongly-cropped image at rest and heavy preview↔full flicker on
+    /// pan/zoom for cropped images.
+    pub fn out_dims(&self) -> (u32, u32) {
+        self.pipeline.out_dims()
+    }
+
     // ── Lens amount passthroughs (Spec 4.4, U7) ────────────────────────────
     // Amount-only lens slider changes (distortion/tca/vignetting `amount`,
     // NOT lens id / enabled flags / focal / aperture / crop — those change the

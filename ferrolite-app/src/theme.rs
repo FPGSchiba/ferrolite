@@ -4,8 +4,8 @@ use egui::{Color32, Context, FontData, FontDefinitions, FontFamily, Visuals};
 
 pub const BG_APP: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
 pub const BG_PANEL: Color32 = Color32::from_rgb(0x17, 0x17, 0x17);
-pub const BG_TITLEBAR: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-pub const BG_TOOLBAR: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x1d);
+pub const BG_TITLEBAR: Color32 = Color32::from_rgb(0x11, 0x11, 0x11);
+pub const BG_TOOLBAR: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
 pub const BG_BASE: Color32 = Color32::from_rgb(0x14, 0x14, 0x14);
 pub const BG_CANVAS: Color32 = Color32::from_rgb(0x0e, 0x0e, 0x0e);
 // Canonical design palette (design-system §2) — full token set kept for use across later specs.
@@ -16,6 +16,16 @@ pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x6a, 0x6a, 0x6a);
 pub const ACCENT: Color32 = Color32::from_rgb(0x6d, 0x97, 0xb5);
 pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xa9, 0xc7, 0xdd);
 pub const ACCENT_BG_SEL: Color32 = Color32::from_rgb(0x21, 0x2a, 0x30);
+#[allow(dead_code)]
+pub const ACCENT_FILL: Color32 = Color32::from_rgb(0x23, 0x2b, 0x30);
+#[allow(dead_code)]
+pub const ACCENT_BORDER: Color32 = Color32::from_rgb(0x34, 0x46, 0x4f);
+#[allow(dead_code)]
+pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0xcf, 0xe0, 0xec);
+#[allow(dead_code)]
+pub const TEXT_ACTIVE: Color32 = Color32::from_rgb(0xea, 0xf1, 0xf6);
+#[allow(dead_code)]
+pub const TEXT_INACTIVE: Color32 = Color32::from_rgb(0x9a, 0x9a, 0x9a);
 pub const SEMANTIC_RED: Color32 = Color32::from_rgb(0xc7, 0x54, 0x50);
 pub const SEMANTIC_GREEN: Color32 = Color32::from_rgb(0x4c, 0xaf, 0x71);
 pub const SEMANTIC_AMBER: Color32 = Color32::from_rgb(0xd6, 0xa8, 0x4c); // warning toasts
@@ -87,6 +97,15 @@ mod tests {
     #[test]
     fn accent_bright_token_matches_design_system() {
         assert_eq!(ACCENT_BRIGHT, Color32::from_rgb(169, 199, 221)); // #a9c7dd
+    }
+
+    #[test]
+    fn v2_accent_tokens_match_spec() {
+        assert_eq!(ACCENT_FILL, Color32::from_rgb(0x23, 0x2b, 0x30)); // #232b30
+        assert_eq!(ACCENT_BORDER, Color32::from_rgb(0x34, 0x46, 0x4f)); // #34464f
+        assert_eq!(ACCENT_TEXT, Color32::from_rgb(0xcf, 0xe0, 0xec)); // #cfe0ec
+        assert_eq!(TEXT_ACTIVE, Color32::from_rgb(0xea, 0xf1, 0xf6)); // #eaf1f6
+        assert_eq!(TEXT_INACTIVE, Color32::from_rgb(0x9a, 0x9a, 0x9a)); // #9a9a9a
     }
 
     #[test]

@@ -16,6 +16,7 @@ mod op;
 mod pipeline;
 mod rcd_gpu;
 mod serialize;
+mod sharpen_node;
 mod tile_edit;
 mod uniforms;
 
@@ -32,13 +33,19 @@ pub use lens_bake::bake_products;
 pub use lens_gpu::{VignetteTexture, WarpGridTexture};
 pub use local::{
     AdjustmentSet, ColorControl, ColorSwatch, LightControl, LocalAdjustments, MaskLayer,
+    NoiseReduction,
 };
+// `EngineStage` is the fused layer-engine node's stage discriminant (Task 3
+// wires two `LocalAdjustmentsNode` instances, one per stage, into the
+// pipelines) — re-exported from the otherwise crate-private `local_node`
+// module.
+pub use local_node::EngineStage;
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
 pub use op::{
-    Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Dehaze, Exposure, Geometry,
-    GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve, PointCurve,
-    Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
+    Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Dehaze, EditDoc, Exposure,
+    Geometry, GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve,
+    PointCurve, Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
 pub use pipeline::{blit_to_rgba8, blit_to_rgba8_with_matrix, EditPipeline};
 pub use rcd_gpu::{demosaic_rcd_gpu, CfaInput};
@@ -49,31 +56,44 @@ pub use tile_edit::TileEditPipeline;
 // reusable transforms (`color_grade_px`, `curve_lut`, `parametric_curve_lut`, `tone_curve_luts`)
 // are public per design §2.5 so the future per-mask path reuses them with no rework.
 // `sharpen_halo`/`lens_halo_px` are public for Plan 3's tile producer.
+// `ExposureUniform`/`WbUniform`/`ContrastUniform` retired with Task 3 (Phase 3
+// fused layer engine): the standalone exposure/white-balance/contrast passes
+// they backed are gone — `local_adjust_uniform`/`LocalAdjustUniform` cover the
+// same math for both the Light-stage engine node and per-mask layers now.
+// `geometry_uniform`/`geometry_src_px` are public as the CPU reference for the
+// geometry pass's projective (keystone) mapping — GPU parity tests and any
+// future keystone-aware coordinate mapping consume them; `KEYSTONE_STRENGTH`
+// is the single named tuning constant for keystone responsiveness (spec C4).
 pub use uniforms::{
-    color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px, lens_uniform,
-    parametric_curve_lut, sharpen_halo, tone_curve_luts, vignette_amount, ColorGradeUniform,
-    ContrastUniform, ExposureUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform,
-    SharpenUniform, VignetteUniform, WbUniform, MAX_SHARPEN_RADIUS,
+    clamp_uv_to_crop_bounds, color_grade_px, curve_lut, geometry_src_px, geometry_tile_uniform,
+    geometry_uniform, lens_halo_px, lens_uniform, parametric_curve_lut, sharpen_halo,
+    sharpen_halo_doc, tone_curve_luts, vignette_amount, ColorGradeUniform, GeometryUniform,
+    HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
+    KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
 /// cached modules instead of compiling on the UI thread. Call once at startup,
-/// alongside the display-pipeline pre-warm. Covers the original color/tone/
-/// geometry passes, the two lens passes (geometry now carries the warp;
-/// `vignette` is the radial-gain pass), `local-adjust` (the masked Light+Color
-/// point op), `color-grade` (the three-way + global grading wheels point op),
-/// and the dehaze passes: `dehaze-dark-channel`/`-min-h`/`-min-v`/`-products`/
+/// alongside the display-pipeline pre-warm. Covers `color-matrix`/
+/// `geometry`/`vignette` (the surviving standalone point/geometry passes),
+/// `sharpen-box-h`/`-box-v`/`-apply` (the Phase 4 separable `SharpenNode`
+/// three-pass replacement for the old fused `sharpen.wgsl`, which stays
+/// in-tree as reference math but is no longer compiled here),
+/// `local-adjust` (the fused Light+Color engine — one shader now covers what
+/// used to be six standalone passes: exposure/white-balance/contrast/
+/// tone-curve/hsl/color-grade, retired as graph nodes by the Phase 3 fused
+/// layer engine; their `.wgsl` files stay in-tree as reference math for
+/// `local_adjust.wgsl`'s per-op ports, just no longer compiled here), and the
+/// dehaze passes: `dehaze-dark-channel`/`-min-h`/`-min-v`/`-products`/
 /// `-box-h`/`-box-v`/`-guided-ab`/`-guided-q` (the multi-pass guided-filter
 /// transmission map, `DehazeTransmissionNode`) — plus `dehaze-transmission-mip`
-/// (its mip-chain downsample for LOD-aware sampling) — plus `dehaze-recovery` (the
-/// amount/atmos blend, `DehazeRecoveryNode`) — both nodes shared by
-/// `EditPipeline` and `TileEditPipeline` (QS-Task 4/5).
+/// (its mip-chain downsample for LOD-aware sampling) — shared by `EditPipeline`
+/// and `TileEditPipeline` (QS-Task 4/5). The amount/atmos recovery+blend step
+/// (formerly a separate `dehaze-recovery`/`DehazeRecoveryNode` pass) is fused
+/// into `local-adjust` below (Phase 4 Task 2) — no longer a standalone shader.
 pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     for (label, src) in [
         ("color-matrix", include_str!("shaders/color_matrix.wgsl")),
-        ("exposure", include_str!("shaders/exposure.wgsl")),
-        ("white-balance", include_str!("shaders/white_balance.wgsl")),
-        ("contrast", include_str!("shaders/contrast.wgsl")),
         (
             "dehaze-dark-channel",
             include_str!("shaders/dehaze_dark_channel.wgsl"),
@@ -98,14 +118,23 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "dehaze-transmission-mip",
             include_str!("shaders/dehaze_transmission_mip.wgsl"),
         ),
+        // `dehaze_recovery.wgsl` (the retired standalone recovery pass) stays
+        // in-tree as reference math (its per-pixel kernel was ported verbatim
+        // into `local_adjust.wgsl`'s `dehaze_recover_step`, Phase 4 Task 2) but
+        // is no longer compiled here.
+        // `sharpen.wgsl` (the retired fused 2D pass) stays in-tree as
+        // reference math (see `sharpen_node.rs`'s doc) but is no longer
+        // compiled here — `SharpenNode` (both pipelines) now dispatches the
+        // passes below instead. `sharpen-apply-masked` (Phase 4 Task 4) is
+        // the per-mask-layer masked apply, only ever dispatched when a
+        // visible layer has its own active sharpen.
+        ("sharpen-box-h", include_str!("shaders/sharpen_box_h.wgsl")),
+        ("sharpen-box-v", include_str!("shaders/sharpen_box_v.wgsl")),
+        ("sharpen-apply", include_str!("shaders/sharpen_apply.wgsl")),
         (
-            "dehaze-recovery",
-            include_str!("shaders/dehaze_recovery.wgsl"),
+            "sharpen-apply-masked",
+            include_str!("shaders/sharpen_apply_masked.wgsl"),
         ),
-        ("tone-curve", include_str!("shaders/tone_curve.wgsl")),
-        ("hsl", include_str!("shaders/hsl.wgsl")),
-        ("color-grade", include_str!("shaders/color_grade.wgsl")),
-        ("sharpen", include_str!("shaders/sharpen.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
         ("local-adjust", include_str!("shaders/local_adjust.wgsl")),

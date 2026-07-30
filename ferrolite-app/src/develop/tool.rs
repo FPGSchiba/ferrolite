@@ -184,16 +184,16 @@ mod tests {
             ids,
             vec![ToolId::Adjust, ToolId::Crop, ToolId::Mask, ToolId::Heal]
         );
-        assert_eq!(
-            reg.base_tabs().len(),
-            8,
-            "Light/Color/Grade/Curve/Effects/Detail/Optics/Info"
-        );
+        assert_eq!(reg.base_tabs().len(), 3, "Light/Color/Effects");
         // Heal is the only always-disabled tool; assert via its (empty) tabs rather
         // than `enabled()` to avoid constructing a full `AppState` here.
         assert!(
             reg.get(ToolId::Heal).unwrap().tabs().is_empty(),
             "Heal has no tabs"
+        );
+        assert!(
+            reg.get(ToolId::Mask).unwrap().tabs().is_empty(),
+            "Mask injects no tabs — shared base tabs only"
         );
     }
 }

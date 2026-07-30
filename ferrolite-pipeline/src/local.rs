@@ -18,10 +18,21 @@ pub struct ColorSwatch {
     pub amount: f32,
 }
 
+/// Noise-reduction parameters (luminance + chroma). All zero-identity; no
+/// shader yet (carried for schema stability — the V2 Effects tab shows the
+/// sliders but they are not wired until their pass lands).
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct NoiseReduction {
+    pub luminance: f32,
+    pub detail: f32,
+    pub color: f32,
+    pub color_detail: f32,
+}
+
 /// Per-mask point-op adjustments. All scalars are zero-identity; `Default` is the
 /// no-op set. Serde uses `#[serde(default)]` on every field so a payload written
 /// by an older/newer build (missing/extra fields) loads as identity for those.
-#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct AdjustmentSet {
     #[serde(default)]
     pub exposure: f32,
@@ -45,17 +56,28 @@ pub struct AdjustmentSet {
     pub hue: f32,
     #[serde(default)]
     pub color: ColorSwatch,
-    // Reserved neighborhood locals — no shader in P1 (greyed in Plan 4's UI).
+    // New in the unified model (design 2026-07-28 §2): the full parameter block,
+    // shared verbatim between the global layer and every mask layer. All
+    // zero-identity, all `#[serde(default)]` (schema-stable forward).
+    #[serde(default)]
+    pub vibrance: f32,
+    #[serde(default)]
+    pub tone_curve: crate::op::ToneCurve,
+    #[serde(default)]
+    pub hsl: crate::op::Hsl,
+    #[serde(default)]
+    pub color_grade: crate::op::ColorGrade,
+    #[serde(default)]
+    pub sharpen: crate::op::Sharpen,
+    #[serde(default)]
+    pub dehaze: crate::op::Dehaze,
+    #[serde(default)]
+    pub noise_reduction: NoiseReduction,
+    // Reserved neighborhood locals — no shader yet (Phase 4 owns them).
     #[serde(default)]
     pub texture: f32,
     #[serde(default)]
     pub clarity: f32,
-    #[serde(default)]
-    pub dehaze: f32,
-    #[serde(default)]
-    pub sharpness: f32,
-    #[serde(default)]
-    pub noise: f32,
 }
 
 /// A single Light control (per-control reset target).
@@ -93,12 +115,43 @@ impl AdjustmentSet {
             && self.tint == 0.0
             && self.saturation == 0.0
             && self.hue == 0.0
+            && self.vibrance == 0.0
             && self.color.amount == 0.0
+            && self.tone_curve.is_identity()
+            && self.hsl.is_identity()
+            && self.color_grade.is_identity()
+            && self.sharpen.amount == 0.0
+            && self.dehaze.is_identity()
+            && self.noise_reduction == NoiseReduction::default()
+    }
+
+    /// Copy with every identity-valued STRUCTURED field snapped to its exact
+    /// `Default`, so identity edits stay byte-equal to a reset — the same
+    /// invariant `EditDoc::set_op` maintains (is_identity, PartialEq-vs-default,
+    /// and the serde hash agree). Scalars pass through (0.0 is already canonical).
+    pub fn normalized(&self) -> Self {
+        let mut s = self.clone();
+        if s.dehaze.is_identity() {
+            s.dehaze = crate::op::Dehaze::default();
+        }
+        if s.sharpen.amount == 0.0 {
+            s.sharpen = crate::op::Sharpen::default();
+        }
+        if s.tone_curve.is_identity() {
+            s.tone_curve = crate::op::ToneCurve::default();
+        }
+        if s.color_grade.is_identity() {
+            s.color_grade = crate::op::ColorGrade::default();
+        }
+        if s.hsl.is_identity() {
+            s.hsl = crate::op::Hsl::default();
+        }
+        s
     }
 
     /// New set with one Light control reset to identity (immutable per-control reset).
     pub fn reset_light(&self, c: LightControl) -> Self {
-        let mut s = *self;
+        let mut s = self.clone();
         match c {
             LightControl::Exposure => s.exposure = 0.0,
             LightControl::Contrast => s.contrast = 0.0,
@@ -112,7 +165,7 @@ impl AdjustmentSet {
 
     /// New set with one Color control reset to identity.
     pub fn reset_color(&self, c: ColorControl) -> Self {
-        let mut s = *self;
+        let mut s = self.clone();
         match c {
             ColorControl::Temp => s.temp = 0.0,
             ColorControl::Tint => s.tint = 0.0,
@@ -121,6 +174,43 @@ impl AdjustmentSet {
             ColorControl::Color => s.color = ColorSwatch::default(),
         }
         s
+    }
+
+    /// Copy carrying ONLY the fused engine's Light-stage fields (exposure,
+    /// highlights/shadows/whites/blacks, temp/tint, contrast); every other
+    /// field is reset to its identity `Default`. The exact complement of
+    /// `color_segment` — together they partition every `AdjustmentSet` field
+    /// exactly once (fields belonging to neither engine segment, e.g. sharpen/
+    /// dehaze/noise_reduction/texture/clarity, are identity in both).
+    pub fn light_segment(&self) -> Self {
+        Self {
+            exposure: self.exposure,
+            contrast: self.contrast,
+            highlights: self.highlights,
+            shadows: self.shadows,
+            whites: self.whites,
+            blacks: self.blacks,
+            temp: self.temp,
+            tint: self.tint,
+            ..Self::default()
+        }
+    }
+
+    /// Copy carrying ONLY the fused engine's Color-stage fields (saturation,
+    /// hue, vibrance, color swatch, tone curve, HSL, color grade); every other
+    /// field is reset to its identity `Default`. The exact complement of
+    /// `light_segment`.
+    pub fn color_segment(&self) -> Self {
+        Self {
+            saturation: self.saturation,
+            hue: self.hue,
+            color: self.color,
+            vibrance: self.vibrance,
+            tone_curve: self.tone_curve.clone(),
+            hsl: self.hsl,
+            color_grade: self.color_grade,
+            ..Self::default()
+        }
     }
 }
 
@@ -267,5 +357,69 @@ mod tests {
         };
         let json = serde_json::to_string(&la).unwrap();
         assert_eq!(serde_json::from_str::<LocalAdjustments>(&json).unwrap(), la);
+    }
+
+    #[test]
+    fn expanded_set_default_is_identity_and_serde_defaults_hold() {
+        let s = AdjustmentSet::default();
+        assert!(s.is_identity());
+        // A payload written by an older build (missing every new field) loads as identity.
+        let old_json = r#"{"exposure":0.0}"#;
+        let parsed: AdjustmentSet = serde_json::from_str(old_json).unwrap();
+        assert!(parsed.is_identity());
+        assert_eq!(parsed, AdjustmentSet::default());
+    }
+
+    #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
+    #[allow(clippy::field_reassign_with_default)]
+    fn each_structured_field_breaks_identity() {
+        let mut s = AdjustmentSet::default();
+        s.tone_curve.points = vec![(0.0, 0.1), (1.0, 1.0)];
+        assert!(!s.is_identity(), "tone curve");
+
+        let mut s = AdjustmentSet::default();
+        s.hsl.bands[0].sat = 0.3;
+        assert!(!s.is_identity(), "hsl");
+
+        let mut s = AdjustmentSet::default();
+        s.color_grade.shadows.sat = 0.4;
+        assert!(!s.is_identity(), "color grade");
+
+        let mut s = AdjustmentSet::default();
+        s.sharpen.amount = 0.5;
+        assert!(!s.is_identity(), "sharpen");
+
+        let mut s = AdjustmentSet::default();
+        s.dehaze.amount = 0.2;
+        assert!(!s.is_identity(), "dehaze");
+
+        let mut s = AdjustmentSet::default();
+        s.noise_reduction.luminance = 0.5;
+        assert!(!s.is_identity(), "noise reduction");
+
+        let mut s = AdjustmentSet::default();
+        s.vibrance = 0.1;
+        assert!(!s.is_identity(), "vibrance");
+    }
+
+    #[test]
+    // default-then-assign mirrors the plan's literal test spec; clearer than
+    // struct-update for single fields.
+    #[allow(clippy::field_reassign_with_default)]
+    fn expanded_set_round_trips() {
+        let mut s = AdjustmentSet::default();
+        s.exposure = 0.5;
+        s.tone_curve.points = vec![(0.0, 0.0), (0.4, 0.6), (1.0, 1.0)];
+        s.hsl.bands[3].hue = -0.2;
+        s.sharpen = crate::op::Sharpen {
+            amount: 0.8,
+            radius: 2,
+        };
+        s.dehaze.amount = -0.3;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: AdjustmentSet = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, s);
     }
 }

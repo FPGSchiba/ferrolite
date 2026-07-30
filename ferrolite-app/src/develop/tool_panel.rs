@@ -3,10 +3,20 @@
 //! Replaces the flat CollapsingHeader `adjustment_panel::show`.
 
 use crate::develop::adjustment_panel::{EditOutcome, PanelOutcome};
-use crate::develop::tool::DevelopToolRegistry;
+use crate::develop::tool::{DevelopToolRegistry, ToolId};
 use crate::state::AppState;
+use crate::theme;
 use ferrolite_color::WorkingSpace;
-use ferrolite_pipeline::{OpKind, OpStack};
+
+/// Whether the shared Light/Color/Effects tab row (+ the active tool's
+/// temporary tabs) renders at all this frame. Crop replaces the tab row
+/// entirely with its own dedicated panel (design 2026-07-29 §C3 / V2
+/// README:69) — every other tool keeps the shared row (Mask only injects a
+/// header ABOVE it via the branch above, never replaces it). Single source of
+/// truth for the gate used both by `show()` below and by this module's tests.
+fn tab_row_visible(active: ToolId) -> bool {
+    active != ToolId::Crop
+}
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -29,32 +39,100 @@ pub fn show(
     }
     let mut ts = state.tool_state;
     ts.ensure_valid_tab(reg);
-    let bar = ts.tab_bar(reg);
-    let base_len = reg.base_tabs().len();
 
-    // Render the tab bar (base tabs, then a separator + the active tool's temp tab).
-    ui.horizontal_wrapped(|ui| {
-        for (i, id) in bar.iter().enumerate() {
-            if i == base_len && i > 0 {
-                ui.separator(); // visual break before the active tool's temp tab
-            }
-            let label = tab_label(reg, ts, *id);
-            if ui.selectable_label(ts.active_tab == *id, label).clicked() {
-                ts.select_tab(*id, reg);
+    // Mask mode: the mask-management block + a scope banner render ABOVE the
+    // shared tab bar (design 2026-07-28 §3; Task 6) — there is no separate
+    // "Mask" tab anymore; the same Light/Color/Effects tabs below edit the
+    // selected mask through `ScopedEdit`.
+    let mut mask_panel_edit: Option<EditOutcome> = None;
+    if ts.active == ToolId::Mask {
+        // Pre-extraction pattern MaskTab::show used (stack clone + keymap
+        // clone + &mut v.mask), moved here verbatim from tools/mask.rs.
+        let stack = state.viewer.as_ref().map(|v| v.op_stack.clone());
+        let keymap = state.settings.keymap.clone();
+        if let Some(stack) = stack {
+            if let Some(v) = state.viewer.as_mut() {
+                mask_panel_edit =
+                    crate::develop::mask_panel::show(ui, &stack, &mut v.mask, &keymap);
             }
         }
-    });
-    ui.separator();
+
+        // Scope banner (accent = editing a mask; faint = nothing selected).
+        match crate::develop::scope::current(state) {
+            crate::develop::scope::EditScope::Mask(i) => {
+                let name = state
+                    .viewer
+                    .as_ref()
+                    .map(|v| {
+                        crate::develop::mask_edit::layers(&v.op_stack).layers[i]
+                            .name
+                            .clone()
+                    })
+                    .unwrap_or_default();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Editing: {name} — adjustments below apply only inside this mask"
+                    ))
+                    .color(theme::ACCENT)
+                    .size(11.0),
+                );
+            }
+            crate::develop::scope::EditScope::MaskNone => {
+                ui.label(
+                    egui::RichText::new(
+                        "Create or select a mask — adjustments below edit the selected mask",
+                    )
+                    .color(theme::TEXT_FAINT)
+                    .size(11.0),
+                );
+            }
+            crate::develop::scope::EditScope::Global => {}
+        }
+        ui.separator();
+    }
+
+    // Crop: tabs disappear entirely (design 2026-07-29 §C3 / V2 README:69) —
+    // replaced by `CropTab::show`'s own dedicated panel (CROP & TRANSFORM +
+    // GEOMETRY sections), reached below through the SAME "active tool's temp
+    // tabs" dispatch every other tool already uses (`ts.active_tab` still
+    // resolves to `TabId("crop")` — only the visible tab ROW is suppressed).
+    if tab_row_visible(ts.active) {
+        let base_tabs = reg.base_tabs();
+        let tool_tabs = if ts.active != crate::develop::tool::ToolId::Adjust {
+            reg.get(ts.active).map(|t| t.tabs()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let mut tab_items: Vec<(crate::develop::tool::TabId, &str)> = Vec::new();
+        for tab in base_tabs.iter() {
+            tab_items.push((tab.id(), tab.label()));
+        }
+        for tab in tool_tabs.iter() {
+            tab_items.push((tab.id(), tab.label()));
+        }
+
+        let mut active_tab = ts.active_tab;
+        let resp = crate::widgets::tabs::tab_row(ui, &mut active_tab, &tab_items);
+        if resp.changed() {
+            ts.select_tab(active_tab, reg);
+        }
+        ui.separator();
+    }
 
     // 3) Dispatch the active tab's show(). Look the tab object up fresh (base ++ active
     //    tool tabs) and call it.
     let active = ts.active_tab;
-    let mut out: Option<EditOutcome> = None;
+    // Seed with the mask panel's edit (if any) so a mask-list/component action
+    // this frame isn't lost when the active base tab itself produces no edit.
+    let mut out: Option<EditOutcome> = mask_panel_edit;
     // Base tabs:
     let mut rendered = false;
     for tab in reg.base_tabs() {
         if tab.id() == active {
-            out = tab.show(ui, state);
+            if let Some(edit) = tab.show(ui, state) {
+                out = Some(edit);
+            }
             rendered = true;
             break;
         }
@@ -64,23 +142,13 @@ pub fn show(
         if let Some(tool) = reg.get(ts.active) {
             for tab in tool.tabs() {
                 if tab.id() == active {
-                    out = tab.show(ui, state);
+                    if let Some(edit) = tab.show(ui, state) {
+                        out = Some(edit);
+                    }
                     break;
                 }
             }
         }
-    }
-
-    // 4) Global chrome (not tool/tab-specific): reset the entire OpStack to default.
-    //    Placed after the active tab's dispatch so a click here wins over any edit the
-    //    tab produced this frame (last-writer-wins, matching the pre-migration behavior).
-    ui.separator();
-    if ui.button("Reset all").clicked() {
-        out = Some(EditOutcome {
-            stack: OpStack::default(),
-            kind: OpKind::Exposure,
-            commit: true,
-        });
     }
 
     // Write ToolState back.
@@ -91,22 +159,137 @@ pub fn show(
     }
 }
 
-fn tab_label(
+/// Test/verification-only mirror of the tab-row id list `show()` assembles
+/// above (base tabs ++ the active tool's temporary tabs), gated by the same
+/// `tab_row_visible`. Ids only, no labels: a `PanelTab::label()` borrows from
+/// `tool.tabs()`'s freshly-allocated boxes, which can't outlive this
+/// function — so this exists purely to make the Crop-suppresses-tabs
+/// behavior assertable without spinning up an egui context.
+#[cfg(test)]
+fn tab_row_ids(
+    ts: &crate::develop::tool_state::ToolState,
     reg: &DevelopToolRegistry,
-    ts: crate::develop::tool_state::ToolState,
-    id: crate::develop::tool::TabId,
-) -> String {
-    for tab in reg.base_tabs() {
-        if tab.id() == id {
-            return tab.label().to_string();
+) -> Vec<crate::develop::tool::TabId> {
+    if !tab_row_visible(ts.active) {
+        return Vec::new();
+    }
+    let mut ids: Vec<crate::develop::tool::TabId> =
+        reg.base_tabs().iter().map(|t| t.id()).collect();
+    if ts.active != ToolId::Adjust {
+        if let Some(tool) = reg.get(ts.active) {
+            ids.extend(tool.tabs().iter().map(|t| t.id()));
         }
     }
-    if let Some(tool) = reg.get(ts.active) {
-        for tab in tool.tabs() {
-            if tab.id() == id {
-                return tab.label().to_string();
-            }
+    ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::develop::tool::{DevelopCtx, DevelopTool, PanelTab, TabId};
+    use crate::develop::tool_state::ToolState;
+
+    struct DummyTab(TabId);
+    impl PanelTab for DummyTab {
+        fn id(&self) -> TabId {
+            self.0
+        }
+        fn label(&self) -> &str {
+            "t"
+        }
+        fn show(&self, _ui: &mut egui::Ui, _s: &mut AppState) -> Option<EditOutcome> {
+            None
         }
     }
-    id.0.to_string()
+
+    struct DummyTool {
+        id: ToolId,
+        enabled: bool,
+        tabs: Vec<TabId>,
+    }
+    impl DevelopTool for DummyTool {
+        fn id(&self) -> ToolId {
+            self.id
+        }
+        fn icon(&self) -> &'static str {
+            "x"
+        }
+        fn label(&self) -> &'static str {
+            "d"
+        }
+        fn enabled(&self, _c: &DevelopCtx) -> bool {
+            self.enabled
+        }
+        fn tabs(&self) -> Vec<Box<dyn PanelTab>> {
+            self.tabs
+                .iter()
+                .map(|t| Box::new(DummyTab(*t)) as Box<dyn PanelTab>)
+                .collect()
+        }
+    }
+
+    fn reg() -> DevelopToolRegistry {
+        DevelopToolRegistry::new(
+            vec![
+                Box::new(DummyTab(TabId("light"))) as Box<dyn PanelTab>,
+                Box::new(DummyTab(TabId("color"))),
+                Box::new(DummyTab(TabId("effects"))),
+            ],
+            vec![
+                Box::new(DummyTool {
+                    id: ToolId::Adjust,
+                    enabled: true,
+                    tabs: vec![],
+                }) as Box<dyn DevelopTool>,
+                Box::new(DummyTool {
+                    id: ToolId::Crop,
+                    enabled: true,
+                    tabs: vec![TabId("crop")],
+                }),
+                Box::new(DummyTool {
+                    id: ToolId::Mask,
+                    enabled: true,
+                    tabs: vec![],
+                }),
+            ],
+        )
+    }
+
+    #[test]
+    fn tab_row_visible_is_false_only_for_crop() {
+        assert!(tab_row_visible(ToolId::Adjust));
+        assert!(tab_row_visible(ToolId::Mask));
+        assert!(tab_row_visible(ToolId::Heal));
+        assert!(!tab_row_visible(ToolId::Crop));
+    }
+
+    #[test]
+    fn crop_active_shows_no_tab_row_items() {
+        let reg = reg();
+        let mut ts = ToolState::default();
+        ts.select_tool(ToolId::Crop, true, &reg);
+        assert!(
+            tab_row_ids(&ts, &reg).is_empty(),
+            "Crop suppresses the shared tab row entirely"
+        );
+    }
+
+    #[test]
+    fn adjust_and_mask_keep_the_unchanged_base_tab_row() {
+        let reg = reg();
+        let ts = ToolState::default();
+        assert_eq!(
+            tab_row_ids(&ts, &reg),
+            vec![TabId("light"), TabId("color"), TabId("effects")]
+        );
+
+        let mut ts_mask = ToolState::default();
+        ts_mask.select_tool(ToolId::Mask, true, &reg);
+        assert_eq!(
+            tab_row_ids(&ts_mask, &reg),
+            vec![TabId("light"), TabId("color"), TabId("effects")],
+            "Mask injects a header above the row (see the Mask branch), not tab \
+             items — the base tab row itself is unchanged"
+        );
+    }
 }

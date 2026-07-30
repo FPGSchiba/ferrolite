@@ -67,12 +67,13 @@ impl Catalog {
             "INSERT INTO images
                (folder_id, filename, mtime, size, camera_make, camera_model,
                 width, height, orientation, capture_time, iso, decode_status, kind,
-                rating, added_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                rating, added_at, lens, aperture, focal_length)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
              ON CONFLICT(folder_id, filename) DO UPDATE SET
                 mtime=?3, size=?4, camera_make=?5, camera_model=?6, width=?7,
                 height=?8, orientation=?9, capture_time=?10, iso=?11,
-                decode_status=?12, kind=?13, rating=?14",
+                decode_status=?12, kind=?13, rating=?14, lens=?16, aperture=?17,
+                focal_length=?18",
             rusqlite::params![
                 img.folder_id,
                 img.filename,
@@ -89,6 +90,9 @@ impl Catalog {
                 img.kind.as_i64(),
                 img.rating.as_i64(),
                 img.added_at,
+                img.lens,
+                img.aperture,
+                img.focal_length,
             ],
         )?;
         let id = self.conn().query_row(
@@ -124,12 +128,13 @@ impl Catalog {
                 "INSERT INTO images
                    (folder_id, filename, mtime, size, camera_make, camera_model,
                     width, height, orientation, capture_time, iso, decode_status, kind,
-                    rating, added_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                    rating, added_at, lens, aperture, focal_length)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
                  ON CONFLICT(folder_id, filename) DO UPDATE SET
                     mtime=?3, size=?4, camera_make=?5, camera_model=?6, width=?7,
                     height=?8, orientation=?9, capture_time=?10, iso=?11,
-                    decode_status=?12, kind=?13, rating=?14",
+                    decode_status=?12, kind=?13, rating=?14, lens=?16, aperture=?17,
+                    focal_length=?18",
                 rusqlite::params![
                     img.folder_id,
                     img.filename,
@@ -146,6 +151,9 @@ impl Catalog {
                     img.kind.as_i64(),
                     img.rating.as_i64(),
                     img.added_at,
+                    img.lens,
+                    img.aperture,
+                    img.focal_length,
                 ],
             )?;
             let id: i64 = tx.query_row(
@@ -182,8 +190,8 @@ impl Catalog {
             "INSERT INTO images
                (folder_id, filename, mtime, size, camera_make, camera_model,
                 width, height, orientation, capture_time, iso, decode_status, kind,
-                rating, added_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                rating, added_at, lens, aperture, focal_length)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)
              ON CONFLICT(folder_id, filename) DO NOTHING",
             rusqlite::params![
                 img.folder_id,
@@ -201,6 +209,9 @@ impl Catalog {
                 img.kind.as_i64(),
                 img.rating.as_i64(),
                 img.added_at,
+                img.lens,
+                img.aperture,
+                img.focal_length,
             ],
         )?;
         Ok(())
@@ -471,12 +482,22 @@ impl Catalog {
         crate::queries::tags_for_images(self.conn(), image_ids)
     }
 
-    /// Create a new collection. Returns `CatalogError::Conflict` if a collection
+    /// Create a new collection without a parent. Returns `CatalogError::Conflict` if a collection
     /// with that name already exists (enforced by the UNIQUE constraint on `collections.name`).
     pub fn create_collection(&self, name: &str, color: Color) -> Result<i64, CatalogError> {
+        self.create_collection_with_parent(name, color, None)
+    }
+
+    /// Create a new collection with an optional parent collection id.
+    pub fn create_collection_with_parent(
+        &self,
+        name: &str,
+        color: Color,
+        parent_id: Option<i64>,
+    ) -> Result<i64, CatalogError> {
         let res = self.conn().execute(
-            "INSERT INTO collections (name, color) VALUES (?1, ?2)",
-            rusqlite::params![name, color.to_packed() as i64],
+            "INSERT INTO collections (name, color, parent_id) VALUES (?1, ?2, ?3)",
+            rusqlite::params![name, color.to_packed() as i64, parent_id],
         );
         match res {
             Ok(_) => Ok(self.conn().last_insert_rowid()),
@@ -507,6 +528,15 @@ impl Catalog {
             rusqlite::params![color.to_packed() as i64, id],
         )?;
         Ok(())
+    }
+
+    /// Update the parent collection of an existing collection.
+    pub fn update_collection_parent(
+        &self,
+        id: i64,
+        parent_id: Option<i64>,
+    ) -> Result<(), CatalogError> {
+        crate::queries::update_collection_parent(self.conn(), id, parent_id)
     }
 
     /// Delete a collection and cascade-remove all its image memberships.
@@ -550,6 +580,11 @@ impl Catalog {
         ids: &[i64],
     ) -> Result<HashMap<i64, Vec<i64>>, CatalogError> {
         crate::queries::collections_for_images(self.conn(), ids)
+    }
+
+    /// Query image counts per collection.
+    pub fn collection_image_counts(&self) -> Result<HashMap<i64, usize>, CatalogError> {
+        crate::queries::collection_image_counts(self.conn())
     }
 
     /// Execute a `LibraryQuery` and return matching image records.
@@ -627,6 +662,72 @@ impl Catalog {
     pub fn images_by_ids(&self, ids: &[i64]) -> Result<Vec<ImageRecord>, CatalogError> {
         crate::queries::images_by_ids(self.conn(), ids)
     }
+
+    /// Task-14 backlog listing (see `crate::queries::images_needing_metadata_backfill`'s
+    /// doc comment for the id-cursor pagination and the empty-string
+    /// sentinel). Exposed on the writer too, not just `ReadPool` — the
+    /// background job reads via `ReadPool` off the UI thread, but tests (and
+    /// any future synchronous caller) can use this directly without opening a
+    /// separate read pool.
+    pub fn images_needing_metadata_backfill(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::model::BackfillCandidate>, CatalogError> {
+        crate::queries::images_needing_metadata_backfill(self.conn(), after_id, limit)
+    }
+
+    /// Count of rows still awaiting the Task-14 backfill. The backfill JOB
+    /// (`ferrolite-app`'s `meta_backfill::spawn_meta_backfill`) checks this as
+    /// its first off-thread step (`has_backlog`) and returns early when it is
+    /// `0` — the job itself is submitted unconditionally every launch
+    /// (`meta_backfill::spawn_once`); this count is what makes a
+    /// fully-backfilled catalog cheap (one `COUNT(*)`, nothing more) rather
+    /// than what gates whether the job is spawned at all.
+    pub fn metadata_backfill_pending_count(&self) -> Result<i64, CatalogError> {
+        crate::queries::metadata_backfill_pending_count(self.conn())
+    }
+
+    /// Write one Task-14 backfill batch in a single transaction: sets
+    /// `lens`/`aperture`/`focal_length` for every id in `results`.
+    ///
+    /// `lens = Some(String::new())` is the "attempted, found nothing"
+    /// sentinel a caller uses when a file's EXIF read failed (missing/corrupt
+    /// file) or succeeded but turned up no lens/aperture/focal data at all.
+    /// It is written back literally, NOT coerced to `NULL` — writing NULL
+    /// would leave the row matching `images_needing_metadata_backfill`'s
+    /// all-NULL predicate forever, re-reading the same unreadable/empty file
+    /// on every subsequent launch. This assumes a decoder never legitimately
+    /// emits `Some("")` as a real lens name; if one ever did, the row would
+    /// still safely drop out of the backlog (it no longer matches the
+    /// all-NULL predicate) — the sentinel and a hypothetical genuine empty
+    /// string are indistinguishable, but both outcomes are safe here, just
+    /// not re-checked again.
+    ///
+    /// The `WHERE` clause only touches rows that are STILL all-NULL at write
+    /// time — a race guard against concurrent ingest: the backfill job reads
+    /// a candidate's current file-system metadata off the UI thread, but this
+    /// write lands later, on the UI thread (see the variant's doc comment on
+    /// `AppEvent::MetaBackfillReady`). If a concurrent ingest pass wrote real
+    /// `lens`/`aperture`/`focal_length` values for the same row in between,
+    /// the extra predicate makes this UPDATE a no-op for that row instead of
+    /// clobbering the fresh data with a stale (possibly sentinel) backfill
+    /// result.
+    pub fn apply_metadata_backfill_batch(
+        &self,
+        results: &[crate::model::BackfillResult],
+    ) -> Result<(), CatalogError> {
+        let tx = self.conn().unchecked_transaction()?;
+        for r in results {
+            tx.execute(
+                "UPDATE images SET lens = ?1, aperture = ?2, focal_length = ?3 WHERE id = ?4
+                 AND lens IS NULL AND aperture IS NULL AND focal_length IS NULL",
+                rusqlite::params![r.lens, r.aperture, r.focal_length, r.id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -685,6 +786,68 @@ mod collection_tests {
         a_colls.sort_unstable();
         assert_eq!(a_colls, vec![c1, c2]);
         assert_eq!(map.get(&b).cloned().unwrap_or_default(), vec![c1]);
+    }
+
+    #[test]
+    fn create_parent_child_collections() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let parent = cat
+            .create_collection("Vacations", Color::from_packed(0x30A46C))
+            .unwrap();
+        let child1 = cat
+            .create_collection_with_parent("Japan 2025", Color::default(), Some(parent))
+            .unwrap();
+        let child2 = cat
+            .create_collection_with_parent("Italy 2026", Color::default(), Some(parent))
+            .unwrap();
+
+        let collections = cat.list_collections().unwrap();
+        assert_eq!(collections.len(), 3);
+
+        let parent_rec = collections.iter().find(|c| c.id == parent).unwrap();
+        assert_eq!(parent_rec.name, "Vacations");
+        assert_eq!(parent_rec.parent_id, None);
+
+        let child1_rec = collections.iter().find(|c| c.id == child1).unwrap();
+        assert_eq!(child1_rec.name, "Japan 2025");
+        assert_eq!(child1_rec.parent_id, Some(parent));
+
+        let child2_rec = collections.iter().find(|c| c.id == child2).unwrap();
+        assert_eq!(child2_rec.name, "Italy 2026");
+        assert_eq!(child2_rec.parent_id, Some(parent));
+
+        // Deleting parent cascades to children due to ON DELETE CASCADE
+        cat.delete_collection(parent).unwrap();
+        let collections_after = cat.list_collections().unwrap();
+        assert!(collections_after.is_empty());
+    }
+
+    #[test]
+    fn update_collection_parent_reparents_correctly() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let parent = cat
+            .create_collection("Vacations", Color::default())
+            .unwrap();
+        let child = cat
+            .create_collection("Japan 2025", Color::default())
+            .unwrap();
+
+        // Initially both are flat (parent_id = None)
+        let collections = cat.list_collections().unwrap();
+        let child_rec = collections.iter().find(|c| c.id == child).unwrap();
+        assert_eq!(child_rec.parent_id, None);
+
+        // Update child to have parent_id = Some(parent)
+        cat.update_collection_parent(child, Some(parent)).unwrap();
+        let collections = cat.list_collections().unwrap();
+        let child_rec = collections.iter().find(|c| c.id == child).unwrap();
+        assert_eq!(child_rec.parent_id, Some(parent));
+
+        // Update child to have parent_id = None (flat collection again)
+        cat.update_collection_parent(child, None).unwrap();
+        let collections = cat.list_collections().unwrap();
+        let child_rec = collections.iter().find(|c| c.id == child).unwrap();
+        assert_eq!(child_rec.parent_id, None);
     }
 }
 
@@ -991,5 +1154,262 @@ mod ingest_batch_tests {
             thumb_count, 0,
             "no thumbnail persisted from the rolled-back batch"
         );
+    }
+}
+
+#[cfg(test)]
+mod metadata_backfill_tests {
+    use super::*;
+    use crate::model::{BackfillResult, NewImage};
+    use ferrolite_image::FileKind;
+
+    /// A `Pending`/`Failed` `NewImage` row already writes NULL to
+    /// `lens`/`aperture`/`focal_length` (see `model.rs`), which is exactly
+    /// what a real pre-v7-ingest row looks like — so seeding with these
+    /// constructors is a faithful stand-in without needing a real v6 schema.
+    fn null_metadata_image(cat: &Catalog, folder: i64, name: &str) -> i64 {
+        cat.upsert_image(&NewImage::pending(
+            folder,
+            name.to_string(),
+            1,
+            1,
+            FileKind::Raw,
+            0,
+        ))
+        .unwrap()
+    }
+
+    fn image_with_metadata(cat: &Catalog, folder: i64, name: &str) -> i64 {
+        image_with_lens(cat, folder, name, "50mm f/1.8")
+    }
+
+    fn image_with_lens(cat: &Catalog, folder: i64, name: &str, lens: &str) -> i64 {
+        let meta = ferrolite_decode::Metadata {
+            make: "Acme".into(),
+            model: "X100".into(),
+            width: 100,
+            height: 100,
+            orientation: ferrolite_image::Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            aperture: Some(2.8),
+            shutter: None,
+            focal_length: Some(50.0),
+            focal_length_35mm: None,
+            lens: Some(lens.to_string()),
+        };
+        cat.upsert_image(&NewImage::from_metadata(
+            folder,
+            name.to_string(),
+            1,
+            1,
+            &meta,
+            FileKind::Raw,
+            ferrolite_image::Rating::default(),
+            0,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn listing_returns_exactly_the_all_null_rows() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let a = null_metadata_image(&cat, f, "a.nef");
+        let b = null_metadata_image(&cat, f, "b.nef");
+        let with_meta = image_with_metadata(&cat, f, "c.nef");
+
+        let candidates = cat.images_needing_metadata_backfill(0, 10).unwrap();
+        let ids: Vec<i64> = candidates.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![a, b], "only the all-NULL rows are listed");
+        assert!(!ids.contains(&with_meta));
+
+        // The candidate's path is the folder path + filename, already joined.
+        let cand_a = candidates.iter().find(|c| c.id == a).unwrap();
+        assert_eq!(cand_a.path, std::path::PathBuf::from("/p").join("a.nef"));
+        assert_eq!(cand_a.kind, FileKind::Raw);
+    }
+
+    #[test]
+    fn pending_count_matches_listing_size() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        null_metadata_image(&cat, f, "a.nef");
+        null_metadata_image(&cat, f, "b.nef");
+        image_with_metadata(&cat, f, "c.nef");
+
+        assert_eq!(cat.metadata_backfill_pending_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn listing_cursor_paginates_forward_without_overlap() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let ids: Vec<i64> = (0..5)
+            .map(|i| null_metadata_image(&cat, f, &format!("img{i}.nef")))
+            .collect();
+
+        let first = cat.images_needing_metadata_backfill(0, 2).unwrap();
+        assert_eq!(first.iter().map(|c| c.id).collect::<Vec<_>>(), &ids[0..2]);
+        let cursor = first.last().unwrap().id;
+
+        let second = cat.images_needing_metadata_backfill(cursor, 2).unwrap();
+        assert_eq!(second.iter().map(|c| c.id).collect::<Vec<_>>(), &ids[2..4]);
+        let cursor2 = second.last().unwrap().id;
+
+        let third = cat.images_needing_metadata_backfill(cursor2, 2).unwrap();
+        assert_eq!(third.iter().map(|c| c.id).collect::<Vec<_>>(), &ids[4..5]);
+
+        let fourth = cat
+            .images_needing_metadata_backfill(third.last().unwrap().id, 2)
+            .unwrap();
+        assert!(fourth.is_empty(), "cursor past the end returns nothing");
+    }
+
+    #[test]
+    fn batch_update_sets_columns_and_removes_rows_from_listing() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let found = null_metadata_image(&cat, f, "a.nef");
+        let sentinel = null_metadata_image(&cat, f, "b.nef");
+
+        cat.apply_metadata_backfill_batch(&[
+            BackfillResult {
+                id: found,
+                lens: Some("50mm f/1.8".to_string()),
+                aperture: Some(1.8),
+                focal_length: Some(50.0),
+            },
+            BackfillResult {
+                id: sentinel,
+                lens: Some(String::new()),
+                aperture: None,
+                focal_length: None,
+            },
+        ])
+        .unwrap();
+
+        assert!(
+            cat.images_needing_metadata_backfill(0, 10)
+                .unwrap()
+                .is_empty(),
+            "both rows must drop out of the listing after the batch write"
+        );
+        assert_eq!(cat.metadata_backfill_pending_count().unwrap(), 0);
+
+        let (lens, aperture, focal): (Option<String>, Option<f64>, Option<f64>) = cat
+            .conn()
+            .query_row(
+                "SELECT lens, aperture, focal_length FROM images WHERE id = ?1",
+                [found],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(lens.as_deref(), Some("50mm f/1.8"));
+        // Round-trips through the `REAL` column as an f32-precision value
+        // (matches how `f32` params are always bound elsewhere in this
+        // crate — see `query.rs`'s aperture/focal tests).
+        assert_eq!(aperture, Some(1.8_f32 as f64));
+        assert_eq!(focal, Some(50.0_f32 as f64));
+
+        let sentinel_lens: Option<String> = cat
+            .conn()
+            .query_row("SELECT lens FROM images WHERE id = ?1", [sentinel], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            sentinel_lens,
+            Some(String::new()),
+            "sentinel is an empty string, not NULL"
+        );
+    }
+
+    #[test]
+    fn partial_metadata_already_excludes_row_without_needing_the_sentinel() {
+        // A row where only SOME of the three columns come back non-NULL never
+        // matches the all-NULL predicate again, even without writing the
+        // empty-string sentinel — only a total miss needs the sentinel.
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let partial = null_metadata_image(&cat, f, "a.nef");
+
+        cat.apply_metadata_backfill_batch(&[BackfillResult {
+            id: partial,
+            lens: None,
+            aperture: Some(4.0),
+            focal_length: None,
+        }])
+        .unwrap();
+
+        assert!(
+            cat.images_needing_metadata_backfill(0, 10)
+                .unwrap()
+                .is_empty(),
+            "a row with any non-NULL column is excluded from the listing"
+        );
+    }
+
+    #[test]
+    fn distinct_lenses_excludes_null_and_sentinel_returns_sorted_reals() {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        null_metadata_image(&cat, f, "null.nef");
+        let sentinel = null_metadata_image(&cat, f, "sentinel.nef");
+        cat.apply_metadata_backfill_batch(&[BackfillResult {
+            id: sentinel,
+            lens: Some(String::new()),
+            aperture: None,
+            focal_length: None,
+        }])
+        .unwrap();
+        image_with_lens(&cat, f, "b.nef", "Zeiss 50mm f/1.4");
+        image_with_lens(&cat, f, "a.nef", "Nikkor 24-70mm f/2.8");
+
+        let lenses = crate::queries::distinct_lenses(cat.conn()).unwrap();
+        assert_eq!(
+            lenses,
+            vec![
+                "Nikkor 24-70mm f/2.8".to_string(),
+                "Zeiss 50mm f/1.4".to_string(),
+            ],
+            "NULL and the empty-string sentinel are excluded; reals come back sorted"
+        );
+    }
+
+    #[test]
+    fn batch_write_does_not_clobber_metadata_written_by_concurrent_ingest() {
+        // Simulates the race the WHERE-clause guard closes: the backfill job
+        // reads a candidate's on-disk EXIF off the UI thread, but the write
+        // lands later, on the UI thread — a concurrent ingest could have
+        // already written real metadata for the same row in between. The
+        // guarded UPDATE must leave that already-populated row untouched.
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let id = image_with_lens(&cat, f, "a.nef", "Real Lens 50mm f/1.4");
+
+        cat.apply_metadata_backfill_batch(&[BackfillResult {
+            id,
+            lens: Some(String::new()),
+            aperture: None,
+            focal_length: None,
+        }])
+        .unwrap();
+
+        let (lens, aperture, focal): (Option<String>, Option<f64>, Option<f64>) = cat
+            .conn()
+            .query_row(
+                "SELECT lens, aperture, focal_length FROM images WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            lens.as_deref(),
+            Some("Real Lens 50mm f/1.4"),
+            "pre-existing lens must survive the race-guarded backfill write"
+        );
+        assert_eq!(aperture, Some(2.8_f32 as f64));
+        assert_eq!(focal, Some(50.0_f32 as f64));
     }
 }

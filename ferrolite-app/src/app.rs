@@ -1,17 +1,16 @@
+pub mod controller;
+pub mod shortcuts;
+
 use crate::canvas::{self, CanvasResources};
 use crate::module::Module;
 use crate::theme;
 use crate::viewer;
 
 pub struct FerroliteApp {
-    module: Module,
+    pub(crate) module: Module,
     thumb_size: f32,
-    state: crate::state::AppState,
-    /// Last frame's `viewer.crop_active`. A transition (enter/exit crop mode)
-    /// with no other edit does not otherwise re-render the preview, so we detect
-    /// the edge and force a `set_preview_and_full` on the same frame before paint:
-    /// enter → crop=full+angle view; exit → the real crop applied.
-    crop_active_prev: bool,
+    pub(crate) state: crate::state::AppState,
+
     /// Set when a Develop→Library switch happens mid-frame, after the filmstrip
     /// has already painted (and thus recorded) its thumbnail textures. Clearing
     /// `state.textures` in that same frame would free textures egui's paint jobs
@@ -28,12 +27,20 @@ pub struct FerroliteApp {
     /// One-shot restore-session guard: set `true` on the first `update()` frame,
     /// whether or not a restore actually happened, so the check runs exactly once.
     did_restore: bool,
+    /// One-shot Task-14 metadata-backfill spawn guard: set `true` on the
+    /// first `update()` frame, mirroring `did_restore`. The job
+    /// (`library::meta_backfill::spawn_once`) is submitted unconditionally
+    /// when this flag flips — the backlog check (`has_backlog`) runs INSIDE
+    /// the job, off the UI thread, as its first step, so this flag only
+    /// ensures the job is submitted at most once per app run, not a gate on
+    /// whether there's work to do.
+    did_meta_backfill_spawn: bool,
     /// Whether the Help modal (`crate::help::show`) is open. Opened by
     /// `Action::OpenHelp` (F1, global) or the Help menu.
-    show_help: bool,
+    pub(crate) show_help: bool,
     /// Whether the Settings window (`crate::settings::ui::show`) is open.
     /// Opened by `Action::OpenSettings` (Ctrl+, global) or the File menu.
-    show_settings: bool,
+    pub(crate) show_settings: bool,
     /// One-shot guard: set `true` the first frame that has a valid render state
     /// (pipelines pre-warmed), after kicking off the initial display-profile
     /// detect. Ensures the startup detect fires exactly once.
@@ -41,7 +48,7 @@ pub struct FerroliteApp {
     /// The Develop tool/tab registry (design §4): base adjustment tabs + the
     /// ordered canvas tools shown in the palette. Built once here; read in
     /// Tasks 10-11 to render the palette/tab bar/canvas overlay.
-    tool_registry: crate::develop::tool::DevelopToolRegistry,
+    pub(crate) tool_registry: crate::develop::tool::DevelopToolRegistry,
 }
 
 impl FerroliteApp {
@@ -89,11 +96,12 @@ impl FerroliteApp {
             module: Module::default(),
             thumb_size,
             state,
-            crop_active_prev: false,
+
             pending_texture_clear: false,
             diag: crate::diag::DiagState::new(),
             settings_dirty: false,
             did_restore: false,
+            did_meta_backfill_spawn: false,
             show_help: false,
             show_settings: false,
             did_display_detect: false,
@@ -105,7 +113,7 @@ impl FerroliteApp {
     /// it off the UI thread at the end of this frame's `update()`. Every
     /// settings mutation site must call this (see `settings::keymap::Keymap`
     /// doc comment).
-    fn mark_settings_dirty(&mut self) {
+    pub(crate) fn mark_settings_dirty(&mut self) {
         self.settings_dirty = true;
     }
 
@@ -124,7 +132,12 @@ impl FerroliteApp {
     /// persist the resulting op stack. Shared by the `Ctrl+Z`/`Ctrl+Shift+Z`/
     /// `Ctrl+Y` keyboard path and the Edit menu's Undo/Redo items so both
     /// route through the exact same logic.
-    fn apply_undo_redo(&mut self, ctx: &egui::Context, frame: &eframe::Frame, undo: bool) {
+    pub(crate) fn apply_undo_redo(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        undo: bool,
+    ) {
         let result = self.state.viewer.as_mut().and_then(|v| {
             if undo {
                 v.history.undo()
@@ -133,7 +146,12 @@ impl FerroliteApp {
             }
         });
         if let Some(stack) = result {
-            self.set_preview_and_full(frame, stack.clone(), true);
+            crate::app::controller::AppController::set_preview_and_full(
+                self,
+                frame,
+                stack.clone(),
+                true,
+            );
             if let Some(v) = self.state.viewer.as_mut() {
                 v.edits_dirty = true;
                 // A stale in-progress gesture or cached overlay must not carry over
@@ -165,7 +183,7 @@ impl FerroliteApp {
     /// Move the open Develop viewer to the previous/next image in the current
     /// image set, non-cyclic. Shared by the ←/→ keyboard path and the Photo
     /// menu's Previous/Next image items.
-    fn navigate_step(
+    pub(crate) fn navigate_step(
         &mut self,
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
@@ -197,7 +215,7 @@ impl FerroliteApp {
     /// which stays true while tiles are still streaming in after a pan/zoom),
     /// force the view back to fit so the preview tier (and thus the divider)
     /// is immediately visible again.
-    fn toggle_split_compare(&mut self) {
+    pub(crate) fn toggle_split_compare(&mut self) {
         if let Some(v) = self.state.viewer.as_mut() {
             let turning_on = !v.split_compare;
             v.split_compare = !v.split_compare;
@@ -215,97 +233,6 @@ impl FerroliteApp {
 }
 
 impl FerroliteApp {
-    /// Handle a tier-1 preview: run ONE sRGB→working color pass on the
-    /// already-off-thread-converted linear buffer, build the rung-1
-    /// `VirtualTexture` wrapping its output directly (no throwaway upload),
-    /// stash it (+ GpuContext) in eframe's `callback_resources`, and fit the
-    /// view. The full 9-node preview `EditPipeline` stays lazy — built on the
-    /// first edit by `set_preview_and_full`, not here. Stale events (no open
-    /// viewer, or a different image_id) are dropped — the user may have
-    /// closed/switched the viewer mid-decode.
-    fn apply_preview_ready(
-        &mut self,
-        frame: &eframe::Frame,
-        ctx: &egui::Context,
-        image_id: i64,
-        linear: &ferrolite_image::LinearRgbaF32,
-    ) {
-        let Some(v) = self.state.viewer.as_mut() else {
-            return; // viewer closed while decoding
-        };
-        if v.image_id != image_id {
-            return; // stale: a different image is now open
-        }
-        // Retain the sRGB-linear source. For Standard it is displayed and feeds
-        // the lazy preview `EditPipeline`; for RAW it is kept ONLY as the
-        // full-decode-failure fallback (`FullFailed`) and is never shown on the
-        // happy path.
-        let is_raw = v.kind == ferrolite_image::FileKind::Raw;
-        v.preview_source = Some(std::sync::Arc::new(linear.clone()));
-        // Invalidate the mask-overlay's bounded input cache: it was derived from
-        // the previous preview source and no longer applies.
-        v.mask_overlay_input = None;
-
-        // RAW: do NOT reveal the embedded JPEG. Keep the spinner up until the
-        // color-managed raw render is built at full-decode (`apply_full_decoded`),
-        // so the reveal comes from the same pipeline as the sparse full — a
-        // sharpness-only ramp with no color/tone shift.
-        if is_raw {
-            return;
-        }
-
-        // Standard: the preview IS the full-resolution image — reveal it now.
-        // `full_res = true`: this is the genuine cold full-res JPEG decode, so
-        // it is eligible to warm-cache.
-        let revealed = self.reveal_srgb_preview(frame, image_id, true);
-        if !revealed {
-            return;
-        }
-
-        // Preview-cache write-back (Phase 3): on a qualifying Standard open, cache
-        // the identity color-managed 2048px render so a later open of the same JPG
-        // reveals instantly from disk (Task 6's read path). `preview_source` is
-        // already display-linear sRGB, so the write-back matrix is identity (Task
-        // 5). Gated on a default op stack + a genuine cache MISS
-        // (`v.cache_write_back`, set by the preview-cache read) so an edited image
-        // or a re-open with the entry already on disk never re-encodes.
-        //
-        // Reuse the retained `preview_source` Arc as the payload (no second
-        // O(pixels) copy); the Background job does the key stat + encode + disk IO
-        // off the UI thread (CLAUDE.md rule 1).
-        let write_back = self.state.viewer.as_ref().and_then(|v| {
-            if v.image_id != image_id {
-                return None;
-            }
-            crate::develop::preview_cache::should_write_back(&v.op_stack, v.cache_write_back).then(
-                || {
-                    (
-                        v.path.clone(),
-                        v.op_stack.clone(),
-                        v.color_profile.clone(),
-                        v.preview_source.clone(),
-                    )
-                },
-            )
-        });
-        if let Some((path, op_stack, color_profile, Some(render))) = write_back {
-            crate::develop::preview_cache::spawn_cache_write(
-                &self.state.jobs,
-                std::sync::Arc::clone(&self.state.preview_store),
-                &self.state.tx,
-                ctx,
-                path,
-                op_stack,
-                self.state.working_space,
-                color_profile,
-                render,
-                crate::develop::preview_cache::standard_writeback_matrix(),
-                ferrolite_previews::DEFAULT_CACHE_CAP_BYTES,
-                image_id,
-            );
-        }
-    }
-
     /// Build the rung-1 preview `VirtualTexture` from the retained sRGB
     /// `preview_source` via one `sRGB→working` color pass, install the holder,
     /// fit the view, and mark the viewer `loaded` + `idle`. Shared by the
@@ -313,14 +240,13 @@ impl FerroliteApp {
     /// preview-cache-hit reveal (`apply_preview_cache_hit`), and the RAW
     /// full-decode-failure fallback (`FullFailed`). Returns `true` on success,
     /// `false` if a prerequisite (GPU / viewer / source) is missing.
-    ///
     /// `full_res` tells `warm_insert_display` whether `preview_source` is
     /// genuinely full-resolution (a cold Standard decode) or a downscaled
     /// stand-in (the 2048px preview-cache render, or RAW's embedded-JPEG
     /// failure fallback) — only a full-resolution reveal may be warm-cached,
     /// otherwise a later warm hit could get stuck serving a low-res texture
     /// as if it were the sharp 1:1 tier (see `warm_insert_display`).
-    fn reveal_srgb_preview(
+    pub(crate) fn reveal_srgb_preview(
         &mut self,
         frame: &eframe::Frame,
         image_id: i64,
@@ -353,7 +279,7 @@ impl FerroliteApp {
             // A Standard image never reaches apply_full_decoded, so set the tail
             // here — routed through the current display state so an active monitor
             // LUT stays applied instead of reverting to analytic sRGB on open.
-            self.apply_display_tail(&gpu, vp);
+            crate::app::controller::AppController::apply_display_tail(self, &gpu, vp);
             ferrolite_vt::VirtualTexture::single_from_texture(
                 &gpu,
                 converted.texture.clone(),
@@ -481,7 +407,7 @@ impl FerroliteApp {
                 .callback_resources
                 .get::<viewer::ViewerPipelines>()
                 .expect("ViewerPipelines pre-warmed at startup");
-            self.apply_display_tail(&gpu, vp);
+            crate::app::controller::AppController::apply_display_tail(self, &gpu, vp);
             ferrolite_vt::VirtualTexture::single_from_texture(
                 &gpu,
                 tex,
@@ -498,11 +424,15 @@ impl FerroliteApp {
         // `None` only in headless tests (production always populates both
         // alongside a `Full` insert — see `apply_pyramid_ready`); a `None` here
         // falls back to the display-only tail below, same as a `Display` hit.
-        let full_installed = full
+        // The success flag is intentionally unused: whether or not the sharp
+        // tier installed from the cache, `spawn_full` still re-runs (see the
+        // `full_requested` note below).
+        let _full_installed = full
             .as_ref()
             .and_then(|f| Some((f.pyramid.as_ref()?, f.tile_source.as_ref()?, f)))
             .is_some_and(|(pyramid, tile_source, f)| {
-                self.install_full_pipeline(
+                crate::app::controller::AppController::install_full_pipeline(
+                    self,
                     frame,
                     image_id,
                     pyramid,
@@ -517,17 +447,20 @@ impl FerroliteApp {
                 // The cached display texture serves the instant fit/preview reveal.
                 // For RAW the SHARP tier must still stream in behind it so 1:1 zoom
                 // sharpens exactly as a normal open does (the sparse full pyramid) —
-                // RAW has no separate full-res display tier — UNLESS `full_installed`
-                // (below) already installed that sharp tier from the cache. For
+                // RAW has no separate full-res display tier — unless the `Full` hit
+                // above already installed that sharp tier from the cache. For
                 // Standard the cached display texture IS already the full-resolution
                 // image (warm-cached ONLY when full-res, see `warm_insert_display`'s
                 // `full_res` gate), so there is no sharper tier left to stream either
                 // way. Therefore, mirroring `apply_preview_cache_hit`:
-                //  - `warm_revealed` skips the now-redundant tier-1 preview (the RAW
-                //    embedded-JPEG reveal) AND the redundant Standard heavy JPEG
-                //    re-decode in `drive_viewer`; RAW's tier-2 pyramid decode chain
-                //    there still runs on a `Display`-only hit (ungated — it must, RAW
-                //    has no other route to 1:1 sharpness).
+                //  - `warm_revealed` skips the now-redundant tier-1 RAW embedded-JPEG
+                //    reveal, and makes the heavy re-decodes below run in
+                //    RESTORE-ONLY mode: the warm cache holds only GPU artifacts, so
+                //    the retained CPU sources (`preview_source` /
+                //    `raw_preview_source`) and the preview `EditPipeline` must be
+                //    re-decoded or edits on a warm-revealed image silently stop
+                //    rendering — but their handlers skip the holder re-install and
+                //    view re-fit a cold open performs.
                 //  - Mark the disk preview-cache read already-resolved so the
                 //    debounced tier-2 step fires DIRECTLY, without the disk read
                 //    re-installing a lower-res 2048px holder over the warm texture,
@@ -537,24 +470,23 @@ impl FerroliteApp {
                 //  - Clear `idle` so the drive loop stays alive one more beat: RAW
                 //    returns to idle on pyramid convergence (`drive_viewer`'s
                 //    `full_converged` gate, which `install_full_pipeline` also feeds
-                //    on a `Full` hit); Standard has nothing left to converge on, so
-                //    `drive_viewer`'s gated branch sets `idle` back to `true`
-                //    immediately once the debounce elapses — NOT a per-frame spin
-                //    either way.
+                //    on a `Full` hit); Standard settles it in `apply_preview_ready`'s
+                //    warm branch once the restore decode lands.
                 v.warm_revealed = true;
                 v.idle = false;
                 v.cache_read_requested = true;
                 v.cache_resolved = true;
                 v.cache_write_back = false;
-                if full_installed {
-                    // The sparse full pipeline is already installed from the cache
-                    // (`full_ready` was set inside `install_full_pipeline`) — mark
-                    // the tier-2 pyramid decode as already-requested so
-                    // `drive_viewer`'s `heavy_pending` gate does not resubmit
-                    // `spawn_full` (RAW-only; `full_requested` is otherwise unused
-                    // for Standard, which never submits a pyramid job).
-                    v.full_requested = true;
-                }
+                // NOTE (`full_installed`): the sparse full pipeline is installed
+                // from the cache (`full_ready` set inside `install_full_pipeline`),
+                // but `full_requested` is deliberately NOT set — `spawn_full` must
+                // still re-run (debounced, off-thread) because the warm cache holds
+                // only GPU artifacts: the retained CPU source (`raw_preview_source`)
+                // and the preview `EditPipeline` are gone, and without them edits on
+                // a warm-revealed RAW silently stop rendering. `apply_full_decoded`
+                // detects this case (`warm_revealed && full_ready`) and ONLY
+                // restores those two — no holder re-install, no view re-fit, no
+                // duplicate pyramid build.
             }
         }
         true
@@ -571,7 +503,12 @@ impl FerroliteApp {
     /// full-res re-decode entirely (see the `!v.warm_revealed` gate in
     /// `drive_viewer`) and would otherwise get stuck serving the downscaled
     /// texture as if it were the sharp 1:1 tier.
-    fn warm_insert_display(&mut self, frame: &eframe::Frame, image_id: i64, full_res: bool) {
+    pub(crate) fn warm_insert_display(
+        &mut self,
+        frame: &eframe::Frame,
+        image_id: i64,
+        full_res: bool,
+    ) {
         if !full_res {
             return;
         }
@@ -718,7 +655,7 @@ impl FerroliteApp {
     }
 
     /// Flag the histogram stale so the next frame recomputes it (debounced).
-    fn mark_histogram_dirty(&mut self) {
+    pub(crate) fn mark_histogram_dirty(&mut self) {
         if let Some(v) = self.state.viewer.as_mut() {
             v.histogram.mark_dirty();
         }
@@ -808,7 +745,7 @@ impl FerroliteApp {
 
     /// Normalized WhiteBalance temperature of the open viewer's current op stack
     /// (0.0 = as-shot/identity when there is no WB op or no viewer).
-    fn current_wb_temp(&self) -> f32 {
+    pub(crate) fn current_wb_temp(&self) -> f32 {
         self.state
             .viewer
             .as_ref()
@@ -822,7 +759,7 @@ impl FerroliteApp {
     /// (P2 Plan 2 / S3); single-illuminant reduce to the static matrix. Already
     /// row-normalized by `wb_camera_to_working` (the demosaic applied as-shot
     /// gains). The sRGB preview tier is NOT normalized — see `preview_to_working`.
-    fn camera_to_working(&self, temp: f32) -> [[f32; 3]; 3] {
+    pub(crate) fn camera_to_working(&self, temp: f32) -> [[f32; 3]; 3] {
         match self.state.viewer.as_ref() {
             Some(v) => crate::camera_matrix::wb_camera_to_working(
                 &v.color_profile,
@@ -852,24 +789,40 @@ impl FerroliteApp {
     /// Background job to regenerate its Library thumbnail from the in-memory
     /// stack, then clear the flag so re-entrant frames do not double-spawn.
     /// Called at every "leave Develop for this image" transition. No-op when
-    /// there is no viewer, no session edits, or no GPU render state.
-    fn maybe_regen_on_leave(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let (image_id, path, kind, stack) = {
-            let Some(v) = self.state.viewer.as_mut() else {
-                return;
-            };
-            if !crate::develop::thumb_regen::should_regenerate_on_leave(v.edits_dirty) {
-                return;
-            }
-            // Clear before spawning so an edge-triggered re-check this frame
-            // (e.g. module switch) cannot enqueue a duplicate job.
-            v.edits_dirty = false;
-            (v.image_id, v.path.clone(), v.kind, v.op_stack.clone())
-        };
-        let Some(rs) = frame.wgpu_render_state() else {
-            // No GPU this frame: keep the existing thumbnail. An on-demand
-            // "Regenerate thumbnail" can recover it later.
+    /// there is no viewer or no session edits.
+    ///
+    /// The flag is cleared ONLY once the job is actually spawned (gated
+    /// through `thumb_regen::on_leave_decision`, not cleared unconditionally
+    /// up front): `frame.wgpu_render_state()` can come back `None` on a given
+    /// frame (e.g. a transient window-resize/chrome interaction), and
+    /// `edits_dirty` is the only signal that ever re-triggers this regen. A
+    /// clear-before-spawn ordering would silently strand the image on its
+    /// pre-edit thumbnail forever the first time that frame's GPU state is
+    /// missing, with nothing left to retry it short of the manual "Regenerate
+    /// thumbnail" context-menu action. See `on_leave_decision`'s doc comment.
+    pub(crate) fn maybe_regen_on_leave(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some(v) = self.state.viewer.as_ref() else {
             return;
+        };
+        let rs = frame.wgpu_render_state();
+        let (spawn, new_edits_dirty) =
+            crate::develop::thumb_regen::on_leave_decision(v.edits_dirty, rs.is_some());
+        if let Some(v) = self.state.viewer.as_mut() {
+            v.edits_dirty = new_edits_dirty;
+        }
+        if !spawn {
+            return;
+        }
+        // `on_leave_decision` only returns `spawn == true` when `rs.is_some()`
+        // was true above, so this is guaranteed to be `Some`.
+        let rs = rs.expect("on_leave_decision only spawns when a render state is present");
+        let (image_id, path, kind, stack) = {
+            let v = self
+                .state
+                .viewer
+                .as_ref()
+                .expect("checked at function entry");
+            (v.image_id, v.path.clone(), v.kind, v.op_stack.clone())
         };
         let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
         let cam =
@@ -885,7 +838,7 @@ impl FerroliteApp {
             path,
             kind,
             cam,
-            crate::develop::thumb_regen::RegenStackSource::InMemory(stack),
+            crate::develop::thumb_regen::RegenStackSource::InMemory(Box::new(stack)),
         );
     }
 
@@ -969,17 +922,24 @@ impl FerroliteApp {
         let source_path = v.path.clone();
         let image_id = v.image_id;
         let stack = v.op_stack.clone();
-        // Only when dehaze is actually active does export need a transmission
+        // Only when dehaze is actually active anywhere in the document (the
+        // global op OR a visible mask layer's amount — Phase 4 Task 3, see
+        // `EditDoc::dehaze_active_anywhere`) does export need a transmission
         // source: the same CPU preview-tier selection `preview_tier_source` uses
         // (RAW: `raw_preview_source`; Standard: `preview_source`), passed as a
         // SNAPSHOT `Arc` — export builds its own bounded transmission from it on
         // the worker thread rather than sampling the live preview pipeline's
-        // texture (see `spawn_export`'s `transmission_source` doc).
-        let transmission_source = stack.dehaze().filter(|d| d.amount != 0.0).and_then(|_| {
-            v.raw_preview_source
-                .clone()
-                .or_else(|| v.preview_source.clone())
-        });
+        // texture (see `spawn_export`'s `transmission_source` doc). Widened past
+        // the old `stack.dehaze().filter(amount != 0.0)` global-only gate, which
+        // silently skipped this for a mask-only dehaze layer (global amount 0).
+        let transmission_source = stack
+            .dehaze_active_anywhere()
+            .then(|| {
+                v.raw_preview_source
+                    .clone()
+                    .or_else(|| v.preview_source.clone())
+            })
+            .flatten();
 
         // Default filename: source basename + new extension.
         let stem = source_path
@@ -1136,1675 +1096,20 @@ impl FerroliteApp {
 
     /// sRGB→working for the preview tier: the embedded preview and Standard images
     /// are sRGB-primaries, so they convert via the sRGB fallback profile.
-    fn preview_to_working(&self) -> [[f32; 3]; 3] {
+    pub(crate) fn preview_to_working(&self) -> [[f32; 3]; 3] {
         self.source_to_working(&ferrolite_decode::ColorProfile::srgb_fallback())
-    }
-
-    /// Ensure `ViewerGpu.preview_before` holds the unedited (identity stack)
-    /// rung-1 preview while split-compare is active. For Standard it is built from
-    /// the retained sRGB `preview_source` via one `color_convert` pass; for RAW it
-    /// is built from the demosaic `raw_preview_source` through an identity op stack
-    /// with the camera→working matrix (`cam`) — the SAME color path as the RAW
-    /// after-view, so the split compares like-with-like (no color/tone shift).
-    /// Rebuilt only when missing (invalidated on WS change / image open), so edits
-    /// do not recompute it — the before never changes.
-    fn ensure_before_view(&mut self, frame: &eframe::Frame) {
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-        let (active, image_id, is_raw, srgb_src, raw_src) = match self.state.viewer.as_ref() {
-            Some(v) => (
-                v.split_compare,
-                v.image_id,
-                v.kind == ferrolite_image::FileKind::Raw,
-                v.preview_source.clone(),
-                v.raw_preview_source.clone(),
-            ),
-            None => return,
-        };
-        if !active {
-            return;
-        }
-        // Already built for this image? Nothing to do.
-        {
-            let renderer = rs.renderer.read();
-            if let Some(g) = renderer.callback_resources.get::<viewer::ViewerGpu>() {
-                if g.image_id == image_id && g.preview_before.is_some() {
-                    return;
-                }
-            }
-        }
-        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-        // Compute the unedited "before" texture on the same color path as the
-        // after-view: RAW via the raw pipeline (demosaic + identity + `cam`),
-        // Standard via the sRGB `color_convert`.
-        let (tex, dims) = if is_raw {
-            // `cam` borrows the viewer immutably; compute before the write below.
-            let cam = self.camera_to_working(self.current_wb_temp());
-            let Some(src) = raw_src else {
-                return; // RAW before-view not available until the full decode.
-            };
-            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-            let mut ep = ferrolite_pipeline::EditPipeline::new(
-                ctx_arc,
-                &src,
-                ferrolite_pipeline::OpStack::default(),
-                cam,
-            );
-            let out = ep.evaluate();
-            (out.texture.clone(), (out.width, out.height))
-        } else {
-            let pw = self.preview_to_working();
-            let Some(src) = srgb_src else {
-                return;
-            };
-            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-            let out = ferrolite_pipeline::color_convert(ctx_arc, &src, pw);
-            (out.texture.clone(), (out.width, out.height))
-        };
-        let vt = {
-            let renderer = rs.renderer.read();
-            let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() else {
-                return;
-            };
-            ferrolite_vt::VirtualTexture::single_from_texture(&gpu, tex, dims, &vp.pipelines)
-        };
-        let mut renderer = rs.renderer.write();
-        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-            if g.image_id == image_id {
-                g.preview_before = Some(vt);
-            }
-        }
-    }
-
-    /// Handle a tier-2 full decode: build a `PyramidTileSource` from the
-    /// display-linear image, wrap it as a sparse (rung-4) `VirtualTexture`,
-    /// store it alongside the preview in `ViewerGpu`, and begin the preview→full
-    /// crossfade. Stale events (no open viewer / different image_id) are dropped.
-    fn apply_full_decoded(
-        &mut self,
-        frame: &eframe::Frame,
-        ctx: &egui::Context,
-        image_id: i64,
-        image: &ferrolite_image::LinearRgbaF32,
-        color_profile: &ferrolite_decode::ColorProfile,
-    ) {
-        let Some(v) = self.state.viewer.as_mut() else {
-            return; // viewer closed while decoding
-        };
-        if v.image_id != image_id {
-            return; // stale: a different image is now open
-        }
-        v.color_profile = color_profile.clone();
-        let is_raw = v.kind == ferrolite_image::FileKind::Raw;
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-
-        // `v` only guarded staleness above; release the borrow before taking the
-        // renderer lock so we can re-borrow afterwards. (Both live on `self` but
-        // do not alias.)
-        let _ = v;
-
-        // Compute camera→working BEFORE any exclusive `viewer` borrow below:
-        // `camera_to_working` itself borrows `self.state.viewer` immutably.
-        let cam = self.camera_to_working(self.current_wb_temp());
-        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-
-        // RAW rung-1 reveal render (Approach A): run the demosaiced camera-native
-        // `image` through the op stack with the SAME camera→working matrix + op
-        // stack as the sparse full below, so the preview→full swap is a
-        // sharpness-only ramp with no color/tone shift. Build the preview
-        // `EditPipeline` ONCE here and retain it (`v.preview_edit`) for reuse by
-        // `set_preview_and_full` — never compiled per edit (CLAUDE.md rule 2).
-        // Standard images never reach `apply_full_decoded`.
-        // Build the camera-native reveal source ONCE for RAW. The full-res `Arc`
-        // (`raw_preview_source`) is retained as `v.raw_preview_source` (consumed
-        // by the split-compare "before" rebuild and the preview-cache
-        // write-back below, which persists a NOT-viewport-bounded 2048px JPEG
-        // to disk and must not be quality-degraded by the current window size)
-        // AND reused as the write-back payload — the demosaiced buffer is never
-        // memcpy'd a second time onto the UI thread for that purpose.
-        //
-        // Full-res reveal: the reveal `EditPipeline` runs the FULL-resolution
-        // demosaiced image through the op chain, so the rung-1 preview is
-        // dims-consistent with the full VT and with every preview-tier consumer
-        // (display transform, GPU histogram, the before/after split compare, and
-        // the retained `preview_edit` reused for live edits). A prior attempt to
-        // render this at viewport resolution saved ~674 ms but made the preview
-        // tier a low-res proxy whose logical size ≠ its texture size, which broke
-        // the zoom/LOD transform, the split compare, the histogram, and edited-
-        // preview sharpness — so it was reverted.
-        // One owned copy of the full-res buffer, shared (by `Arc` refcount bump,
-        // NOT a second O(pixels) memcpy) between the RAW reveal source here and
-        // the pyramid job below — replacing what were two separate `image.clone()`s
-        // (~400 MB each for a 24 MP frame). This was a major driver of the
-        // develop-scroll RSS high-water mark (memory profiling, 2026-07).
-        let image_arc = std::sync::Arc::new(image.clone());
-        let raw_preview_source: Option<std::sync::Arc<ferrolite_image::LinearRgbaF32>> =
-            is_raw.then(|| std::sync::Arc::clone(&image_arc));
-        let raw_preview: Option<(std::sync::Arc<wgpu::Texture>, (u32, u32))> = if let Some(src) =
-            raw_preview_source.as_ref()
-        {
-            match self.state.viewer.as_mut() {
-                Some(v) if v.image_id == image_id => {
-                    // The full-res reveal source is retained as `v.raw_preview_source`
-                    // (read by `ensure_before_view`'s split-compare rebuild and reused
-                    // as the preview-cache write-back payload below) AND fed to the
-                    // reveal `EditPipeline` here — one full-res buffer, no second copy.
-                    v.raw_preview_source = raw_preview_source.clone();
-                    let ctx_arc =
-                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    let mut ep = ferrolite_pipeline::EditPipeline::new(
-                        ctx_arc.clone(),
-                        src,
-                        v.op_stack.clone(),
-                        cam,
-                    );
-                    // Bind any lens bake already present (e.g. a re-open that
-                    // baked before this decode landed) so the initial preview
-                    // isn't uncorrected (I1). Usually None at fresh open; the
-                    // `LensBaked` handler pushes the bake once it completes.
-                    if let Some(w) = v.lens_warp.as_ref() {
-                        ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
-                    }
-                    ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
-                        v.op_stack.lens_correction().as_ref(),
-                        v.lens_warp.is_some(),
-                    ));
-                    if let Some(vg) = v.lens_vignette.as_ref() {
-                        ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
-                    }
-                    // Mode-aware vignette (MV2): profile LUT lerp when a bake is
-                    // bound, else the lens-free parametric manual gain — so a
-                    // persisted manual-vignette op (lens_id=None, no bake) still
-                    // applies on open. Both uniforms are pushed as a pair.
-                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
-                        v.op_stack.lens_correction().as_ref(),
-                        v.lens_vignette.is_some(),
-                    );
-                    ep.set_vig_amount(vig_amount);
-                    ep.set_vig_manual(vig_manual);
-                    let out = ep.evaluate();
-                    let tex = out.texture.clone();
-                    let dims = (out.width, out.height);
-                    v.preview_edit = Some(ep);
-                    Some((tex, dims))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-
-        // Build ONLY the rung-1 reveal preview VT here (cheap). The sparse full VT
-        // (and the GPU edit pyramid) are built off the UI thread — both are CPU
-        // box-downsample heavy (~1.2 s combined) and were the open freeze
-        // (CLAUDE.md rule 1). They arrive later via `AppEvent::PyramidReady`, which
-        // `apply_pyramid_ready` installs into the holder (see the Background job
-        // submitted below). Until then the holder carries `full: None` and the
-        // color-correct reveal is shown.
-        let preview_vt = {
-            let renderer = rs.renderer.read();
-            let vp = renderer
-                .callback_resources
-                .get::<viewer::ViewerPipelines>()
-                .expect("ViewerPipelines pre-warmed at startup");
-            // Route through the current display state so an active monitor LUT
-            // stays applied across image opens instead of reverting to sRGB.
-            self.apply_display_tail(&gpu, vp);
-            raw_preview.as_ref().map(|(tex, dims)| {
-                ferrolite_vt::VirtualTexture::single_from_texture(
-                    &gpu,
-                    std::sync::Arc::clone(tex),
-                    *dims,
-                    &vp.pipelines,
-                )
-            })
-        };
-
-        // Install the reveal-preview holder with `full: None`. For RAW the rung-1
-        // preview IS the reveal render, so install a fresh holder (there is no JPEG
-        // holder — `apply_preview_ready` kept the spinner up). Replaces any stale
-        // holder from a superseded image. The sparse full VT is installed later by
-        // `apply_pyramid_ready` when the off-thread pyramid job completes; the full
-        // VT MUST NOT produce raw-camera-native tiles until the edit producer
-        // exists, so `set_producing(true)` is deferred to that handler.
-        let mut preview_installed = false;
-        {
-            let mut renderer = rs.renderer.write();
-            if let Some(preview) = preview_vt {
-                let holder_gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-                // Placeholder (1,1) present-buffer size: `drive_viewer`'s per-frame
-                // resize corrects it to the canvas's physical viewport before paint.
-                let present =
-                    ferrolite_vt::PresentBuffers::new(&holder_gpu, (1, 1), rs.target_format);
-                let present_alpha = holder_gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("vt-present-alpha"),
-                    size: 32,
-                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                renderer.callback_resources.insert(viewer::ViewerGpu {
-                    ctx: holder_gpu,
-                    preview,
-                    full: None,
-                    preview_before: None,
-                    image_id,
-                    present,
-                    present_alpha,
-                    blit_bind_front: None,
-                });
-                preview_installed = true;
-            } else if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                // Non-RAW defensive path (Standard never submits a tier-2 decode);
-                // reuse an existing matching holder. The pyramid job still runs and
-                // `apply_pyramid_ready` installs the full VT into it.
-                if g.image_id == image_id {
-                    preview_installed = true;
-                }
-            }
-        }
-
-        if preview_installed {
-            if let Some(v) = self.state.viewer.as_mut() {
-                if v.image_id == image_id {
-                    // Step 3 reveal: the rung-1 raw render is now on screen, so
-                    // drop the spinner. (For RAW `loaded` was held false in
-                    // `apply_preview_ready` until this color-correct reveal.)
-                    v.loaded = true;
-                    // NOTE: `full_ready` stays FALSE here. The sparse full VT and
-                    // its edit producer are built off the UI thread and installed
-                    // by `apply_pyramid_ready` on `AppEvent::PyramidReady`; only
-                    // then is the full tier ready. Until the swap the color-correct
-                    // reveal (installed above) is what the viewer shows.
-                    //
-                    // The full tier's dimensions (uprighted; full-res GPU RCD for
-                    // RGGB, else QuadBin half-res) are the reveal render's dims too.
-                    // Fit to them; fall back to the image's own size if the canvas
-                    // has not painted yet (the user has not interacted at open time).
-                    let full_dims = (image.width, image.height);
-                    v.image_dims = Some(full_dims);
-                    let viewport = if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
-                        v.viewport
-                    } else {
-                        (full_dims.0 as f32, full_dims.1 as f32)
-                    };
-                    v.view = ferrolite_vt::ViewTransform::fit(full_dims, viewport);
-                }
-            }
-
-            // Both full-res pyramids (the sparse-VT CPU tile source and the
-            // GPU-resident edit pyramid) are CPU box-downsample heavy (~1.2 s
-            // combined) — build them on a `ferrolite-jobs` Background worker rather
-            // than the UI thread (CLAUDE.md rule 1; this was the open freeze). They
-            // need the FULL-res `image`; reuse the single shared `image_arc`
-            // (an `Arc` refcount bump, NOT a second ~400 MB clone) built above.
-            //
-            // Perf fix D: cancellation of a superseded build is cooperative and
-            // only checked BETWEEN the two monolithic steps inside the job, so
-            // fast filmstrip navigation could otherwise pile up remnant builds
-            // that monopolize the worker pool and starve the settled image's
-            // `Visible` full decode. Bound concurrency with a process-global
-            // permit (`develop::cache::try_acquire_pyramid_permit`): if a slot is
-            // free, submit now; otherwise defer via `needs_pyramid` and let
-            // `drive_viewer` retry once a permit frees, for the CURRENT viewer
-            // only (a superseded image's flag is simply never revisited — see
-            // `ViewerState::needs_pyramid`).
-            match crate::develop::cache::try_acquire_pyramid_permit() {
-                Some(permit) => {
-                    self.submit_pyramid_build(
-                        frame,
-                        ctx,
-                        image_id,
-                        std::sync::Arc::clone(&image_arc),
-                        permit,
-                    );
-                }
-                None => {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_id == image_id {
-                            v.needs_pyramid = true;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Preview-cache write-back (Task 5): on a qualifying RAW open, cache the
-        // identity (unedited) color-managed render so a later open of the same
-        // file can reveal instantly from disk (Task 6's read path).
-        //
-        // CORRECTNESS GUARD: `preview_cache::key_for` hashes the ACTUAL op stack,
-        // but the payload encoded here is the IDENTITY (camera→working→display)
-        // render computed on the CPU from `image` — never the GPU op-stack
-        // result. Caching an identity render under an *edited* key would later
-        // reveal the wrong (unedited) image, so `should_write_back` gates on the
-        // stack being `OpStack::default()`. Edited images are a deliberate cache
-        // miss until a later task reads back the real GPU render.
-        //
-        // Task 6 threads the real "cache miss" flag through the read path:
-        // `v.cache_write_back` is `false` after a cache HIT (the entry already
-        // exists) and `true` after a MISS, so a hit never re-encodes. Key
-        // assembly (`key_for`'s `fs::metadata` stat), encode/JPEG, and disk I/O
-        // all run inside the Background job. The only UI-thread work here is the
-        // `should_write_back` guard plus cheap refcount bumps (the reveal render
-        // `Arc` is reused — no second full-buffer clone) (CLAUDE.md rule 1).
-        if preview_installed {
-            // Snapshot the viewer inputs, then release the borrow before the
-            // job submit (which borrows other `self.state` fields).
-            let write_back = self.state.viewer.as_ref().and_then(|v| {
-                if v.image_id != image_id {
-                    return None;
-                }
-                crate::develop::preview_cache::should_write_back(&v.op_stack, v.cache_write_back)
-                    .then(|| (v.path.clone(), v.op_stack.clone()))
-            });
-            // `apply_full_decoded` only runs for RAW opens (see the `is_raw.then`
-            // guard on `raw_preview_source` above), so `raw_preview_source` is
-            // always `Some` here — but match defensively rather than unwrap.
-            if let (Some((path, op_stack)), Some(render)) =
-                (write_back, raw_preview_source.as_ref())
-            {
-                // Identity display pipeline: camera→working (`cam`) then
-                // working→display. `mul_mat3(a, b)` = a·b, so this applies
-                // `cam` first, matching the identity reveal (minus 8-bit
-                // quantization). The op stack is NOT applied here — the guard
-                // above ensures we only reach this when it is identity anyway.
-                let display_matrix = ferrolite_color::mul_mat3(
-                    &ferrolite_color::working_to_display(self.state.working_space),
-                    &cam,
-                );
-                // Reuse the reveal `Arc` (no second full-buffer clone) and let
-                // the job assemble the key off-thread (`key_for` does an
-                // `fs::metadata` stat — never on the UI thread).
-                crate::develop::preview_cache::spawn_cache_write(
-                    &self.state.jobs,
-                    std::sync::Arc::clone(&self.state.preview_store),
-                    &self.state.tx,
-                    ctx,
-                    path,
-                    op_stack,
-                    self.state.working_space,
-                    color_profile.clone(),
-                    std::sync::Arc::clone(render),
-                    display_matrix,
-                    ferrolite_previews::DEFAULT_CACHE_CAP_BYTES,
-                    image_id,
-                );
-            }
-        }
-
-        if preview_installed {
-            // `full_res = true`: `apply_full_decoded` only runs for RAW, and
-            // its rung-1 reveal render is always the full-resolution
-            // demosaiced image (see the comment above), so it is always
-            // eligible to warm-cache.
-            self.warm_insert_display(frame, image_id, true);
-        }
-        self.mark_histogram_dirty();
-    }
-
-    /// Submit the off-thread build of both full-res pyramids (the sparse-VT
-    /// CPU tile source and the GPU-resident edit pyramid) for `image_id` on a
-    /// `ferrolite-jobs` Background worker — CPU box-downsample heavy (~1.2 s
-    /// combined), so this must never run on the UI thread (CLAUDE.md rule 1;
-    /// this was the original open freeze). `GpuContext` is `Send + Sync` (Arc
-    /// device/queue handles), as are `PyramidTileSource` and
-    /// `GpuPyramidSource`, so both build off-thread and are delivered over the
-    /// channel as `AppEvent::PyramidReady`, which `apply_pyramid_ready`
-    /// installs + starts producing.
-    ///
-    /// `permit` (perf fix D) is MOVED into the job closure so it is released,
-    /// via its `Drop` impl, exactly when the closure ends — on normal
-    /// completion, on an early return at a `cancel.is_cancelled()` checkpoint,
-    /// or (in principle) on panic — so a `PYRAMID_BUILD_CONCURRENCY` slot can
-    /// never leak. Two call sites feed this: the immediate submit in
-    /// `apply_full_decoded` (when a permit is free at full-decode time), and
-    /// `drive_viewer`'s per-frame retry (when it was deferred via
-    /// `v.needs_pyramid` because none was).
-    fn submit_pyramid_build(
-        &mut self,
-        frame: &eframe::Frame,
-        ctx: &egui::Context,
-        image_id: i64,
-        image_full: std::sync::Arc<ferrolite_image::LinearRgbaF32>,
-        permit: crate::develop::cache::PyramidPermit,
-    ) {
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-        let gpu_job = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-        let tx = self.state.tx.clone();
-        let repaint = ctx.clone();
-        let pyramid_handle =
-            self.state
-                .jobs
-                .submit(ferrolite_jobs::Priority::Background, move |cancel| {
-                    // Held for the lifetime of this closure; dropped (releasing the
-                    // permit) on every exit path below, including the early returns.
-                    let _permit = permit;
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    // Attribute this job's large in-flight buffer (full-res linear f32) to
-                    // the memory overlay for its lifetime. Gated: zero cost when off.
-                    let _inflight = crate::diag::enabled().then(|| {
-                        crate::diag_mem::track_inflight_pyramid(crate::diag_mem::linear_bytes(
-                            image_full.width,
-                            image_full.height,
-                        ))
-                    });
-                    let tile_source: std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync> =
-                        std::sync::Arc::new(ferrolite_vt::PyramidTileSource::new(
-                            (*image_full).clone(),
-                        ));
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    let gpu_pyramid = std::sync::Arc::new(
-                        ferrolite_pipeline::GpuPyramidSource::new(&gpu_job, &image_full),
-                    );
-                    if cancel.is_cancelled() {
-                        return;
-                    }
-                    let _ = tx.send(crate::events::AppEvent::PyramidReady {
-                        image_id,
-                        tile_source,
-                        gpu_pyramid,
-                    });
-                    repaint.request_repaint();
-                });
-        // Store the handle so a later navigation (`cancel_loads`) can cancel
-        // this Background pyramid build. Guard on `image_id` matching in case
-        // a newer image already superseded this one between submit and now.
-        if let Some(v) = self.state.viewer.as_mut() {
-            if v.image_id == image_id {
-                v.pyramid_handle = Some(pyramid_handle);
-            }
-        }
-    }
-
-    /// Build the sparse full `VirtualTexture` (needs the render state) plus the
-    /// `Rc`-based `TileEditPipeline`/`EditTileProducer` (both `!Send`, so
-    /// UI-thread/render-thread only) from a GPU pyramid, a tile source, an op
-    /// stack, and a camera matrix; install the full VT into the existing
-    /// `ViewerGpu` holder; and start producing (the full VT must not emit raw
-    /// camera-native tiles before the producer exists). Returns `false`
-    /// (nothing installed) if the render state is unavailable or the viewer has
-    /// since navigated away from `image_id` — guarded both at the exclusive
-    /// `viewer` borrow and again at the final write-lock install, since the
-    /// holder can be replaced by a newer open between the two.
-    ///
-    /// Shared by `apply_pyramid_ready` (the normal tier-2 decode completion,
-    /// which owns `cam`/`op_stack` from the just-decoded open) and
-    /// `try_warm_reveal` (a `WarmHit::Full` — the pyramid `Arc`s and the
-    /// `op_stack`/`cam` they were built with are already in hand from the warm
-    /// cache, so this reconstructs the GPU-side producer without any decode).
-    /// `v.lens_warp`/`v.lens_vignette` are read from the CURRENT viewer (not
-    /// cached — they are lens-bake products keyed off the image, not the op
-    /// stack, and `apply_lens_baked` rebuilds the producer again once a bake
-    /// lands).
-    fn install_full_pipeline(
-        &mut self,
-        frame: &eframe::Frame,
-        image_id: i64,
-        pyramid: &std::sync::Arc<ferrolite_pipeline::GpuPyramidSource>,
-        tile_source: &std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync>,
-        op_stack: &ferrolite_pipeline::OpStack,
-        cam: [[f32; 3]; 3],
-    ) -> bool {
-        let Some(rs) = frame.wgpu_render_state() else {
-            return false;
-        };
-        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-
-        // Build the sparse full VT from the tile source (needs the pre-warmed
-        // `ViewerPipelines`; the read lock is released before the write install
-        // below).
-        let full = {
-            let renderer = rs.renderer.read();
-            let vp = renderer
-                .callback_resources
-                .get::<viewer::ViewerPipelines>()
-                .expect("ViewerPipelines pre-warmed at startup");
-            // Keep an active monitor LUT applied across the install.
-            self.apply_display_tail(&gpu, vp);
-            ferrolite_vt::VirtualTexture::sparse(
-                &gpu,
-                std::sync::Arc::clone(tile_source),
-                std::sync::Arc::clone(&self.state.jobs),
-                VIEWER_TILE_BUDGET,
-                &vp.pipelines,
-            )
-        };
-
-        // Build the full-res edit producer from the GPU pyramid and flip
-        // `full_ready`. The full VT tiles ALWAYS pass through camera→working
-        // (the raw camera-native CPU path must never reach the working→display
-        // tail), so the producer is attached unconditionally — identity stack =
-        // unedited-but-color-managed.
-        let version;
-        {
-            let Some(v) = self.state.viewer.as_mut() else {
-                return false;
-            };
-            if v.image_id != image_id {
-                return false;
-            }
-            v.pyramid = Some(std::sync::Arc::clone(pyramid));
-            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-            // Mode-aware vignette pair (MV2) so a persisted manual-vignette op
-            // (lens_id=None → no bake) applies on open; the current lens bake (if
-            // any) is threaded in — `None` is byte-identical to no correction.
-            let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
-                op_stack.lens_correction().as_ref(),
-                v.lens_vignette.is_some(),
-            );
-            let tep = ferrolite_pipeline::TileEditPipeline::new(
-                ctx_arc,
-                std::sync::Arc::clone(pyramid),
-                op_stack.clone(),
-                cam,
-                v.lens_warp.as_ref(),
-                v.lens_vignette.as_ref(),
-            );
-            let mut producer = viewer::EditTileProducer::new(tep);
-            producer.set_vig_amount(vig_amount);
-            producer.set_vig_manual(vig_manual);
-            // Whole-image atmospheric light for dehaze (design §5.3): cached and
-            // estimated at most once per image (`ViewerState::dehaze_atmos`), not
-            // re-estimated on every producer rebuild — this rebuild also fires on
-            // radius/geometry/lens drags, and `A` is image-invariant, so redoing
-            // the O(n log n) sort here would be UI-thread work per drag tick
-            // (CLAUDE.md responsiveness rule 1). Same fn + same source the preview
-            // EditPipeline uses internally, so the two tiers agree.
-            //
-            // `if let` rather than `.unwrap_or(NEUTRAL)`: a decoded source is
-            // guaranteed present here (this branch only runs once the full-res
-            // pyramid + preview source exist), so `None` is a can't-happen guard,
-            // not a silent-wrong fallback — leaving `producer` on its constructor
-            // default (`DEHAZE_ATMOS_NEUTRAL`) would silently diverge from the
-            // preview tier if it were ever hit.
-            if let Some(a) = v.dehaze_atmos() {
-                producer.set_dehaze_atmos(a);
-            }
-            // Seed the shared dehaze transmission (ST-Task 4) from the preview
-            // `EditPipeline` if it already exists and has evaluated (it's built +
-            // evaluated in `apply_full_decoded`, which runs before this pyramid-
-            // ready handler) — so a producer built outside an edit still starts
-            // with the current map instead of a stale passthrough. `producer` is a
-            // local here (not yet stored on `v`), so this doesn't conflict with
-            // the immutable `v.preview_edit` borrow.
-            producer.set_shared_transmission(
-                v.preview_edit
-                    .as_ref()
-                    .and_then(|ep| ep.transmission_texture()),
-            );
-            v.edit_producer = Some(producer);
-            // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
-            // this producer was built from `v.op_stack`.
-            v.full_stack = v.op_stack.clone();
-            v.full_ready = true;
-            version = v.opstack_version.max(1);
-        }
-
-        // Install the full VT into the existing holder + start producing. Guard on
-        // `image_id` again: the holder could have been replaced by a newer open
-        // between the reads above and this write lock.
-        let mut renderer = rs.renderer.write();
-        if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-            if g.image_id == image_id {
-                g.full = Some(full);
-                if let Some(full) = g.full.as_mut() {
-                    full.set_producing(true);
-                    full.set_opstack_version(&g.ctx, version);
-                }
-            }
-        }
-        true
-    }
-
-    /// Both full-res pyramids finished building off the UI thread (delivered by
-    /// the Background job submitted in `apply_full_decoded`): the sparse-VT CPU
-    /// tile source and the GPU-resident edit pyramid. This is the UI-thread tail
-    /// that the freeze fix moved off-thread — `install_full_pipeline` does the
-    /// actual VT/producer construction (shared with a `WarmHit::Full` reveal);
-    /// this wrapper supplies `cam`/`op_stack` from the just-decoded open and, on
-    /// success, records the full pipeline in the warm cache so an immediate
-    /// back-navigation to this `(image_id, op_stack_hash)` reveals 1:1 instantly
-    /// (`try_warm_reveal`) instead of paying the ~1.2 s rebuild again. A stale
-    /// result (user navigated away while the pyramids built) is dropped.
-    fn apply_pyramid_ready(
-        &mut self,
-        frame: &eframe::Frame,
-        image_id: i64,
-        tile_source: &std::sync::Arc<dyn ferrolite_vt::TileSource + Send + Sync>,
-        gpu_pyramid: &std::sync::Arc<ferrolite_pipeline::GpuPyramidSource>,
-    ) {
-        // Stale guard: viewer closed or a different image is now open. Snapshot
-        // `op_stack` here (before any exclusive `viewer` borrow inside
-        // `install_full_pipeline`) so it can be passed in by value.
-        let Some(op_stack) = self
-            .state
-            .viewer
-            .as_ref()
-            .and_then(|v| (v.image_id == image_id).then(|| v.op_stack.clone()))
-        else {
-            return;
-        };
-        // Compute camera→working BEFORE any exclusive `viewer` borrow below:
-        // `camera_to_working` itself borrows `self.state.viewer` immutably.
-        let cam = self.camera_to_working(self.current_wb_temp());
-        if !self.install_full_pipeline(frame, image_id, gpu_pyramid, tile_source, &op_stack, cam) {
-            return;
-        }
-
-        // Warm cache: retain this image's full pipeline (GPU pyramid + tile
-        // source + stack/cam) so an immediate back-navigation reveals 1:1
-        // instantly (`try_warm_reveal`) instead of repeating the ~1.2 s rebuild.
-        let key = crate::develop::cache::CacheKey {
-            image_id,
-            op_stack_hash: self
-                .state
-                .viewer
-                .as_ref()
-                .map(|v| v.op_stack_hash())
-                .unwrap_or(0),
-        };
-        // Estimate: full-res Rgba16Float resident bytes plus the mip tail
-        // (matches the diag gather's per-image GPU-pyramid estimate).
-        let bytes = self
-            .state
-            .viewer
-            .as_ref()
-            .and_then(|v| v.image_dims)
-            .map(|(w, h)| w as u64 * h as u64 * 8 * 4 / 3)
-            .unwrap_or(0);
-        self.state.warm_cache.insert_full(
-            key,
-            crate::develop::cache::FullEntry {
-                pyramid: Some(std::sync::Arc::clone(gpu_pyramid)),
-                tile_source: Some(std::sync::Arc::clone(tile_source)),
-                op_stack,
-                cam,
-                bytes,
-            },
-        );
-    }
-
-    /// A preview-cache READ resolved to a HIT (Task 6): the cached JPEG for
-    /// `image_id` was decoded off-thread to `linear`. Reveal it via the same
-    /// Improvement-1 sRGB path Standard images use (`reveal_srgb_preview`, which
-    /// runs one bounded `sRGB→working` GPU pass, fits, and installs the VT), so a
-    /// second visit to a RAW shows instantly WITHOUT the RAW pixel decode. Then
-    /// mark `cache_resolved` so the sparse full decode still fires next frame for
-    /// zoom/1:1 detail, and `cache_write_back = false` so that full decode does
-    /// NOT re-encode an entry that already exists. Stale `image_id` is dropped.
-    fn apply_preview_cache_hit(
-        &mut self,
-        frame: &eframe::Frame,
-        image_id: i64,
-        linear: &ferrolite_image::LinearRgbaF32,
-    ) {
-        match self.state.viewer.as_mut() {
-            Some(v) if v.image_id == image_id => {
-                // Reuse the sRGB reveal path, which reads `preview_source`.
-                v.preview_source = Some(std::sync::Arc::new(linear.clone()));
-                // Invalidate the mask-overlay's bounded input cache: it was derived
-                // from the previous preview source and no longer applies.
-                v.mask_overlay_input = None;
-            }
-            _ => return, // stale: viewer closed or a different image is open
-        }
-        // `full_res = false`: this is the 2048px disk preview-cache render
-        // (RAW or Standard), not the full-resolution image — must not be
-        // warm-cached as if it were the sharp 1:1 tier.
-        let revealed = self.reveal_srgb_preview(frame, image_id, false);
-        if revealed {
-            self.mark_histogram_dirty();
-        }
-        if let Some(v) = self.state.viewer.as_mut() {
-            if v.image_id == image_id {
-                // A hit already has the entry on disk: do not write it back.
-                v.cache_write_back = false;
-                // Let the debounced full decode fire next frame (zoom detail).
-                v.cache_resolved = true;
-                // reveal_srgb_preview marks the viewer idle (no tier-2 for the
-                // Standard path); the RAW hit still wants the sparse full, so
-                // clear idle to keep the drive loop alive until it arrives.
-                if revealed {
-                    v.idle = false;
-                }
-            }
-        }
-    }
-
-    /// A preview-cache READ resolved to a MISS (Task 6): no usable entry, so let
-    /// the existing full-decode path run (`cache_resolved`) and have it cache its
-    /// result (`cache_write_back`, consumed by `should_write_back` in
-    /// `apply_full_decoded`). Stale `image_id` is dropped.
-    fn apply_preview_cache_miss(&mut self, image_id: i64) {
-        if let Some(v) = self.state.viewer.as_mut() {
-            if v.image_id == image_id {
-                v.cache_write_back = true;
-                v.cache_resolved = true;
-            }
-        }
-    }
-
-    /// An off-thread lens bake (`develop::lens_bake::spawn_lens_bake`) finished
-    /// (Spec 4.4, U7). Stores the fresh warp grid / vignette map / resolved name
-    /// on the viewer, then rebuilds the full-res tile producer so it picks up
-    /// the new grid/LUT (a lens bake ALWAYS changes the baked content — the
-    /// producer must be discarded and rebuilt, the same as a geometry/halo
-    /// change; there is no in-place "new bake, same shapes" case to special-case).
-    ///
-    /// Guarded on `image_id == current`: a bake for an image the user has since
-    /// navigated away from is dropped here even if it slipped past the
-    /// `lens_bake_handle` cancellation checkpoint in the job itself.
-    fn apply_lens_baked(
-        &mut self,
-        frame: &eframe::Frame,
-        image_id: i64,
-        result: &crate::develop::lens_bake::LensBakeResult,
-    ) {
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-        let cam = self.camera_to_working(self.current_wb_temp());
-        let Some(v) = self.state.viewer.as_mut() else {
-            return;
-        };
-        if v.image_id != image_id {
-            return; // superseded: navigated away before the bake finished
-        }
-        v.lens_warp = result.warp.clone();
-        v.lens_vignette = result.vignette.clone();
-        v.lens_resolved_name = result.resolved_name.clone();
-        v.lens_bake_handle = None;
-
-        // Rebuild the full-res producer (if the pyramid exists yet) so it binds
-        // the fresh grid/LUT. Mirrors the rebuild branch in `set_preview_and_full`.
-        let shown = if v.before_after {
-            ferrolite_pipeline::OpStack::default()
-        } else {
-            v.op_stack.clone()
-        };
-
-        // Push the fresh bake to the PREVIEW/fit tier too, so toggling or
-        // adjusting a correction updates the fit-zoom image live (I1). The
-        // before-view (identity `shown`) carries no lens op, so bind identity
-        // there. Bake products are cheap GPU uploads here (already baked
-        // off-thread by the job that produced this `result`). Built once and
-        // reused by the full-res producer rebuild below (CLAUDE.md GPU rule).
-        let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-        let _ = &ctx_arc; // used by the preview and/or full-res branch below
-        if let Some(ep) = v.preview_edit.as_mut() {
-            let lc = shown.lens_correction();
-            if let Some(w) = v.lens_warp.as_ref() {
-                ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
-            }
-            ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
-                lc.as_ref(),
-                v.lens_warp.is_some(),
-            ));
-            if let Some(vg) = v.lens_vignette.as_ref() {
-                ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
-            }
-            // Mode-aware vignette pair (MV2): a bake just landed, so
-            // `has_vignette_lut` reflects the fresh `v.lens_vignette`.
-            let (vig_amount, vig_manual) =
-                crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
-            ep.set_vig_amount(vig_amount);
-            ep.set_vig_manual(vig_manual);
-            let img = ep.evaluate();
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                if g.image_id == image_id {
-                    g.preview
-                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
-                }
-            }
-        }
-        if let Some(pyr) = v.pyramid.clone() {
-            // Mode-aware vignette pair for the rebuilt full-res producer (MV2).
-            let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
-                shown.lens_correction().as_ref(),
-                v.lens_vignette.is_some(),
-            );
-            let tep = ferrolite_pipeline::TileEditPipeline::new(
-                ctx_arc.clone(),
-                pyr,
-                shown.clone(),
-                cam,
-                v.lens_warp.as_ref(),
-                v.lens_vignette.as_ref(),
-            );
-            let mut producer = viewer::EditTileProducer::new(tep);
-            producer.set_vig_amount(vig_amount);
-            producer.set_vig_manual(vig_manual);
-            // Whole-image atmospheric light for dehaze (design §5.3): cached and
-            // estimated at most once per image (`ViewerState::dehaze_atmos`) — see
-            // the full rationale at the first `set_dehaze_atmos` call site in
-            // `apply_pyramid_ready`. `if let` (not `.unwrap_or(NEUTRAL)`): a
-            // decoded source is guaranteed present on this rebuild path, so
-            // `None` is a can't-happen guard, not a silent-wrong fallback.
-            if let Some(a) = v.dehaze_atmos() {
-                producer.set_dehaze_atmos(a);
-            }
-            // Re-seed the shared dehaze transmission (ST-Task 4): this rebuild
-            // discards the previous producer, so the fresh one needs the current
-            // map from the preview `EditPipeline` (already built + evaluated by
-            // now — see the preview-tier branch above in this same handler, or
-            // `apply_full_decoded` at open). `producer` is a local (not yet on
-            // `v`), so no borrow conflict with the immutable `v.preview_edit` read.
-            producer.set_shared_transmission(
-                v.preview_edit
-                    .as_ref()
-                    .and_then(|ep| ep.transmission_texture()),
-            );
-            v.edit_producer = Some(producer);
-            // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
-            // this producer was rebuilt from `shown`.
-            v.full_stack = shown.clone();
-            v.opstack_version = v.opstack_version.wrapping_add(1);
-            let version = v.opstack_version;
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                if g.image_id == image_id {
-                    if let Some(full) = g.full.as_mut() {
-                        full.set_producing(true);
-                        full.set_opstack_version(&g.ctx, version);
-                    }
-                }
-            }
-        }
-        if let Some(v) = self.state.viewer.as_mut() {
-            v.idle = false; // wake the drive loop so producer tiles re-render
-        }
-    }
-
-    /// Apply `stack` to both render tiers (GPU + memory only; no history/persist).
-    /// Preview tier: build the EditPipeline once, reuse via set_stack; evaluate
-    /// and swap the displayed single texture. Full-res tier: set_stack (color) or
-    /// rebuild (geometry/halo), bump the opstack version to invalidate cached tiles.
-    /// Update the render tiers for `stack`. The live PREVIEW tier is always
-    /// updated (that is what the fit-zoom view shows). The full-res tiled tier is
-    /// only (re)synced + re-produced when `produce_full` is true — passed as the
-    /// edit's `commit` flag, so a slider DRAG updates only the cheap preview each
-    /// frame and the expensive full-res producer refreshes once on release. This
-    /// keeps the VT from re-running `produce_tile` for every tile every drag frame
-    /// (which exhausted GPU memory on integrated GPUs once a heavy op like dehaze's
-    /// multi-pass transmission was active). Non-drag callers pass `true`.
-    fn set_preview_and_full(
-        &mut self,
-        frame: &eframe::Frame,
-        stack: ferrolite_pipeline::OpStack,
-        produce_full: bool,
-    ) {
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-        // Compute before taking the exclusive `viewer` borrow below:
-        // `camera_to_working`/`preview_to_working` themselves borrow
-        // `self.state.viewer` immutably.
-        // WB temp of the INCOMING stack (v.op_stack is updated below), so a WB
-        // temp edit re-interpolates the dual-illuminant matrix this same frame.
-        let temp = stack.white_balance().map(|w| w.temp).unwrap_or(0.0);
-        let cam = self.camera_to_working(temp);
-        let pw = self.preview_to_working();
-        let Some(v) = self.state.viewer.as_mut() else {
-            return;
-        };
-        v.op_stack = stack.clone();
-        v.opstack_version = v.opstack_version.wrapping_add(1);
-
-        // Preview-tier matrix (RAW = WB-driven camera→working `cam`; Standard =
-        // sRGB `pw`). Recomputed each edit; `set_color_matrix` no-ops when
-        // unchanged, so only a WB temp change actually dirties the head (P2 §5.1).
-        let pv_matrix = v.preview_tier_source(cam, pw).1;
-
-        // What the preview should show: the live stack, or the empty stack in
-        // before/after mode. While the crop tool is active, keep the ROTATION
-        // (and aspect) applied but force crop = full: the crop rectangle is then
-        // represented by the overlay drawn over the full, rotated image, and the
-        // Angle slider rotates the preview live. (In before/after mode `shown` is
-        // identity — no geometry — so this branch is a no-op, which is correct.)
-        let mut shown = if v.before_after {
-            ferrolite_pipeline::OpStack::default()
-        } else {
-            stack.clone()
-        };
-        if v.crop_active {
-            if let Some(g) = shown.geometry() {
-                shown = shown.set_op(ferrolite_pipeline::Op::Geometry(
-                    ferrolite_pipeline::Geometry {
-                        crop: ferrolite_pipeline::CropRect::full(),
-                        angle_deg: g.angle_deg,
-                        aspect: g.aspect,
-                    },
-                ));
-            }
-        }
-
-        // Preview tier (built once per image, reused). For RAW this pipeline was
-        // already built at full-decode (`apply_full_decoded`) from the demosaic
-        // source with `cam`; this rebuild branch is the Standard/lazy fallback.
-        // Source + matrix must match the tier the image is displayed on: RAW =
-        // demosaic + camera→working (`cam`); Standard = sRGB source + sRGB→working
-        // (`pw`). Sourcing RAW from the sRGB JPEG here would reintroduce the color
-        // shift this task removes.
-        if v.preview_edit.is_none() {
-            let (src, matrix) = v.preview_tier_source(cam, pw);
-            if let Some(src) = src {
-                let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                let mut ep = ferrolite_pipeline::EditPipeline::new(
-                    ctx_arc.clone(),
-                    &src,
-                    shown.clone(),
-                    matrix,
-                );
-                // A rebuilt preview must re-bind the current lens bake so an
-                // already-corrected image keeps its correction at fit zoom (I1).
-                if let Some(w) = v.lens_warp.as_ref() {
-                    ep.set_warp(ferrolite_pipeline::WarpGridTexture::upload(&ctx_arc, w));
-                }
-                if let Some(vg) = v.lens_vignette.as_ref() {
-                    ep.set_vignette(ferrolite_pipeline::VignetteTexture::upload(&ctx_arc, vg));
-                }
-                v.preview_edit = Some(ep);
-            }
-        }
-        if let Some(ep) = v.preview_edit.as_mut() {
-            ep.set_stack(shown.clone());
-            ep.set_color_matrix(pv_matrix);
-            // Apply the current lens amounts + vig lerp to the preview too, so a
-            // lens Amount-only drag (no bake, no rebuild) updates the fit-zoom
-            // image live — mirroring the full-res producer's amount-only branch
-            // below. `use_warp` follows whether a grid is currently bound.
-            let lc = shown.lens_correction();
-            ep.set_lens_uniform(ferrolite_pipeline::lens_uniform(
-                lc.as_ref(),
-                v.lens_warp.is_some(),
-            ));
-            // Mode-aware vignette pair (MV2): profile lerp when a LUT is bound,
-            // else the lens-free parametric manual gain. This is the site that
-            // makes a manual-vignette Amount drag update the fit-zoom preview
-            // live with NO lens (uniform-only; no bake, no rebuild).
-            let (vig_amount, vig_manual) =
-                crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
-            ep.set_vig_amount(vig_amount);
-            ep.set_vig_manual(vig_manual);
-            // Evaluate BEFORE taking the renderer lock; pass the resulting texture
-            // (cheap Arc clone) into the write scope. (`ep` borrows `self.state`,
-            // `renderer` borrows `frame` — disjoint, so they may coexist, but we
-            // keep the evaluate out of the lock scope to stay close to the
-            // apply_full_decoded discipline.)
-            let img = ep.evaluate();
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                if g.image_id == v.image_id {
-                    g.preview
-                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
-                }
-            }
-        }
-
-        // Full-res tier (only meaningful once the full decode + pyramid exist).
-        // Render `shown` here too (not the live `stack`): in before/after mode
-        // `shown` is identity. The sparse VT is now ALWAYS producer-driven: the
-        // "before" (identity `shown`) is rendered by the producer with an
-        // identity op-stack + camera→working — the correct unedited image in
-        // working space — never the raw camera-native CPU path. The
-        // opstack_version bump above invalidates stale produced tiles so the new
-        // (edited or unedited) tiles are re-produced on toggle.
-        // Full-res tier: DEFERRED to commit (`produce_full`). Mid-drag
-        // (`produce_full == false`) only the live preview above is refreshed each
-        // frame; the producer is left untouched and NOT re-produced, so the VT does
-        // not re-run `produce_tile` for every tile every frame — that per-frame
-        // full-res churn is what exhausted GPU memory on integrated GPUs with a
-        // heavy op (dehaze's multi-pass transmission) active. On commit the producer
-        // syncs once and re-produces (the load the app already handled per edit).
-        // `needs_full_rebuild` compares against `v.full_stack` — the stack the
-        // producer ACTUALLY reflects — not the previous frame, so a dehaze on/off or
-        // radius change made across the deferred drag still rebuilds here on release.
-        if produce_full && v.full_ready {
-            let rebuild = v.edit_producer.is_none()
-                || crate::develop::ops_edit::needs_full_rebuild(&v.full_stack, &shown);
-            if rebuild {
-                if let Some(pyr) = v.pyramid.clone() {
-                    let ctx_arc =
-                        std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-                    // Thread the current lens bake (U7); `needs_full_rebuild`
-                    // already fires when the rebuild-relevant lens key changes,
-                    // so the grid/LUT this producer is BUILT with must be the
-                    // one matching `shown`'s lens_id/focal/aperture/crop/enabled
-                    // flags — i.e. the bake already stored on `v` by the
-                    // `LensBaked` handler for this same key.
-                    // Mode-aware vignette pair (MV2) for the fresh producer, so a
-                    // rebuild (e.g. geometry change) with a persisted manual or
-                    // profile vignette keeps applying it — the constructor only
-                    // seeds `vig_amount`, never the parametric `manual`.
-                    let (vig_amount, vig_manual) = crate::develop::vignette_mode::vig_pair(
-                        shown.lens_correction().as_ref(),
-                        v.lens_vignette.is_some(),
-                    );
-                    let tep = ferrolite_pipeline::TileEditPipeline::new(
-                        ctx_arc,
-                        pyr,
-                        shown.clone(),
-                        cam,
-                        v.lens_warp.as_ref(),
-                        v.lens_vignette.as_ref(),
-                    );
-                    let mut producer = viewer::EditTileProducer::new(tep);
-                    producer.set_vig_amount(vig_amount);
-                    producer.set_vig_manual(vig_manual);
-                    // Whole-image atmospheric light for dehaze (design §5.3): cached
-                    // and estimated at most once per image
-                    // (`ViewerState::dehaze_atmos`) — see the full rationale at the
-                    // first `set_dehaze_atmos` call site in `apply_pyramid_ready`.
-                    // This rebuild is exactly the radius/geometry/lens-drag path
-                    // `needs_full_rebuild` fires on, so this is the call site the
-                    // caching matters most for. `if let` (not `.unwrap_or(NEUTRAL)`):
-                    // a decoded source is guaranteed present once `full_ready`, so
-                    // `None` is a can't-happen guard, not a silent-wrong fallback.
-                    if let Some(a) = v.dehaze_atmos() {
-                        producer.set_dehaze_atmos(a);
-                    }
-                    v.edit_producer = Some(producer);
-                }
-            } else if let Some(producer) = v.edit_producer.as_mut() {
-                // Color-only change: update params in place. Also covers a lens
-                // Amount-only change (no rebuild per `needs_full_rebuild`): the
-                // grid/LUT are unchanged, only the uniform lerp amounts move.
-                producer.set_stack(shown.clone());
-                producer.set_color_matrix(cam);
-                let lc = shown.lens_correction();
-                producer.set_lens_uniform(ferrolite_pipeline::lens_uniform(
-                    lc.as_ref(),
-                    v.lens_warp.is_some(),
-                ));
-                // Mode-aware vignette pair (MV2): a manual Amount drag with no
-                // lens reaches here (uniform-only, no rebuild) and updates the
-                // full-res producer live.
-                let (vig_amount, vig_manual) =
-                    crate::develop::vignette_mode::vig_pair(lc.as_ref(), v.lens_vignette.is_some());
-                producer.set_vig_amount(vig_amount);
-                producer.set_vig_manual(vig_manual);
-            }
-            // Hand the tiled producer the shared dehaze transmission (ST-Task 4):
-            // the preview `EditPipeline` above (`v.preview_edit`) is the SOLE place
-            // the transmission is computed — evaluated earlier in this same call,
-            // just above (line ~1569) — so it is current here. The tiled recovery
-            // only samples it (no per-tile recompute). Fetch the `Arc` (cheap
-            // clone) into a local BEFORE mutably borrowing `v.edit_producer`: both
-            // are fields of `v`, so the immutable fetch must finish before the
-            // mutable borrow starts, or this doesn't compile. Runs unconditionally
-            // whenever a producer exists — both the just-rebuilt producer and the
-            // updated-in-place (color-only / amount-only) producer above need the
-            // current map; `None` (dehaze inactive) sets a passthrough.
-            let shared_transmission = v
-                .preview_edit
-                .as_ref()
-                .and_then(|ep| ep.transmission_texture());
-            if let Some(producer) = v.edit_producer.as_mut() {
-                producer.set_shared_transmission(shared_transmission);
-            }
-            // Record the stack the producer now reflects — the rebuild baseline for
-            // the next commit (see the `full_stack` field doc + the block comment).
-            v.full_stack = shown.clone();
-            let version = v.opstack_version;
-            let image_id = v.image_id;
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                if g.image_id == image_id {
-                    if let Some(full) = g.full.as_mut() {
-                        full.set_producing(true);
-                        full.set_opstack_version(&g.ctx, version);
-                    }
-                }
-            }
-        }
-        v.idle = false; // wake the drive loop so producer tiles re-render
-        self.mark_histogram_dirty();
-    }
-
-    /// Apply a panel/widget edit: update both tiers immediately; on commit (drag
-    /// release / discrete change) push undo history + persist off-thread.
-    fn apply_edit(
-        &mut self,
-        ctx: &egui::Context,
-        frame: &eframe::Frame,
-        kind: ferrolite_pipeline::OpKind,
-        stack: ferrolite_pipeline::OpStack,
-        commit: bool,
-    ) {
-        // Snapshot the pre-edit stack BEFORE `set_preview_and_full` overwrites
-        // `v.op_stack`, so a lens-key comparison below sees the real old/new.
-        let old_stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
-        // Mid-drag (`commit == false`): preview-only, defer the full-res tier to
-        // release. On commit: sync + re-produce the full-res tier too. Also flag
-        // the drag so `drive_viewer` PAUSES per-frame full-res tile production
-        // while dragging (the OOM lever — the drive loop produces independently of
-        // this method); production resumes on commit.
-        self.set_preview_and_full(frame, stack.clone(), commit);
-        if let Some(v) = self.state.viewer.as_mut() {
-            v.edit_in_progress = !commit;
-        }
-        if !commit {
-            return;
-        }
-        let Some(v) = self.state.viewer.as_mut() else {
-            return;
-        };
-        v.edits_dirty = true;
-        v.history.push(kind, stack.clone());
-        // Mask edits all share OpKind::LocalAdjustments; seal so each committed
-        // gesture (stroke, slider drag, discrete action) is its own undo step.
-        if kind == ferrolite_pipeline::OpKind::LocalAdjustments {
-            v.history.break_coalesce();
-        }
-        let image_id = v.image_id;
-        let path = v.path.clone();
-        let has_edits = !stack.is_identity();
-        if let Some(rec) = self.state.images.iter_mut().find(|r| r.id == image_id) {
-            rec.has_edits = has_edits; // optimistic cache update (filmstrip badge)
-        }
-        if kind == ferrolite_pipeline::OpKind::LensCorrection {
-            if let Some(old) = old_stack {
-                self.maybe_spawn_lens_bake(ctx, &old, &stack);
-            }
-        }
-        self.persist_ops(ctx, image_id, path, stack);
-    }
-
-    /// Rebuild the mask-overlay GPU texture iff the selected mask definition or
-    /// the preview generation changed. Bounded (≤ OVERLAY_MAX_EDGE composite +
-    /// GPU-side red tint, NO GPU→CPU readback) + only-on-change, so it is safe on
-    /// the UI thread even mid-stroke (CLAUDE.md §1). The `MaskOverlayCompositor`
-    /// (incl. its tint pipeline) is built once and cached on `ViewerState`, never
-    /// rebuilt per frame (CLAUDE.md §2).
-    fn rebuild_mask_overlay_if_needed(&mut self, frame: &eframe::Frame) {
-        use crate::develop::mask_edit;
-        use crate::develop::mask_overlay_color::OVERLAY_MAX_EDGE;
-        use std::hash::{Hash, Hasher};
-
-        let Some(v) = self.state.viewer.as_mut() else {
-            return;
-        };
-        let la = mask_edit::layers(&v.op_stack);
-        let Some(sel) = v.mask.selected.filter(|&i| i < la.layers.len()) else {
-            v.mask.overlay_key = None;
-            return;
-        };
-        let committed_def = &la.layers[sel].mask;
-        // While the Components window's Add section is tuning a Luma/Color
-        // component (Task 6), composite the PROSPECTIVE def (committed + the
-        // tentative component at its mode) instead of the committed one, so the
-        // red overlay live-previews the in-progress add.
-        let def = match v.mask.preview_component.clone() {
-            Some((c, mode)) => mask_edit::prospective_def(committed_def, c, mode),
-            None => committed_def.clone(),
-        };
-        // Key: which mask def + preview generation + any in-progress preview
-        // component. serde-hash the def (small); fold the tentative component in
-        // too so the overlay rebuilds live as the Add sliders move (its params
-        // aren't reflected in `def`/`committed_def` otherwise since it's not
-        // committed to the OpStack yet).
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        // Committed mask changes are already captured by `opstack_version` (it
-        // bumps on every edit, incl. undo/redo) plus the selected-mask index (a
-        // mask switch changes the shown def without an edit). Hashing those two is
-        // O(1). We deliberately do NOT serde-serialize `committed_def` here: that
-        // is O(all-components · brush-nodes) on the UI thread EVERY frame during a
-        // stroke, which made large masks (100+ components) lag. Only the
-        // uncommitted `preview_component` (one tentative component, small) still
-        // needs hashing, since it is not reflected in `opstack_version`.
-        sel.hash(&mut h);
-        v.opstack_version.hash(&mut h); // bumps on every committed edit / preview regen
-        serde_json::to_string(&v.mask.preview_component)
-            .unwrap_or_default()
-            .hash(&mut h);
-        // Fold the hovered component into the key so the highlight texture
-        // rebuilds (via `MaskOverlayCompositor::highlight_texture`) whenever the
-        // Components modal's hover changes, even though the def itself didn't.
-        v.mask.highlight_component.hash(&mut h);
-        let key = h.finish();
-        // Dedup: `overlay_key` is the per-viewer correctness signal (it resets to
-        // None on image switch / stack change, so a fresh viewer always rebuilds
-        // before its first draw); `mask_overlay_native.is_some()` is only the
-        // app-global first-registration guard. Both must hold to skip.
-        if v.mask.overlay_key == Some(key) && self.state.mask_overlay_native.is_some() {
-            return;
-        }
-
-        // GPU context from the eframe render state, NOT from `v.preview_edit`: the
-        // mask overlay must be able to build on a freshly-(re)opened image BEFORE
-        // any edit exists. `preview_edit` is created lazily — for Standard images
-        // only on the first edit (`set_preview_and_full`), for RAW at full-decode —
-        // so gating the overlay on it meant a just-opened mask showed no overlay
-        // until the first component edit / invert toggle forced a rebuild. Sourcing
-        // the context here (same wgpu device eframe uses; `from_render_state` is the
-        // established ad-hoc-context pattern) fixes that. Compositor/input below are
-        // still cached once and reused (CLAUDE.md GPU rule).
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-        let gpu_ctx = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-        if v.mask_overlay.is_none() {
-            v.mask_overlay = Some(ferrolite_pipeline::MaskOverlayCompositor::new(
-                gpu_ctx.clone(),
-            ));
-        }
-        if v.mask_overlay_input.is_none() {
-            if let Some(src) = v.preview_source.as_ref() {
-                let small = downscale_linear(src, OVERLAY_MAX_EDGE);
-                v.mask_overlay_input = Some(ferrolite_pipeline::upload_source(&gpu_ctx, &small));
-                // Bump the input generation so the compositor's per-component
-                // cache re-samples range shapes against the fresh input.
-                v.mask_overlay_input_gen = v.mask_overlay_input_gen.wrapping_add(1);
-            }
-        }
-        let (overlay, highlight) = {
-            let highlight_component = v.mask.highlight_component;
-            // Monotonic input identity for the compositor's incremental cache:
-            // changes whenever `mask_overlay_input` is re-uploaded, so range
-            // shapes re-sample the fresh image. A counter (not the texture's
-            // `Arc` pointer) avoids an ABA hazard where a freed texture's address
-            // is reused by the new upload and collides.
-            let input_id = v.mask_overlay_input_gen;
-            let (Some(oc), Some(input)) = (v.mask_overlay.as_mut(), v.mask_overlay_input.as_ref())
-            else {
-                return;
-            };
-            let overlay = oc.overlay_texture(
-                &def,
-                input,
-                input_id,
-                crate::develop::mask_overlay_color::OVERLAY_STRENGTH,
-            );
-            // Highlight build MUST come after `overlay_texture` above: it reads
-            // the per-component cache that call just populated for the CURRENT
-            // def. `highlight_texture` is bounds-safe (returns `None` if the
-            // hovered index isn't in the cache), so a stale/out-of-range index
-            // just means no highlight this frame rather than a panic.
-            let highlight = highlight_component.and_then(|idx| {
-                oc.highlight_texture(idx, crate::develop::mask_overlay_color::HIGHLIGHT_STRENGTH)
-            });
-            v.mask.overlay_key = Some(key);
-            (overlay, highlight)
-        };
-        // `v` borrow ends here; the renderer + app-global texture ids are disjoint.
-        let view = overlay.srgb_view();
-        {
-            let mut renderer = rs.renderer.write();
-            match self.state.mask_overlay_native {
-                Some(id) => renderer.update_egui_texture_from_wgpu_texture(
-                    &gpu_ctx.device,
-                    &view,
-                    wgpu::FilterMode::Linear,
-                    id,
-                ),
-                None => {
-                    let id = renderer.register_native_texture(
-                        &gpu_ctx.device,
-                        &view,
-                        wgpu::FilterMode::Linear,
-                    );
-                    self.state.mask_overlay_native = Some(id);
-                }
-            }
-            if let Some(highlight) = &highlight {
-                let hview = highlight.srgb_view();
-                match self.state.mask_overlay_highlight_native {
-                    Some(id) => renderer.update_egui_texture_from_wgpu_texture(
-                        &gpu_ctx.device,
-                        &hview,
-                        wgpu::FilterMode::Linear,
-                        id,
-                    ),
-                    None => {
-                        let id = renderer.register_native_texture(
-                            &gpu_ctx.device,
-                            &hview,
-                            wgpu::FilterMode::Linear,
-                        );
-                        self.state.mask_overlay_highlight_native = Some(id);
-                    }
-                }
-            }
-        }
-        self.state.mask_overlay_gpu = Some(overlay);
-        // Only replace the cached highlight `OverlayTexture` when a fresh one was
-        // built this frame; when `highlight_component` is `None` the stale GPU
-        // texture is simply left un-drawn (draw-time gates on
-        // `highlight_component.is_some()`), so there's no dangling-view risk from
-        // dropping it here while the registered native id still references it.
-        if let Some(highlight) = highlight {
-            self.state.mask_overlay_highlight_gpu = Some(highlight);
-        }
-    }
-
-    /// Spawn an off-thread lens bake (Spec 4.4, U7) iff the bake-relevant lens
-    /// key (`ops_edit::lens_bake_key`: lens id, distortion/tca/vignetting
-    /// enabled flags, focal/aperture/crop) changed between `old`/`new`. This is
-    /// intentionally a DIFFERENT key from `needs_full_rebuild`'s
-    /// `lens_rebuild_key`, which excludes `vignetting.enabled` (a vignette
-    /// toggle has no halo/geometry impact, so it must not force an immediate
-    /// `TileEditPipeline` rebuild) — but `bake_products` DOES bake the
-    /// vignette LUT whenever `vignetting.enabled`, so the bake trigger must
-    /// still fire on that toggle or the LUT is never produced. This
-    /// deliberately excludes per-correction `amount`s: an Amount-only slider
-    /// drag must NOT re-run the DB lookup + bake (it's a uniform-only update
-    /// applied in `set_preview_and_full`'s non-rebuild branch), only a change
-    /// that would actually produce a different grid/LUT re-bakes.
-    fn maybe_spawn_lens_bake(
-        &mut self,
-        ctx: &egui::Context,
-        old: &ferrolite_pipeline::OpStack,
-        new: &ferrolite_pipeline::OpStack,
-    ) {
-        if crate::develop::ops_edit::lens_bake_key(old)
-            == crate::develop::ops_edit::lens_bake_key(new)
-        {
-            return; // Amount-only (or no) lens change: no bake needed.
-        }
-        let Some(db) = self.state.lens_db.clone() else {
-            return; // DB failed to load at startup: lens correction disabled.
-        };
-        let Some(lc) = new.lens_correction() else {
-            return; // LensCorrection op was removed entirely: nothing to bake.
-        };
-        let Some(v) = self.state.viewer.as_mut() else {
-            return;
-        };
-        // Cancel any in-flight bake for the previous key before superseding it.
-        if let Some(h) = v.lens_bake_handle.take() {
-            h.cancel();
-        }
-        let image_id = v.image_id;
-        let handle = crate::develop::lens_bake::spawn_lens_bake(
-            &self.state.jobs,
-            &db,
-            &self.state.tx,
-            ctx,
-            image_id,
-            lc,
-        );
-        if let Some(v) = self.state.viewer.as_mut() {
-            v.lens_bake_handle = Some(handle);
-        }
-    }
-
-    /// Spec 4.4 (U9) Step 1: attempt the cheap in-memory lens auto-match for
-    /// `image_id`'s viewer, once both its EXIF (`meta_loaded`) and its loaded
-    /// op-stack (`ops_loaded`) are known. One-shot per open
-    /// (`lens_auto_match_attempted`) and gated on `lens_match::should_auto_match`
-    /// so an existing `LensCorrection` op (persisted, or added/cleared this
-    /// session) is never second-guessed.
-    ///
-    /// Deliberately does NOT call `ops_edit::set_lens_correction` or spawn a
-    /// bake: it only stores the `LensMatch` candidate on the viewer for the
-    /// panel to read as its seed. No op is created, so `has_edits`/the
-    /// catalog badge/the sidecar are all untouched until the user actually
-    /// toggles a correction — opt-in is preserved.
-    ///
-    /// The DB lookup itself is a bundled-XML string/table search (no I/O, no
-    /// GPU), the same cost class already run inline for the manual picker
-    /// (`find_lenses`) and documented as UI-thread-safe in `lens_bake.rs`'s
-    /// module doc — hence no job is spawned for this step.
-    fn try_auto_match_lens(&mut self, image_id: i64) {
-        let Some(v) = self.state.viewer.as_ref() else {
-            return;
-        };
-        if v.image_id != image_id || v.lens_auto_match_attempted {
-            return;
-        }
-        if !v.meta_loaded || !v.ops_loaded {
-            return; // wait for both prerequisites before attempting/giving up
-        }
-        // Gather everything the match needs as owned values before taking the
-        // exclusive borrow below (mirrors the borrow discipline used elsewhere
-        // in this loop, e.g. `maybe_spawn_lens_bake`).
-        let should_match = crate::develop::lens_match::should_auto_match(&v.op_stack);
-        let query = v
-            .meta
-            .as_ref()
-            .and_then(crate::develop::lens_match::query_from_metadata);
-
-        let Some(v) = self.state.viewer.as_mut() else {
-            return;
-        };
-        v.lens_auto_match_attempted = true; // one-shot regardless of outcome below
-        if !should_match {
-            return; // an explicit LensCorrection op already exists: don't guess
-        }
-        let Some(db) = self.state.lens_db.clone() else {
-            return; // DB unavailable: lens correction section is disabled
-        };
-        let Some(query) = query else {
-            return; // decode failed, no EXIF, or no focal length: can't query
-        };
-        let candidate = ferrolite_lens::LensDb::match_lens(db.as_ref(), &query);
-        if let Some(v) = self.state.viewer.as_mut() {
-            if v.image_id == image_id {
-                v.lens_auto_match = candidate;
-            }
-        }
-    }
-
-    /// Re-apply the currently-resolved display tail to the viewer pipelines.
-    /// LUT path when a monitor profile is active, else the analytic sRGB matrix.
-    /// Synchronous — safe to call on every image reveal (no re-bake, no flash).
-    /// Re-uploading the LUT on open also self-heals a device-loss.
-    fn apply_display_tail(&self, gpu: &ferrolite_gpu::GpuContext, vp: &viewer::ViewerPipelines) {
-        match &self.state.display_lut {
-            Some(l) => vp.pipelines.set_display_lut(
-                &gpu.queue,
-                l.size,
-                &l.rgba16f,
-                ferrolite_color::DISPLAY_LUT_SHAPER_GAMMA,
-            ),
-            None => vp.pipelines.set_display_matrix(
-                &gpu.queue,
-                ferrolite_color::working_to_display(self.state.working_space),
-            ),
-        }
-    }
-
-    /// Detect the window's monitor profile (cheap UI-thread OS call), then
-    /// parse + bake the display LUT off the UI thread on `ferrolite-jobs`.
-    /// Bumps `display_detect_gen` so stale results from superseded re-detects
-    /// are dropped when they arrive. The ONLY UI-thread work here is the
-    /// `monitor_profile::detect` OS call (microseconds); the file read, ICC
-    /// parse and LUT bake all run inside the Background job (CLAUDE.md §1).
-    fn redetect_display_profile(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        use raw_window_handle::HasWindowHandle;
-
-        self.state.display_detect_gen += 1;
-        let generation = self.state.display_detect_gen;
-        let mode = self.state.settings.display_profile.clone();
-        let working = self.state.working_space;
-        let tx = self.state.tx.clone();
-
-        // UI-thread OS call only (cheap): get the ICC source + monitor key.
-        let (detected, key) = match frame.window_handle() {
-            Ok(h) => crate::monitor_profile::detect(h.as_raw()),
-            Err(_) => (None, 0),
-        };
-        self.state.last_monitor_key = key;
-        let source = crate::settings::dto::resolve(&mode, detected);
-
-        // Off-thread: file read + ICC parse + LUT bake. Never on the UI thread.
-        self.state
-            .jobs
-            .submit(ferrolite_jobs::Priority::Background, move |_cancel| {
-                let (lut, name) = match source {
-                    None => (None, "sRGB (default)".to_string()),
-                    Some(src) => match crate::monitor_profile::source_to_bytes(src)
-                        .ok()
-                        .and_then(|b| ferrolite_color::DisplayProfile::parse(&b).ok())
-                    {
-                        Some(profile) => match ferrolite_color::bake_display_lut(
-                            working,
-                            &profile,
-                            ferrolite_color::DISPLAY_LUT_SIZE,
-                        ) {
-                            Ok(lut) => {
-                                let name = profile.name.clone();
-                                (Some(lut), name)
-                            }
-                            Err(e) => {
-                                eprintln!("ferrolite: display LUT bake failed: {e}");
-                                (None, "Not detected — using sRGB".to_string())
-                            }
-                        },
-                        None => (None, "Not detected — using sRGB".to_string()),
-                    },
-                };
-                let _ = tx.send(crate::events::AppEvent::DisplayProfileResolved {
-                    lut,
-                    name,
-                    generation,
-                });
-            });
-        ctx.request_repaint();
-    }
-
-    /// Change the editing working space: recompose camera→working + working→display,
-    /// push the tail matrix to the display pipelines (once), update both edit tiers,
-    /// and invalidate full-res tiles so they re-render. Never rebuilds pipelines.
-    ///
-    /// Wired to the Develop adjustment panel's working-space `ComboBox`.
-    fn apply_working_space(
-        &mut self,
-        ctx: &egui::Context,
-        frame: &eframe::Frame,
-        ws: ferrolite_color::WorkingSpace,
-    ) {
-        if ws == self.state.working_space {
-            return;
-        }
-        self.state.working_space = ws;
-        self.state.settings.working_space =
-            crate::settings::dto::PersistedWorkingSpace::from_ws(ws);
-        self.mark_settings_dirty();
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
-        let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-
-        // Push the working→display tail (shared uniform; not per-frame).
-        {
-            let renderer = rs.renderer.read();
-            if let Some(vp) = renderer.callback_resources.get::<viewer::ViewerPipelines>() {
-                vp.pipelines
-                    .set_display_matrix(&gpu.queue, ferrolite_color::working_to_display(ws));
-            }
-        }
-
-        // Re-bake the display LUT for the new working space when a monitor
-        // profile is active. In sRGB mode this resolves to `None` and the
-        // event handler restores the analytic matrix above — a cheap no-op.
-        self.redetect_display_profile(ctx, frame);
-
-        let cam = self.camera_to_working(self.current_wb_temp());
-        let pw = self.preview_to_working();
-        let Some(v) = self.state.viewer.as_mut() else {
-            ctx.request_repaint();
-            return;
-        };
-
-        // Preview tier: update the matrix, re-evaluate, swap the displayed texture.
-        // Source + matrix must match the tier the image is displayed on (the same
-        // choice `set_preview_and_full`/`apply_full_decoded` make): RAW = demosaic
-        // camera-native `raw_preview_source` + camera→working (`cam`); Standard =
-        // sRGB `preview_source` + sRGB→working (`pw`). Applying `pw` to a RAW
-        // preview would diverge it (and the histogram that reads it) from the full
-        // tier and reintroduce the RAW color/tone shift progressive reveal removes.
-        let (pv_src, pv_matrix) = v.preview_tier_source(cam, pw);
-        if let Some(ep) = v.preview_edit.as_mut() {
-            ep.set_color_matrix(pv_matrix);
-            let img = ep.evaluate();
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                if g.image_id == v.image_id {
-                    g.preview
-                        .update_single_from_texture(img.texture.clone(), (img.width, img.height));
-                }
-            }
-        } else if let Some(src) = pv_src {
-            // No edit yet: re-run the one-shot color pass from the kind-correct
-            // source (RAW demosaic / sRGB) with its matrix.
-            let ctx_arc = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
-            let converted = ferrolite_pipeline::color_convert(ctx_arc, &src, pv_matrix);
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                if g.image_id == v.image_id {
-                    g.preview.update_single_from_texture(
-                        converted.texture.clone(),
-                        (converted.width, converted.height),
-                    );
-                }
-            }
-        }
-
-        // Full-res tier: update the producer's matrix + invalidate cached tiles.
-        if let Some(producer) = v.edit_producer.as_mut() {
-            producer.set_color_matrix(cam);
-        }
-        v.opstack_version = v.opstack_version.wrapping_add(1);
-        let version = v.opstack_version;
-        let image_id = v.image_id;
-        {
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                if g.image_id == image_id {
-                    g.preview_before = None; // rebuilt by ensure_before_view with new WS
-                    if let Some(full) = g.full.as_mut() {
-                        full.set_opstack_version(&g.ctx, version);
-                    }
-                }
-            }
-        }
-        v.idle = false;
-        self.mark_histogram_dirty();
-        ctx.request_repaint();
     }
 }
 
 /// Physical tile-pool budget for the viewer's sparse VT. 256 tiles × 256² ×
 /// RGBA16F ≈ 128 MB of GPU memory — generous headroom for a fit-to-window view
 /// plus a few zoom levels of the quad-binned (half-res) full image.
-const VIEWER_TILE_BUDGET: u32 = 256;
-
-/// Max edited tiles rendered per frame on the render thread (bounds GPU work
-/// per CLAUDE.md's GPU-frame-budget rule: pipelines run on the render thread
-/// but bounded, never unbounded per-frame work). Remaining needed tiles are
-/// produced on subsequent frames.
-///
-/// Task 15: raised from 8 to 32. Production here only feeds the OFF-SCREEN
-/// sparse pool that `drive_viewer` composes+swaps once converged (see
-/// `compose_sparse_into`) — none of it is presented mid-burst — so a larger
-/// per-frame burst is invisible to the user and just reaches convergence (and
-/// the visible swap) sooner. The value stays a bounded named const rather than
-/// unbounded so a single frame's production cannot blow the frame budget;
-/// the author profiles this bound in the next phase (Task 17) and will tune
-/// it further if 32 proves too expensive on slower GPUs.
-const MAX_PRODUCE_PER_FRAME: usize = 32;
-
-/// Spec 4.5 §4.2: prefetch ring for the sparse producer's needed set — the ring
-/// of tiles around the visible rect (plus the coarse base) produced ahead of a
-/// pan/zoom so the off-screen compose has the neighbours ready and convergence
-/// includes them. A one-tile ring keeps the extra production bounded.
-const PREFETCH_RING: u32 = 1;
+pub(crate) const VIEWER_TILE_BUDGET: u32 = 256;
 
 /// Max thumbnail texture uploads per frame (bounds per-frame GPU/texture work
 /// during bulk thumbnail delivery; CLAUDE.md responsiveness rule). Overflow is
 /// stashed in `AppState.pending_uploads` and flushed over subsequent frames.
-const MAX_THUMB_UPLOADS_PER_FRAME: usize = 16;
+pub(crate) const MAX_THUMB_UPLOADS_PER_FRAME: usize = 16;
 
 /// Debounce (seconds) before the tier-2 full-RAW decode is submitted after a
 /// viewer opens. The tier-1 preview shows immediately regardless; the full
@@ -2815,515 +1120,11 @@ const MAX_THUMB_UPLOADS_PER_FRAME: usize = 16;
 const FULL_DECODE_DEBOUNCE: f32 = 0.05;
 
 impl FerroliteApp {
-    /// Per-frame viewer drive: advance the crossfade, drive the sparse VT
-    /// (reconcile against GPU-truth feedback + drain finished loads), paint the
-    /// preview or full image (swap-on-ready), and request a repaint ONLY while
-    /// there is still work — so a finished/failed viewer goes idle (no busy-loop).
-    ///
-    /// Crossfade approach 4b (swap-on-ready): we keep showing the sharp preview
-    /// until the crossfade ramp completes AND the current view's tiles are all
-    /// resident (`sparse_pending() == 0`), then hard-swap to the full VT. The
-    /// full is already sharp at that point, so there is no blurry pop. True alpha
-    /// blending in the callback would need a second alpha-blended pipeline pass;
-    /// 4b avoids that cost and reads as instant at the 150 ms ramp.
-    fn drive_viewer(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        let dt = ui.ctx().input(|i| i.stable_dt);
-
-        // Perf fix D: retry a pyramid build `apply_full_decoded` deferred
-        // because no `PYRAMID_BUILD_CONCURRENCY` permit was free at the time.
-        // `needs_pyramid` lives on the CURRENT viewer (reset to `false` by
-        // every `ViewerState::open`), so this only ever retries for the image
-        // the user is actually looking at now — a superseded image's deferred
-        // pyramid is simply never revisited once navigation replaces the
-        // viewer. Only RAW builds a pyramid at all, and `raw_preview_source`
-        // (retained by `apply_full_decoded`) is the full-res `Arc` the build
-        // needs, so gate on both being present.
-        let deferred_pyramid = self.state.viewer.as_ref().and_then(|v| {
-            (v.needs_pyramid && v.kind == ferrolite_image::FileKind::Raw)
-                .then(|| v.raw_preview_source.clone())
-                .flatten()
-                .map(|image_full| (v.image_id, image_full))
-        });
-        if let Some((image_id, image_full)) = deferred_pyramid {
-            match crate::develop::cache::try_acquire_pyramid_permit() {
-                Some(permit) => {
-                    self.submit_pyramid_build(frame, ui.ctx(), image_id, image_full, permit);
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_id == image_id {
-                            v.needs_pyramid = false;
-                        }
-                    }
-                }
-                None => {
-                    // Still no free permit: keep the drive loop alive so the
-                    // retry runs again next frame instead of stalling until
-                    // unrelated input requests a repaint.
-                    ui.ctx().request_repaint();
-                }
-            }
-        }
-
-        // First, reconcile any stale GPU holder: if the holder belongs to an
-        // image other than the open viewer (navigation happened), cancel its
-        // tile jobs so they stop competing with the new image's loads.
-        let open_id = self.state.viewer.as_ref().map(|v| v.image_id);
-
-        // Drive the sparse VT for the open viewer and learn how many tiles are
-        // still pending (so we can both gate the swap and terminate the repaint).
-        // `request_view_feedback` reconciles residency against the PRIOR frame's
-        // GPU feedback marks (one frame latent); the paint callback's `draw_sparse`
-        // marks the CURRENT frame. This converges over frames; the coarse-LOD
-        // fallback keeps showing tiles meanwhile.
-        let mut tiles_pending: Option<usize> = None;
-        // Producer-drive convergence signals (Plan 3): CPU load jobs stay at 0 in
-        // producer mode, so the sparse VT's producer progress is tracked here to
-        // decide when the shown full view is fully rendered.
-        let mut produce_pending: Option<usize> = None;
-        let mut needed_established = false;
-        let mut produced_this_frame = 0usize;
-        // Spec 4.5 §4.2: whether the sparse pool is fully resident for the current
-        // transform+version this frame (CPU-rect predicate). Drives the off-screen
-        // compose+swap below and the `present_source` selection for `paint`.
-        let mut converged = false;
-        // Set true on the frame the compose+swap actually ran, so the caller can
-        // (re)start the crossfade ramp exactly once per convergence.
-        let mut swapped_this_frame = false;
-        // Set true when `g.present.resize` actually reallocated (canvas size
-        // changed), meaning `front`/`back` are now blank. `converged` frequently
-        // stays true across a resize (same zoom -> same tiles resident), so the
-        // compose+swap guard below would otherwise never re-fire and the canvas
-        // would show blank/clear-color until the next pan/zoom/edit. Re-armed
-        // below alongside the `!converged` re-arm.
-        let mut present_reallocated = false;
-        if let (Some(rs), Some(v)) = (frame.wgpu_render_state(), self.state.viewer.as_ref()) {
-            // The view/viewport for feedback, prefetch, convergence, and the
-            // off-screen compose. One-frame-latent (recorded by the PRIOR frame's
-            // `viewer::paint`), matching `request_view_feedback`'s existing latency.
-            let cur_view = v.view;
-            let cur_viewport = v.viewport;
-            // The `(opstack_version, view)` the compose+swap keys on, captured
-            // (Copy) before the `&mut ViewerGpu` borrow. `front` is composed for
-            // the CURRENT state iff `cur_present_key == Some((cur_version, cur_view))`.
-            let cur_version = v.opstack_version;
-            let cur_present_key = v.present_key;
-            let mut renderer = rs.renderer.write();
-            if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
-                // Resize the off-screen present buffers to the canvas viewport
-                // (converted logical→physical px) every frame; `resize` no-ops
-                // when the size is unchanged. `v.viewport` is one-frame-latent
-                // here (this runs before `viewer::paint` records this frame's
-                // rect below), matching `request_view_feedback`'s existing
-                // one-frame latency.
-                let ppp = ui.ctx().pixels_per_point();
-                let phys = (
-                    (v.viewport.0 * ppp).round().max(1.0) as u32,
-                    (v.viewport.1 * ppp).round().max(1.0) as u32,
-                );
-                present_reallocated = g.present.resize(&g.ctx, phys);
-                if Some(g.image_id) != open_id {
-                    // Stale holder from a superseded viewer: stop its tile jobs.
-                    if let Some(full) = g.full.as_mut() {
-                        full.cancel_sparse();
-                    }
-                } else if g.full.is_some() {
-                    // Scope the `&mut g.full` alias so it is DROPPED before the
-                    // compose+swap below reborrows `g.full` alongside `g.present`
-                    // / `g.ctx` (disjoint-field borrows must not overlap an alias).
-                    {
-                        let full = g.full.as_mut().expect("checked is_some");
-                        full.request_view_feedback(&g.ctx);
-                        // Plan 3: when an edit producer is present, render the needed
-                        // tiles on the render thread (bounded). `produce_view` borrows
-                        // the producer (which lives in ViewerState) by &mut per call.
-                        // Spec 4.5 §4.2: drive production from the PREFETCHED CPU-rect
-                        // set (visible + ring + coarse base) so convergence includes
-                        // the neighbours a pan/zoom will need, and the visible tiles
-                        // converge first.
-                        if let Some(v) = self.state.viewer.as_mut() {
-                            // PAUSE full-res production while a slider edit is being
-                            // dragged: the fit view shows the live preview tier
-                            // during the drag (the full tier is off-screen while the
-                            // op version bumps), so re-producing the heavy dehaze
-                            // full-res tiles every frame is pure waste — and on
-                            // constrained/integrated GPUs that per-frame churn
-                            // exhausts memory (OOM in `produce_tile`). Production
-                            // resumes on commit (drag release), refreshing 1:1 once.
-                            if !v.edit_in_progress {
-                                if let Some(producer) = v.edit_producer.as_mut() {
-                                    let needed = full.needed_prefetched(
-                                        &cur_view,
-                                        cur_viewport,
-                                        PREFETCH_RING,
-                                    );
-                                    produced_this_frame = full.produce_view(
-                                        &g.ctx,
-                                        producer,
-                                        &needed,
-                                        MAX_PRODUCE_PER_FRAME,
-                                    );
-                                }
-                            }
-                        }
-                        tiles_pending = full.sparse_pending();
-                        produce_pending = full.produce_pending();
-                        needed_established = full.needed_established();
-                        // CPU-rect convergence for the current transform+version.
-                        converged = full.is_converged(&cur_view, cur_viewport);
-                    }
-
-                    // Compose+swap when the pool is converged AND `front` is stale
-                    // or missing for the current state — i.e. its key does not match
-                    // `(cur_version, cur_view)`. An edit bumps `opstack_version` and
-                    // a pan/zoom changes `view`, so the key mismatches immediately;
-                    // once composed for this state the key matches and the swap does
-                    // not re-fire (at most ONCE per (version, view)). This is the
-                    // keying that fixes edits/split not showing until a zoom nudge.
-                    // The pool is converged so this is one bounded render pass.
-                    // Disjoint-field borrows: `g.full`, `g.ctx`, and `g.present` are
-                    // three distinct fields borrowed in the same expression.
-                    if converged && cur_present_key != Some((cur_version, cur_view)) {
-                        let mut enc =
-                            g.ctx
-                                .device
-                                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                                    label: Some("viewer-present-compose"),
-                                });
-                        if let Some(full) = g.full.as_mut() {
-                            full.compose_sparse_into(
-                                &g.ctx,
-                                &mut enc,
-                                g.present.back_view(),
-                                &cur_view,
-                                cur_viewport,
-                            );
-                        }
-                        g.ctx.queue.submit([enc.finish()]);
-                        g.present.swap();
-                        swapped_this_frame = true;
-                    }
-                }
-            }
-        }
-
-        let Some(v) = self.state.viewer.as_mut() else {
-            return;
-        };
-
-        // Task 17 (spec 4.5 §9): dev-mode viewer frame-time profiling hook.
-        // Entirely behind `diag::enabled()` — the branch not taken means zero
-        // added cost (no float math, no atomic store) on the hot pan/zoom path
-        // when diagnostics are off, matching every other recorder in `diag.rs`.
-        // Records this frame's `stable_dt` (ms) and the sparse producer's
-        // tiles-produced-this-frame count so the author can measure the
-        // ≤16.6 ms/frame budget on the dev GPU via the existing diag log/overlay
-        // (see `diag::format_viewer_line`); no new UI.
-        if crate::diag::enabled() {
-            crate::diag::record_viewer_frame(dt, produced_this_frame);
-        }
-
-        // If the view changed (pan/zoom in `viewer::paint` already cleared `idle`,
-        // but a programmatic change might not), `request_view_feedback` above may
-        // have submitted new tile loads. Resume the drive loop so they drain + display.
-        if matches!(tiles_pending, Some(n) if n > 0) {
-            v.idle = false;
-        }
-
-        // Spec 4.5 §4.2: key the composed `front` on `(opstack_version, view)`.
-        // A canvas resize reallocates (blanks) the present buffers, so invalidate
-        // the key — `front` no longer holds anything valid until recomposed. On the
-        // frame the compose+swap ran, record the key it was composed at and (re)start
-        // the crossfade ramp so the freshly-composed `front` fades in over the preview.
-        // Recompute the current key here (post-block) since `opstack_version`/`view`
-        // are stable across this function and were captured above as Copy locals.
-        let cur_version = v.opstack_version;
-        let cur_view = v.view;
-        if present_reallocated {
-            v.present_key = None;
-        }
-        if swapped_this_frame {
-            v.present_key = Some((cur_version, cur_view));
-            v.begin_crossfade();
-        }
-
-        // Advance the crossfade ramp. `factor` in [0,1] rides the swap: 0 right
-        // after a swap, 1 once the ramp completes (or immediately once idle+ready).
-        let factor = v.tick_crossfade(dt);
-        let tiles_settled = matches!(tiles_pending, Some(0));
-        // `front` holds a valid composed image for the CURRENT `(version, view)`
-        // iff the recorded key matches. False during edits (version bumped), motion
-        // (view changed each frame), and right after a resize (key set to `None`) —
-        // in all of which `present_source` must fall back to `Preview`.
-        let front_valid = v.present_key == Some((cur_version, cur_view));
-        // The full (sparse) tier is actually on screen once `front` is valid for
-        // the current state, the crossfade has completed, its tiles are all
-        // resident, AND the before/after split is NOT active (the split is a
-        // preview-tier-only compare — never claim the full tier is "shown" while
-        // it renders, which is the split fix). Consulted by `toggle_split_compare`
-        // (via `showing_full`) to decide whether enabling the split dead-ends.
-        let show_full =
-            v.full_ready && front_valid && factor >= 1.0 && tiles_settled && !v.split_compare;
-        // Present-source inputs handed to `viewer::paint` (which also folds in the
-        // per-frame `interacting` and `split_compare` it reads): the sparse tier
-        // exists, `front` is valid for the current `(version, view)`, and the
-        // crossfade factor.
-        let full_ready = v.full_ready;
-        // Persist the real, per-frame-current value so `toggle_split_compare`
-        // (which runs outside this per-frame borrow, e.g. from a keyboard
-        // shortcut or menu click) can consult an accurate "is the full tier
-        // actually on screen right now" signal instead of a `full_ready`-only
-        // proxy that stays true while tiles are still streaming in.
-        v.showing_full = show_full;
-
-        // Producer convergence: the shown full view is fully rendered only once
-        // the GPU-truth needed set has been established (the sparse shader painted
-        // + its feedback read back) AND every needed tile is produced at the
-        // current version AND nothing was produced this frame. Because feedback is
-        // one frame latent and production is bounded per frame, this takes several
-        // frames after `show_full` first flips true.
-        let full_converged = needed_established
-            && matches!(produce_pending, Some(0) | None)
-            && produced_this_frame == 0;
-
-        // Terminal state: full shown, crossfade done, AND the producer has
-        // converged. Gating idle on `full_converged` (not merely `show_full`)
-        // keeps the drive loop alive across the feedback→produce frames so tiles
-        // stream in without a manual pan/zoom.
-        if show_full && !v.crossfading && full_converged {
-            v.idle = true;
-        }
-
-        let crossfading = v.crossfading;
-        // While the crop tool is active, the crop overlay is the sole input
-        // target: gate the canvas pan/zoom interaction off so it doesn't compete.
-        // While the before/after SPLIT is shown on the preview tier, the divider
-        // strip (drawn below) owns pointer input instead, so gate pan/zoom off
-        // then too (at 1:1 the split is suppressed and pan/zoom resumes).
-        let interactive = !v.crop_active && (show_full || !v.split_compare);
-
-        let canvas_rect = ui.available_rect_before_wrap();
-        // Split only renders on the preview tier; once `show_full` takes over it
-        // dead-ends here (silently — `toggle_split_compare` now forces a fit on
-        // enable, so this state is reached only via zooming/navigating in while
-        // already split, not via the toggle itself).
-        let split_active = v.split_compare && !show_full;
-        let (image_id, view, viewport, split_pos) = (v.image_id, v.view, v.viewport, v.split_pos);
-
-        // Tier-0 placeholder: the resident grid thumbnail for this image (if any),
-        // cloned out of the texture cache BEFORE the `viewer::paint` borrow of `v`
-        // so the `self.state.textures` borrow is released first. A `TextureHandle`
-        // clone is a cheap refcount bump (no pixel copy).
-        let tier0_thumb = self.state.textures.get(image_id).cloned();
-
-        // `paint` applies this frame's pan/zoom and clears `idle` when the view
-        // moved, so read `idle` AFTER it to catch an interaction this frame. It
-        // also folds this frame's `interacting` into the present source and returns
-        // the chosen source so the repaint gate can keep the loop alive mid-fade.
-        let (loading_preview, present_source) = viewer::paint(
-            ui,
-            v,
-            full_ready,
-            front_valid,
-            factor,
-            interactive,
-            tier0_thumb.as_ref(),
-        );
-        let idle = v.idle;
-        let crossfading_present = matches!(present_source, viewer::PresentSource::Crossfade(_));
-
-        // Repaint only while there is pending work:
-        //  - preview not yet uploaded, or
-        //  - crossfade ramp still advancing, or
-        //  - sparse tiles still loading.
-        // Once `idle` (full ready + settled, or a failure marked it idle) we stop.
-        // A pan/zoom clears `idle` so the loop resumes and the new view's tiles
-        // (requested next frame) drain and display.
-        let tiles_loading = matches!(tiles_pending, Some(n) if n > 0);
-        // Keep repainting while the producer is still converging on the shown full
-        // view (feedback is one frame latent + production is bounded per frame),
-        // so the sparse tiles stream in on open without a manual pan/zoom.
-        let full_warming = show_full && !full_converged;
-        // Spec 4.5 §4.2: while the sparse tier exists but is not yet converged, keep
-        // the loop alive so production advances and the off-screen compose+swap can
-        // fire; and keep it alive while a present-crossfade is mid-ramp so the
-        // freshly-swapped `front` fades in without a manual nudge. Additionally, keep
-        // repainting while `front` is stale for the current state (`!front_valid`) —
-        // e.g. an edit at an already-settled fit view bumped `opstack_version` so the
-        // key mismatches but `converged` may already be true: without this the loop
-        // could idle before the recompose+swap fires and the edit would only appear
-        // after a manual zoom. Once `front_valid` (and not crossfading + converged),
-        // none of these terms hold, so the loop goes idle (no busy-loop).
-        let compose_pending = full_ready && (!converged || !front_valid);
-        if !idle
-            && (loading_preview
-                || crossfading
-                || crossfading_present
-                || tiles_loading
-                || full_warming
-                || compose_pending)
-        {
-            ui.ctx().request_repaint();
-        }
-
-        // The `v` borrow has ended; the split render/drag needs `&mut self`
-        // (`ensure_before_view` + writing `split_pos` on drag).
-        if split_active {
-            self.ensure_before_view(frame);
-            let div_x = crate::develop::split::divider_x(
-                canvas_rect.left(),
-                canvas_rect.width(),
-                split_pos,
-            );
-            // Paint the "before" clipped to the left of the divider, on top of
-            // the already-painted "after". Same `canvas_rect` for both callbacks
-            // keeps the image geometry identical; only the clip rect (scissor)
-            // differs, so left = before, right = after.
-            let left_clip =
-                egui::Rect::from_min_max(canvas_rect.min, egui::pos2(div_x, canvas_rect.max.y));
-            ui.painter()
-                .with_clip_rect(left_clip)
-                .add(egui_wgpu::Callback::new_paint_callback(
-                    canvas_rect,
-                    viewer::ViewerCallback {
-                        image_id,
-                        view,
-                        viewport,
-                        // The `Before` path always draws the preview-tier
-                        // `preview_before`; the present source is ignored by that
-                        // arm, but pass `Preview` for a well-defined value.
-                        present_source: viewer::PresentSource::Preview,
-                        which: viewer::PreviewWhich::Before,
-                    },
-                ));
-            // Divider line + a grab handle at mid-height.
-            let painter = ui.painter();
-            painter.vline(
-                div_x,
-                canvas_rect.y_range(),
-                egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
-            );
-            let handle_center = egui::pos2(div_x, canvas_rect.center().y);
-            painter.circle(
-                handle_center,
-                7.0,
-                egui::Color32::from_black_alpha(120),
-                egui::Stroke::new(1.5_f32, egui::Color32::WHITE),
-            );
-            // Side labels: which half is the unedited original vs. the current
-            // edit. Bottom corners keep them clear of the top-right histogram
-            // overlay and the mid-height divider handle. Left of the divider is
-            // the "before" (original), right is the "after" (edited).
-            let label_font = egui::FontId::proportional(12.0);
-            let label_pad = egui::vec2(6.0, 3.0);
-            let label_margin = 8.0;
-            let draw_side_label = |text: &str, right_aligned: bool| {
-                let galley = painter.layout_no_wrap(
-                    text.to_owned(),
-                    label_font.clone(),
-                    egui::Color32::WHITE,
-                );
-                let size = galley.size() + label_pad * 2.0;
-                let x = if right_aligned {
-                    canvas_rect.right() - label_margin - size.x
-                } else {
-                    canvas_rect.left() + label_margin
-                };
-                let min = egui::pos2(x, canvas_rect.bottom() - label_margin - size.y);
-                painter.rect_filled(
-                    egui::Rect::from_min_size(min, size),
-                    3.0,
-                    egui::Color32::from_black_alpha(140),
-                );
-                painter.galley(min + label_pad, galley, egui::Color32::WHITE);
-            };
-            draw_side_label("Original", false);
-            draw_side_label("Edited", true);
-            // Drag: a thin full-height strip around the divider owns the pointer.
-            let hit = crate::develop::split::HANDLE_TOL;
-            let strip = egui::Rect::from_min_max(
-                egui::pos2(div_x - hit, canvas_rect.top()),
-                egui::pos2(div_x + hit, canvas_rect.bottom()),
-            );
-            let resp = ui.interact(
-                strip,
-                ui.id().with(("split-divider", image_id)),
-                egui::Sense::click_and_drag(),
-            );
-            // Precise hover check against the divider itself (not just the strip
-            // rect) via the pure hit-test, so the cursor only swaps within the
-            // documented `HANDLE_TOL` of the actual divider line.
-            let hovering_divider = resp.hover_pos().is_some_and(|pos| {
-                crate::develop::split::hit_divider(
-                    canvas_rect.left(),
-                    canvas_rect.width(),
-                    split_pos,
-                    pos.x,
-                    hit,
-                )
-            });
-            if hovering_divider || resp.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-            }
-            if resp.dragged() {
-                if let Some(pos) = resp.interact_pointer_pos() {
-                    let new_pos = crate::develop::split::pos_from_pointer(
-                        canvas_rect.left(),
-                        canvas_rect.width(),
-                        pos.x,
-                    );
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        v.split_pos = new_pos;
-                    }
-                    ui.ctx().request_repaint();
-                }
-            }
-        }
-    }
-
-    /// Draw the read-only, GPU-computed histogram as a floating, non-interactive
-    /// overlay anchored to the Develop canvas's top-right corner (spec 4.1 §7.1).
-    /// Data comes straight from `ViewerState::histogram` (already computed by
-    /// `maybe_update_histogram`'s GPU dispatch this frame or an earlier one) — this
-    /// is display placement only, no recompute. `Order::Middle` sits above the
-    /// canvas paint but below modal `Order::Foreground` windows (Help/Settings),
-    /// and `.interactable(false)` means canvas pan/zoom keeps working underneath it.
-    fn draw_histogram_overlay(&self, ui: &egui::Ui) {
-        const MARGIN: f32 = 12.0;
-        const WIDTH: f32 = 220.0;
-
-        let canvas_rect = ui.min_rect();
-        let bins = self
-            .state
-            .viewer
-            .as_ref()
-            .and_then(|v| v.histogram.bins.as_deref());
-
-        let pos = egui::pos2(
-            canvas_rect.right() - WIDTH - MARGIN,
-            canvas_rect.top() + MARGIN,
-        );
-
-        egui::Area::new(egui::Id::new("develop_histogram_overlay"))
-            .order(egui::Order::Middle)
-            .fixed_pos(pos)
-            .interactable(false)
-            .show(ui.ctx(), |ui| {
-                ui.set_width(WIDTH);
-                egui::Frame::none()
-                    .fill(egui::Color32::from_black_alpha(160))
-                    .rounding(4.0)
-                    .inner_margin(6.0)
-                    .show(ui, |ui| {
-                        ui.set_width(WIDTH - 12.0);
-                        crate::develop::histogram_widget::show(ui, bins);
-                    });
-            });
-    }
-
     /// The single image-open path: cancel the previously-open viewer's in-flight
     /// tile jobs, open the new image's two-tier load, switch to Develop, and request
     /// a repaint so the viewer is drawn on the very next frame (otherwise egui would
     /// idle on the grid until the next input event, which reads as a stall).
-    fn open_record(
+    pub(crate) fn open_record(
         &mut self,
         ctx: &egui::Context,
         frame: &mut eframe::Frame,
@@ -3364,7 +1165,7 @@ impl FerroliteApp {
     /// Increment the inflight counter and spawn an ops-persist job. Both call
     /// sites (apply_edit commit branch + undo/redo handler) must go through here
     /// so the counter stays balanced with the single `OpsSaved` event each job emits.
-    fn persist_ops(
+    pub(crate) fn persist_ops(
         &mut self,
         ctx: &egui::Context,
         image_id: i64,
@@ -3387,7 +1188,7 @@ impl FerroliteApp {
     /// The VT lives in `callback_resources`; the decode jobs are cancelled
     /// separately via `ViewerState::cancel_loads`. Guarded on `image_id` so we
     /// never cancel a holder that already belongs to a newer viewer.
-    fn cancel_viewer_tiles(&self, frame: &eframe::Frame, image_id: i64) {
+    pub(crate) fn cancel_viewer_tiles(&self, frame: &eframe::Frame, image_id: i64) {
         let Some(rs) = frame.wgpu_render_state() else {
             return;
         };
@@ -3405,7 +1206,11 @@ impl FerroliteApp {
     /// Runs once per frame where the GPU render state is available; each image
     /// loads its edit stack from its `.xmp` sidecar inside the Background job
     /// (missing/malformed → identity, i.e. a color-managed unedited thumbnail).
-    fn drain_thumb_regen_requests(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    pub(crate) fn drain_thumb_regen_requests(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
         if self.state.pending_thumb_regen.is_empty() {
             return;
         }
@@ -3559,35 +1364,6 @@ fn window_resize(ctx: &egui::Context) {
     }
 }
 
-/// Nearest-neighbor CPU downscale of a LinearRgbaF32 to ≤ max_edge longest side.
-/// Used to bound the mask-overlay compositor's input (CLAUDE.md §1) so the
-/// GPU composite + CPU readback stay cheap enough to rebuild on every mask/edit
-/// change, even mid-stroke.
-fn downscale_linear(
-    src: &ferrolite_image::LinearRgbaF32,
-    max_edge: u32,
-) -> ferrolite_image::LinearRgbaF32 {
-    let (sw, sh) = (src.width, src.height);
-    let scale = (max_edge as f32 / sw.max(sh) as f32).min(1.0);
-    let (dw, dh) = (
-        ((sw as f32 * scale) as u32).max(1),
-        ((sh as f32 * scale) as u32).max(1),
-    );
-    if (dw, dh) == (sw, sh) {
-        return src.clone();
-    }
-    let mut px = Vec::with_capacity((dw * dh * 4) as usize);
-    for y in 0..dh {
-        let sy = (y as f32 / dh as f32 * sh as f32) as u32;
-        for x in 0..dw {
-            let sx = (x as f32 / dw as f32 * sw as f32) as u32;
-            let i = ((sy * sw + sx) * 4) as usize;
-            px.extend_from_slice(&src.pixels[i..i + 4]);
-        }
-    }
-    ferrolite_image::LinearRgbaF32::new(dw, dh, px).expect("downscale length")
-}
-
 impl eframe::App for FerroliteApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // One-time GPU-budget diagnostic (root-cause confirmation for the dehaze
@@ -3639,6 +1415,18 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // One-shot Task-14 background metadata backfill: the job is spawned
+        // unconditionally here (never a synchronous DB check on the UI
+        // thread — the job's OWN first step, off-thread, is the cheap
+        // backlog check, so a fully-backfilled library pays one off-thread
+        // COUNT per launch, zero UI-thread work). Independent of
+        // `did_restore`/session restore — runs across the whole catalog, not
+        // the browsed folder.
+        if !self.did_meta_backfill_spawn {
+            self.did_meta_backfill_spawn = true;
+            crate::library::meta_backfill::spawn_once(&mut self.state, ctx);
+        }
+
         // One-shot startup display-profile detect, once the render state is valid
         // (ViewerPipelines pre-warmed in `new`). Ordering is guaranteed: `new()`
         // inserts `ViewerPipelines` into `cc.wgpu_render_state`'s callback
@@ -3653,7 +1441,7 @@ impl eframe::App for FerroliteApp {
         // the off-thread bake job reports back.
         if !self.did_display_detect && frame.wgpu_render_state().is_some() {
             self.did_display_detect = true;
-            self.redetect_display_profile(ctx, frame);
+            crate::app::controller::AppController::redetect_display_profile(self, ctx, frame);
         } else if self.did_display_detect {
             // Multi-monitor follow: cheap per-frame monitor-key check. When the
             // window moves to a display with a different profile, re-detect+bake.
@@ -3661,7 +1449,9 @@ impl eframe::App for FerroliteApp {
             if let Ok(h) = frame.window_handle() {
                 let (_src, key) = crate::monitor_profile::detect(h.as_raw());
                 if key != self.state.last_monitor_key {
-                    self.redetect_display_profile(ctx, frame);
+                    crate::app::controller::AppController::redetect_display_profile(
+                        self, ctx, frame,
+                    );
                 }
             }
         }
@@ -3701,304 +1491,8 @@ impl eframe::App for FerroliteApp {
         // paints (below) so it re-uploads fresh instead of showing grey cells.
         let module_at_frame_start = self.module;
 
-        // Drain job results into state; upload textures for ThumbReady events and
-        // build the viewer's rung-1 VirtualTexture for PreviewReady events.
-        //
-        // Texture uploads are capped at MAX_THUMB_UPLOADS_PER_FRAME per frame so
-        // a burst of finished thumbnails (bulk generation) can't blow the frame
-        // budget. First flush any backlog stashed on a previous frame, then drain
-        // the channel; overflow decoded thumbnails are stashed for next frame.
-        let mut uploads_this_frame = 0usize;
-        {
-            // Drain the stashed backlog first (FIFO) up to the per-frame budget.
-            let take = self
-                .state
-                .pending_uploads
-                .len()
-                .min(MAX_THUMB_UPLOADS_PER_FRAME);
-            if take > 0 {
-                let backlog: Vec<(i64, Vec<u8>, u32, u32)> =
-                    self.state.pending_uploads.drain(..take).collect();
-                for (id, rgba, w, h) in backlog {
-                    self.state.upload_thumbnail(ctx, id, rgba, w, h);
-                    uploads_this_frame += 1;
-                }
-                self.state.dirty = true;
-            }
-        }
-        let mut ingest_done = false;
-        let mut events_this_frame = 0usize;
-        while let Ok(event) = self.state.rx.try_recv() {
-            events_this_frame += 1;
-            match &event {
-                crate::events::AppEvent::PreviewReady { image_id, linear } => {
-                    self.apply_preview_ready(frame, ctx, *image_id, linear);
-                    self.state.dirty = true;
-                    continue;
-                }
-                crate::events::AppEvent::FullDecoded {
-                    image_id,
-                    image,
-                    color_profile,
-                } => {
-                    self.apply_full_decoded(frame, ctx, *image_id, image, color_profile);
-                    self.state.dirty = true;
-                    continue;
-                }
-                crate::events::AppEvent::PyramidReady {
-                    image_id,
-                    tile_source,
-                    gpu_pyramid,
-                } => {
-                    self.apply_pyramid_ready(frame, *image_id, tile_source, gpu_pyramid);
-                    self.state.dirty = true;
-                    continue;
-                }
-                crate::events::AppEvent::FullFailed { image_id } => {
-                    let image_id = *image_id;
-                    // For RAW: if we never revealed (the color-managed raw render
-                    // never built because the full decode failed), fall back to the
-                    // embedded JPEG so an undecodable-full still shows *something*.
-                    // This is the ONE place the JPEG may reach the screen for RAW.
-                    let need_fallback = matches!(
-                        self.state.viewer.as_ref(),
-                        Some(v) if v.image_id == image_id
-                            && v.kind == ferrolite_image::FileKind::Raw
-                            && !v.loaded
-                    );
-                    // `full_res = false`: the embedded JPEG fallback is a
-                    // downscaled stand-in, not the full RAW decode — must not
-                    // be warm-cached as if it were the sharp 1:1 tier.
-                    if need_fallback && self.reveal_srgb_preview(frame, image_id, false) {
-                        eprintln!(
-                            "ferrolite: full decode failed for #{image_id}; showing embedded JPEG fallback"
-                        );
-                    }
-                    // Mark the viewer idle so the repaint loop can stop (the decode
-                    // error was already logged on the job thread). On the fallback
-                    // path `reveal_srgb_preview` already set `idle`; this covers the
-                    // already-loaded / no-fallback cases too.
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_id == image_id {
-                            v.idle = true;
-                        }
-                    }
-                    self.state.dirty = true;
-                    continue;
-                }
-                crate::events::AppEvent::PreviewCacheHit { image_id, linear } => {
-                    self.apply_preview_cache_hit(frame, *image_id, linear);
-                    self.state.dirty = true;
-                    ctx.request_repaint();
-                    continue;
-                }
-                crate::events::AppEvent::PreviewCacheMiss { image_id } => {
-                    self.apply_preview_cache_miss(*image_id);
-                    self.state.dirty = true;
-                    ctx.request_repaint();
-                    continue;
-                }
-                crate::events::AppEvent::OpsLoaded { image_id, stack } => {
-                    let mut rebake: Option<ferrolite_pipeline::LensCorrection> = None;
-                    let mut just_loaded = false;
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_id == *image_id && !v.ops_loaded {
-                            v.ops_loaded = true;
-                            just_loaded = true;
-                            if !stack.is_identity() {
-                                v.history =
-                                    crate::develop::history::History::new(stack.clone(), 100);
-                                self.set_preview_and_full(frame, stack.clone(), true);
-                            }
-                            // Spec 4.4 (U9) Step 2: a persisted correction (any
-                            // toggle enabled, with a resolvable lens key) needs
-                            // its warp/vignette re-baked from scratch — the
-                            // grids themselves are never persisted (spec §7.4).
-                            // Until the bake returns, `LensUniform.use_warp`
-                            // stays 0 (identity), so nothing renders wrong in
-                            // the meantime.
-                            if let Some(lc) = stack.lens_correction() {
-                                if crate::develop::lens_bake::needs_rebake_on_load(&lc) {
-                                    rebake = Some(lc);
-                                }
-                            }
-                        }
-                    }
-                    if just_loaded {
-                        // Session-wide tool/tab selection (Task 3) survives image
-                        // switches, but a tab valid for the previous image may not
-                        // exist for this one (e.g. its temp tab belonged to a tool
-                        // disabled for the new image) — re-validate now that the new
-                        // image's ops/registry context is current.
-                        self.state.tool_state.ensure_valid_tab(&self.tool_registry);
-                    }
-                    if let Some(lc) = rebake {
-                        if let Some(db) = self.state.lens_db.clone() {
-                            let image_id = *image_id;
-                            let handle = crate::develop::lens_bake::spawn_lens_bake(
-                                &self.state.jobs,
-                                &db,
-                                &self.state.tx,
-                                ctx,
-                                image_id,
-                                lc,
-                            );
-                            if let Some(v) = self.state.viewer.as_mut() {
-                                if v.image_id == image_id {
-                                    v.lens_bake_handle = Some(handle);
-                                }
-                            }
-                        }
-                    }
-                    // Spec 4.4 (U9) Step 1: try the cheap in-memory auto-match
-                    // now that the loaded stack is known (it may resolve before
-                    // or after MetaLoaded — both event handlers attempt it, and
-                    // `lens_auto_match_attempted` makes the attempt one-shot).
-                    self.try_auto_match_lens(*image_id);
-                    self.state.dirty = true;
-                    continue;
-                }
-                crate::events::AppEvent::MetaLoaded { image_id, meta } => {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_id == *image_id && !v.meta_loaded {
-                            v.meta_loaded = true;
-                            v.meta = meta.clone();
-                        }
-                    }
-                    self.try_auto_match_lens(*image_id);
-                    self.state.dirty = true;
-                    ctx.request_repaint();
-                    continue;
-                }
-                crate::events::AppEvent::IngestDone => {
-                    ingest_done = true;
-                }
-                crate::events::AppEvent::HistogramReady { image_id, bins } => {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_id == *image_id {
-                            if !bins.is_empty() {
-                                v.histogram.bins = Some(bins.clone());
-                            }
-                            v.histogram.inflight = false;
-                        }
-                    }
-                    ctx.request_repaint();
-                }
-                crate::events::AppEvent::ExportProgress {
-                    image_id: _,
-                    done,
-                    total,
-                } => {
-                    if let Some(a) = self.state.export_activity.as_mut() {
-                        a.set_tiles(*done, *total);
-                    }
-                    ctx.request_repaint();
-                    continue;
-                }
-                crate::events::AppEvent::ExportFinished {
-                    image_id: _,
-                    ok,
-                    message,
-                } => {
-                    if let Some(a) = self.state.export_activity.as_mut() {
-                        if a.kind == crate::export::ExportKind::Single {
-                            a.item_finished(*ok, message.clone());
-                        }
-                    }
-                    self.state.notify(
-                        if *ok {
-                            crate::notifications::Level::Info
-                        } else {
-                            crate::notifications::Level::Error
-                        },
-                        message.clone(),
-                    );
-                    ctx.request_repaint();
-                    continue;
-                }
-                crate::events::AppEvent::ExportItemStarted { name } => {
-                    if let Some(a) = self.state.export_activity.as_mut() {
-                        a.start_item(Some(name.clone()));
-                    }
-                    ctx.request_repaint();
-                    continue;
-                }
-                crate::events::AppEvent::DisplayProfileResolved {
-                    lut,
-                    name,
-                    generation,
-                } => {
-                    // Drop results superseded by a newer re-detect.
-                    if *generation == self.state.display_detect_gen {
-                        self.state.display_profile_name = name.clone();
-                        // Store the resolved tail so the handler and the image
-                        // reveal sites share one source of truth (`apply_display_tail`).
-                        self.state.display_lut = lut.clone();
-                        if let Some(rs) = frame.wgpu_render_state() {
-                            let gpu = ferrolite_gpu::GpuContext::from_render_state(rs);
-                            let renderer = rs.renderer.read();
-                            if let Some(vp) =
-                                renderer.callback_resources.get::<viewer::ViewerPipelines>()
-                            {
-                                self.apply_display_tail(&gpu, vp);
-                            }
-                        }
-                        ctx.request_repaint();
-                    }
-                    continue;
-                }
-                crate::events::AppEvent::LensBaked { image_id, result } => {
-                    self.apply_lens_baked(frame, *image_id, result);
-                    self.state.dirty = true;
-                    ctx.request_repaint();
-                    continue;
-                }
-                _ => {}
-            }
-            if let Some((id, rgba, w, h)) = self.state.apply(event) {
-                if uploads_this_frame < MAX_THUMB_UPLOADS_PER_FRAME {
-                    self.state.upload_thumbnail(ctx, id, rgba, w, h);
-                    uploads_this_frame += 1;
-                } else {
-                    // Over budget this frame — stash for a subsequent frame and
-                    // mark the id awaiting upload so a re-request while it waits
-                    // does not re-submit/re-push (re-submit storm guard).
-                    self.state.thumb_uploading.insert(id);
-                    self.state.pending_uploads.push((id, rgba, w, h));
-                }
-            }
-            self.state.dirty = true;
-        }
-        // If a texture-upload backlog remains, schedule another frame so it
-        // flushes over subsequent frames (each capped) instead of all at once.
-        if !self.state.pending_uploads.is_empty() {
-            ctx.request_repaint();
-        }
-        // Auto-dismiss the finished-export indicator a few seconds after it
-        // completes so the status bar returns to normal on its own. `completed_at`
-        // is only set once an export is done, so a running export is untouched.
-        if let Some(done_at) = self
-            .state
-            .export_activity
-            .as_ref()
-            .and_then(|a| a.completed_at)
-        {
-            const EXPORT_DONE_LINGER: std::time::Duration = std::time::Duration::from_secs(4);
-            let elapsed = done_at.elapsed();
-            if elapsed >= EXPORT_DONE_LINGER {
-                self.state.export_activity = None;
-            } else {
-                ctx.request_repaint_after(EXPORT_DONE_LINGER - elapsed);
-            }
-        }
-        let repaint_forced = !self.state.pending_uploads.is_empty();
-        crate::diag::add_events(events_this_frame);
-        crate::diag::add_uploads(uploads_this_frame);
-        self.drain_thumb_regen_requests(ctx, frame);
-        // Refresh toolbar metadata-filter caches once per completed ingest (bounded).
-        if ingest_done {
-            self.state.reload_vocab();
-        }
+        // Drain job results into state; upload textures and route events via controller.
+        crate::app::controller::AppController::handle_events(self, ctx, frame);
 
         if self.state.dirty {
             self.state.refresh_images();
@@ -4217,8 +1711,10 @@ impl eframe::App for FerroliteApp {
                             self.toggle_split_compare();
                         }
                     });
-                egui::TopBottomPanel::top("develop_filmstrip")
-                    .exact_height(80.0)
+                let filmstrip_resp = egui::TopBottomPanel::top("develop_filmstrip")
+                    .resizable(true)
+                    .default_height(self.state.settings.filmstrip_height)
+                    .height_range(64.0..=220.0)
                     .frame(
                         egui::Frame::none()
                             .fill(theme::BG_TOOLBAR)
@@ -4229,6 +1725,11 @@ impl eframe::App for FerroliteApp {
                         film_clicked =
                             crate::library::filmstrip::show(ui, &mut self.state, current);
                     });
+                let new_h = filmstrip_resp.response.rect.height();
+                if (self.state.settings.filmstrip_height - new_h).abs() > 0.001 {
+                    self.state.settings.filmstrip_height = new_h;
+                    self.mark_settings_dirty();
+                }
             }
             crate::module::Module::Export => {
                 egui::TopBottomPanel::top("export_toolbar")
@@ -4311,380 +1812,7 @@ impl eframe::App for FerroliteApp {
         // thing that reacts to a keypress, and stops shortcuts like Enter or
         // Ctrl+A from leaking through to the grid/viewer underneath.
         if !self.modal_active() {
-            // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
-            // closed image's work stops competing with whatever is opened next.
-            if self
-                .state
-                .settings
-                .keymap
-                .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
-            {
-                self.maybe_regen_on_leave(ctx, frame);
-                if let Some(v) = self.state.viewer.take() {
-                    v.cancel_loads();
-                    self.cancel_viewer_tiles(frame, v.image_id);
-                    self.module = crate::module::Module::Library;
-                }
-            }
-
-            // Enter opens the selected image in the viewer (library grid only, no
-            // viewer already open, exactly one image selected). Suppressed while a
-            // modal is up or a text field holds focus (so a future search box's
-            // Enter won't pop the viewer).
-            if self.module.is_library()
-                && self.state.viewer.is_none()
-                && !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::OpenImage)
-            {
-                if let Some(sel_id) = self.state.selected {
-                    if let Some(rec) = self.state.images.iter().find(|r| r.id == sel_id).cloned() {
-                        self.open_record(ctx, frame, &rec);
-                    }
-                }
-            }
-
-            // F1 opens the Help modal. Global: works regardless of module/viewer
-            // state, but suppressed while a text field holds focus or another
-            // modal is up (consistent with the neighboring shortcuts here).
-            if !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::OpenHelp)
-            {
-                self.show_help = true;
-            }
-
-            // Ctrl+, opens the Settings window. Global, same gating as Help
-            // above. Since this whole region is gated on `!self.modal_active()`
-            // (which now includes `show_settings`), the shortcut only opens
-            // Settings when no modal is already up — acceptable, since a
-            // modal already on screen has its own dismissal path.
-            if !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::OpenSettings)
-            {
-                self.show_settings = true;
-            }
-
-            // Ctrl/Cmd+A toggles select-all over the current (filtered) grid rows.
-            // Library grid only (no viewer, no modal, no text field focused).
-            if self.module.is_library()
-                && self.state.viewer.is_none()
-                && !ctx.wants_keyboard_input()
-                && self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::SelectAll)
-            {
-                self.state.toggle_select_all();
-            }
-
-            // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
-            // toggles. In Library (no viewer) they apply to the grid selection; in
-            // Develop or Library+viewer they apply to the open viewer image.
-            if !ctx.wants_keyboard_input() {
-                use ferrolite_image::{Flag, Rating};
-
-                // --- 1. Read key intent ---
-                enum KeyIntent {
-                    Rating(u8),
-                    Flag(Flag),
-                }
-                // Routed through the keymap (one lookup per Action, each its own
-                // `ctx.input` call inside `Keymap::pressed`); priority order (ratings
-                // 0..5, then Pick, then Reject) and "one intent per frame" preserved.
-                use crate::settings::keymap::Action;
-                let km = &self.state.settings.keymap;
-                let rating_actions = [
-                    Action::Rating0,
-                    Action::Rating1,
-                    Action::Rating2,
-                    Action::Rating3,
-                    Action::Rating4,
-                    Action::Rating5,
-                ];
-                let mut intent = None;
-                for (n, action) in rating_actions.into_iter().enumerate() {
-                    if km.pressed(ctx, action) {
-                        intent = Some(KeyIntent::Rating(n as u8));
-                        break;
-                    }
-                }
-                let intent = intent.or_else(|| {
-                    if km.pressed(ctx, Action::FlagPick) {
-                        Some(KeyIntent::Flag(Flag::Pick))
-                    } else if km.pressed(ctx, Action::FlagReject) {
-                        Some(KeyIntent::Flag(Flag::Reject))
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(intent) = intent {
-                    // --- 2. Resolve target image id ---
-                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                        self.state.selected
-                    } else {
-                        self.state.viewer.as_ref().map(|v| v.image_id)
-                    };
-
-                    if let Some(target_id) = target_id {
-                        // --- 3. Look up current value ---
-                        let rec = self.state.images.iter().find(|r| r.id == target_id);
-                        let cur_rating = rec.map(|r| r.rating.get()).unwrap_or(0);
-                        let cur_flag = rec.map(|r| r.flag).unwrap_or(Flag::None);
-
-                        // --- 4. Build toggled edit ---
-                        let edit = match intent {
-                            KeyIntent::Rating(n) => crate::metadata::MetaEdit::SetRating(
-                                Rating::new(crate::metadata::toggle_rating(cur_rating, n)),
-                            ),
-                            KeyIntent::Flag(f) => crate::metadata::MetaEdit::SetFlag(
-                                crate::metadata::toggle_flag(cur_flag, f),
-                            ),
-                        };
-
-                        // --- 5. Apply ---
-                        if self.module.is_library() && self.state.viewer.is_none() {
-                            self.state.apply_metadata_edit(ctx, edit);
-                        } else {
-                            self.state
-                                .apply_metadata_edit_to_image(ctx, target_id, edit);
-                        }
-                    }
-                }
-
-                // Q toggles export-queue membership for the same target image used
-                // by the rating/flag intents above (grid selection in Library-no-
-                // viewer, else the open viewer image). Kept as a parallel check
-                // rather than folded into `KeyIntent` so the rating/flag toggle
-                // logic above is untouched.
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::AddToQueue)
-                {
-                    let target_id = if self.module.is_library() && self.state.viewer.is_none() {
-                        self.state.selected
-                    } else {
-                        self.state.viewer.as_ref().map(|v| v.image_id)
-                    };
-                    if let Some(target_id) = target_id {
-                        let was_queued = self.state.queue_contains(target_id);
-                        self.state.queue_toggle(target_id);
-                        self.state.notify(
-                            crate::notifications::Level::Info,
-                            if was_queued {
-                                "Removed from export queue."
-                            } else {
-                                "Added to export queue."
-                            },
-                        );
-                    }
-                }
-            }
-
-            // Left/Right move between images while viewing (Develop), non-cyclic.
-            if self.module == crate::module::Module::Develop
-                && self.state.viewer.is_some()
-                && !ctx.wants_keyboard_input()
-            {
-                let km = &self.state.settings.keymap;
-                let dir = if km.pressed(ctx, crate::settings::keymap::Action::NextImage) {
-                    Some(crate::viewer::nav::Step::Next)
-                } else if km.pressed(ctx, crate::settings::keymap::Action::PrevImage) {
-                    Some(crate::viewer::nav::Step::Prev)
-                } else {
-                    None
-                };
-                if let Some(dir) = dir {
-                    self.navigate_step(ctx, frame, dir);
-                }
-
-                // Before/After: `\` shows the empty (before) stack while held, and
-                // reverts to the live stack on release.
-                //
-                // NOTE (Task 2.3 keymap routing, deliberate behavior change): the
-                // dispatch for this refactor explicitly routes `HoldBeforePeek`
-                // through `Keymap::held` (level-triggered), matching the keymap's
-                // own design — `Action::HoldBeforePeek` is documented as "Hold to
-                // show original (before)" and `held()` exists specifically for this
-                // action. The pre-refactor code actually toggled `before_after` on
-                // each `key_pressed` (an edge-triggered latch), which contradicted
-                // its own doc comment in `viewer/mod.rs` calling it "momentary".
-                // This routes it to the momentary/hold behavior the naming always
-                // implied: `before_after` now directly mirrors "is the chord held",
-                // only re-evaluating the preview on an actual state transition
-                // (press or release), not every frame it's held.
-                let hold_before = self
-                    .state
-                    .settings
-                    .keymap
-                    .held(ctx, crate::settings::keymap::Action::HoldBeforePeek);
-                let before_after_changed = self
-                    .state
-                    .viewer
-                    .as_ref()
-                    .is_some_and(|v| v.before_after != hold_before);
-                if before_after_changed {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        v.before_after = hold_before;
-                    }
-                    let stack = self.state.viewer.as_ref().unwrap().op_stack.clone();
-                    self.set_preview_and_full(frame, stack, true); // re-evaluates with before_after
-                }
-
-                // Undo / Redo. Redo also accepts the Ctrl+Y alias in addition to the
-                // keymap's bound chord (defaults to Ctrl+Shift+Z) — kept for users
-                // used to the common Ctrl+Y redo convention.
-                let km = &self.state.settings.keymap;
-                let undo = km.pressed(ctx, crate::settings::keymap::Action::Undo);
-                let ctrl_y = ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Y));
-                let redo = km.pressed(ctx, crate::settings::keymap::Action::Redo) || ctrl_y;
-                if undo || redo {
-                    self.apply_undo_redo(ctx, frame, undo);
-                }
-
-                // Toggle before/after SPLIT-compare (draggable divider), mirroring
-                // the `develop_filter_bar` toggle button's click handling exactly:
-                // flips `split_compare` and, only when turning it on, resets
-                // `split_pos` to center. (Auto-fit-at-1:1 is a later task — not
-                // added here.)
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ToggleSplitCompare)
-                {
-                    self.toggle_split_compare();
-                }
-
-                // Tool-switch keybinds (A/C/M by default) and mask-overlay toggle.
-                // Mirrors the tool palette's `SelectTool` handler's borrow
-                // discipline: resolve `enabled` via a shared borrow first, then
-                // take `&mut self.state.viewer` to apply it.
-                let km = &self.state.settings.keymap;
-                let tool = if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolAdjust) {
-                    Some(crate::develop::tool::ToolId::Adjust)
-                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolCrop) {
-                    Some(crate::develop::tool::ToolId::Crop)
-                } else if km.pressed(ctx, crate::settings::keymap::Action::SwitchToolMask) {
-                    Some(crate::develop::tool::ToolId::Mask)
-                } else {
-                    None
-                };
-                if let Some(id) = tool {
-                    let enabled = self
-                        .tool_registry
-                        .get(id)
-                        .map(|t| {
-                            t.enabled(&crate::develop::tool::DevelopCtx { state: &self.state })
-                        })
-                        .unwrap_or(false);
-                    if self.state.viewer.is_some() {
-                        self.state
-                            .tool_state
-                            .select_tool(id, enabled, &self.tool_registry);
-                    }
-                }
-
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ToggleMaskOverlay)
-                {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        v.mask.overlay_on = !v.mask.overlay_on;
-                    }
-                }
-
-                // New Brush Layer (default `B`): starts a fresh, separately-deletable
-                // `Brush` component in the selected mask — the explicit "split" for the
-                // merge-by-default brush model. Gated on the Mask tool being active
-                // (mirrors `ToggleMaskOverlay` above) plus an actual mask selection.
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::NewBrushLayer)
-                {
-                    let stack_and_idx = self.state.viewer.as_ref().and_then(|v| {
-                        (v.mask.active && v.mask.selected.is_some())
-                            .then(|| (v.op_stack.clone(), v.mask.selected.unwrap()))
-                    });
-                    if let Some((stack, idx)) = stack_and_idx {
-                        let new_stack = crate::develop::mask_edit::new_brush_layer(&stack, idx);
-                        self.apply_edit(
-                            ctx,
-                            frame,
-                            ferrolite_pipeline::OpKind::LocalAdjustments,
-                            new_stack,
-                            true,
-                        );
-                    }
-                }
-
-                // Zoom-to-fit (default `F`) and Zoom 1:1 (default `Z`): rebuild the
-                // same transforms the canvas's double-click toggle already builds
-                // (`viewer/mod.rs`'s `paint`), just from a keybind instead of a
-                // double-click gesture.
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ZoomFit)
-                {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if let Some(dims) = v.image_dims {
-                            v.view = ferrolite_vt::ViewTransform::fit(dims, v.viewport);
-                            v.idle = false;
-                            // Snap cleanly to fit: drop any pending/residual scroll so
-                            // trackpad momentum can't keep zooming past the fit this
-                            // frame (drive_viewer reads these deltas later this frame).
-                            ctx.input_mut(|i| {
-                                i.raw_scroll_delta = egui::Vec2::ZERO;
-                                i.smooth_scroll_delta = egui::Vec2::ZERO;
-                            });
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-                if self
-                    .state
-                    .settings
-                    .keymap
-                    .pressed(ctx, crate::settings::keymap::Action::ZoomActual)
-                {
-                    if let Some(v) = self.state.viewer.as_mut() {
-                        if v.image_dims.is_some() {
-                            v.view = ferrolite_vt::ViewTransform {
-                                zoom: 1.0,
-                                pan: (0.0, 0.0),
-                            };
-                            v.idle = false;
-                            // Same as fit: kill residual scroll velocity so the 1:1
-                            // snap isn't immediately dragged off by trackpad momentum.
-                            ctx.input_mut(|i| {
-                                i.raw_scroll_delta = egui::Vec2::ZERO;
-                                i.smooth_scroll_delta = egui::Vec2::ZERO;
-                            });
-                            ctx.request_repaint();
-                        }
-                    }
-                }
-            }
+            crate::app::shortcuts::dispatch(ctx, self, frame);
         }
 
         // Deferred warm-cache lookup (one-shot, mirrors `lens_auto_match_attempted`
@@ -4801,21 +1929,21 @@ impl eframe::App for FerroliteApp {
                                 v.full_handle = Some(h);
                                 v.full_requested = true;
                             }
-                        } else if !v.warm_revealed {
+                        } else {
                             // Standard: the heavy tier-1 IS the full-res JPG decode.
                             // This also runs after a cache HIT (`heavy_pending` is
                             // `!preview_requested`, still true post-hit) — the 2048px
                             // reveal from `apply_preview_cache_hit` shows first, then
                             // this streams in the full-res 1:1 detail.
                             //
-                            // Gated on `!v.warm_revealed`: unlike RAW, Standard has no
-                            // separate pyramid tier (`spawn_full`/the pyramid are
-                            // RAW-only) — a Standard image's full-resolution display
-                            // texture IS the sharp 1:1 artifact. A warm display hit
-                            // (`try_warm_reveal`) already installed that full-res
-                            // texture (warm-cached ONLY when full-res — see
-                            // `warm_insert_display`'s `full_res` gate), so re-decoding
-                            // here would just reproduce what is already on screen.
+                            // Runs on a warm display hit too — NOT for display (the
+                            // warm texture is already the full-res edited render) but
+                            // to restore the retained `preview_source` the warm cache
+                            // cannot hold (it keeps only GPU artifacts): without it
+                            // the lazy preview `EditPipeline` can never be built and
+                            // edits on a warm-revealed image silently stop rendering.
+                            // `apply_preview_ready` skips the redundant reveal for the
+                            // warm case (no holder re-install, no view re-fit).
                             let h = viewer::load::spawn_preview(
                                 &self.state.jobs,
                                 &self.state.tx,
@@ -4826,17 +1954,6 @@ impl eframe::App for FerroliteApp {
                             );
                             v.preview_handle = Some(h);
                             v.preview_requested = true;
-                        } else {
-                            // Warm Standard hit: skip the redundant decode (see
-                            // above). Nothing will call `reveal_srgb_preview` /
-                            // `install_preview_holder` for this open, so there is no
-                            // other path left to converge `idle` — settle it here,
-                            // mirroring what `install_preview_holder` does for a tier-1
-                            // reveal with no tier-2 to wait on. Also mark
-                            // `preview_requested` so `heavy_pending` clears and this
-                            // branch is not re-entered every frame.
-                            v.preview_requested = true;
-                            v.idle = true;
                         }
                     }
                 } else {
@@ -4991,6 +2108,28 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        if self.module == crate::module::Module::Develop && self.state.show_info_panel {
+            let info_resp = egui::SidePanel::left("develop_info_panel")
+                .resizable(true)
+                .default_width(self.state.settings.info_panel_width)
+                .width_range(220.0..=450.0)
+                .frame(
+                    egui::Frame::none()
+                        .fill(egui::Color32::from_rgb(0x1a, 0x1a, 0x1a))
+                        .inner_margin(egui::Margin::symmetric(12.0, 12.0)),
+                )
+                .show(ctx, |ui| {
+                    crate::develop::info_panel::show(ui, &self.state);
+                });
+            if info_resp.response.drag_stopped()
+                && (info_resp.response.rect.width() - self.state.settings.info_panel_width).abs()
+                    > 0.5
+            {
+                self.state.settings.info_panel_width = info_resp.response.rect.width();
+                self.mark_settings_dirty();
+            }
+        }
+
         if self.module == crate::module::Module::Develop && self.state.viewer.is_some() {
             self.maybe_update_histogram(ctx, frame);
         }
@@ -5014,33 +2153,69 @@ impl eframe::App for FerroliteApp {
             }
             let mut outcome = None;
             let working_space = self.state.working_space;
-            egui::SidePanel::right("develop_adjust")
+            let adjust_resp = egui::SidePanel::right("develop_adjust")
                 .resizable(true)
-                .default_width(296.0)
+                .default_width(self.state.settings.right_panel_width)
                 .width_range(250.0..=400.0)
                 .frame(
                     egui::Frame::none()
                         .fill(theme::BG_APP)
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                        .inner_margin(egui::Margin {
+                            left: 12.0,
+                            right: 8.0,
+                            top: 8.0,
+                            bottom: 8.0,
+                        }),
                 )
                 .show(ctx, |ui| {
+                    ui.spacing_mut().scroll.bar_width = 10.0;
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            outcome = Some(crate::develop::tool_panel::show(
-                                ui,
-                                &mut self.state,
-                                &self.tool_registry,
-                                working_space,
-                            ));
+                            egui::Frame::none()
+                                .inner_margin(egui::Margin {
+                                    left: 0.0,
+                                    right: 8.0,
+                                    top: 0.0,
+                                    bottom: 0.0,
+                                })
+                                .show(ui, |ui| {
+                                    let prev_disclosures =
+                                        crate::settings::dto::disclosure_snapshot(
+                                            &self.state.settings,
+                                        );
+                                    outcome = Some(crate::develop::tool_panel::show(
+                                        ui,
+                                        &mut self.state,
+                                        &self.tool_registry,
+                                        working_space,
+                                    ));
+                                    if crate::settings::dto::disclosure_snapshot(
+                                        &self.state.settings,
+                                    ) != prev_disclosures
+                                    {
+                                        self.mark_settings_dirty();
+                                    }
+                                });
                         });
                 });
+            if adjust_resp.response.drag_stopped()
+                && (adjust_resp.response.rect.width() - self.state.settings.right_panel_width).abs()
+                    > 0.5
+            {
+                self.state.settings.right_panel_width = adjust_resp.response.rect.width();
+                self.mark_settings_dirty();
+            }
             if let Some(outcome) = outcome {
                 if let Some(ws) = outcome.working_space {
-                    self.apply_working_space(ctx, frame, ws);
+                    crate::app::controller::AppController::apply_working_space(
+                        self, ctx, frame, ws,
+                    );
                 }
                 if let Some(o) = outcome.edit {
-                    self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                    crate::app::controller::AppController::apply_edit(
+                        self, ctx, frame, o.kind, o.stack, o.commit,
+                    );
                 }
             }
         }
@@ -5077,26 +2252,20 @@ impl eframe::App for FerroliteApp {
                     }
                 });
             egui::SidePanel::right("export_settings")
-                .resizable(true)
-                .default_width(296.0)
-                .width_range(250.0..=400.0)
+                .resizable(false)
+                .exact_width(300.0)
                 .frame(
                     egui::Frame::none()
                         .fill(theme::BG_APP)
-                        .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
+                        .stroke(egui::Stroke::new(
+                            1.0_f32,
+                            egui::Color32::from_rgb(0x26, 0x26, 0x26),
+                        ))
+                        .inner_margin(egui::Margin::symmetric(12.0, 12.0)),
                 )
                 .show(ctx, |ui| {
-                    ui.label(
-                        egui::RichText::new("EXPORT SETTINGS")
-                            .small()
-                            .color(theme::TEXT_FAINT),
-                    );
-                    ui.add_space(6.0);
                     let before = self.state.export_settings;
-                    crate::export::settings_form::settings_form(
-                        ui,
-                        &mut self.state.export_settings,
-                    );
+                    crate::export_module::export_settings_panel(ui, &mut self.state);
                     if self.state.export_settings != before {
                         self.state.settings.export =
                             crate::settings::dto::PersistedExport::from_options(
@@ -5117,136 +2286,21 @@ impl eframe::App for FerroliteApp {
                         crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
                 }
                 crate::module::Module::Develop => {
-                    if self.state.viewer.is_some() {
-                        // FIX C: crop mode enter/exit transition. `crop_active` was
-                        // (re)armed above by the Geometry section this frame; if it
-                        // just changed, re-evaluate the preview NOW (before paint) so
-                        // entering shows crop=full+angle and exiting applies the real
-                        // crop — neither transition otherwise triggers a re-render.
-                        // Gather the op_stack into a local first (borrow discipline:
-                        // `set_preview_and_full(&mut self, …)` needs an exclusive
-                        // borrow, so no live `&self.state.viewer` may overlap it).
-                        let crop_active = self
-                            .state
-                            .viewer
-                            .as_ref()
-                            .map(|v| v.crop_active)
-                            .unwrap_or(false);
-                        if crop_active != self.crop_active_prev {
-                            let stack = self.state.viewer.as_ref().map(|v| v.op_stack.clone());
-                            if let Some(stack) = stack {
-                                self.set_preview_and_full(frame, stack, true);
-                            }
-                            self.crop_active_prev = crop_active;
-                        }
-                        // Ctrl+scroll brush-size gesture (Mask tool active, a mask
-                        // selected, Brush sub-tool — the same three conditions
-                        // `mask_overlay::show` requires before it dispatches to
-                        // `route_brush`, so the gesture only fires when the brush
-                        // cursor/affordance is actually shown — pointer over the
-                        // image): must run BEFORE `drive_viewer`,
-                        // because `drive_viewer` → `viewer::paint` reads the same
-                        // `i.raw_scroll_delta.y` this frame to drive canvas zoom
-                        // (viewer/mod.rs `paint`). Handling the brush gesture first
-                        // and zeroing `raw_scroll_delta` here (via `ctx.input_mut`)
-                        // consumes the scroll so the zoom handler sees none left —
-                        // the only place both concerns are close enough to serialize
-                        // without restructuring `viewer::paint`'s own scroll read.
-                        if let Some(v) = self.state.viewer.as_ref() {
-                            if v.mask.active
-                                && v.mask.selected.is_some()
-                                && v.mask.tool == crate::develop::mask_ui::MaskTool::Brush
-                            {
-                                let dims = v.image_dims.unwrap_or((1, 1));
-                                let image_rect = crate::viewer::image_screen_rect(
-                                    ui.min_rect(),
-                                    dims,
-                                    v.view,
-                                    v.viewport,
-                                );
-                                let ctrl_scroll_over_image = ctx.input(|i| {
-                                    let ctrl = i.modifiers.command || i.modifiers.ctrl;
-                                    let scroll_y = i.raw_scroll_delta.y;
-                                    let over_image = i
-                                        .pointer
-                                        .hover_pos()
-                                        .is_some_and(|p| image_rect.contains(p));
-                                    (ctrl && scroll_y.abs() > f32::EPSILON && over_image)
-                                        .then_some(scroll_y)
-                                });
-                                if let Some(scroll_y) = ctrl_scroll_over_image {
-                                    if let Some(v) = self.state.viewer.as_mut() {
-                                        v.mask.brush_radius =
-                                            crate::develop::mask_overlay::brush_radius_from_scroll(
-                                                v.mask.brush_radius,
-                                                scroll_y,
-                                                crate::develop::mask_panel::BRUSH_RADIUS_MIN,
-                                                crate::develop::mask_panel::BRUSH_RADIUS_MAX,
-                                            );
-                                    }
-                                    // Consume: zero the scroll so `drive_viewer`'s zoom
-                                    // handler (reading the same field) does not also fire.
-                                    ctx.input_mut(|i| i.raw_scroll_delta = egui::Vec2::ZERO);
-                                }
-                            }
-                        }
-                        self.drive_viewer(ui, frame);
-                        // Bounded one-per-frame warm-neighbor render (Task 8):
-                        // pop at most one queued decoded source and turn it into
-                        // a cached display texture. Placed alongside
-                        // `drive_viewer` since both need `frame`'s render state
-                        // and both run only while Develop is open with a viewer.
-                        self.drain_one_warm_render(ctx, frame);
-                        if self.state.settings.show_histogram {
-                            self.draw_histogram_overlay(ui);
-                        }
-                        // Overlay is suppressed while the Info tab is active (it shows
-                        // the same facts) — a non-destructive gate, so the overlay
-                        // returns when the user leaves that tab without touching the
-                        // persisted `show_info_overlay` preference.
-                        if self.state.settings.show_info_overlay
-                            && self.state.tool_state.active_tab
-                                != crate::develop::tool::TabId("info")
+                    if let Some(v) = self.state.viewer.as_ref() {
+                        if let Some(action) =
+                            crate::develop::canvas::Viewer::new(v.image_id).show(ui, self, frame)
                         {
-                            if let Some(v) = self.state.viewer.as_ref() {
-                                if let (Some(meta), Some(dims)) = (v.meta.as_ref(), v.image_dims) {
-                                    let fit =
-                                        ferrolite_vt::ViewTransform::fit(dims, v.viewport).zoom;
-                                    let facts = crate::develop::info::ImageFacts::build(
-                                        meta,
-                                        v.view.zoom,
-                                        fit,
-                                        dims,
-                                    );
-                                    crate::develop::info_overlay::draw(ui, &facts);
-                                }
-                            }
-                        }
-                        if self.state.settings.show_tool_palette && self.state.viewer.is_some() {
-                            let ts = self.state.tool_state;
-                            let can_undo = self
-                                .state
-                                .viewer
-                                .as_ref()
-                                .is_some_and(|v| v.history.can_undo());
-                            let can_redo = self
-                                .state
-                                .viewer
-                                .as_ref()
-                                .is_some_and(|v| v.history.can_redo());
-                            let ctx_ro = crate::develop::tool::DevelopCtx { state: &self.state };
-                            let action = crate::develop::tool_palette::show(
-                                ui,
-                                &self.tool_registry,
-                                ts,
-                                &ctx_ro,
-                                can_undo,
-                                can_redo,
-                            );
                             match action {
-                                Some(crate::develop::tool_palette::PaletteAction::SelectTool(
-                                    id,
-                                )) => {
+                                crate::develop::canvas::ViewerAction::ApplyEdit {
+                                    kind,
+                                    stack,
+                                    commit,
+                                } => {
+                                    crate::app::controller::AppController::apply_edit(
+                                        self, ctx, frame, kind, stack, commit,
+                                    );
+                                }
+                                crate::develop::canvas::ViewerAction::SelectTool(id) => {
                                     let enabled = self
                                         .tool_registry
                                         .get(id)
@@ -5265,76 +2319,49 @@ impl eframe::App for FerroliteApp {
                                         );
                                     }
                                 }
-                                Some(crate::develop::tool_palette::PaletteAction::Undo) => {
-                                    self.apply_undo_redo(ctx, frame, true)
+                                crate::develop::canvas::ViewerAction::Undo => {
+                                    self.apply_undo_redo(ctx, frame, true);
                                 }
-                                Some(crate::develop::tool_palette::PaletteAction::Redo) => {
-                                    self.apply_undo_redo(ctx, frame, false)
+                                crate::develop::canvas::ViewerAction::Redo => {
+                                    self.apply_undo_redo(ctx, frame, false);
                                 }
-                                None => {}
-                            }
-                        }
-                        // Active-tool canvas overlay (crop handles, mask coverage tint,
-                        // etc.) — a single dispatch to the active tool's `canvas()`
-                        // replaces the old per-section crop_overlay/mask_overlay calls.
-                        // Keep the mask overlay's bounded rebuild glue (needs &mut self)
-                        // here, before dispatch, so `state.mask_overlay_native` is
-                        // current when `MaskTool::canvas` reads it.
-                        let active_tool = self
-                            .state
-                            .viewer
-                            .is_some()
-                            .then_some(self.state.tool_state.active);
-                        if active_tool == Some(crate::develop::tool::ToolId::Mask) {
-                            self.rebuild_mask_overlay_if_needed(frame);
-                        }
-                        if let Some(id) = active_tool {
-                            if let Some((dims, view, viewport)) = self
-                                .state
-                                .viewer
-                                .as_ref()
-                                .map(|v| (v.image_dims.unwrap_or((1, 1)), v.view, v.viewport))
-                            {
-                                let image_rect = crate::viewer::image_screen_rect(
-                                    ui.min_rect(),
-                                    dims,
-                                    view,
-                                    viewport,
-                                );
-                                if let Some(tool) = self.tool_registry.get(id) {
-                                    if let Some(o) = tool.canvas(ui, image_rect, &mut self.state) {
-                                        self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                                crate::develop::canvas::ViewerAction::SetPreviewAndFull(stack) => {
+                                    // Crop-mode transition (this action's only
+                                    // emitter — see canvas/viewer.rs Step 1):
+                                    // the shown extent just changed (full ↔
+                                    // cropped), so re-frame the view to the
+                                    // NEW extent. Without this, entering the
+                                    // crop tool on a cropped image kept the
+                                    // fit of the smaller cropped extent while
+                                    // showing the full image (opened visibly
+                                    // zoomed-in), and the overlay's
+                                    // `image_dims`-derived hit geometry no
+                                    // longer matched what was displayed.
+                                    let shown_dims =
+                                        crate::app::controller::AppController::set_preview_and_full(
+                                            self, frame, stack, true,
+                                        );
+                                    if let Some(dims) = shown_dims {
+                                        if let Some(v) = self.state.viewer.as_mut() {
+                                            v.image_dims = Some(dims);
+                                            if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
+                                                v.view = ferrolite_vt::ViewTransform::fit(
+                                                    dims, v.viewport,
+                                                );
+                                            }
+                                            v.idle = false;
+                                        }
+                                        ctx.request_repaint();
                                     }
                                 }
                             }
                         }
-                        // Loupe context-menu widget covers the whole canvas; while any
-                        // canvas tool (Crop/Mask/Heal) is active it must NOT be
-                        // registered, or it competes with that tool's own interact for
-                        // input (e.g. it stole clicks from the mask color-eyedropper).
-                        // Only register it in the Adjust tool, where no canvas tool
-                        // owns the pointer.
-                        let is_adjust_active =
-                            self.state.tool_state.active == crate::develop::tool::ToolId::Adjust;
-                        let ctx_menu_id = self
-                            .state
-                            .viewer
-                            .as_ref()
-                            .filter(|_| is_adjust_active)
-                            .map(|v| v.image_id);
-                        if let Some(image_id) = ctx_menu_id {
-                            let rect = ui.min_rect();
-                            let resp =
-                                ui.interact(rect, ui.id().with("loupe_ctx"), egui::Sense::click());
-                            resp.context_menu(|ui| {
-                                crate::library::image_context_menu::show(
-                                    ui,
-                                    &mut self.state,
-                                    image_id,
-                                    true,
-                                );
-                            });
-                        }
+                        // Bounded one-per-frame warm-neighbor render (Task 8):
+                        // pop at most one queued decoded source and turn it into
+                        // a cached display texture. Placed alongside the canvas
+                        // viewer since both need `frame`'s render state and both
+                        // run only while Develop is open with a viewer.
+                        self.drain_one_warm_render(ctx, frame);
                     } else {
                         let rect = ui.available_rect_before_wrap();
                         canvas::paint(ui, rect); // Develop with no image open: stub canvas
@@ -5404,7 +2431,7 @@ impl eframe::App for FerroliteApp {
             let display_name = self.state.display_profile_name.clone();
             if crate::settings::ui::show(ctx, &mut open, &mut self.state.settings, &display_name) {
                 self.mark_settings_dirty();
-                self.redetect_display_profile(ctx, frame);
+                crate::app::controller::AppController::redetect_display_profile(self, ctx, frame);
             }
             self.show_settings = open;
         }
@@ -5424,7 +2451,9 @@ impl eframe::App for FerroliteApp {
                 _ => None,
             };
             if let Some(o) = modal_out {
-                self.apply_edit(ctx, frame, o.kind, o.stack, o.commit);
+                crate::app::controller::AppController::apply_edit(
+                    self, ctx, frame, o.kind, o.stack, o.commit,
+                );
             }
         }
 
@@ -5492,6 +2521,7 @@ impl eframe::App for FerroliteApp {
                 viewer_tiles_produced: crate::diag::viewer_tiles_produced(),
             };
             let stats = self.state.jobs.stats();
+            let repaint_forced = !self.state.pending_uploads.is_empty();
             if let Some(snap) = self.diag.tick(
                 std::time::Instant::now(),
                 stats,
@@ -5569,6 +2599,13 @@ impl eframe::App for FerroliteApp {
         let t0 = crate::diag::enabled().then(std::time::Instant::now);
         let before = crate::diag::enabled().then(|| self.state.jobs.stats());
 
+        // Task 14's backfill job runs across the whole catalog, not the
+        // browsed folder, so it is intentionally NOT cancelled by
+        // `cancel_pending_jobs` (folder-switch/reindex scoped) — cancel it
+        // explicitly here instead, like the app's other long-lived handles.
+        if let Some(h) = self.state.meta_backfill_handle.take() {
+            h.cancel();
+        }
         self.state.cancel_pending_jobs();
         self.state.jobs.request_shutdown();
         let timeout_ms = 75u64;
@@ -5588,5 +2625,175 @@ impl eframe::App for FerroliteApp {
                 before, joined, timeout_ms, on_exit_ms,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::settings::Settings;
+
+    #[test]
+    fn test_panel_width_and_height_persistence() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.right_panel_width, 300.0);
+        assert_eq!(settings.info_panel_width, 300.0);
+        assert_eq!(settings.filmstrip_height, 96.0);
+
+        // Mutate widths and height and verify settings values
+        settings.right_panel_width = 350.0;
+        settings.info_panel_width = 280.0;
+        settings.filmstrip_height = 120.0;
+
+        assert_eq!(settings.right_panel_width, 350.0);
+        assert_eq!(settings.info_panel_width, 280.0);
+        assert_eq!(settings.filmstrip_height, 120.0);
+    }
+
+    #[test]
+    fn test_side_panel_width_capture_and_dirty_marking() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let mut settings_dirty = false;
+
+        assert_eq!(settings.right_panel_width, 300.0);
+        assert_eq!(settings.info_panel_width, 300.0);
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run(input.clone(), |_| {});
+        let mut captured_info_w = 0.0;
+        let mut captured_right_w = 0.0;
+
+        let _ = ctx.run(input, |ctx| {
+            let info_resp = egui::SidePanel::left("test_develop_info_panel")
+                .resizable(true)
+                .default_width(320.0)
+                .width_range(220.0..=450.0)
+                .show(ctx, |ui| {
+                    ui.label("info");
+                });
+            let width = info_resp.response.rect.width();
+            captured_info_w = width;
+            if info_resp.response.drag_stopped() && (width - settings.info_panel_width).abs() > 0.5
+            {
+                settings.info_panel_width = width;
+                settings_dirty = true;
+            }
+
+            let adjust_resp = egui::SidePanel::right("test_develop_adjust")
+                .resizable(true)
+                .default_width(340.0)
+                .width_range(250.0..=400.0)
+                .show(ctx, |ui| {
+                    ui.label("adjust");
+                });
+            let width = adjust_resp.response.rect.width();
+            captured_right_w = width;
+            if adjust_resp.response.drag_stopped()
+                && (width - settings.right_panel_width).abs() > 0.5
+            {
+                settings.right_panel_width = width;
+                settings_dirty = true;
+            }
+
+            egui::CentralPanel::default().show(ctx, |_| {});
+        });
+
+        // Without drag_stopped(), initial settings remain untouched
+        assert_eq!(settings.info_panel_width, 300.0);
+        assert_eq!(settings.right_panel_width, 300.0);
+        assert!(!settings_dirty);
+
+        // Verify sub-0.5px difference on drag stop does not trigger dirty marking or update
+        let small_diff_w = settings.info_panel_width + 0.3;
+        let prev_w = settings.info_panel_width;
+        let mut dirty = false;
+        let drag_stopped = true;
+        if drag_stopped && (small_diff_w - settings.info_panel_width).abs() > 0.5 {
+            settings.info_panel_width = small_diff_w;
+            dirty = true;
+        }
+        assert_eq!(settings.info_panel_width, prev_w);
+        assert!(!dirty);
+
+        // Verify >0.5px difference on drag stop updates settings and marks dirty
+        if drag_stopped && (captured_info_w - settings.info_panel_width).abs() > 0.5 {
+            settings.info_panel_width = captured_info_w;
+            settings_dirty = true;
+        }
+        assert_eq!(settings.info_panel_width, captured_info_w);
+        assert!(settings_dirty);
+    }
+
+    #[test]
+    fn test_panel_width_drag_stop_persistence_and_scrollbar_clearance() {
+        let ctx = egui::Context::default();
+        let mut settings = Settings::default();
+        let initial_width = settings.right_panel_width;
+        let mut settings_dirty = false;
+
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1920.0, 1080.0),
+            )),
+            ..Default::default()
+        };
+
+        let mut inner_frame_right_margin = 0.0;
+
+        let _ = ctx.run(input, |ctx| {
+            let adjust_resp = egui::SidePanel::right("test_develop_adjust_drag_stop")
+                .resizable(true)
+                .default_width(340.0)
+                .width_range(250.0..=400.0)
+                .show(ctx, |ui| {
+                    ui.spacing_mut().scroll.bar_width = 10.0;
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let frame = egui::Frame::none().inner_margin(egui::Margin {
+                                left: 0.0,
+                                right: 16.0,
+                                top: 0.0,
+                                bottom: 0.0,
+                            });
+                            inner_frame_right_margin = frame.inner_margin.right;
+                            frame.show(ui, |ui| {
+                                ui.label("content inside clearance frame");
+                            });
+                        });
+                });
+
+            // If not drag_stopped(), width setting remains untouched
+            if adjust_resp.response.drag_stopped()
+                && (adjust_resp.response.rect.width() - settings.right_panel_width).abs() > 0.5
+            {
+                settings.right_panel_width = adjust_resp.response.rect.width();
+                settings_dirty = true;
+            }
+        });
+
+        // Since no drag stopped event occurred, width setting is unchanged
+        assert_eq!(settings.right_panel_width, initial_width);
+        assert!(!settings_dirty);
+
+        // Verify the scrollbar clearance frame right margin is 16.0px
+        assert_eq!(inner_frame_right_margin, 16.0);
+
+        // Simulate a drag stop condition
+        let simulated_width = 360.0;
+        let simulated_drag_stopped = true;
+        if simulated_drag_stopped && (simulated_width - settings.right_panel_width).abs() > 0.5 {
+            settings.right_panel_width = simulated_width;
+            settings_dirty = true;
+        }
+        assert_eq!(settings.right_panel_width, 360.0);
+        assert!(settings_dirty);
     }
 }

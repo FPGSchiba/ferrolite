@@ -53,6 +53,15 @@ pub struct AppState {
     pub ingest_done: usize,
 
     pub ingest_handle: Option<JobHandle>,
+    /// The Task-14 background EXIF metadata-backfill job handle, `Some` while
+    /// it is walking the NULL-metadata backlog. Spawned at most once per app
+    /// run (`library::meta_backfill::spawn_once`, called from
+    /// `FerroliteApp::update`'s one-shot startup block) and cancelled at
+    /// shutdown (`on_exit`) like the app's other long-lived job handles —
+    /// deliberately NOT cancelled by `cancel_pending_jobs` (folder-switch /
+    /// reindex scoped), since this backfill runs across the whole catalog,
+    /// not the currently browsed folder.
+    pub meta_backfill_handle: Option<JobHandle>,
 
     /// LRU cache of decoded thumbnail textures (cap 512).
     pub textures: crate::library::texture_cache::TextureCache,
@@ -114,6 +123,8 @@ pub struct AppState {
     pub include_subfolders: bool,
     /// Folder ids whose children are shown in the left-panel tree.
     pub expanded_folders: HashSet<i64>,
+    /// Collection ids whose children are shown in the left-panel tree.
+    pub expanded_collections: HashSet<i64>,
     /// A folder pending a remove-confirmation (set when it has subfolders).
     pub pending_remove: Option<PendingRemove>,
 
@@ -135,6 +146,17 @@ pub struct AppState {
 
     /// Non-None while the single-image viewer is open.
     pub viewer: Option<crate::viewer::ViewerState>,
+
+    /// Interactive canvas panning/zooming/drag state parameters.
+    pub canvas: crate::develop::canvas::ViewerCanvasState,
+
+    /// Develop filmstrip UI state (which selection it has already
+    /// auto-centered on), so the strip free-scrolls and only snaps on
+    /// navigation, not every frame.
+    pub filmstrip: crate::library::filmstrip::FilmstripUiState,
+
+    /// Whether the Develop view read-only left info panel is visible.
+    pub show_info_panel: bool,
 
     /// Develop tool/tab selection state (design §5). Session-wide (unlike the
     /// per-image fields on `ViewerState`) so switching images keeps the same
@@ -198,6 +220,8 @@ pub struct AppState {
     // ── Cached toolbar metadata-filter aggregates (populated by reload_vocab) ──
     /// Distinct camera-model strings from the catalog.
     pub camera_options: Vec<String>,
+    /// Distinct lens-model strings from the catalog.
+    pub lens_options: Vec<String>,
     /// (min, max) ISO across the catalog, or None if no EXIF ISO is indexed.
     pub iso_range: Option<(u32, u32)>,
     /// (earliest, latest) capture-date strings from the catalog, or None.
@@ -277,6 +301,7 @@ impl AppState {
             ingest_total: 0,
             ingest_done: 0,
             ingest_handle: None,
+            meta_backfill_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,
@@ -296,12 +321,16 @@ impl AppState {
             startup_rescan_done: false,
             include_subfolders: settings.filter.include_subfolders,
             expanded_folders: HashSet::new(),
+            expanded_collections: HashSet::new(),
             pending_remove: None,
             mask_overlay_native: None,
             mask_overlay_gpu: None,
             mask_overlay_highlight_native: None,
             mask_overlay_highlight_gpu: None,
             viewer: None,
+            canvas: crate::develop::canvas::ViewerCanvasState::default(),
+            filmstrip: crate::library::filmstrip::FilmstripUiState::default(),
+            show_info_panel: settings.show_info_panel,
             tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,
@@ -321,6 +350,7 @@ impl AppState {
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
+            lens_options: Vec::new(),
             iso_range: None,
             date_range: None,
             renaming: None,
@@ -450,8 +480,11 @@ impl AppState {
     }
 
     /// Load the full tag and collection vocabularies, and refresh cached
-    /// toolbar metadata-filter aggregates (camera list, ISO range, date range).
-    /// Called at startup and after ingest completes.
+    /// toolbar metadata-filter aggregates (camera list, lens list, ISO range,
+    /// date range). Called at startup, after ingest completes, and once per
+    /// backfilled batch (`AppEvent::MetaBackfillReady`) so newly-recovered
+    /// lenses appear in the filter dropdown without a restart. Bounded by the
+    /// number of distinct values, so per-batch calls are cheap.
     pub fn reload_vocab(&mut self) {
         if let Ok(t) = self.reads.list_tags() {
             self.tags = t;
@@ -460,6 +493,7 @@ impl AppState {
             self.collections = c;
         }
         self.camera_options = self.reads.distinct_cameras().unwrap_or_default();
+        self.lens_options = self.reads.distinct_lenses().unwrap_or_default();
         self.iso_range = self.reads.iso_bounds().unwrap_or_default();
         self.date_range = self.reads.date_bounds().unwrap_or_default();
     }
@@ -595,6 +629,7 @@ impl AppState {
                 old.cancel_loads();
             }
             self.viewer = Some(crate::viewer::ViewerState::open(rec.id, path, rec.kind));
+            self.canvas = crate::develop::canvas::ViewerCanvasState::default();
             // Keep the current selection in sync with the viewed image so the
             // bottom status bar (filename · dims · ISO, driven by `selected`)
             // updates on Develop filmstrip navigation, not just library clicks.
@@ -896,6 +931,7 @@ impl AppState {
             ingest_total: 0,
             ingest_done: 0,
             ingest_handle: None,
+            meta_backfill_handle: None,
             textures: crate::library::texture_cache::TextureCache::new(512),
             thumb_pixels: crate::library::thumb_pixel_cache::ThumbPixelCache::new(
                 THUMB_PIXEL_CACHE_CAP,
@@ -915,12 +951,16 @@ impl AppState {
             startup_rescan_done: false,
             include_subfolders: true,
             expanded_folders: HashSet::new(),
+            expanded_collections: HashSet::new(),
             pending_remove: None,
             mask_overlay_native: None,
             mask_overlay_gpu: None,
             mask_overlay_highlight_native: None,
             mask_overlay_highlight_gpu: None,
             viewer: None,
+            canvas: crate::develop::canvas::ViewerCanvasState::default(),
+            filmstrip: crate::library::filmstrip::FilmstripUiState::default(),
+            show_info_panel: false,
             tool_state: Default::default(),
             export_dialog: None,
             export_activity: None,
@@ -940,6 +980,7 @@ impl AppState {
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
             camera_options: Vec::new(),
+            lens_options: Vec::new(),
             iso_range: None,
             date_range: None,
             renaming: None,
@@ -1647,6 +1688,8 @@ mod tests {
             rating: Rating::default(),
             flag: Flag::None,
             has_edits: false,
+            thumb_w: None,
+            thumb_h: None,
         };
 
         s.images = vec![mk_rec(1), mk_rec(2)];
@@ -1877,6 +1920,8 @@ mod tests {
             rating: Rating::default(),
             flag: Flag::None,
             has_edits: false,
+            thumb_w: None,
+            thumb_h: None,
         };
         s.images = vec![mk(1), mk(2)];
         // Selection is image 2, but we edit image 1 explicitly.
@@ -1956,6 +2001,8 @@ mod tests {
                 rating: Rating::default(),
                 flag: Flag::None,
                 has_edits: false,
+                thumb_w: None,
+                thumb_h: None,
             })
             .collect();
     }
@@ -2044,5 +2091,13 @@ mod tests {
             !s.batch_running(),
             "batch_running must go false once the batch is done"
         );
+    }
+
+    #[test]
+    fn app_state_binds_show_info_panel_from_settings() {
+        let mut s = AppState::for_test();
+        s.settings.show_info_panel = true;
+        s.show_info_panel = s.settings.show_info_panel;
+        assert!(s.show_info_panel);
     }
 }

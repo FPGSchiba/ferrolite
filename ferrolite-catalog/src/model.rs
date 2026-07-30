@@ -1,4 +1,5 @@
 use ferrolite_image::{Color, FileKind, Flag, Orientation, Rating, TagId};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecodeStatus {
@@ -39,6 +40,9 @@ pub struct NewImage {
     pub orientation: Orientation,
     pub capture_time: Option<String>,
     pub iso: Option<u32>,
+    pub lens: Option<String>,
+    pub aperture: Option<f32>,
+    pub focal_length: Option<f32>,
     pub decode_status: DecodeStatus,
     pub kind: FileKind,
     pub rating: Rating,
@@ -62,6 +66,18 @@ pub struct ImageRecord {
     pub flag: Flag,
     /// Cache of "has a non-identity frl:ops stack" (rebuildable from the sidecar).
     pub has_edits: bool,
+    /// The persisted thumbnail's own pixel dimensions (`thumbnails.w`/`h`),
+    /// joined in from the `thumbnails` table. Already display-upright at BOTH
+    /// ingest time and after an edited-thumbnail regen (`thumb_regen.rs`
+    /// renders through the full `EditPipeline`, including crop/geometry, then
+    /// `generate_thumbnail` resizes that upright output preserving its
+    /// aspect) — unlike `width`/`height` above, which are the ingest-time
+    /// SENSOR-space dims (pre-orientation-swap) and never change after a
+    /// crop. This is the source of truth for the grid/filmstrip cell aspect
+    /// ratio (`library::grid::cell_aspect`). `None` when no thumbnail row
+    /// exists yet (e.g. a `Pending` row not yet reached by ingest).
+    pub thumb_w: Option<u32>,
+    pub thumb_h: Option<u32>,
 }
 
 /// A tag row read back from the catalog.
@@ -79,6 +95,7 @@ pub struct CollectionRecord {
     pub name: String,
     pub color: Color,
     pub sort_order: i64,
+    pub parent_id: Option<i64>,
 }
 
 /// A row of the persisted export queue (spec §8.4). Ordered by `position`.
@@ -96,6 +113,33 @@ pub struct IngestSummary {
     pub added: usize,
     pub skipped: usize,
     pub failed: usize,
+}
+
+/// One row awaiting the Task-14 background EXIF metadata backfill: an image
+/// whose `lens`/`aperture`/`focal_length` are all still NULL (either
+/// ingested before the v7 migration added those columns, or not yet reached
+/// by a backfill pass). `path` is the already-joined folder-path + filename
+/// (see `images_needing_metadata_backfill`'s doc comment), so the backfill
+/// job never needs a separate `folder_path` round-trip per row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillCandidate {
+    pub id: i64,
+    pub path: PathBuf,
+    pub kind: FileKind,
+}
+
+/// One image's resolved Task-14 backfill write, ready for
+/// `Catalog::apply_metadata_backfill_batch`. `lens = Some(String::new())` is
+/// the "attempted, found nothing" sentinel (see that method's doc comment) —
+/// it is written back literally (never coerced to `None`), which is what
+/// permanently excludes the row from `images_needing_metadata_backfill`
+/// instead of retrying it on every launch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackfillResult {
+    pub id: i64,
+    pub lens: Option<String>,
+    pub aperture: Option<f32>,
+    pub focal_length: Option<f32>,
 }
 
 impl NewImage {
@@ -123,6 +167,9 @@ impl NewImage {
             orientation: meta.orientation,
             capture_time: meta.capture_time.clone(),
             iso: meta.iso,
+            lens: meta.lens.clone(),
+            aperture: meta.aperture,
+            focal_length: meta.focal_length,
             decode_status: DecodeStatus::Done,
             kind,
             rating,
@@ -153,6 +200,9 @@ impl NewImage {
             orientation: Orientation::Normal,
             capture_time: None,
             iso: None,
+            lens: None,
+            aperture: None,
+            focal_length: None,
             decode_status: DecodeStatus::Pending,
             kind,
             rating: Rating::default(),
@@ -181,6 +231,9 @@ impl NewImage {
             orientation: Orientation::Normal,
             capture_time: None,
             iso: None,
+            lens: None,
+            aperture: None,
+            focal_length: None,
             decode_status: DecodeStatus::Failed,
             kind,
             rating: Rating::default(),

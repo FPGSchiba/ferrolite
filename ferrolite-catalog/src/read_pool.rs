@@ -99,6 +99,11 @@ impl ReadPool {
     ) -> Result<std::collections::HashMap<i64, Vec<i64>>, CatalogError> {
         self.with_conn(|c| crate::queries::collections_for_images(c, ids))
     }
+    pub fn collection_image_counts(
+        &self,
+    ) -> Result<std::collections::HashMap<i64, usize>, CatalogError> {
+        self.with_conn(crate::queries::collection_image_counts)
+    }
 
     /// Execute a `LibraryQuery` and return matching image records.
     pub fn query_images(&self, q: &crate::LibraryQuery) -> Result<Vec<ImageRecord>, CatalogError> {
@@ -108,6 +113,12 @@ impl ReadPool {
     /// Sorted list of distinct non-null camera models for the filter toolbar.
     pub fn distinct_cameras(&self) -> Result<Vec<String>, CatalogError> {
         self.with_conn(crate::queries::distinct_cameras)
+    }
+
+    /// Sorted list of distinct non-null, non-empty lens names for the filter
+    /// toolbar (excludes the backfill "attempted, found nothing" sentinel).
+    pub fn distinct_lenses(&self) -> Result<Vec<String>, CatalogError> {
+        self.with_conn(crate::queries::distinct_lenses)
     }
 
     /// Min/max ISO values across all images, or `None` if no ISO data is present.
@@ -129,6 +140,24 @@ impl ReadPool {
     /// skipping ids that no longer exist.
     pub fn images_by_ids(&self, ids: &[i64]) -> Result<Vec<crate::ImageRecord>, CatalogError> {
         self.with_conn(|c| crate::queries::images_by_ids(c, ids))
+    }
+
+    /// Task-14 background-backfill backlog listing, off the UI thread (see
+    /// `crate::queries::images_needing_metadata_backfill`'s doc comment).
+    /// This is the read path the backfill job uses: it never touches the
+    /// writer, so it never contends with the single-writer lock.
+    pub fn images_needing_metadata_backfill(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<crate::model::BackfillCandidate>, CatalogError> {
+        self.with_conn(|c| crate::queries::images_needing_metadata_backfill(c, after_id, limit))
+    }
+
+    /// Count of rows still awaiting the Task-14 backfill — the one-shot
+    /// startup gate.
+    pub fn metadata_backfill_pending_count(&self) -> Result<i64, CatalogError> {
+        self.with_conn(crate::queries::metadata_backfill_pending_count)
     }
 }
 

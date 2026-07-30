@@ -2,6 +2,7 @@
 
 pub mod cell_state;
 pub mod collection_menu;
+pub mod collection_tree;
 pub mod develop_filter_bar;
 pub mod develop_metadata_bar;
 pub mod drag;
@@ -13,6 +14,7 @@ pub mod grid;
 pub mod grid_layout;
 pub mod icons;
 pub mod image_context_menu;
+pub mod meta_backfill;
 pub mod panel;
 pub mod texture_cache;
 pub mod thumb_pixel_cache;

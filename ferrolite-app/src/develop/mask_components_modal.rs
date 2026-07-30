@@ -316,6 +316,7 @@ fn edit_component_ui(
                 unit: "",
                 bipolar: false,
                 signed: false,
+                custom_label_w: None,
             });
             ui.add(EguiSlider {
                 label: "Hi",
@@ -328,6 +329,7 @@ fn edit_component_ui(
                 unit: "",
                 bipolar: false,
                 signed: false,
+                custom_label_w: None,
             });
             ui.add(EguiSlider {
                 label: "Softness",
@@ -340,6 +342,7 @@ fn edit_component_ui(
                 unit: "",
                 bipolar: false,
                 signed: false,
+                custom_label_w: None,
             });
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
@@ -397,6 +400,7 @@ fn edit_component_ui(
                 unit: "",
                 bipolar: false,
                 signed: false,
+                custom_label_w: None,
             });
             ui.add(EguiSlider {
                 label: "Softness",
@@ -409,6 +413,7 @@ fn edit_component_ui(
                 unit: "",
                 bipolar: false,
                 signed: false,
+                custom_label_w: None,
             });
             ui.horizontal(|ui| {
                 if ui.button("Update").clicked() {
@@ -434,6 +439,7 @@ fn edit_component_ui(
                 unit: "",
                 bipolar: false,
                 signed: false,
+                custom_label_w: None,
             });
             let invert_resp = ui.checkbox(&mut mask.radial_invert, "Invert");
             ui.label(
@@ -565,6 +571,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         ui.add(EguiSlider {
             label: "Hardness",
@@ -577,6 +584,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         ui.add(EguiSlider {
             label: "Flow",
@@ -589,6 +597,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         ui.checkbox(&mut mask.brush_erase, "Erase");
     }
@@ -621,6 +630,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         ui.add(EguiSlider {
             label: "Hi",
@@ -633,6 +643,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         ui.add(EguiSlider {
             label: "Softness",
@@ -645,6 +656,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         if ui.button("Add Luma range").clicked() {
             let c = MaskComponent::LumaRange {
@@ -715,6 +727,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         ui.add(EguiSlider {
             label: "Softness",
@@ -727,6 +740,7 @@ fn add_component_ui(
             unit: "",
             bipolar: false,
             signed: false,
+            custom_label_w: None,
         });
         let can_add = !mask.color_samples.is_empty();
         if ui

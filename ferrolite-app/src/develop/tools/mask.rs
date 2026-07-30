@@ -1,14 +1,15 @@
 //! The Mask tool: a canvas overlay (coverage tint + brush/gradient/range
-//! affordances) plus a "Mask" panel tab (masks list + selected-mask controls).
-//! Both wrap existing, already-tested code (`mask_overlay::show`,
-//! `mask_panel::show`) so this migration is behavior-preserving.
+//! affordances). It injects no temporary panel tab of its own — the mask
+//! management block + scope banner render above the shared base tabs in
+//! `tool_panel::show` (design 2026-07-28 §3; Task 6), and the same
+//! Light/Color/Effects tabs edit the selected mask via `ScopedEdit`.
 //!
 //! NOTE: the app calls `rebuild_mask_overlay_if_needed` before this tool's
 //! `canvas()` runs while Mask is active, so `state.mask_overlay_native` (the
 //! app-global GPU-native overlay texture id) is current.
 
 use crate::develop::adjustment_panel::EditOutcome;
-use crate::develop::tool::{DevelopCtx, DevelopTool, PanelTab, TabId, ToolId};
+use crate::develop::tool::{DevelopCtx, DevelopTool, PanelTab, ToolId};
 use crate::state::AppState;
 
 pub struct MaskTool;
@@ -27,7 +28,7 @@ impl DevelopTool for MaskTool {
         ctx.state.viewer.is_some()
     }
     fn tabs(&self) -> Vec<Box<dyn PanelTab>> {
-        vec![Box::new(MaskTab)]
+        Vec::new()
     }
     fn canvas(
         &self,
@@ -59,24 +60,5 @@ impl DevelopTool for MaskTool {
             dims,
             preview_source.as_ref(),
         )
-    }
-}
-
-pub struct MaskTab;
-
-impl PanelTab for MaskTab {
-    fn id(&self) -> TabId {
-        TabId("mask")
-    }
-    fn label(&self) -> &str {
-        "Mask"
-    }
-    fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
-        // Mirrors the current call (adjustment_panel.rs:244-252): pull the
-        // OpStack out, then take &mut v.mask.
-        let stack = state.viewer.as_ref()?.op_stack.clone();
-        let keymap = state.settings.keymap.clone();
-        let v = state.viewer.as_mut()?;
-        crate::develop::mask_panel::show(ui, &stack, &mut v.mask, &keymap)
     }
 }

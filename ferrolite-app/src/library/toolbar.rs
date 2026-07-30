@@ -1,34 +1,94 @@
-//! Library top toolbar: search, sort, rating/flag/tag filters, and the
-//! thumbnail-size slider pinned to the right.  All widgets drive `state.filter`
-//! and `state.include_subfolders` directly; the caller sets `state.dirty` when
-//! the returned `changed` flag is true (so the read pool re-queries off-thread).
-//!
-//! Icons come from the shared icon library (`crate::icons`, backed by egui-phosphor)
-//! via the `library::icons` helpers — see the "UI icons" rule in the root CLAUDE.md.
+//! Library top toolbar: search, sort, rating/flag/tag filters, Metadata Filters popup, and the
+//! thumbnail-size slider pinned to the right. All widgets drive `state.filter`
+//! directly; the caller sets `state.dirty` when the returned `changed` flag is
+//! true (so the read pool re-queries off-thread). The "Subfolders" scope toggle
+//! lives in the Folders tree header (`panel.rs`), not here.
 
+use crate::library::filter::range_to_filter;
 use crate::library::filter_widgets as fw;
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
-use crate::widgets::EguiSlider;
+use crate::widgets::range_slider::graduated_detents;
+use crate::widgets::{draw_reset_arrow, multi_select_chips, tool_button, EguiSlider, RangeSlider};
+use egui::{pos2, Color32, FontId, Rounding, Stroke};
+use ferrolite_catalog::FileTypeChip;
+use std::sync::LazyLock;
+
+/// Toolbar layout constants (Spec 3.3).
+#[allow(dead_code)]
+pub const TOOLBAR_HEIGHT: f32 = 38.0_f32;
+#[allow(dead_code)]
+pub const TOOLBAR_BG: Color32 = Color32::from_rgb(0x1a, 0x1a, 0x1a);
+#[allow(dead_code)]
+pub const TOOLBAR_BORDER: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+#[allow(dead_code)]
+pub const METADATA_POPUP_BG: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x1d);
+#[allow(dead_code)]
+pub const METADATA_POPUP_BORDER: Color32 = Color32::from_rgb(0x35, 0x35, 0x35);
 
 /// Width of the thumbnail-size slider's box on the right.
-const SIZE_SLIDER_W: f32 = 208.0;
+const SIZE_SLIDER_W: f32 = 208.0_f32;
 
 /// Caret half-width (px) used in the Metadata button.
-const CARET_HW: f32 = 4.5;
+const CARET_HW: f32 = 4.5_f32;
+
+/// ISO range-filter bounds and full-stop detents (spec L3, Task 7).
+const ISO_MIN: f32 = 50.0_f32;
+const ISO_MAX: f32 = 102_400.0_f32;
+const ISO_DETENTS: &[f32] = &[
+    50.0, 100.0, 200.0, 400.0, 800.0, 1600.0, 3200.0, 6400.0, 12800.0, 25600.0, 51200.0, 102400.0,
+];
+
+/// Aperture range-filter bounds and third-stop detents (spec L3, Task 7).
+const APERTURE_MIN: f32 = 0.7_f32;
+const APERTURE_MAX: f32 = 32.0_f32;
+const APERTURE_DETENTS: &[f32] = &[
+    0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6,
+    6.3, 7.1, 8.0, 9.0, 10.0, 11.0, 13.0, 14.0, 16.0, 18.0, 20.0, 22.0, 25.0, 29.0, 32.0,
+];
+
+/// Focal-length range-filter bounds (spec L3, Task 7; round4 feedback item 1).
+/// Whole-mm detents were twitchy and hard to aim across the full 8-1200mm
+/// span, so the detent step grows the further out the value gets: 1mm in
+/// `[8,50)`, 5mm in `[50,200)`, 10mm in `[200,600)`, 50mm in `[600,1200]`.
+/// Built once (not per-frame) into a cached `Vec` since `RangeSlider` needs a
+/// `&[f32]` every frame it draws. Manual double-click entry (`parse_range_entry`)
+/// is not constrained to these steps, so precision is still available.
+const FOCAL_MIN: f32 = 8.0_f32;
+const FOCAL_MAX: f32 = 1200.0_f32;
+static FOCAL_DETENTS: LazyLock<Vec<f32>> = LazyLock::new(|| {
+    graduated_detents(&[
+        (8.0, 50.0, 1.0),
+        (50.0, 200.0, 5.0),
+        (200.0, 600.0, 10.0),
+        (600.0, 1200.0, 50.0),
+    ])
+});
 
 /// Returns `true` if any filter/sort/source field changed this frame.
 pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bool {
     let mut changed = false;
-    ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = 10.0;
 
-        // Search (debounced upstream by the dirty flag; query runs off-thread).
+    // Toolbar background + bottom border
+    let bar = ui.max_rect();
+    ui.painter().rect_filled(bar, Rounding::ZERO, TOOLBAR_BG);
+    ui.painter().line_segment(
+        [
+            pos2(bar.left(), bar.bottom() - 0.5_f32),
+            pos2(bar.right(), bar.bottom() - 0.5_f32),
+        ],
+        Stroke::new(1.0_f32, TOOLBAR_BORDER),
+    );
+
+    ui.horizontal_centered(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0_f32;
+
+        // Search field (210px desired width).
         let resp = ui.add(
             egui::TextEdit::singleline(&mut state.filter.search)
                 .hint_text("Search filename or tag…")
-                .desired_width(206.0),
+                .desired_width(210.0_f32),
         );
         if resp.changed() {
             changed = true;
@@ -63,98 +123,381 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
             changed = true;
         }
 
-        if ui
-            .checkbox(&mut state.include_subfolders, "Subfolders")
-            .changed()
-        {
-            changed = true;
-        }
-
-        // Metadata range popover: camera model (inline list), ISO range, date range.
+        // Metadata Filters popup panel (300px wide, #1d1d1d bg, 1px #353535 border).
         //
-        // The camera selector was previously a nested ComboBox, which spawned its own
-        // area-popup.  Clicking that popup registered as a click *outside* the parent
-        // popup, immediately closing it (bug #9).  Fix: replace the ComboBox with inline
-        // `selectable_label` rows inside a ScrollArea — no nested popup, so the parent
-        // stays open.  `CloseOnClickOutside` still closes when the user clicks outside.
-        let popup_id = ui.make_persistent_id("meta_popover");
-        let btn_resp = show_metadata_button(ui, popup_id);
-        if btn_resp.clicked() {
-            ui.memory_mut(|m| m.toggle_popup(popup_id));
-        }
-        egui::popup::popup_below_widget(
-            ui,
-            popup_id,
-            &btn_resp,
-            egui::PopupCloseBehavior::CloseOnClickOutside,
-            |ui| {
-                ui.set_min_width(240.0);
+        // NOTE: this is a hand-rolled `egui::Area`-based popup, NOT
+        // `Memory::toggle_popup` + `popup_below_widget`. egui's `Memory` tracks the
+        // open popup in a single global slot (`Memory.popup: Option<Id>`), and the
+        // `egui::ComboBox`es inside this popup (Camera, Lens) use that exact same
+        // slot for their own dropdown. Clicking a combo overwrote the slot with the
+        // combo's id, so next frame `popup_below_widget`'s `is_popup_open` guard
+        // failed and the whole Metadata popup vanished. Tracking our own
+        // open/closed bool in temp data sidesteps the shared slot entirely, so the
+        // combos are free to use it for themselves without disturbing us.
+        let popup_id = ui.make_persistent_id("metadata_filters_popup");
+        let mut popup_open = ui.data(|d| d.get_temp::<bool>(popup_id)).unwrap_or(false);
 
-                // Camera model — inline selectable list (no nested ComboBox popup).
-                ui.label("Camera");
-                egui::ScrollArea::vertical()
-                    .id_salt("meta_camera_scroll")
-                    .max_height(160.0)
-                    .show(ui, |ui| {
-                        if ui
-                            .selectable_label(state.filter.camera.is_none(), "Any")
-                            .clicked()
-                        {
-                            state.filter.camera = None;
-                            changed = true;
-                        }
-                        for c in &state.camera_options {
-                            let sel = state.filter.camera.as_deref() == Some(c.as_str());
-                            if ui.selectable_label(sel, c.as_str()).clicked() {
-                                state.filter.camera = Some(c.clone());
+        // `show_metadata_button` only reserves the caret's rect and does not paint
+        // it yet: the caret is painted once, at the very bottom of this block,
+        // from `popup_open`'s FINAL value for the frame (after the toggle below
+        // and after the close-decision that may also flip it via Escape/outside
+        // click). Painting it here — before those — would show last frame's
+        // direction for one frame on the exact click that opens/closes the popup.
+        let (btn_resp, caret_rect) = show_metadata_button(ui);
+        if btn_resp.clicked() {
+            popup_open = !popup_open;
+        }
+
+        let mut combo_selection_this_frame = false;
+
+        if popup_open {
+            let mut close_popup = false;
+
+            let area_resp = egui::Area::new(popup_id.with("area"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(btn_resp.rect.left_bottom())
+                .default_width(300.0_f32)
+                .show(ui.ctx(), |ui| {
+                    ui.set_min_width(300.0_f32);
+                    ui.set_max_width(300.0_f32);
+
+                    egui::Frame::popup(ui.style())
+                        .fill(METADATA_POPUP_BG)
+                        .stroke(Stroke::new(1.0_f32, METADATA_POPUP_BORDER))
+                        .inner_margin(egui::Margin::same(12.0_f32))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0_f32;
+
+                            // Header "METADATA FILTERS" + "Reset" link
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("METADATA FILTERS")
+                                        .font(FontId::proportional(11.0_f32))
+                                        .strong()
+                                        .color(theme::TEXT_PRIMARY),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.link("Reset").clicked() {
+                                            state.filter.reset_metadata_filters();
+                                            changed = true;
+                                        }
+                                    },
+                                );
+                            });
+
+                            ui.separator();
+
+                            // Combos: Camera, Lens. (The popup used to also carry
+                            // a Rating combo here, duplicating the toolbar's main
+                            // rating filter — removed per round4 feedback item 1;
+                            // the main toolbar rating control, `fw::rating_threshold`,
+                            // remains the only rating control and still drives
+                            // `state.filter.min_rating`.)
+                            ui.horizontal(|ui| {
+                                ui.label("Camera");
+                                let selected_cam =
+                                    state.filter.camera.as_deref().unwrap_or("All Cameras");
+                                egui::ComboBox::from_id_salt("camera_combo")
+                                    .selected_text(selected_cam)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                state.filter.camera.is_none(),
+                                                "All Cameras",
+                                            )
+                                            .clicked()
+                                        {
+                                            state.filter.camera = None;
+                                            changed = true;
+                                            combo_selection_this_frame = true;
+                                        }
+                                        for c in &state.camera_options {
+                                            let sel =
+                                                state.filter.camera.as_deref() == Some(c.as_str());
+                                            if ui.selectable_label(sel, c.as_str()).clicked() {
+                                                state.filter.camera = Some(c.clone());
+                                                changed = true;
+                                                combo_selection_this_frame = true;
+                                            }
+                                        }
+                                    });
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Lens");
+                                let selected_lens =
+                                    state.filter.lens.as_deref().unwrap_or("All Lenses");
+                                egui::ComboBox::from_id_salt("lens_combo")
+                                    .selected_text(selected_lens)
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(
+                                                state.filter.lens.is_none(),
+                                                "All Lenses",
+                                            )
+                                            .clicked()
+                                        {
+                                            state.filter.lens = None;
+                                            changed = true;
+                                            combo_selection_this_frame = true;
+                                        }
+                                        for l in &state.lens_options {
+                                            let sel =
+                                                state.filter.lens.as_deref() == Some(l.as_str());
+                                            if ui.selectable_label(sel, l.as_str()).clicked() {
+                                                state.filter.lens = Some(l.clone());
+                                                changed = true;
+                                                combo_selection_this_frame = true;
+                                            }
+                                        }
+                                    });
+                            });
+
+                            ui.separator();
+
+                            // "FILE TYPE" multi-select chips (spec L4, Task 8): each
+                            // chip independently toggles membership in
+                            // `file_types` (selected = in the set); the empty set
+                            // is the "all types" state, and the reset arrow beside
+                            // the section label clears it back to that state.
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new("FILE TYPE")
+                                        .font(FontId::proportional(10.5_f32))
+                                        .color(theme::TEXT_DIM),
+                                );
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let modified = !state.filter.file_types.is_empty();
+                                        let (reset_rect, reset_resp) = ui.allocate_exact_size(
+                                            egui::vec2(16.0_f32, 16.0_f32),
+                                            egui::Sense::click(),
+                                        );
+                                        if reset_resp.hovered() && modified {
+                                            ui.output_mut(|o| {
+                                                o.cursor_icon = egui::CursorIcon::PointingHand
+                                            });
+                                        }
+                                        if reset_resp.clicked() && modified {
+                                            state.filter.file_types.clear();
+                                            changed = true;
+                                        }
+                                        let reset_color = if modified {
+                                            if reset_resp.hovered() {
+                                                theme::ACCENT_BRIGHT
+                                            } else {
+                                                theme::TEXT_DIM
+                                            }
+                                        } else {
+                                            theme::BORDER_STRONG
+                                        };
+                                        draw_reset_arrow(
+                                            ui.painter(),
+                                            reset_rect.center(),
+                                            4.5,
+                                            reset_color,
+                                        );
+                                    },
+                                );
+                            });
+                            let chip_options = [
+                                (FileTypeChip::Raw, "RAW"),
+                                (FileTypeChip::Jpeg, "JPEG"),
+                                (FileTypeChip::Png, "PNG"),
+                                (FileTypeChip::Tiff, "TIFF"),
+                            ];
+                            if multi_select_chips(
+                                ui,
+                                "file_type_chips",
+                                &mut state.filter.file_types,
+                                &chip_options,
+                            )
+                            .changed()
+                            {
                                 changed = true;
                             }
-                        }
-                    });
 
-                ui.separator();
+                            ui.separator();
 
-                // ISO range (cached).
-                if let Some((lo, hi)) = state.iso_range {
-                    let (mut a, mut b) = state.filter.iso.unwrap_or((lo, hi));
-                    let mut af = a as f32;
-                    let mut bf = b as f32;
-                    let r1 =
-                        ui.add(egui::Slider::new(&mut af, lo as f32..=hi as f32).text("ISO min"));
-                    let r2 =
-                        ui.add(egui::Slider::new(&mut bf, lo as f32..=hi as f32).text("ISO max"));
-                    if r1.changed() || r2.changed() {
-                        a = af as u32;
-                        b = bf as u32;
-                        state.filter.iso = Some((a.min(b), a.max(b)));
-                        changed = true;
-                    }
-                    if ui.button("Clear ISO").clicked() {
-                        state.filter.iso = None;
-                        changed = true;
-                    }
-                }
+                            // "EXPOSURE RANGE" sliders: ISO, Aperture, Focal
+                            ui.label(
+                                egui::RichText::new("EXPOSURE RANGE")
+                                    .font(FontId::proportional(10.5_f32))
+                                    .color(theme::TEXT_DIM),
+                            );
 
-                // Date range (cached; ISO-8601 text inputs for lexical compare).
-                if let Some((lo, hi)) = state.date_range.clone() {
-                    let (mut from, mut to) = state
-                        .filter
-                        .date
-                        .clone()
-                        .unwrap_or((lo.clone(), hi.clone()));
-                    let r1 = ui.add(egui::TextEdit::singleline(&mut from).hint_text("from"));
-                    let r2 = ui.add(egui::TextEdit::singleline(&mut to).hint_text("to"));
-                    if r1.changed() || r2.changed() {
-                        state.filter.date = Some((from, to));
-                        changed = true;
-                    }
-                    if ui.button("Clear dates").clicked() {
-                        state.filter.date = None;
-                        changed = true;
-                    }
-                }
-            },
+                            // ISO range filter: full-stop detents, log track.
+                            // `None` reads as handles at the full [min, max] bounds;
+                            // narrowed handles write back `Some((lo, hi))`.
+                            let (mut iso_lo, mut iso_hi) = state
+                                .filter
+                                .iso
+                                .map(|(lo, hi)| (lo as f32, hi as f32))
+                                .unwrap_or((ISO_MIN, ISO_MAX));
+                            if ui
+                                .add(RangeSlider {
+                                    label: "ISO",
+                                    lo: &mut iso_lo,
+                                    hi: &mut iso_hi,
+                                    min: ISO_MIN,
+                                    max: ISO_MAX,
+                                    detents: ISO_DETENTS,
+                                    log: true,
+                                    decimals: 0,
+                                    unit: "",
+                                    value_prefix: "",
+                                })
+                                .changed()
+                            {
+                                state.filter.iso =
+                                    range_to_filter(iso_lo, iso_hi, ISO_MIN, ISO_MAX)
+                                        .map(|(lo, hi)| (lo.round() as u32, hi.round() as u32));
+                                changed = true;
+                            }
+
+                            // Aperture range filter: third-stop detents, log track.
+                            let (mut ap_lo, mut ap_hi) = state
+                                .filter
+                                .aperture
+                                .unwrap_or((APERTURE_MIN, APERTURE_MAX));
+                            if ui
+                                .add(RangeSlider {
+                                    label: "Aperture",
+                                    lo: &mut ap_lo,
+                                    hi: &mut ap_hi,
+                                    min: APERTURE_MIN,
+                                    max: APERTURE_MAX,
+                                    detents: APERTURE_DETENTS,
+                                    log: true,
+                                    decimals: 1,
+                                    unit: "",
+                                    value_prefix: "f/",
+                                })
+                                .changed()
+                            {
+                                state.filter.aperture =
+                                    range_to_filter(ap_lo, ap_hi, APERTURE_MIN, APERTURE_MAX);
+                                changed = true;
+                            }
+
+                            // Focal-length range filter: graduated detents (round4
+                            // feedback item 1), log track — easier to aim across
+                            // the wide 8-1200mm span than a linear track.
+                            let (mut focal_lo, mut focal_hi) =
+                                state.filter.focal.unwrap_or((FOCAL_MIN, FOCAL_MAX));
+                            if ui
+                                .add(RangeSlider {
+                                    label: "Focal",
+                                    lo: &mut focal_lo,
+                                    hi: &mut focal_hi,
+                                    min: FOCAL_MIN,
+                                    max: FOCAL_MAX,
+                                    detents: &FOCAL_DETENTS,
+                                    log: true,
+                                    decimals: 0,
+                                    unit: " mm",
+                                    value_prefix: "",
+                                })
+                                .changed()
+                            {
+                                state.filter.focal =
+                                    range_to_filter(focal_lo, focal_hi, FOCAL_MIN, FOCAL_MAX);
+                                changed = true;
+                            }
+
+                            ui.separator();
+
+                            // Footer: "Apply Filters" (accent-filled) and "Close" buttons
+                            ui.horizontal(|ui| {
+                                let apply_btn = egui::Button::new(
+                                    egui::RichText::new("Apply Filters").color(theme::ACCENT_TEXT),
+                                )
+                                .fill(theme::ACCENT_FILL);
+                                if ui.add(apply_btn).clicked() {
+                                    changed = true;
+                                    close_popup = true;
+                                }
+                                if ui.button("Close").clicked() {
+                                    close_popup = true;
+                                }
+                            });
+                        });
+                });
+
+            // Close on outside click (button and popup both excluded) unless a
+            // ComboBox dropdown inside is open. A combo's dropdown area can extend
+            // past the popup's own Area rect, so a raw "click outside the popup"
+            // check would treat picking a combo option as an outside click and
+            // slam the whole Metadata popup shut.
+            //
+            // `any_inner_popup_open` is read AFTER the Area above (and the combos
+            // inside it) already ran, so it is NOT a reliable "a combo dropdown
+            // was open" signal for the exact frame a selection is made: egui's
+            // `ComboBox` uses `PopupCloseBehavior::CloseOnClick` internally, which
+            // closes its own dropdown (clearing the shared `Memory` popup slot)
+            // synchronously the moment any of its options is clicked — before we
+            // get to read `any_popup_open()` here. So on that frame this would
+            // read `false` even though the click was really "pick a combo option",
+            // and `clicked_outside` would read `true` (the option can render
+            // outside the popup's own Area rect), closing the whole popup right
+            // after the pick. `combo_selection_this_frame` is set directly at each
+            // `selectable_label` click site above and short-circuits the close
+            // for exactly that frame, independent of the (here, unreliable)
+            // `any_inner_popup_open` snapshot.
+            let clicked_outside =
+                btn_resp.clicked_elsewhere() && area_resp.response.clicked_elsewhere();
+            let any_inner_popup_open = ui.memory(|m| m.any_popup_open());
+            let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+
+            if close_popup
+                || should_close_metadata_popup(
+                    clicked_outside,
+                    any_inner_popup_open,
+                    escape_pressed,
+                    combo_selection_this_frame,
+                )
+            {
+                popup_open = false;
+            }
+        }
+
+        // Paint the caret from `popup_open`'s value at the END of the frame's
+        // decision-making (after the toggle click above AND the close-decision
+        // just above, which can also flip it via Escape/outside-click) so it
+        // never shows a stale direction for a frame — see the comment on
+        // `show_metadata_button`.
+        icons::caret(
+            ui.painter(),
+            caret_rect.center(),
+            CARET_HW - 1.0_f32,
+            theme::TEXT_DIM,
+            !popup_open,
         );
+
+        ui.data_mut(|d| d.insert_temp(popup_id, popup_open));
+
+        // Reset-all-filters: clears every Library filter (rating, flag, tags,
+        // search, camera, lens, ISO/aperture/focal, file-type chips) in one
+        // click. Disabled — with a "why" hover reason — once nothing is
+        // active, so it's inert rather than misleadingly clickable.
+        let all_default = state.filter.is_default();
+        if tool_button(
+            ui,
+            crate::icons::RESET,
+            "Reset all filters",
+            false,
+            !all_default,
+            Some("All filters are at default"),
+        )
+        .clicked()
+            && !all_default
+        {
+            state.filter.reset_all();
+            changed = true;
+        }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.allocate_ui_with_layout(
@@ -164,14 +507,15 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                     ui.add(EguiSlider {
                         label: "Size",
                         value: thumb_size,
-                        min: 0.0,
-                        max: 100.0,
-                        default: 46.0,
-                        step: 1.0,
+                        min: 0.0_f32,
+                        max: 100.0_f32,
+                        default: 46.0_f32,
+                        step: 1.0_f32,
                         decimals: 0,
                         unit: "",
                         bipolar: false,
                         signed: false,
+                        custom_label_w: None,
                     });
                 },
             );
@@ -180,24 +524,152 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
     changed
 }
 
-/// Render the "Metadata" button with a small painted down-caret to the right.
-/// Returns the `Response` for the text button (used to anchor + toggle the popup).
-fn show_metadata_button(ui: &mut egui::Ui, _popup_id: egui::Id) -> egui::Response {
-    // Lay out text button + caret in a tight inline group.
+/// Render the "Metadata" button and reserve the rect for its caret glyph.
+/// Returns the button `Response` (used to anchor + toggle the popup) and the
+/// caret's paint rect — the caller paints the caret itself, once, from
+/// `popup_open`'s value at the end of this frame's decision-making (see the
+/// call site in `show`). Painting it here, before that toggle/close logic
+/// runs, would show the previous frame's direction for one frame on the exact
+/// click that opens or closes the popup.
+fn show_metadata_button(ui: &mut egui::Ui) -> (egui::Response, egui::Rect) {
+    // Lay out text button + caret rect in a tight inline group.
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 3.0;
+        ui.spacing_mut().item_spacing.x = 3.0_f32;
         let btn = ui.button("Metadata");
-        // Small caret to the right of the button text.
-        let caret_size = egui::vec2(12.0, 12.0);
+        // Small caret to the right of the button text (painted by the caller).
+        let caret_size = egui::vec2(12.0_f32, 12.0_f32);
         let (rect, _) = ui.allocate_exact_size(caret_size, egui::Sense::hover());
-        icons::caret(
-            ui.painter(),
-            rect.center(),
-            CARET_HW - 1.0,
-            theme::TEXT_DIM,
-            true,
-        );
-        btn
+        (btn, rect)
     })
     .inner
+}
+
+/// Pure close-decision for the Metadata popup, factored out so it's testable
+/// without an `egui::Context`.
+///
+/// - `any_inner_popup_open` should reflect `ui.memory(|m| m.any_popup_open())`
+///   sampled after this frame's ComboBoxes ran. It's kept as an input (rather
+///   than dropped) because it still guards the case where a dropdown is open
+///   but nothing was clicked this frame. It is NOT sufficient on its own for a
+///   combo *selection* click: egui's `ComboBox` uses
+///   `PopupCloseBehavior::CloseOnClick`, which closes the combo's own dropdown
+///   (clearing the shared `Memory` popup slot) synchronously as part of
+///   rendering it, before this flag is sampled — so on the very frame a
+///   selection is made, this reads `false` even though the click was a combo
+///   pick, not a click outside the popup.
+/// - `combo_selection_this_frame` covers exactly that frame: it's set directly
+///   at each `selectable_label` click site inside the popup's ComboBoxes and
+///   unconditionally keeps the popup open, since a selection can render past
+///   the popup's own Area rect and would otherwise look like an outside click.
+fn should_close_metadata_popup(
+    clicked_outside: bool,
+    any_inner_popup_open: bool,
+    escape_pressed: bool,
+    combo_selection_this_frame: bool,
+) -> bool {
+    if escape_pressed {
+        return true;
+    }
+    if combo_selection_this_frame {
+        return false;
+    }
+    clicked_outside && !any_inner_popup_open
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Context;
+
+    #[test]
+    fn toolbar_layout_constants() {
+        assert_eq!(TOOLBAR_HEIGHT, 38.0_f32);
+        assert_eq!(TOOLBAR_BG, Color32::from_rgb(0x1a, 0x1a, 0x1a));
+        assert_eq!(TOOLBAR_BORDER, Color32::from_rgb(0x26, 0x26, 0x26));
+        assert_eq!(METADATA_POPUP_BG, Color32::from_rgb(0x1d, 0x1d, 0x1d));
+        assert_eq!(METADATA_POPUP_BORDER, Color32::from_rgb(0x35, 0x35, 0x35));
+    }
+
+    #[test]
+    fn metadata_popup_open_state_is_a_plain_bool_in_temp_data() {
+        // The Metadata popup no longer competes for egui's single global
+        // `Memory.popup` slot (that's the bug the ComboBoxes triggered); its
+        // open/closed state lives in `Ui::data` under its own persistent id and
+        // is untouched by `Memory::toggle_popup`.
+        let ctx = Context::default();
+        let popup_id = egui::Id::new("metadata_filters_popup");
+
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(popup_id)), None);
+        ctx.data_mut(|d| d.insert_temp(popup_id, true));
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(popup_id)), Some(true));
+
+        // A ComboBox toggling the shared Memory popup slot must not affect it.
+        ctx.memory_mut(|m| m.toggle_popup(egui::Id::new("some_combo_box")));
+        assert_eq!(ctx.data(|d| d.get_temp::<bool>(popup_id)), Some(true));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_escape_always_closes() {
+        assert!(should_close_metadata_popup(false, false, true, false));
+        assert!(should_close_metadata_popup(false, true, true, false));
+        assert!(should_close_metadata_popup(true, true, true, false));
+        // Escape wins even in the (contrived) case a selection flag is also set.
+        assert!(should_close_metadata_popup(false, false, true, true));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_outside_click_closes_when_no_inner_popup_open() {
+        assert!(should_close_metadata_popup(true, false, false, false));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_stays_open_while_combo_dropdown_is_open() {
+        // A dropdown is open but nothing was clicked yet this frame: don't close.
+        assert!(!should_close_metadata_popup(true, true, false, false));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_stays_open_on_combo_selection_even_if_it_reads_as_outside_click()
+    {
+        // This is the exact interaction that used to close the popup before the
+        // fix: picking a ComboBox option renders past the popup's own Area rect,
+        // so the click reads as "outside the popup" (`clicked_outside`), AND by
+        // the time we sample it, `any_inner_popup_open` has already gone false
+        // (the combo closed its own dropdown as part of handling that same
+        // click, before we get to check). Only `combo_selection_this_frame`
+        // — set directly at the selection site — can save the popup here.
+        assert!(!should_close_metadata_popup(true, false, false, true));
+    }
+
+    #[test]
+    fn should_close_metadata_popup_stays_open_with_no_signal() {
+        assert!(!should_close_metadata_popup(false, false, false, false));
+        assert!(!should_close_metadata_popup(false, true, false, false));
+    }
+
+    #[test]
+    fn filter_state_reset_metadata_filters() {
+        let mut file_types = std::collections::BTreeSet::new();
+        file_types.insert(FileTypeChip::Raw);
+        let mut fs = crate::library::filter::FilterState {
+            camera: Some("Sony A7IV".to_string()),
+            lens: Some("24-70mm f/2.8".to_string()),
+            file_types,
+            min_rating: 4,
+            iso: Some((100, 3200)),
+            aperture: Some((2.8_f32, 11.0_f32)),
+            focal: Some((24.0_f32, 70.0_f32)),
+            ..Default::default()
+        };
+
+        fs.reset_metadata_filters();
+
+        assert_eq!(fs.camera, None);
+        assert_eq!(fs.lens, None);
+        assert!(fs.file_types.is_empty());
+        assert_eq!(fs.min_rating, 0);
+        assert_eq!(fs.iso, None);
+        assert_eq!(fs.aperture, None);
+        assert_eq!(fs.focal, None);
+    }
 }

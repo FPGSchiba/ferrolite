@@ -36,6 +36,26 @@ pub fn should_regenerate_on_leave(edits_dirty: bool) -> bool {
     edits_dirty
 }
 
+/// Full on-leave decision, including the "clear only on success" invariant:
+/// returns `(spawn_job, new_edits_dirty)`. `edits_dirty` is the ONLY signal
+/// that ever re-triggers the auto regen (short of the manual "Regenerate
+/// thumbnail" context-menu action), so it must survive a frame where no GPU
+/// render state is available (`frame.wgpu_render_state()` returned `None`) —
+/// clearing it unconditionally on such a frame would silently strand the
+/// image on its pre-edit thumbnail forever, with nothing left to retry it.
+/// Kept pure (no `Viewer`/`Frame`) so this invariant is unit-testable without
+/// a live GPU context.
+pub fn on_leave_decision(edits_dirty: bool, has_render_state: bool) -> (bool, bool) {
+    if !should_regenerate_on_leave(edits_dirty) {
+        return (false, edits_dirty);
+    }
+    if has_render_state {
+        (true, false)
+    } else {
+        (false, true)
+    }
+}
+
 /// Resolve the stack for the on-demand path from a sidecar `frl:ops` payload.
 /// Missing (`None`) or malformed (`deserialize` → `None`) → identity.
 pub fn resolve_regen_stack(payload: Option<String>) -> OpStack {
@@ -129,7 +149,7 @@ pub fn regenerate_edited_thumbnail_blocking(
 /// Where the job obtains the edit stack.
 pub enum RegenStackSource {
     /// From the just-closed viewer (auto-on-leave) — no sidecar read.
-    InMemory(OpStack),
+    InMemory(Box<OpStack>),
     /// Read the `.xmp` sidecar inside the job (on-demand catch-up); missing or
     /// malformed → identity.
     Sidecar,
@@ -160,7 +180,7 @@ pub fn spawn_regen_edited_thumbnail(
             return;
         }
         let stack = match stack_source {
-            RegenStackSource::InMemory(s) => s,
+            RegenStackSource::InMemory(s) => *s,
             RegenStackSource::Sidecar => resolve_regen_stack(read_ops(&sidecar_path(&path))),
         };
         match regenerate_edited_thumbnail_blocking(
@@ -201,6 +221,26 @@ mod tests {
     }
 
     #[test]
+    fn on_leave_decision_spawns_and_clears_when_gpu_is_available() {
+        assert_eq!(on_leave_decision(true, true), (true, false));
+    }
+
+    #[test]
+    fn on_leave_decision_keeps_dirty_flag_when_gpu_is_unavailable() {
+        // A missed frame (no render state) must NOT clear `edits_dirty`: it is
+        // the only signal that ever re-triggers the auto regen, and dropping
+        // it here would silently strand the image on its pre-edit thumbnail
+        // forever (short of the manual "Regenerate thumbnail" action).
+        assert_eq!(on_leave_decision(true, false), (false, true));
+    }
+
+    #[test]
+    fn on_leave_decision_is_a_noop_without_dirty_edits() {
+        assert_eq!(on_leave_decision(false, true), (false, false));
+        assert_eq!(on_leave_decision(false, false), (false, false));
+    }
+
+    #[test]
     fn missing_sidecar_resolves_to_identity() {
         assert!(resolve_regen_stack(None).is_identity());
     }
@@ -212,8 +252,7 @@ mod tests {
 
     #[test]
     fn valid_sidecar_payload_round_trips() {
-        let mut stack = OpStack::default();
-        stack.ops.push(ferrolite_pipeline::Op::Exposure(
+        let stack = OpStack::default().set_op(ferrolite_pipeline::Op::Exposure(
             ferrolite_pipeline::Exposure { ev: 1.0 },
         ));
         let payload = serialize(&stack);

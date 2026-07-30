@@ -395,8 +395,15 @@ pub fn geometry_uniform(
     let (s, c) = theta.sin_cos();
     let m = [c, -s, s, c];
 
+    // Pivot on the ROUNDED output extent, not the fractional crop_w_px/
+    // crop_h_px: out_w/out_h are the actual pixel dims being sampled, so the
+    // crop center used to derive `off` must agree with them. Using the
+    // unrounded crop_w_px/crop_h_px here (as before) leaves a ≤0.5px
+    // rounding remainder baked into every output texel's source coordinate,
+    // smearing the last row/column outward past the true crop extent. For
+    // an exact-pixel crop (out_w == crop_w_px, no remainder) this is a no-op.
     let out_center = [out_w as f32 * 0.5, out_h as f32 * 0.5];
-    let crop_center = [cx * sw + crop_w_px * 0.5, cy * sh + crop_h_px * 0.5];
+    let crop_center = [cx * sw + out_w as f32 * 0.5, cy * sh + out_h as f32 * 0.5];
     let off = [
         crop_center[0] - (m[0] * out_center[0] + m[1] * out_center[1]),
         crop_center[1] - (m[2] * out_center[0] + m[3] * out_center[1]),
@@ -1394,7 +1401,7 @@ mod tests {
     #[test]
     fn geometry_uniform_crop_halves_output_dims() {
         use crate::op::{Aspect, CropRect, Geometry};
-        let (_, w, h) = geometry_uniform(
+        let (u, w, h) = geometry_uniform(
             Some(Geometry {
                 crop: CropRect {
                     x: 0.25,
@@ -1409,6 +1416,11 @@ mod tests {
             48,
         );
         assert_eq!((w, h), (32, 24));
+        // Exact-pixel crop: crop_w_px/crop_h_px are already integers (32.0,
+        // 24.0), so out_w/out_h round with zero remainder. The rounded-dims
+        // fix must be a no-op here -- off is just the crop origin (16, 12),
+        // identical to what the pre-fix formula also produced for this case.
+        assert_eq!(u.off, [16.0, 12.0]);
     }
 
     #[test]
@@ -1428,6 +1440,90 @@ mod tests {
         assert!((u.m[1] - -1.0).abs() < 1e-5);
         assert!((u.m[2] - 1.0).abs() < 1e-5);
         assert!(u.m[3].abs() < 1e-5);
+    }
+
+    #[test]
+    fn geometry_uniform_fractional_crop_stays_in_bounds() {
+        // Root cause (spec C2, part 1): out_w/out_h are rounded to whole
+        // pixels, but the sampling matrix/offset must pivot around a crop
+        // center derived from THOSE ROUNDED dims, not the fractional
+        // crop_w_px/crop_h_px -- otherwise every output texel center is off
+        // by the rounding remainder (up to ~0.5 source px), smearing the
+        // last row/column outward past the true crop extent.
+        use crate::op::{Aspect, CropRect, Geometry};
+
+        let src_w = 4001u32;
+        let src_h = 2999u32;
+        let sw = src_w as f32;
+        let sh = src_h as f32;
+        // Deliberately fractional: crop_w_px/crop_h_px round with a
+        // non-trivial remainder in both dimensions.
+        let cx = 0.1003_f32;
+        let cy = 0.2001_f32;
+        let cw = 0.4997_f32;
+        let ch = 0.5993_f32;
+
+        for angle_deg in [0.0_f32, 12.5, -30.0] {
+            let geo = Geometry {
+                crop: CropRect {
+                    x: cx,
+                    y: cy,
+                    w: cw,
+                    h: ch,
+                },
+                angle_deg,
+                aspect: Aspect::Free,
+            };
+            let (u, out_w, out_h) = geometry_uniform(Some(geo), src_w, src_h);
+            let out_w = out_w as f32;
+            let out_h = out_h as f32;
+
+            // The true pivot: crop origin + half of the ROUNDED output
+            // extent (this is exactly what the fix must derive `m`/`off`
+            // from), rotated by the same matrix the uniform reports.
+            let ideal_center = [cx * sw + out_w * 0.5, cy * sh + out_h * 0.5];
+            let theta = angle_deg.to_radians();
+            let (s, c) = theta.sin_cos();
+            let r = [c, -s, s, c]; // same row-major convention as `m`
+
+            for &(ox, oy) in &[
+                (0.0_f32, 0.0_f32),
+                (out_w - 1.0, 0.0),
+                (0.0, out_h - 1.0),
+                (out_w - 1.0, out_h - 1.0),
+            ] {
+                // Output texel center, local to the output rect's own center.
+                let local = [ox + 0.5 - out_w * 0.5, oy + 0.5 - out_h * 0.5];
+                let ideal_src = [
+                    ideal_center[0] + r[0] * local[0] + r[1] * local[1],
+                    ideal_center[1] + r[2] * local[0] + r[3] * local[1],
+                ];
+
+                // What geometry_uniform's actual m/off place this corner at
+                // (mirrors the WGSL shader's `sx = m.x*po.x + m.y*po.y + off.x`).
+                let po = [ox + 0.5, oy + 0.5];
+                let actual_src = [
+                    u.m[0] * po[0] + u.m[1] * po[1] + u.off[0],
+                    u.m[2] * po[0] + u.m[3] * po[1] + u.off[1],
+                ];
+
+                let dx = (actual_src[0] - ideal_src[0]).abs();
+                let dy = (actual_src[1] - ideal_src[1]).abs();
+                // Design ceiling is half a source texel; the fixed formula
+                // should land within float epsilon of the ideal pivot.
+                assert!(
+                    dx <= 0.5 && dy <= 0.5,
+                    "angle {angle_deg}: corner ({ox},{oy}) drifted ({dx}, {dy}) \
+                     source px from the rounded-dims pivot"
+                );
+                assert!(
+                    dx < 1e-3 && dy < 1e-3,
+                    "angle {angle_deg}: corner ({ox},{oy}) off by ({dx}, {dy}) \
+                     source px -- m/off must derive from the ROUNDED out_w/out_h, \
+                     not the fractional crop_w_px/crop_h_px"
+                );
+            }
+        }
     }
 
     #[test]

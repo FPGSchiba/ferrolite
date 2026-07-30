@@ -382,6 +382,111 @@ mod tests {
         assert_eq!(module, Module::Library);
     }
 
+    /// Regression test for the active-module accent underline (Spec 3.2 / UI v2).
+    ///
+    /// Runs the REAL production titlebar construction (identical to app.rs:
+    /// `TopBottomPanel::top("titlebar").exact_height(30).frame(Frame::none().fill(BG_TITLEBAR))`
+    /// → `title_bar` → `TabRow`) plus a `CentralPanel`, then inspects the frame's
+    /// `FullOutput::shapes` and asserts the 2px `theme::ACCENT` underline is
+    /// (a) painted, (b) FULLY inside its clip rect, and (c) not intersected by any
+    /// shape painted after it.
+    ///
+    /// History: two earlier "fixes" moved the stroke relative to `rect.bottom()`
+    /// while the tab rect silently overflowed the 30px bar (rect.bottom() == 34,
+    /// clip bottom == 30), so the stroke was painted at y >= 30 and clipped to
+    /// zero visible pixels. Asserting `clip.contains_rect(bbox)` here — not mere
+    /// existence — is what catches that failure mode.
+    #[test]
+    fn titlebar_active_tab_underline_is_visible() {
+        let ctx = Context::default();
+        let mut module = Module::Export;
+        let keymap = Keymap::default();
+
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                pos2(0.0_f32, 0.0_f32),
+                vec2(1280.0_f32, 800.0_f32),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            egui::TopBottomPanel::top("titlebar")
+                .exact_height(TITLEBAR_HEIGHT)
+                .frame(egui::Frame::none().fill(crate::theme::BG_TITLEBAR))
+                .show(ctx, |ui| {
+                    let _ = title_bar(
+                        ctx,
+                        ui,
+                        &mut module,
+                        VERSION_STRING,
+                        false,
+                        false,
+                        &keymap,
+                        false,
+                        false,
+                        false,
+                        false,
+                        false,
+                    );
+                });
+            egui::CentralPanel::default().show(ctx, |_ui| {});
+        });
+
+        // Flatten the shape tree, preserving paint order.
+        fn flatten(shape: &egui::Shape, clip: Rect, out: &mut Vec<(egui::Shape, Rect)>) {
+            match shape {
+                egui::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        flatten(s, clip, out);
+                    }
+                }
+                s => out.push((s.clone(), clip)),
+            }
+        }
+        let mut flat: Vec<(egui::Shape, Rect)> = Vec::new();
+        for clipped in &output.shapes {
+            flatten(&clipped.shape, clipped.clip_rect, &mut flat);
+        }
+
+        let is_accent_underline = |shape: &egui::Shape| -> bool {
+            matches!(
+                shape,
+                egui::Shape::LineSegment { points, stroke }
+                    if stroke.color == egui::epaint::ColorMode::Solid(crate::theme::ACCENT)
+                        && (stroke.width - 2.0_f32).abs() < 1e-4
+                        && (points[0].y - points[1].y).abs() < 1e-4
+            )
+        };
+
+        let (idx, (underline, clip)) = flat
+            .iter()
+            .enumerate()
+            .find(|(_, (shape, _))| is_accent_underline(shape))
+            .expect("active tab must paint a 2px horizontal theme::ACCENT underline");
+
+        // Visible: the whole 2px stroke must lie inside its clip rect (the 30px
+        // titlebar panel), not just intersect it.
+        let bbox = underline.visual_bounding_rect();
+        assert!(
+            clip.contains_rect(bbox),
+            "underline bbox {bbox:?} must be fully inside its clip rect {clip:?} \
+             (a partially/fully clipped underline is invisible in the running app)"
+        );
+        assert!(
+            bbox.max.y <= TITLEBAR_HEIGHT,
+            "underline bbox {bbox:?} must lie within the {TITLEBAR_HEIGHT}px titlebar"
+        );
+
+        // Not covered: nothing painted after the underline may overlap it.
+        for (shape, later_clip) in flat.iter().skip(idx + 1) {
+            let later_bbox = shape.visual_bounding_rect();
+            assert!(
+                !(later_bbox.intersects(bbox) && later_clip.intersects(bbox)),
+                "underline at {bbox:?} is painted over by a later shape: {shape:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_titlebar_single_border_and_tab_alignment() {
         let ctx = Context::default();

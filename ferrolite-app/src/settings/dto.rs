@@ -408,6 +408,14 @@ pub struct Settings {
     pub mask_noise_reduction_open: bool,
     #[serde(default = "default_true")]
     pub mask_dehaze_open: bool,
+    // Crop tool's dedicated panel (design 2026-07-29 §C3 / V2 README:69) — the
+    // panel that replaces the shared Light/Color/Effects tabs while Crop is
+    // active. Only one scope exists (Crop is never mask-scoped), so there is
+    // no `mask_crop_*` counterpart.
+    #[serde(default = "default_true")]
+    pub crop_transform_open: bool,
+    #[serde(default = "default_true")]
+    pub crop_geometry_open: bool,
 }
 
 impl Default for Settings {
@@ -449,6 +457,8 @@ impl Default for Settings {
             mask_sharpening_open: true,
             mask_noise_reduction_open: true,
             mask_dehaze_open: true,
+            crop_transform_open: true,
+            crop_geometry_open: true,
         }
     }
 }
@@ -456,7 +466,7 @@ impl Default for Settings {
 /// Number of section-disclosure (`*_open`) flags in `Settings` — see
 /// `disclosure_snapshot`. Kept as a named constant so the snapshot array size
 /// and the coverage test share one source of truth.
-pub const DISCLOSURE_FLAG_COUNT: usize = 19;
+pub const DISCLOSURE_FLAG_COUNT: usize = 21;
 
 /// Snapshot of EVERY section-disclosure flag on `Settings` (both the Adjust
 /// scope and its per-scope Mask counterpart — see the `mask_*_open` fields'
@@ -492,6 +502,8 @@ pub fn disclosure_snapshot(s: &Settings) -> [bool; DISCLOSURE_FLAG_COUNT] {
         s.mask_sharpening_open,
         s.mask_noise_reduction_open,
         s.mask_dehaze_open,
+        s.crop_transform_open,
+        s.crop_geometry_open,
     ]
 }
 
@@ -678,6 +690,8 @@ mod tests {
         assert!(default_settings.mask_sharpening_open);
         assert!(default_settings.mask_noise_reduction_open);
         assert!(default_settings.mask_dehaze_open);
+        assert!(default_settings.crop_transform_open);
+        assert!(default_settings.crop_geometry_open);
 
         let empty_json = "{}";
         let parsed: Settings = serde_json::from_str(empty_json).expect("deserialize empty json");
@@ -707,6 +721,8 @@ mod tests {
             mask_sharpening_open: false,
             mask_noise_reduction_open: false,
             mask_dehaze_open: false,
+            crop_transform_open: false,
+            crop_geometry_open: false,
             ..Settings::default()
         };
 

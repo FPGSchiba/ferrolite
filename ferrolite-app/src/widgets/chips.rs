@@ -35,7 +35,14 @@ impl<'a, T: PartialEq + Clone> SegmentedControl<'a, T> {
 /// - 3px border radius (`Rounding::same(3.0_f32)`).
 /// - Active: `theme::ACCENT_FILL` (`#232b30`), 1px `theme::ACCENT_BORDER` (`#34464f`), `theme::ACCENT_TEXT` (`#cfe0ec`).
 /// - Inactive: `theme::BG_BASE` (`#141414`), 1px `theme::BORDER_STRONG` (`#2a2a2a`), `theme::TEXT_DIM` (`#8a8a8a`).
-fn chip_button(ui: &mut egui::Ui, label: &str, is_active: bool) -> egui::Response {
+///
+/// `pub(crate)` (not private) so a caller needing a chip ROW with mixed
+/// semantics per chip — e.g. the crop panel's aspect row, where most chips
+/// write a real preset but one or two are selected-state-only/inert — can
+/// compose its own loop directly over this primitive instead of forcing its
+/// shape through `segmented_control`/`multi_select_chips`, which both assume
+/// every option is uniformly click-active.
+pub(crate) fn chip_button(ui: &mut egui::Ui, label: &str, is_active: bool) -> egui::Response {
     let font_id = egui::TextStyle::Button.resolve(ui.style());
     let temp_color = if is_active {
         theme::ACCENT_TEXT

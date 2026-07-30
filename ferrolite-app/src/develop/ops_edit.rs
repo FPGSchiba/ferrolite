@@ -9,6 +9,43 @@
 
 use ferrolite_pipeline::{sharpen_halo_doc, LensCorrection, Op, OpStack};
 
+/// The stack whose render the viewer should SHOW this frame — the single
+/// source of truth for what extent the preview tier evaluates to:
+///
+/// * before/after: the identity stack (the "before" image);
+/// * crop mode (`crop_active`): the live stack with the crop FORCED FULL —
+///   rotation/aspect/keystone stay applied so the Angle slider rotates live,
+///   but the crop rectangle is represented by the overlay drawn over the
+///   full image, so the render must be the FULL (uncropped) extent;
+/// * otherwise: the live stack unchanged (crop applied → cropped extent).
+///
+/// Entering/leaving crop mode therefore CHANGES the shown extent (full ↔
+/// cropped), which is why the crop-mode transition must also re-frame the
+/// view to the newly shown dims (see the `SetPreviewAndFull` handler in
+/// `app.rs`) — leaving the old fit made re-editing a crop open visibly
+/// more zoomed-in than the tool was left (the fit belonged to the smaller
+/// cropped extent) and desynced the overlay's `image_dims`-derived hit
+/// geometry from what was actually displayed.
+pub fn shown_stack(stack: &OpStack, before_after: bool, crop_active: bool) -> OpStack {
+    let mut shown = if before_after {
+        OpStack::default()
+    } else {
+        stack.clone()
+    };
+    if crop_active {
+        if let Some(g) = shown.geometry() {
+            shown = shown.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+                crop: ferrolite_pipeline::CropRect::full(),
+                angle_deg: g.angle_deg,
+                aspect: g.aspect,
+                keystone_v: g.keystone_v,
+                keystone_h: g.keystone_h,
+            }));
+        }
+    }
+    shown
+}
+
 /// A `LensCorrection` with no matched lens AND every correction disabled is
 /// identity (nothing to bake, nothing to apply) → remove the op entirely so
 /// `is_identity()`/`has_edits` stay correct, mirroring every other `set_*`
@@ -94,6 +131,60 @@ pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
 mod tests {
     use super::*;
     use ferrolite_pipeline::{Dehaze, Op, OpStack, Sharpen};
+
+    fn cropped_rotated_stack() -> OpStack {
+        OpStack::default().set_op(Op::Geometry(ferrolite_pipeline::Geometry {
+            crop: ferrolite_pipeline::CropRect {
+                x: 0.1,
+                y: 0.1,
+                w: 0.5,
+                h: 0.5,
+            },
+            angle_deg: 7.5,
+            ..Default::default()
+        }))
+    }
+
+    /// The refit-dims choice (crop re-edit bug): entering crop mode shows the
+    /// FULL extent — the shown stack's crop must be forced full while rotation
+    /// (and the rest of the geometry) stays applied.
+    #[test]
+    fn shown_stack_in_crop_mode_forces_crop_full_but_keeps_rotation() {
+        let stack = cropped_rotated_stack();
+        let shown = shown_stack(&stack, false, true);
+        let g = shown.geometry().expect("geometry kept");
+        assert_eq!(
+            (g.crop.x, g.crop.y, g.crop.w, g.crop.h),
+            (0.0, 0.0, 1.0, 1.0),
+            "crop forced full while the tool is active"
+        );
+        assert_eq!(g.angle_deg, 7.5, "rotation stays live in crop mode");
+        // The LIVE stack is untouched (immutability) — only the shown copy changes.
+        assert_eq!(stack.geometry().unwrap().crop.w, 0.5);
+    }
+
+    /// Leaving crop mode shows the CROPPED extent again: the shown stack is
+    /// the live stack unchanged.
+    #[test]
+    fn shown_stack_outside_crop_mode_keeps_the_crop() {
+        let stack = cropped_rotated_stack();
+        let shown = shown_stack(&stack, false, false);
+        assert_eq!(
+            shown.geometry().unwrap().crop,
+            stack.geometry().unwrap().crop,
+            "at rest the cropped extent is shown"
+        );
+    }
+
+    /// Before/after shows the identity render; crop mode is then a no-op on
+    /// it (no geometry op to force full).
+    #[test]
+    fn shown_stack_before_after_is_identity_even_in_crop_mode() {
+        let stack = cropped_rotated_stack();
+        let shown = shown_stack(&stack, true, true);
+        assert!(shown.is_identity());
+        assert!(shown.geometry().is_none());
+    }
 
     #[test]
     fn set_lens_correction_removes_when_unmatched_and_all_off() {

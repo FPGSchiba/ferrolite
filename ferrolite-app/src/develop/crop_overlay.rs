@@ -21,6 +21,51 @@ use crate::theme;
 use ferrolite_pipeline::{CropRect, Geometry, OpStack};
 
 const HANDLE_R: f32 = 0.03; // normalized hit radius
+const HANDLE_DOT_R: f32 = 4.0; // idle handle-dot radius
+const HANDLE_DOT_R_HOT: f32 = 6.0; // enlarged radius for the hovered/dragged handle
+
+/// What the crop overlay wants done this frame: a geometry edit (handle
+/// resize / body move / Escape cancel), or a canvas PAN — a drag that started
+/// inside the image but OUTSIDE the crop rect and any handle. Pan/zoom must
+/// keep working while the crop tool is active (QoL): the overlay owns the
+/// pointer over the image, so it is the one that has to hand non-crop drags
+/// back to the caller (`tools/crop.rs` applies them via `viewer::apply_pan`).
+// Boxed: an `EditOutcome` carries a whole `OpStack` (~540 bytes) while `Pan`
+// is 8 — clippy::large_enum_variant. One box per emitted edit (a handful per
+// gesture), not per frame.
+pub enum CropOverlayAction {
+    Edit(Box<EditOutcome>),
+    Pan(egui::Vec2),
+}
+
+/// Pure routing decision for a drag, given the press-position hit-test:
+/// a handle resizes, the body moves the rect, anywhere else pans the canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragRoute {
+    Resize(Handle),
+    MoveBody,
+    Pan,
+}
+
+fn route_drag(hit: Option<Handle>) -> DragRoute {
+    match hit {
+        Some(Handle::Body) => DragRoute::MoveBody,
+        Some(h) => DragRoute::Resize(h),
+        None => DragRoute::Pan,
+    }
+}
+
+/// The hover/drag cursor for each crop target (spec: hover affordance like
+/// the Tone Curve's points — the cursor names the gesture).
+fn cursor_for(h: Handle) -> egui::CursorIcon {
+    match h {
+        Handle::TopLeft | Handle::BottomRight => egui::CursorIcon::ResizeNwSe,
+        Handle::TopRight | Handle::BottomLeft => egui::CursorIcon::ResizeNeSw,
+        Handle::Top | Handle::Bottom => egui::CursorIcon::ResizeVertical,
+        Handle::Left | Handle::Right => egui::CursorIcon::ResizeHorizontal,
+        Handle::Body => egui::CursorIcon::Move,
+    }
+}
 
 /// Fixed (NOT `ui.id()`-derived) egui data key for the in-progress handle
 /// drag: which handle, and the crop rect exactly as it was BEFORE the drag
@@ -92,7 +137,7 @@ pub fn show(
     image_rect: egui::Rect,
     stack: &OpStack,
     aspect_dims: (u32, u32),
-) -> Option<EditOutcome> {
+) -> Option<CropOverlayAction> {
     let geo = stack.geometry().unwrap_or_default();
     let crop = geo.crop;
     let to_screen = |nx: f32, ny: f32| {
@@ -108,13 +153,42 @@ pub fn show(
         )
     };
 
-    // Crop rect + rule-of-thirds.
+    // Interact BEFORE painting so this frame's hover/drag state can drive the
+    // hover affordance (hovered handle grows, cursor names the gesture) —
+    // mirrors `widgets/curve.rs`, where the hovered point enlarges.
+    let resp = ui.interact(
+        image_rect,
+        ui.id().with("crop_overlay"),
+        egui::Sense::click_and_drag(),
+    );
+
+    // The handle (or body) the pointer is over, plus the one an in-progress
+    // drag is holding — the "hot" target that gets the enlarged dot + cursor.
+    let hover_hit = resp
+        .hover_pos()
+        .and_then(|p| crop_math::hit_test(crop, to_norm(p), HANDLE_R));
+    let drag_hit: Option<Handle> = ui
+        .data(|d| d.get_temp::<DragState>(drag_state_id()))
+        .map(|ds| ds.handle);
+    let hot = drag_hit.or(hover_hit);
+    if let Some(h) = hot {
+        ui.ctx().set_cursor_icon(cursor_for(h));
+    }
+
+    // Crop rect + rule-of-thirds. Body hover/drag brightens + thickens the
+    // rect edges (the body's equivalent of a handle growing).
     let r = egui::Rect::from_min_max(
         to_screen(crop.x, crop.y),
         to_screen(crop.x + crop.w, crop.y + crop.h),
     );
+    let body_hot = hot == Some(Handle::Body);
+    let rect_stroke = if body_hot {
+        egui::Stroke::new(2.0_f32, theme::ACCENT_TEXT)
+    } else {
+        egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT)
+    };
     let painter = ui.painter();
-    painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5_f32, theme::ACCENT_BRIGHT));
+    painter.rect_stroke(r, 0.0, rect_stroke);
     for i in 1..3 {
         let f = i as f32 / 3.0;
         painter.line_segment(
@@ -133,32 +207,37 @@ pub fn show(
         );
     }
     // All 8 handles (spec §8.4): 4 corners + 4 edge midpoints. `hit_test`
-    // recognizes all 8, so paint all 8 so they're discoverable, not just corners.
-    for (nx, ny) in [
+    // recognizes all 8, so paint all 8 so they're discoverable, not just
+    // corners. The hovered/dragged handle renders enlarged + brightened
+    // (Tone Curve parity — see `DOT_R`/`DOT_R_HOVER` in `widgets/curve.rs`).
+    for (handle, nx, ny) in [
         // Corners.
-        (crop.x, crop.y),
-        (crop.x + crop.w, crop.y),
-        (crop.x, crop.y + crop.h),
-        (crop.x + crop.w, crop.y + crop.h),
+        (Handle::TopLeft, crop.x, crop.y),
+        (Handle::TopRight, crop.x + crop.w, crop.y),
+        (Handle::BottomLeft, crop.x, crop.y + crop.h),
+        (Handle::BottomRight, crop.x + crop.w, crop.y + crop.h),
         // Edge midpoints.
-        (crop.x + crop.w * 0.5, crop.y),
-        (crop.x + crop.w, crop.y + crop.h * 0.5),
-        (crop.x + crop.w * 0.5, crop.y + crop.h),
-        (crop.x, crop.y + crop.h * 0.5),
+        (Handle::Top, crop.x + crop.w * 0.5, crop.y),
+        (Handle::Right, crop.x + crop.w, crop.y + crop.h * 0.5),
+        (Handle::Bottom, crop.x + crop.w * 0.5, crop.y + crop.h),
+        (Handle::Left, crop.x, crop.y + crop.h * 0.5),
     ] {
+        let is_hot = hot == Some(handle);
         painter.circle(
             to_screen(nx, ny),
-            4.0,
-            theme::ACCENT_BRIGHT,
+            if is_hot {
+                HANDLE_DOT_R_HOT
+            } else {
+                HANDLE_DOT_R
+            },
+            if is_hot {
+                theme::ACCENT_TEXT
+            } else {
+                theme::ACCENT_BRIGHT
+            },
             egui::Stroke::new(1.0_f32, theme::BG_BASE),
         );
     }
-
-    let resp = ui.interact(
-        image_rect,
-        ui.id().with("crop_overlay"),
-        egui::Sense::click_and_drag(),
-    );
 
     // Reconcile stale drag state: if egui itself no longer considers this
     // widget's id to be mid-drag (e.g. the user switched tools via keybind
@@ -184,7 +263,7 @@ pub fn show(
     let stored_drag: Option<DragState> = ui.data(|d| d.get_temp(drag_state_id()));
     if let Some(outcome) = cancel_if_escaped(escape_pressed, stored_drag, stack, geo) {
         ui.data_mut(|d| d.remove::<DragState>(drag_state_id()));
-        return Some(outcome);
+        return Some(CropOverlayAction::Edit(Box::new(outcome)));
     }
 
     // NORMALIZED-space ratio, NOT `aspect_ratio`'s image-space one: `resize`
@@ -196,8 +275,22 @@ pub fn show(
     let aspect = crop_math::normalized_aspect(geo.aspect, aspect_dims.0, aspect_dims.1);
     let mut new_crop = crop;
     let mut changed = false;
+    let mut pan: Option<egui::Vec2> = None;
     if resp.drag_started() {
-        if let Some(p) = resp.interact_pointer_pos() {
+        // Hit-test at the PRESS ORIGIN, not the current pointer position.
+        // `drag_started()` only fires once egui considers the press
+        // "decidedly dragging" — i.e. the pointer has already travelled past
+        // the ~6px click threshold (or dwelled) — so by this frame
+        // `interact_pointer_pos()` can be well past the handle (a quick flick
+        // easily clears a 0.03-normalized hit radius) or even OUTSIDE the
+        // rect body the user grabbed. Hit-testing the moved position instead
+        // of the pressed one silently dropped those drags — the "can't move
+        // the crop" regression (Task-7 rework kept the old position choice
+        // while making a missed hit terminal for the whole drag).
+        let press = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| resp.interact_pointer_pos());
+        if let Some(p) = press {
             let hit = crop_math::hit_test(crop, to_norm(p), HANDLE_R);
             ui.data_mut(|d| match hit {
                 Some(handle) => d.insert_temp(
@@ -207,6 +300,8 @@ pub fn show(
                         origin: crop,
                     },
                 ),
+                // No handle and not the body: this drag PANS the canvas (the
+                // routing below reads the absent DragState as `DragRoute::Pan`).
                 None => d.remove::<DragState>(drag_state_id()),
             });
         }
@@ -226,8 +321,8 @@ pub fn show(
             .map(|ds| ds.handle);
         if let Some(p) = resp.interact_pointer_pos() {
             let norm = to_norm(p);
-            match active {
-                Some(Handle::Body) => {
+            match route_drag(active) {
+                DragRoute::MoveBody => {
                     let d = (
                         resp.drag_delta().x / image_rect.width(),
                         resp.drag_delta().y / image_rect.height(),
@@ -235,11 +330,20 @@ pub fn show(
                     new_crop = crop_math::move_body(crop, d);
                     changed = true;
                 }
-                Some(handle) => {
+                DragRoute::Resize(handle) => {
                     new_crop = crop_math::resize(crop, handle, norm, aspect);
                     changed = true;
                 }
-                None => {}
+                // A drag that started outside the crop rect pans the canvas
+                // (QoL: pan keeps working in crop mode). Only per-frame
+                // deltas while actively dragging — the release frame's delta
+                // is zero and pan has no commit semantics.
+                DragRoute::Pan => {
+                    let d = resp.drag_delta();
+                    if resp.dragged() && d != egui::Vec2::ZERO {
+                        pan = Some(d);
+                    }
+                }
             }
         }
     }
@@ -254,15 +358,212 @@ pub fn show(
             keystone_v: geo.keystone_v,
             keystone_h: geo.keystone_h,
         };
-        return Some(geometry_edit(stack, new_geo, resp.drag_stopped()));
+        return Some(CropOverlayAction::Edit(Box::new(geometry_edit(
+            stack,
+            new_geo,
+            resp.drag_stopped(),
+        ))));
     }
-    None
+    pan.map(CropOverlayAction::Pan)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ferrolite_pipeline::Op;
+
+    /// Drive `show()` through a synthetic pointer drag, one egui frame per
+    /// event, feeding each frame's emitted stack back in (exactly what
+    /// `apply_edit`/`set_preview_and_full` do with the live `viewer.op_stack`).
+    /// Returns the final stack after the release frame plus the accumulated
+    /// pan delta the overlay reported.
+    fn drive_pointer_drag(
+        start: egui::Pos2,
+        moves: &[egui::Pos2],
+        mut stack: OpStack,
+    ) -> (OpStack, egui::Vec2) {
+        let ctx = egui::Context::default();
+        let image_rect =
+            egui::Rect::from_min_max(egui::pos2(100.0_f32, 100.0_f32), egui::pos2(500.0, 500.0));
+        let mut pan_total = egui::Vec2::ZERO;
+        let frame = |events: Vec<egui::Event>, stack: &OpStack| -> Option<CropOverlayAction> {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_max(
+                    egui::pos2(0.0_f32, 0.0_f32),
+                    egui::pos2(800.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            input.events = events;
+            let mut out = None;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    out = show(ui, image_rect, stack, (1000, 1000));
+                });
+            });
+            out
+        };
+        let apply =
+            |action: Option<CropOverlayAction>, stack: &mut OpStack, pan_total: &mut egui::Vec2| {
+                match action {
+                    Some(CropOverlayAction::Edit(o)) => *stack = o.stack,
+                    Some(CropOverlayAction::Pan(d)) => *pan_total += d,
+                    None => {}
+                }
+            };
+        // Hover, then press.
+        for ev in [
+            egui::Event::PointerMoved(start),
+            egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            },
+        ] {
+            let out = frame(vec![ev], &stack);
+            apply(out, &mut stack, &mut pan_total);
+        }
+        // Drag moves (each far past egui's 6px decidedly-dragging threshold).
+        for &p in moves {
+            let out = frame(vec![egui::Event::PointerMoved(p)], &stack);
+            apply(out, &mut stack, &mut pan_total);
+        }
+        // Release.
+        let last = *moves.last().unwrap_or(&start);
+        let out = frame(
+            vec![egui::Event::PointerButton {
+                pos: last,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }],
+            &stack,
+        );
+        apply(out, &mut stack, &mut pan_total);
+        (stack, pan_total)
+    }
+
+    /// EMPIRICAL repro for "cannot move the crop overlay": drag the BODY of a
+    /// centered half-size crop 40px right+down (image_rect is 400px wide, so
+    /// +0.1 normalized) and expect the rect to move.
+    #[test]
+    fn body_drag_moves_the_crop_rect() {
+        let start_crop = CropRect {
+            x: 0.25,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+        };
+        let stack = stack_with_crop(start_crop);
+        // Body center: (100 + 0.5*400, 100 + 0.5*400) = (300, 300).
+        let (end, pan) = drive_pointer_drag(
+            egui::pos2(300.0_f32, 300.0),
+            &[egui::pos2(320.0_f32, 320.0), egui::pos2(340.0_f32, 340.0)],
+            stack,
+        );
+        let crop = end.geometry().expect("geometry op present").crop;
+        assert!(
+            (crop.x - 0.35).abs() < 0.02 && (crop.y - 0.35).abs() < 0.02,
+            "body drag must move the rect by ~+0.1, got {crop:?}"
+        );
+        assert_eq!(pan, egui::Vec2::ZERO, "a body move never pans");
+    }
+
+    /// The press-origin regression: the handle grab is decided at the PRESS
+    /// position. By the time egui reports `drag_started()` the pointer has
+    /// already moved past the ~6px decidedly-dragging threshold — here it is
+    /// 20px past the handle, well outside the 0.03-normalized hit radius —
+    /// so hit-testing the current position (the pre-fix behavior) dropped
+    /// the whole drag.
+    #[test]
+    fn handle_drag_resizes_the_crop_rect_even_when_the_pointer_outruns_the_handle() {
+        let start_crop = CropRect {
+            x: 0.25,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+        };
+        let stack = stack_with_crop(start_crop);
+        // BottomRight handle: (100 + 0.75*400, 100 + 0.75*400) = (400, 400).
+        let (end, pan) = drive_pointer_drag(
+            egui::pos2(400.0_f32, 400.0),
+            &[egui::pos2(420.0_f32, 420.0), egui::pos2(440.0_f32, 440.0)],
+            stack,
+        );
+        let crop = end.geometry().expect("geometry op present").crop;
+        assert!(
+            (crop.w - 0.6).abs() < 0.02 && (crop.h - 0.6).abs() < 0.02,
+            "handle drag must grow the rect to ~0.6, got {crop:?}"
+        );
+        assert_eq!(pan, egui::Vec2::ZERO, "a handle resize never pans");
+    }
+
+    /// QoL: a drag that STARTS outside the crop rect (but on the image) pans
+    /// the canvas instead of editing the crop.
+    #[test]
+    fn drag_outside_the_crop_rect_pans_and_leaves_the_crop_alone() {
+        let start_crop = CropRect {
+            x: 0.4,
+            y: 0.4,
+            w: 0.3,
+            h: 0.3,
+        };
+        let stack = stack_with_crop(start_crop);
+        // (140, 140) is norm (0.1, 0.1): inside the image, far outside the
+        // crop rect and any handle.
+        let (end, pan) = drive_pointer_drag(
+            egui::pos2(140.0_f32, 140.0),
+            &[egui::pos2(170.0_f32, 160.0), egui::pos2(200.0_f32, 180.0)],
+            stack,
+        );
+        let crop = end.geometry().expect("geometry op present").crop;
+        assert_eq!(
+            (crop.x, crop.y, crop.w, crop.h),
+            (0.4, 0.4, 0.3, 0.3),
+            "an outside drag must not touch the crop"
+        );
+        assert!(
+            (pan.x - 60.0).abs() < 1e-3 && (pan.y - 40.0).abs() < 1e-3,
+            "the full drag delta pans the canvas, got {pan:?}"
+        );
+    }
+
+    // ── Pure routing decision (spec: hit-test routing tests) ───────────────
+
+    #[test]
+    fn route_drag_sends_body_to_move_handles_to_resize_and_misses_to_pan() {
+        assert_eq!(route_drag(Some(Handle::Body)), DragRoute::MoveBody);
+        for h in [
+            Handle::TopLeft,
+            Handle::Top,
+            Handle::TopRight,
+            Handle::Right,
+            Handle::BottomRight,
+            Handle::Bottom,
+            Handle::BottomLeft,
+            Handle::Left,
+        ] {
+            assert_eq!(route_drag(Some(h)), DragRoute::Resize(h));
+        }
+        assert_eq!(route_drag(None), DragRoute::Pan);
+    }
+
+    #[test]
+    fn cursor_for_names_the_gesture_per_handle() {
+        assert_eq!(cursor_for(Handle::Body), egui::CursorIcon::Move);
+        assert_eq!(
+            cursor_for(Handle::TopLeft),
+            egui::CursorIcon::ResizeNwSe,
+            "diagonal corners"
+        );
+        assert_eq!(cursor_for(Handle::BottomLeft), egui::CursorIcon::ResizeNeSw);
+        assert_eq!(cursor_for(Handle::Top), egui::CursorIcon::ResizeVertical);
+        assert_eq!(
+            cursor_for(Handle::Right),
+            egui::CursorIcon::ResizeHorizontal
+        );
+    }
 
     fn stack_with_crop(crop: CropRect) -> OpStack {
         OpStack::default().set_op(Op::Geometry(Geometry {

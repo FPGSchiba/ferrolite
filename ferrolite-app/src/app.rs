@@ -2326,9 +2326,33 @@ impl eframe::App for FerroliteApp {
                                     self.apply_undo_redo(ctx, frame, false);
                                 }
                                 crate::develop::canvas::ViewerAction::SetPreviewAndFull(stack) => {
-                                    crate::app::controller::AppController::set_preview_and_full(
-                                        self, frame, stack, true,
-                                    );
+                                    // Crop-mode transition (this action's only
+                                    // emitter — see canvas/viewer.rs Step 1):
+                                    // the shown extent just changed (full ↔
+                                    // cropped), so re-frame the view to the
+                                    // NEW extent. Without this, entering the
+                                    // crop tool on a cropped image kept the
+                                    // fit of the smaller cropped extent while
+                                    // showing the full image (opened visibly
+                                    // zoomed-in), and the overlay's
+                                    // `image_dims`-derived hit geometry no
+                                    // longer matched what was displayed.
+                                    let shown_dims =
+                                        crate::app::controller::AppController::set_preview_and_full(
+                                            self, frame, stack, true,
+                                        );
+                                    if let Some(dims) = shown_dims {
+                                        if let Some(v) = self.state.viewer.as_mut() {
+                                            v.image_dims = Some(dims);
+                                            if v.viewport.0 > 0.0 && v.viewport.1 > 0.0 {
+                                                v.view = ferrolite_vt::ViewTransform::fit(
+                                                    dims, v.viewport,
+                                                );
+                                            }
+                                            v.idle = false;
+                                        }
+                                        ctx.request_repaint();
+                                    }
                                 }
                             }
                         }

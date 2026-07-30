@@ -39,14 +39,27 @@ impl DevelopTool for CropTool {
         image_rect: egui::Rect,
         state: &mut AppState,
     ) -> Option<EditOutcome> {
-        // Wrap the existing crop overlay verbatim (mirrors app.rs:3689-3705): pre-extract
-        // the OpStack and the aspect dims from the viewer before calling into the overlay,
-        // since a later `apply_edit` call needs an exclusive borrow of `state`.
+        // Pre-extract the OpStack and the aspect dims from the viewer before
+        // calling into the overlay, since a later `apply_edit` call needs an
+        // exclusive borrow of `state`.
         let (stack, dims) = {
             let v = state.viewer.as_ref()?;
             (v.op_stack.clone(), v.image_dims.unwrap_or((1, 1)))
         };
-        crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)
+        match crate::develop::crop_overlay::show(ui, image_rect, &stack, dims)? {
+            crate::develop::crop_overlay::CropOverlayAction::Edit(outcome) => Some(*outcome),
+            // A drag that started outside the crop rect pans the canvas (QoL:
+            // pan keeps working in crop mode). Applied here — the overlay is
+            // egui-only and has no access to the viewer's view transform.
+            crate::develop::crop_overlay::CropOverlayAction::Pan(delta) => {
+                if let Some(v) = state.viewer.as_mut() {
+                    v.view = crate::viewer::apply_pan(v.view, (delta.x, delta.y));
+                    v.idle = false;
+                }
+                ui.ctx().request_repaint();
+                None
+            }
+        }
     }
 }
 

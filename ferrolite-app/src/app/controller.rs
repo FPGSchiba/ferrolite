@@ -1219,15 +1219,19 @@ impl AppController {
     /// keeps the VT from re-running `produce_tile` for every tile every drag frame
     /// (which exhausted GPU memory on integrated GPUs once a heavy op like dehaze's
     /// multi-pass transmission was active). Non-drag callers pass `true`.
+    /// Returns the evaluated PREVIEW-tier output dims (the extent of what is
+    /// now on screen — geometry-applied, so the cropped extent at rest and the
+    /// full extent while the crop tool forces `crop = full`), or `None` when
+    /// no preview pipeline exists yet. The crop-mode transition handler in
+    /// `app.rs` uses this to re-frame the view to the newly shown extent;
+    /// every other caller ignores it.
     pub fn set_preview_and_full(
         app: &mut FerroliteApp,
         frame: &eframe::Frame,
         stack: ferrolite_pipeline::OpStack,
         produce_full: bool,
-    ) {
-        let Some(rs) = frame.wgpu_render_state() else {
-            return;
-        };
+    ) -> Option<(u32, u32)> {
+        let rs = frame.wgpu_render_state()?;
         // Compute before taking the exclusive `viewer` borrow below:
         // `camera_to_working`/`preview_to_working` themselves borrow
         // `app.state.viewer` immutably.
@@ -1236,9 +1240,7 @@ impl AppController {
         let temp = stack.white_balance().map(|w| w.temp).unwrap_or(0.0);
         let cam = app.camera_to_working(temp);
         let pw = app.preview_to_working();
-        let Some(v) = app.state.viewer.as_mut() else {
-            return;
-        };
+        let v = app.state.viewer.as_mut()?;
         v.op_stack = stack.clone();
         v.opstack_version = v.opstack_version.wrapping_add(1);
 
@@ -1247,30 +1249,13 @@ impl AppController {
         // unchanged, so only a WB temp change actually dirties the head (P2 §5.1).
         let pv_matrix = v.preview_tier_source(cam, pw).1;
 
-        // What the preview should show: the live stack, or the empty stack in
-        // before/after mode. While the crop tool is active, keep the ROTATION
-        // (and aspect) applied but force crop = full: the crop rectangle is then
-        // represented by the overlay drawn over the full, rotated image, and the
-        // Angle slider rotates the preview live. (In before/after mode `shown` is
-        // identity — no geometry — so this branch is a no-op, which is correct.)
-        let mut shown = if v.before_after {
-            ferrolite_pipeline::OpStack::default()
-        } else {
-            stack.clone()
-        };
-        if v.crop_active {
-            if let Some(g) = shown.geometry() {
-                shown = shown.set_op(ferrolite_pipeline::Op::Geometry(
-                    ferrolite_pipeline::Geometry {
-                        crop: ferrolite_pipeline::CropRect::full(),
-                        angle_deg: g.angle_deg,
-                        aspect: g.aspect,
-                        keystone_v: g.keystone_v,
-                        keystone_h: g.keystone_h,
-                    },
-                ));
-            }
-        }
+        // What the preview should show: the live stack, the empty stack in
+        // before/after mode, or (crop tool active) the stack with crop forced
+        // full so the crop rectangle is represented by the overlay over the
+        // full, rotated image. Pure helper (`develop::ops_edit::shown_stack`)
+        // so the extent choice is unit-tested — it decides the dims this
+        // method returns, which the crop-mode transition refit relies on.
+        let shown = crate::develop::ops_edit::shown_stack(&stack, v.before_after, v.crop_active);
 
         // Preview tier (built once per image, reused). For RAW this pipeline was
         // already built at full-decode (`apply_full_decoded`) from the demosaic
@@ -1300,6 +1285,7 @@ impl AppController {
                 v.preview_edit = Some(ep);
             }
         }
+        let mut shown_dims: Option<(u32, u32)> = None;
         if let Some(ep) = v.preview_edit.as_mut() {
             ep.set_stack(shown.clone());
             ep.set_color_matrix(pv_matrix);
@@ -1326,6 +1312,7 @@ impl AppController {
             // keep the evaluate out of the lock scope to stay close to the
             // apply_full_decoded discipline.)
             let img = ep.evaluate();
+            shown_dims = Some((img.width, img.height));
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == v.image_id {
@@ -1467,6 +1454,7 @@ impl AppController {
         }
         v.idle = false; // wake the drive loop so producer tiles re-render
         app.mark_histogram_dirty();
+        shown_dims
     }
 
     /// Apply a panel/widget edit: update both tiers immediately; on commit (drag

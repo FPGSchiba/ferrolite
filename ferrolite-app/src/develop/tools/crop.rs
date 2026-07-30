@@ -87,6 +87,28 @@ fn conformed_crop(crop: CropRect, aspect: Aspect, dims: (u32, u32)) -> CropRect 
     }
 }
 
+/// The opposite-orientation counterpart of a ratio-backed aspect, for the
+/// crop panel's orientation-flip toggle: landscape 4:3 \u{2194} portrait 3:4,
+/// 3:2 \u{2194} 2:3, 16:9 \u{2194} 9:16, 5:4 \u{2194} 4:5 (either direction —
+/// the mapping is its own inverse). `Aspect::Original`, `Aspect::Square`, and
+/// `Aspect::Free` have no orientation-specific counterpart (a square or an
+/// unconstrained/full-frame crop doesn't have a "portrait" version) and map
+/// to `None` — the flip toggle disables itself on these (see
+/// `aspect_chip_row`'s wiring of the toggle's `enabled` state).
+fn flipped(aspect: Aspect) -> Option<Aspect> {
+    match aspect {
+        Aspect::FourThree => Some(Aspect::ThreeFour),
+        Aspect::ThreeFour => Some(Aspect::FourThree),
+        Aspect::ThreeTwo => Some(Aspect::TwoThree),
+        Aspect::TwoThree => Some(Aspect::ThreeTwo),
+        Aspect::SixteenNine => Some(Aspect::NineSixteen),
+        Aspect::NineSixteen => Some(Aspect::SixteenNine),
+        Aspect::FiveFour => Some(Aspect::FourFive),
+        Aspect::FourFive => Some(Aspect::FiveFour),
+        Aspect::Original | Aspect::Free | Aspect::Square => None,
+    }
+}
+
 /// The aspect chip row's (label, backing-preset) pairs, in spec order:
 /// Original / 1:1 / 4:3 / 3:2 / 16:9 / 5:4 / Custom (design 2026-07-29 §C3 /
 /// V2 README:69). Every ratio-named chip has a real backing `Aspect` value and
@@ -107,20 +129,46 @@ fn aspect_chip_specs() -> [(&'static str, Option<Aspect>); 7] {
     ]
 }
 
-/// Render the wrapping aspect chip row and return `Some(new_aspect)` when the
-/// user clicked a preset-backed chip that differs from `current` (the caller
-/// writes it through `geometry_edit`, same as the Aspect combo). Chips reuse
-/// `widgets::chips::chip_button` styling (Task 8's shared chip primitive) so
-/// they stay visually identical to every other chip row in the app.
+/// Whether an aspect chip (`value`, from [`aspect_chip_specs`]) should render
+/// selected for the given `current` aspect. A landscape-backed chip is active
+/// either when `current` IS that preset, OR when `current` is its PORTRAIT
+/// counterpart (`flipped(current) == value`) — e.g. with `Aspect::ThreeFour`
+/// active, the "4:3" chip renders selected, since the chip row keeps only its
+/// seven landscape labels; the orientation-flip toggle rendered at the row's
+/// end is what actually distinguishes portrait from landscape (see
+/// [`flipped`] and its wiring in [`aspect_chip_row`]). "Custom" (`value ==
+/// None`) is active only for `Aspect::Free`, independent of orientation.
+fn chip_is_active(value: Option<Aspect>, current: Aspect) -> bool {
+    match value {
+        Some(a) => current == a || flipped(current) == Some(a),
+        None => current == Aspect::Free,
+    }
+}
+
+/// Render the wrapping aspect chip row PLUS the orientation-flip toggle at
+/// its end, and return `Some(new_aspect)` when the user either clicked a
+/// preset-backed chip that differs from `current` or clicked an ENABLED flip
+/// toggle (the caller writes either through `geometry_edit`, same as the
+/// Aspect combo — see `CropTab::show`). Chips reuse `widgets::chips::chip_button`
+/// styling (Task 8's shared chip primitive) so they stay visually identical
+/// to every other chip row in the app; the toggle reuses `widgets::tool_button`
+/// for the same active/disabled visual language as every other icon button.
+///
+/// State mapping (documented per the crop-portrait feature): the row shows
+/// only the 7 landscape labels — a portrait aspect has no chip of its own.
+/// When `current` is a portrait variant, its LANDSCAPE COUNTERPART chip
+/// renders selected (`chip_is_active`) AND the flip toggle renders
+/// active/accented (`flip_active` below); clicking that already-selected
+/// counterpart chip is a no-op (same "clicking the active chip does nothing"
+/// rule as every other chip), so switching back to landscape goes through the
+/// flip toggle. The toggle itself is disabled (with a hover reason) when
+/// `current` has no counterpart at all (`Aspect::Original`/`Square`/`Free`).
 fn aspect_chip_row(ui: &mut egui::Ui, current: Aspect) -> Option<Aspect> {
     let mut picked: Option<Aspect> = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
         for (label, value) in aspect_chip_specs() {
-            let is_active = match value {
-                Some(a) => current == a,
-                None => current == Aspect::Free,
-            };
+            let is_active = chip_is_active(value, current);
             let resp = crate::widgets::chips::chip_button(ui, label, is_active);
             match value {
                 Some(a) if resp.clicked() && !is_active => picked = Some(a),
@@ -132,6 +180,24 @@ fn aspect_chip_row(ui: &mut egui::Ui, current: Aspect) -> Option<Aspect> {
                 }
                 _ => {}
             }
+        }
+
+        let flip_target = flipped(current);
+        let flip_enabled = flip_target.is_some();
+        let flip_active = matches!(
+            current,
+            Aspect::ThreeFour | Aspect::TwoThree | Aspect::NineSixteen | Aspect::FourFive
+        );
+        let flip_resp = crate::widgets::tool_button(
+            ui,
+            crate::icons::CROP_FLIP_ORIENTATION,
+            "Flip crop orientation",
+            flip_active,
+            flip_enabled,
+            Some("No portrait/landscape counterpart for this aspect"),
+        );
+        if flip_resp.clicked() && flip_enabled {
+            picked = flip_target;
         }
     });
     picked
@@ -188,6 +254,13 @@ impl PanelTab for CropTab {
                         Aspect::FourThree,
                         Aspect::SixteenNine,
                         Aspect::FiveFour,
+                        // Portrait presets (Task "crop-portrait"): no chip of
+                        // their own (see `aspect_chip_row`'s state mapping),
+                        // but directly pickable here.
+                        Aspect::ThreeFour,
+                        Aspect::TwoThree,
+                        Aspect::NineSixteen,
+                        Aspect::FourFive,
                     ] {
                         ui.selectable_value(&mut aspect, a, format!("{a:?}"));
                     }
@@ -450,6 +523,91 @@ mod tests {
         });
 
         assert_eq!(picked, None, "clicking the already-active chip is a no-op");
+    }
+
+    // ── Task "crop-portrait": portrait aspect variants + orientation flip ──
+
+    /// `flipped` pairs every landscape ratio-preset with its portrait
+    /// counterpart, in BOTH directions (the mapping is its own inverse), and
+    /// returns `None` for the three orientation-agnostic presets.
+    #[test]
+    fn flipped_pairs_every_landscape_and_portrait_preset_both_directions() {
+        let pairs = [
+            (Aspect::FourThree, Aspect::ThreeFour),
+            (Aspect::ThreeTwo, Aspect::TwoThree),
+            (Aspect::SixteenNine, Aspect::NineSixteen),
+            (Aspect::FiveFour, Aspect::FourFive),
+        ];
+        for (landscape, portrait) in pairs {
+            assert_eq!(
+                flipped(landscape),
+                Some(portrait),
+                "{landscape:?} must flip to {portrait:?}"
+            );
+            assert_eq!(
+                flipped(portrait),
+                Some(landscape),
+                "{portrait:?} must flip back to {landscape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flipped_is_none_for_orientation_agnostic_presets() {
+        for a in [Aspect::Original, Aspect::Square, Aspect::Free] {
+            assert_eq!(flipped(a), None, "{a:?} has no orientation counterpart");
+        }
+    }
+
+    /// The chip-selected-state mapping (design note in `aspect_chip_row`):
+    /// every ratio chip is active for its own preset, AND for that preset's
+    /// portrait counterpart — so a portrait aspect surfaces as its landscape
+    /// chip being selected, since the row has no separate portrait labels.
+    #[test]
+    fn chip_is_active_matches_own_preset_and_its_portrait_counterpart() {
+        // Direct match.
+        assert!(chip_is_active(Some(Aspect::FourThree), Aspect::FourThree));
+        // Portrait current -> landscape counterpart chip is active.
+        assert!(chip_is_active(Some(Aspect::FourThree), Aspect::ThreeFour));
+        assert!(chip_is_active(Some(Aspect::ThreeTwo), Aspect::TwoThree));
+        assert!(chip_is_active(
+            Some(Aspect::SixteenNine),
+            Aspect::NineSixteen
+        ));
+        assert!(chip_is_active(Some(Aspect::FiveFour), Aspect::FourFive));
+        // A DIFFERENT landscape chip must not light up for an unrelated portrait aspect.
+        assert!(!chip_is_active(Some(Aspect::ThreeTwo), Aspect::ThreeFour));
+    }
+
+    #[test]
+    fn chip_is_active_custom_chip_only_active_for_free() {
+        assert!(chip_is_active(None, Aspect::Free));
+        assert!(!chip_is_active(None, Aspect::ThreeFour));
+        assert!(!chip_is_active(None, Aspect::FourThree));
+        assert!(!chip_is_active(None, Aspect::Original));
+    }
+
+    /// End-to-end render smoke test: the row (7 chips + flip toggle) must
+    /// render without panicking for every portrait aspect, and produce no
+    /// pick on an input-free frame (mirrors `aspect_chip_row_click_...`
+    /// tests above, which cover the click mechanics on the ratio chips).
+    #[test]
+    fn aspect_chip_row_renders_for_every_portrait_aspect_without_panicking() {
+        let ctx = egui::Context::default();
+        for a in [
+            Aspect::ThreeFour,
+            Aspect::TwoThree,
+            Aspect::NineSixteen,
+            Aspect::FourFive,
+        ] {
+            let mut picked = None;
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    picked = aspect_chip_row(ui, a);
+                });
+            });
+            assert_eq!(picked, None, "no click happened, no pick expected");
+        }
     }
 
     /// UX gap B: picking an aspect conforms the EXISTING rect immediately —

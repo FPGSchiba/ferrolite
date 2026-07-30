@@ -252,6 +252,19 @@ pub enum Aspect {
     /// (design 2026-07-29 §C3 / V2 README:69). Added after the chip row shipped
     /// with a stopgap "not backed yet" placeholder for this ratio.
     FiveFour,
+    /// 3:4 portrait (0.75) — `FourThree`'s portrait counterpart. Portrait
+    /// presets have no dedicated chip; the crop panel's chip row keeps its
+    /// seven landscape labels and an orientation-flip toggle swaps the
+    /// current aspect for its counterpart in place (see
+    /// `develop::tools::crop::flipped` in `ferrolite-app`), while the Aspect
+    /// combo lists all four portrait presets directly.
+    ThreeFour,
+    /// 2:3 portrait (0.6667) — `ThreeTwo`'s portrait counterpart.
+    TwoThree,
+    /// 9:16 portrait (0.5625) — `SixteenNine`'s portrait counterpart.
+    NineSixteen,
+    /// 4:5 portrait (0.8) — `FiveFour`'s portrait counterpart.
+    FourFive,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]

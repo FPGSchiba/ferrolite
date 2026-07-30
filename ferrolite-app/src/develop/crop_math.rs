@@ -268,6 +268,13 @@ pub fn aspect_ratio(aspect: Aspect, img_w: u32, img_h: u32) -> Option<f32> {
         Aspect::FourThree => Some(4.0 / 3.0),
         Aspect::SixteenNine => Some(16.0 / 9.0),
         Aspect::FiveFour => Some(5.0 / 4.0),
+        // Portrait counterparts (ratio < 1) of the four non-square landscape
+        // presets above — see `Aspect`'s doc comments and
+        // `develop::tools::crop::flipped` for the pairing.
+        Aspect::ThreeFour => Some(3.0 / 4.0),
+        Aspect::TwoThree => Some(2.0 / 3.0),
+        Aspect::NineSixteen => Some(9.0 / 16.0),
+        Aspect::FourFive => Some(4.0 / 5.0),
         Aspect::Original => {
             if img_h == 0 {
                 None
@@ -384,6 +391,31 @@ mod tests {
         assert_eq!(aspect_ratio(Aspect::FiveFour, 6000, 4000), Some(1.25));
         assert_eq!(aspect_ratio(Aspect::Free, 6000, 4000), None);
         assert_eq!(aspect_ratio(Aspect::Original, 6000, 4000), Some(1.5));
+    }
+
+    /// The four portrait presets (Task "crop-portrait"): each is the exact
+    /// reciprocal of its landscape counterpart's ratio, independent of source
+    /// dims (dims only matter for `Aspect::Original`).
+    #[test]
+    fn aspect_ratio_maps_portrait_presets_as_reciprocals_of_their_landscape_counterpart() {
+        assert_eq!(aspect_ratio(Aspect::ThreeFour, 6000, 4000), Some(0.75));
+        assert_eq!(aspect_ratio(Aspect::TwoThree, 6000, 4000), Some(2.0 / 3.0));
+        assert_eq!(aspect_ratio(Aspect::NineSixteen, 6000, 4000), Some(0.5625));
+        assert_eq!(aspect_ratio(Aspect::FourFive, 6000, 4000), Some(0.8));
+
+        for (portrait, landscape) in [
+            (Aspect::ThreeFour, Aspect::FourThree),
+            (Aspect::TwoThree, Aspect::ThreeTwo),
+            (Aspect::NineSixteen, Aspect::SixteenNine),
+            (Aspect::FourFive, Aspect::FiveFour),
+        ] {
+            let p = aspect_ratio(portrait, 6000, 4000).unwrap();
+            let l = aspect_ratio(landscape, 6000, 4000).unwrap();
+            assert!(
+                (p * l - 1.0).abs() < 1e-6,
+                "{portrait:?} ({p}) must be the reciprocal of {landscape:?} ({l})"
+            );
+        }
     }
 
     #[test]

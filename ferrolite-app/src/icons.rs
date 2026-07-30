@@ -45,6 +45,7 @@ pub const WARNING: &str = p::WARNING;
 pub const INFO: &str = p::INFO;
 pub const NOTIFY_ERROR: &str = p::WARNING_OCTAGON; // error toast glyph
 pub const CLOSE: &str = p::X; // toast dismiss button
+pub const CROP_FLIP_ORIENTATION: &str = p::ARROWS_CLOCKWISE; // crop panel's landscape<->portrait toggle
 
 /// The regular icon font. `add_to_fonts(Regular)` put Phosphor Regular into the
 /// `Proportional` family's fallback chain, so its PUA codepoints resolve here.
@@ -95,6 +96,7 @@ mod tests {
             ("INFO", INFO),
             ("NOTIFY_ERROR", NOTIFY_ERROR),
             ("CLOSE", CLOSE),
+            ("CROP_FLIP_ORIENTATION", CROP_FLIP_ORIENTATION),
         ] {
             assert!(!s.is_empty(), "icon alias {name} is empty");
         }

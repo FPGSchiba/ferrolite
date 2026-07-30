@@ -60,11 +60,16 @@ pub use tile_edit::TileEditPipeline;
 // fused layer engine): the standalone exposure/white-balance/contrast passes
 // they backed are gone — `local_adjust_uniform`/`LocalAdjustUniform` cover the
 // same math for both the Light-stage engine node and per-mask layers now.
+// `geometry_uniform`/`geometry_src_px` are public as the CPU reference for the
+// geometry pass's projective (keystone) mapping — GPU parity tests and any
+// future keystone-aware coordinate mapping consume them; `KEYSTONE_STRENGTH`
+// is the single named tuning constant for keystone responsiveness (spec C4).
 pub use uniforms::{
-    clamp_uv_to_crop_bounds, color_grade_px, curve_lut, geometry_tile_uniform, lens_halo_px,
-    lens_uniform, parametric_curve_lut, sharpen_halo, sharpen_halo_doc, tone_curve_luts,
-    vignette_amount, ColorGradeUniform, GeometryUniform, HslUniform, LensUniform,
-    LocalAdjustUniform, SharpenUniform, VignetteUniform, MAX_SHARPEN_RADIUS,
+    clamp_uv_to_crop_bounds, color_grade_px, curve_lut, geometry_src_px, geometry_tile_uniform,
+    geometry_uniform, lens_halo_px, lens_uniform, parametric_curve_lut, sharpen_halo,
+    sharpen_halo_doc, tone_curve_luts, vignette_amount, ColorGradeUniform, GeometryUniform,
+    HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
+    KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

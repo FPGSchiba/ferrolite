@@ -373,6 +373,135 @@ pub struct GeometryUniform {
     /// rect here, so un-cropped rendering (including rotation past the frame
     /// edge) is byte-identical to before this field existed.
     pub crop_bounds: [f32; 4],
+    /// Rows of the row-major 3×3 output-px → source-px homography `H`, each
+    /// padded to a vec4 (last lane 0) for WGSL uniform alignment. The shader
+    /// samples `src = (H·[po, 1]).xy / (H·[po, 1]).z` (perspective divide) —
+    /// spec C4 part 2, manual keystone. Built as `A_ext · D · W · N`: the
+    /// keystone unit-square warp `W` (see `keystone_quad_homography`) acts on
+    /// the CROP-LOCAL unit square the user sees (`N`/`D` normalize output px
+    /// by / rescale back from the FULL output dims), and the existing affine
+    /// crop/rotation `A_ext = [m|off; 0 0 1]` then consumes the
+    /// keystone-warped coordinate. With `keystone_v == keystone_h == 0` the
+    /// rows are set to EXACTLY the affine extension — `h2 = [0, 0, 1, 0]`, so
+    /// the divide is by exactly 1.0 and the mapping stays BIT-identical to
+    /// the pre-keystone affine path (guards every existing golden). `m`/`off`
+    /// above keep carrying the keystone-FREE affine part for the CPU
+    /// consumers that invert or re-apply it (`coord.rs`'s display↔source
+    /// mapping, the fused dehaze recovery's source-UV sample) — under a
+    /// non-zero keystone those treat the warp as identity (documented
+    /// approximation, same tier as their existing lens-as-identity fallback).
+    pub h0: [f32; 4],
+    pub h1: [f32; 4],
+    pub h2: [f32; 4],
+}
+
+// The uniform's size/offsets are the GPU ABI — keep in lock-step with WGSL
+// `struct P` in geometry.wgsl (see also `geometry_uniform_size_is_16_byte_aligned`).
+const _: () = assert!(std::mem::size_of::<GeometryUniform>() == 112);
+const _: () = assert!(std::mem::size_of::<GeometryUniform>().is_multiple_of(16));
+
+/// Manual keystone strength: at a full slider throw (`|k| = 1`) each corner of
+/// the far edge is displaced OUTWARD along that edge by `0.5 * KEYSTONE_STRENGTH`
+/// = 17.5% of the crop extent, i.e. the far edge's sampled span widens by
+/// `1 + KEYSTONE_STRENGTH·|k|` — equivalently the DISPLAYED content on that
+/// edge scales by `1 / (1 + KEYSTONE_STRENGTH·|k|)`. Tune keystone
+/// responsiveness ONLY via this named constant.
+pub const KEYSTONE_STRENGTH: f32 = 0.35;
+
+/// The keystone warp `W` on the crop-local unit square: a row-major 3×3
+/// homography mapping output-normalized coords → sample coords (both in the
+/// crop-local unit square's frame; projective apply with a divide by row 2).
+///
+/// Corner model (spec C4, sign convention pinned by
+/// `keystone_v_positive_widens_top_sampled_span`): `keystone_v = kv > 0`
+/// widens the TOP edge's sampled span (converging verticals corrected;
+/// kv < 0 the bottom's); `keystone_h` is the transpose (kh > 0 widens the
+/// LEFT edge's sampled span). Each affected edge's two corners are displaced
+/// OUTWARD along the edge by `0.5 · KEYSTONE_STRENGTH · |k|`:
+///
+/// ```text
+///   dt = max(kv, 0)·K/2    db = max(-kv, 0)·K/2   (x displacement, top/bottom)
+///   dl = max(kh, 0)·K/2    dr = max(-kh, 0)·K/2   (y displacement, left/right)
+///
+///   (0,0) → (-dt, -dl)     (1,0) → (1+dt, -dr)
+///   (0,1) → (-db, 1+dl)    (1,1) → (1+db, 1+dr)
+/// ```
+///
+/// A COMBINED kv + kh applies BOTH displacement sets to the four corners and
+/// solves ONE homography from the result — they compose in a single 4-point
+/// solve, NOT as two multiplied single-axis homographies (a product would add
+/// cross terms the corner model does not ask for).
+///
+/// Closed-form 4-point solve (unit square → quad; Heckbert, *Fundamentals of
+/// Texture Mapping and Image Warping*, §2.2.1 — closed form, no general DLT).
+/// Derivation: write `H = [[a,b,c],[d,e,f],[g,h,1]]` with
+/// `H(u,v) = ((a·u + b·v + c)/(g·u + h·v + 1), (d·u + e·v + f)/(g·u + h·v + 1))`.
+/// The (0,0) corner gives `c = x00`, `f = y00` directly. Summing the four
+/// corner constraints, the projective terms depend only on
+/// `Σx = x00−x10+x11−x01`, `Σy = y00−y10+y11−y01` (both zero ⇔ the quad is a
+/// parallelogram ⇔ the warp is affine, `g = h = 0`); eliminating `a,b,d,e`
+/// from the (1,0)/(0,1)/(1,1) constraints leaves a 2×2 system in `g,h` with
+/// `dx1 = x10−x11, dx2 = x01−x11, dy1 = y10−y11, dy2 = y01−y11`:
+///
+/// ```text
+///   den = dx1·dy2 − dy1·dx2
+///   g   = (Σx·dy2 − Σy·dx2) / den        h = (dx1·Σy − dy1·Σx) / den
+///   a   = x10 − x00 + g·x10              b = x01 − x00 + h·x01
+///   d   = y10 − y00 + g·y10              e = y01 − y00 + h·y01
+/// ```
+///
+/// `den` cannot vanish here: for `|k| ≤ 1`, `K = 0.35` it is
+/// `(dt−db)(dl−dr) − (1+2db)(1+2dr)` ∈ [−2.3, −0.97].
+fn keystone_quad_homography(kv: f32, kh: f32) -> [[f32; 3]; 3] {
+    let half = 0.5 * KEYSTONE_STRENGTH;
+    let dt = kv.max(0.0) * half;
+    let db = (-kv).max(0.0) * half;
+    let dl = kh.max(0.0) * half;
+    let dr = (-kh).max(0.0) * half;
+    let (x00, y00) = (-dt, -dl);
+    let (x10, y10) = (1.0 + dt, -dr);
+    let (x01, y01) = (-db, 1.0 + dl);
+    let (x11, y11) = (1.0 + db, 1.0 + dr);
+
+    let sum_x = x00 - x10 + x11 - x01;
+    let sum_y = y00 - y10 + y11 - y01;
+    let dx1 = x10 - x11;
+    let dx2 = x01 - x11;
+    let dy1 = y10 - y11;
+    let dy2 = y01 - y11;
+    let den = dx1 * dy2 - dy1 * dx2;
+    let g = (sum_x * dy2 - sum_y * dx2) / den;
+    let h = (dx1 * sum_y - dy1 * sum_x) / den;
+    let a = x10 - x00 + g * x10;
+    let b = x01 - x00 + h * x01;
+    let d = y10 - y00 + g * y10;
+    let e = y01 - y00 + h * y01;
+    [[a, b, x00], [d, e, y00], [g, h, 1.0]]
+}
+
+/// Row-major 3×3 matrix product `a · b`.
+fn mat3_mul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0f32; 3]; 3];
+    for (i, row) in out.iter_mut().enumerate() {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j];
+        }
+    }
+    out
+}
+
+/// CPU mirror of `geometry.wgsl`'s projective output→source mapping: `po` is
+/// the output-space coordinate the shader builds (`out_origin + gid + 0.5`);
+/// the result is the SOURCE-pixel coordinate, before normalization by
+/// `src_dims` and the `clamp_uv_to_crop_bounds` clamp. Kept in lock-step with
+/// the WGSL (same expression shape, same evaluation order) so parity tests
+/// can assert the zero-keystone mapping BIT-exactly against the old affine
+/// `m·po + off` — the invariant that guards every existing golden.
+pub fn geometry_src_px(u: &GeometryUniform, po: [f32; 2]) -> [f32; 2] {
+    let hx = u.h0[0] * po[0] + u.h0[1] * po[1] + u.h0[2];
+    let hy = u.h1[0] * po[0] + u.h1[1] * po[1] + u.h1[2];
+    let hw = u.h2[0] * po[0] + u.h2[1] * po[1] + u.h2[2];
+    [hx / hw, hy / hw]
 }
 
 /// Crop + rotate as a sampling transform. Returns the uniform plus the output
@@ -417,6 +546,31 @@ pub fn geometry_uniform(
 
     let crop_bounds = crop_uv_bounds(cx, cy, cw, ch, sw, sh);
 
+    // Spec C4 part 2 (manual keystone): generalize the affine to a projective
+    // mapping. The affine extension `A_ext = [m|off; 0 0 1]`; keystone warps
+    // the CROP-LOCAL unit square (the user perceives keystone relative to the
+    // crop they see), so the full homography is `H = A_ext · D · W · N` — the
+    // affine consumes the keystone-warped coordinate. Zero keystone takes
+    // `A_ext` DIRECTLY (no matrix products), so `h2 = [0,0,1]` exactly and the
+    // shader's divide is by exactly 1.0 — bit-identical to the pre-keystone
+    // affine path (see `geometry_homography_zero_keystone_is_bit_identical_to_affine`).
+    let kv = geo.keystone_v.clamp(-1.0, 1.0);
+    let kh = geo.keystone_h.clamp(-1.0, 1.0);
+    let a_ext = [[m[0], m[1], off[0]], [m[2], m[3], off[1]], [0.0, 0.0, 1.0]];
+    let h = if kv == 0.0 && kh == 0.0 {
+        a_ext
+    } else {
+        let ow = out_w as f32;
+        let oh = out_h as f32;
+        // N: output px → crop-local normalized; D: back to px. `po` includes
+        // `out_origin` on the tile path, so W acts in FULL-output pixel space
+        // exactly as the affine always has.
+        let n_mat = [[1.0 / ow, 0.0, 0.0], [0.0, 1.0 / oh, 0.0], [0.0, 0.0, 1.0]];
+        let d_mat = [[ow, 0.0, 0.0], [0.0, oh, 0.0], [0.0, 0.0, 1.0]];
+        let w_unit = keystone_quad_homography(kv, kh);
+        mat3_mul(a_ext, mat3_mul(d_mat, mat3_mul(w_unit, n_mat)))
+    };
+
     (
         GeometryUniform {
             m,
@@ -425,6 +579,9 @@ pub fn geometry_uniform(
             out_dims: [out_w as f32, out_h as f32],
             out_origin: [0.0, 0.0],
             crop_bounds,
+            h0: [h[0][0], h[0][1], h[0][2], 0.0],
+            h1: [h[1][0], h[1][1], h[1][2], 0.0],
+            h2: [h[2][0], h[2][1], h[2][2], 0.0],
         },
         out_w,
         out_h,
@@ -1580,6 +1737,19 @@ mod tests {
         // WGSL uniform buffers require the whole struct's size to be a
         // multiple of its largest member's alignment (16, from `m: vec4`).
         assert_eq!(std::mem::size_of::<GeometryUniform>() % 16, 0);
+        // Field offsets MIRROR `struct P` in geometry.wgsl exactly (vec4
+        // align 16, vec2 align 8 — repr(C) f32 arrays land on the same
+        // offsets with no implicit padding).
+        assert_eq!(std::mem::size_of::<GeometryUniform>(), 112);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, m), 0);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, off), 16);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, src_dims), 24);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, out_dims), 32);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, out_origin), 40);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, crop_bounds), 48);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, h0), 64);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, h1), 80);
+        assert_eq!(std::mem::offset_of!(GeometryUniform, h2), 96);
     }
 
     #[test]
@@ -1683,6 +1853,245 @@ mod tests {
         // Identity transform + source dims preserved.
         assert_eq!(u.m, [1.0, 0.0, 0.0, 1.0]);
         assert_eq!(u.src_dims, [600.0, 500.0]);
+    }
+
+    // ── Plan `crop-overhaul` C4 Task 5: keystone homography ──
+
+    /// Source-px x-span the output row at `y_px` samples, edge to edge.
+    fn sampled_span_x(u: &GeometryUniform, y_px: f32, out_w: f32) -> f32 {
+        let l = geometry_src_px(u, [0.0, y_px])[0];
+        let r = geometry_src_px(u, [out_w, y_px])[0];
+        r - l
+    }
+
+    /// Source-px y-span the output column at `x_px` samples, edge to edge.
+    fn sampled_span_y(u: &GeometryUniform, x_px: f32, out_h: f32) -> f32 {
+        let t = geometry_src_px(u, [x_px, 0.0])[1];
+        let b = geometry_src_px(u, [x_px, out_h])[1];
+        b - t
+    }
+
+    #[test]
+    fn geometry_homography_zero_keystone_is_bit_identical_to_affine() {
+        // Brief test (a): with keystone == 0 the homography rows must carry
+        // EXACTLY the affine [m|off] extension (h2 = [0,0,1,0] bit-exact, so
+        // the perspective divide is by exactly 1.0) and the mapping must
+        // reproduce the pre-keystone affine `m·po + off` BIT-identically for
+        // a grid of output coords — this is what guards every existing
+        // zero-keystone golden.
+        use crate::op::{Aspect, CropRect, Geometry};
+        let geo = Geometry {
+            crop: CropRect {
+                x: 0.1003,
+                y: 0.2001,
+                w: 0.4997,
+                h: 0.5993,
+            },
+            angle_deg: 12.5,
+            aspect: Aspect::Free,
+            ..Default::default()
+        };
+        let (u, out_w, out_h) = geometry_uniform(Some(geo), 4001, 2999);
+        assert_eq!(
+            u.h2.map(f32::to_bits),
+            [0.0f32, 0.0, 1.0, 0.0].map(f32::to_bits),
+            "zero keystone: h2 must be exactly [0,0,1,0] (not even -0.0)"
+        );
+        assert_eq!(
+            u.h0.map(f32::to_bits)[..3],
+            [u.m[0], u.m[1], u.off[0]].map(f32::to_bits)
+        );
+        assert_eq!(
+            u.h1.map(f32::to_bits)[..3],
+            [u.m[2], u.m[3], u.off[1]].map(f32::to_bits)
+        );
+
+        // Grid of output coords, including tile-style negative/out-of-rect
+        // coords (`po = out_origin + gid + 0.5` may leave the output rect on
+        // the haloed tile path).
+        for iy in -2..=9 {
+            for ix in -2..=9 {
+                let po = [
+                    ix as f32 / 8.0 * out_w as f32 + 0.5,
+                    iy as f32 / 8.0 * out_h as f32 + 0.5,
+                ];
+                let affine = [
+                    u.m[0] * po[0] + u.m[1] * po[1] + u.off[0],
+                    u.m[2] * po[0] + u.m[3] * po[1] + u.off[1],
+                ];
+                let hom = geometry_src_px(&u, po);
+                assert_eq!(
+                    hom.map(f32::to_bits),
+                    affine.map(f32::to_bits),
+                    "zero-keystone homography drifted from the affine at po {po:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keystone_v_positive_widens_top_sampled_span() {
+        // Brief test (b), the pinned sign convention: kv > 0 must map the TOP
+        // output edge's sampled x-span WIDER than the bottom's (converging
+        // verticals corrected). Quantitatively (full frame, no rotation): the
+        // top edge's corners are displaced outward by 0.5·K·kv each, so its
+        // span is (1 + K·kv)·out_w while the bottom edge stays out_w.
+        use crate::op::Geometry;
+        let kv = 0.5f32;
+        let geo = Geometry {
+            keystone_v: kv,
+            ..Default::default()
+        };
+        let (u, out_w, out_h) = geometry_uniform(Some(geo), 64, 48);
+        let ow = out_w as f32;
+        let top = sampled_span_x(&u, 0.0, ow);
+        let bottom = sampled_span_x(&u, out_h as f32, ow);
+        assert!(
+            top > bottom,
+            "kv > 0 must widen the TOP edge's sampled span (top {top}, bottom {bottom})"
+        );
+        assert!((top - ow * (1.0 + KEYSTONE_STRENGTH * kv)).abs() < 1e-3);
+        assert!((bottom - ow).abs() < 1e-3);
+
+        // And the mirror: kv < 0 widens the BOTTOM edge instead.
+        let geo_neg = Geometry {
+            keystone_v: -kv,
+            ..Default::default()
+        };
+        let (u_neg, _, _) = geometry_uniform(Some(geo_neg), 64, 48);
+        let top_neg = sampled_span_x(&u_neg, 0.0, ow);
+        let bottom_neg = sampled_span_x(&u_neg, out_h as f32, ow);
+        assert!(
+            bottom_neg > top_neg,
+            "kv < 0 must widen the BOTTOM edge's sampled span"
+        );
+    }
+
+    #[test]
+    fn keystone_h_positive_widens_left_sampled_span() {
+        // keystone_h is keystone_v transposed: kh > 0 widens the LEFT output
+        // edge's sampled y-span (and kh < 0 the right's).
+        use crate::op::Geometry;
+        let kh = 0.5f32;
+        let geo = Geometry {
+            keystone_h: kh,
+            ..Default::default()
+        };
+        let (u, out_w, out_h) = geometry_uniform(Some(geo), 64, 48);
+        let oh = out_h as f32;
+        let left = sampled_span_y(&u, 0.0, oh);
+        let right = sampled_span_y(&u, out_w as f32, oh);
+        assert!(
+            left > right,
+            "kh > 0 must widen the LEFT edge's sampled span (left {left}, right {right})"
+        );
+        assert!((left - oh * (1.0 + KEYSTONE_STRENGTH * kh)).abs() < 1e-3);
+        assert!((right - oh).abs() < 1e-3);
+
+        let geo_neg = Geometry {
+            keystone_h: -kh,
+            ..Default::default()
+        };
+        let (u_neg, _, _) = geometry_uniform(Some(geo_neg), 64, 48);
+        assert!(
+            sampled_span_y(&u_neg, out_w as f32, oh) > sampled_span_y(&u_neg, 0.0, oh),
+            "kh < 0 must widen the RIGHT edge's sampled span"
+        );
+    }
+
+    #[test]
+    fn keystone_combined_corners_compose_in_one_solve() {
+        // Combined kv + kh: BOTH displacement sets apply to the four corners
+        // of ONE 4-point solve (not two multiplied homographies). With crop +
+        // rotation composed in, each output-rect corner must land exactly on
+        // the affine (m/off) image of its displaced crop-local corner.
+        use crate::op::{Aspect, CropRect, Geometry};
+        let (kv, kh) = (0.5f32, -0.3f32);
+        let geo = Geometry {
+            crop: CropRect {
+                x: 0.1,
+                y: 0.1,
+                w: 0.8,
+                h: 0.8,
+            },
+            angle_deg: 10.0,
+            aspect: Aspect::Free,
+            keystone_v: kv,
+            keystone_h: kh,
+        };
+        let (u, out_w, out_h) = geometry_uniform(Some(geo), 64, 48);
+        let (ow, oh) = (out_w as f32, out_h as f32);
+        let half = 0.5 * KEYSTONE_STRENGTH;
+        let (dt, db) = (kv.max(0.0) * half, (-kv).max(0.0) * half);
+        let (dl, dr) = (kh.max(0.0) * half, (-kh).max(0.0) * half);
+        let corners = [
+            ([0.0f32, 0.0f32], [-dt, -dl]),
+            ([1.0, 0.0], [1.0 + dt, -dr]),
+            ([0.0, 1.0], [-db, 1.0 + dl]),
+            ([1.0, 1.0], [1.0 + db, 1.0 + dr]),
+        ];
+        for (out_n, q) in corners {
+            let po = [out_n[0] * ow, out_n[1] * oh];
+            let q_px = [q[0] * ow, q[1] * oh];
+            let expected = [
+                u.m[0] * q_px[0] + u.m[1] * q_px[1] + u.off[0],
+                u.m[2] * q_px[0] + u.m[3] * q_px[1] + u.off[1],
+            ];
+            let got = geometry_src_px(&u, po);
+            assert!(
+                (got[0] - expected[0]).abs() < 1e-3 && (got[1] - expected[1]).abs() < 1e-3,
+                "corner {out_n:?}: got {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keystone_quad_homography_maps_unit_corners_to_displaced_corners() {
+        // Validates the closed-form solve itself: W applied projectively to
+        // each unit-square corner must reproduce the displaced corner.
+        let (kv, kh) = (0.7f32, -0.4f32);
+        let w = keystone_quad_homography(kv, kh);
+        let apply = |p: [f32; 2]| -> [f32; 2] {
+            let x = w[0][0] * p[0] + w[0][1] * p[1] + w[0][2];
+            let y = w[1][0] * p[0] + w[1][1] * p[1] + w[1][2];
+            let z = w[2][0] * p[0] + w[2][1] * p[1] + w[2][2];
+            [x / z, y / z]
+        };
+        let half = 0.5 * KEYSTONE_STRENGTH;
+        let (dt, db) = (kv.max(0.0) * half, (-kv).max(0.0) * half);
+        let (dl, dr) = (kh.max(0.0) * half, (-kh).max(0.0) * half);
+        let cases = [
+            ([0.0f32, 0.0f32], [-dt, -dl]),
+            ([1.0, 0.0], [1.0 + dt, -dr]),
+            ([0.0, 1.0], [-db, 1.0 + dl]),
+            ([1.0, 1.0], [1.0 + db, 1.0 + dr]),
+        ];
+        for (corner, expected) in cases {
+            let got = apply(corner);
+            assert!(
+                (got[0] - expected[0]).abs() < 1e-5 && (got[1] - expected[1]).abs() < 1e-5,
+                "unit corner {corner:?}: got {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keystone_tile_uniform_inherits_homography_rows() {
+        // The tile head spreads `..base`, so the keystone homography (built
+        // from the FULL output dims) must ride along unchanged; only
+        // out_dims/out_origin differ.
+        use crate::op::Geometry;
+        let geo = Geometry {
+            keystone_v: 0.5,
+            keystone_h: -0.3,
+            ..Default::default()
+        };
+        let (base, _, _) = geometry_uniform(Some(geo), 600, 500);
+        let tile = geometry_tile_uniform(Some(geo), 600, 500, (254.0, -2.0), 260);
+        assert_eq!(tile.h0, base.h0);
+        assert_eq!(tile.h1, base.h1);
+        assert_eq!(tile.h2, base.h2);
+        assert_eq!(tile.out_origin, [254.0, -2.0]);
     }
 
     #[test]

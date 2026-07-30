@@ -3,11 +3,12 @@ mod common;
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_pipeline::{
-    blit_to_rgba8, dehaze_recover, estimate_atmospheric_light, transmission_mip_level_count,
-    transmission_working_dims, upload_source, AdjustmentSet, Aspect, ColorGrade, Contrast,
-    CropRect, CurveMode, Dehaze, EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel,
-    Hsl, HslBand, LocalAdjustments, MaskLayer, Op, OpStack, ParametricCurve, PointCurve, Sharpen,
-    TileEditPipeline, ToneCurve, WhiteBalance, DEHAZE_DEFAULT_RADIUS,
+    blit_to_rgba8, clamp_uv_to_crop_bounds, dehaze_recover, estimate_atmospheric_light,
+    geometry_src_px, geometry_uniform, transmission_mip_level_count, transmission_working_dims,
+    upload_source, AdjustmentSet, Aspect, ColorGrade, Contrast, CropRect, CurveMode, Dehaze,
+    EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, LocalAdjustments,
+    MaskLayer, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve,
+    WhiteBalance, DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -465,6 +466,86 @@ fn geometry_crop_rotate_matches_golden() {
     let pixels = pipe.render_to_image();
     // out dims = round(0.8 * 64) x round(0.8 * 48) = 51 x 38.
     common::assert_golden(&pixels, 51, 38, "geometry_crop_rotate.png");
+}
+
+/// The keystone parity/golden fixture (plan `crop-overhaul` C4 Task 5):
+/// kv = 0.5, kh = -0.3 on top of a real crop + rotation.
+fn keystone_fixture_stack() -> OpStack {
+    OpStack::default().set_op(Op::Geometry(Geometry {
+        crop: CropRect {
+            x: 0.1,
+            y: 0.1,
+            w: 0.8,
+            h: 0.8,
+        },
+        angle_deg: 10.0,
+        aspect: Aspect::Free,
+        keystone_v: 0.5,
+        keystone_h: -0.3,
+    }))
+}
+
+#[test]
+fn geometry_keystone_matches_golden() {
+    // Plan `crop-overhaul` C4 Task 5: the committed keystone golden
+    // (`geometry_keystone.png`, authored with UPDATE_GOLDEN=1 on the dev GPU)
+    // pins the projective geometry pass — kv/kh + crop + rotation.
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let mut pipe = EditPipeline::new(
+        Arc::new(ctx),
+        &common::gradient(W, H),
+        keystone_fixture_stack(),
+        IDENTITY,
+    );
+    let pixels = pipe.render_to_image();
+    // Keystone does not change the output extent: out dims stay the crop's,
+    // round(0.8 * 64) x round(0.8 * 48) = 51 x 38.
+    common::assert_golden(&pixels, 51, 38, "geometry_keystone.png");
+}
+
+#[test]
+fn geometry_keystone_gpu_matches_cpu_homography_reference() {
+    // Brief test (c): CPU/GPU parity on kv=0.5, kh=-0.3 + crop + rotation.
+    // The CPU side predicts every output pixel analytically through the SAME
+    // uniform the GPU consumes: `geometry_src_px` (the homography mirror) →
+    // normalize → `clamp_uv_to_crop_bounds` → evaluate `common::gradient`'s
+    // exact linear formula at the sampled coordinate (bilinear sampling of a
+    // linear ramp is the ramp itself, so texel value at uv is `uv − half
+    // texel`) → the blit's sRGB OETF.
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let stack = keystone_fixture_stack();
+    let mut pipe = EditPipeline::new(
+        Arc::new(ctx),
+        &common::gradient(W, H),
+        stack.clone(),
+        IDENTITY,
+    );
+    let pixels = pipe.render_to_image();
+
+    let (u, out_w, out_h) = geometry_uniform(stack.geometry(), W, H);
+    assert_eq!((out_w, out_h), (51, 38));
+    let mut expected = Vec::with_capacity((out_w * out_h * 4) as usize);
+    for y in 0..out_h {
+        for x in 0..out_w {
+            let po = [x as f32 + 0.5, y as f32 + 0.5];
+            let s = geometry_src_px(&u, po);
+            let uv = clamp_uv_to_crop_bounds([s[0] / W as f32, s[1] / H as f32], u.crop_bounds);
+            let r = uv[0] - 0.5 / W as f32;
+            let g = uv[1] - 0.5 / H as f32;
+            expected.extend_from_slice(&[srgb_u8(r), srgb_u8(g), srgb_u8(0.25), 255]);
+        }
+    }
+    let diff = common::max_abs_diff(&pixels, &expected);
+    assert!(
+        diff <= 4,
+        "keystone GPU render diverged from the CPU homography reference (diff {diff})"
+    );
 }
 
 #[test]

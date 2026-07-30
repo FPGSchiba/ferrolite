@@ -18,6 +18,8 @@
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba16float, write>;
 struct P {
+    // The affine crop/rotation part (keystone-free), kept for CPU consumers
+    // that mirror this uniform's layout — the SHADER maps through h0..h2.
     m: vec4<f32>,         // row-major 2x2: m00,m01,m10,m11
     off: vec2<f32>,
     src_dims: vec2<f32>,
@@ -29,6 +31,14 @@ struct P {
     // duplicating) the frame's own edge texel. Full-frame geometry carries the
     // half-texel-inset FULL rect here, so un-cropped rendering is unchanged.
     crop_bounds: vec4<f32>,
+    // Rows of the row-major 3x3 output-px → source-px homography (spec C4:
+    // manual keystone; last lane of each row is padding). src = (H·[po,1]).xy
+    // / (H·[po,1]).z. At zero keystone the rows carry exactly the affine
+    // [m|off] with h2 = (0,0,1), so hw == 1.0 and the perspective divide is
+    // bit-identical to the old affine path (guards the existing goldens).
+    h0: vec4<f32>,
+    h1: vec4<f32>,
+    h2: vec4<f32>,
 };
 @group(0) @binding(2) var<uniform> p: P;
 @group(0) @binding(3) var samp: sampler;
@@ -82,13 +92,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let oh = u32(p.out_dims.y);
     if (gid.x >= ow || gid.y >= oh) { return; }
     let po = p.out_origin + vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5);
-    let sx = p.m.x * po.x + p.m.y * po.y + p.off.x;
-    let sy = p.m.z * po.x + p.m.w * po.y + p.off.y;
+    // Projective output→source mapping (spec C4: manual keystone). Kept in
+    // lock-step with the CPU mirror `uniforms::geometry_src_px` — same
+    // expression shape and evaluation order, so the zero-keystone path
+    // (hw == exactly 1.0) is bit-identical to the retired affine
+    // `m·po + off`.
+    let hx = p.h0.x * po.x + p.h0.y * po.y + p.h0.z;
+    let hy = p.h1.x * po.x + p.h1.y * po.y + p.h1.z;
+    let hw = p.h2.x * po.x + p.h2.y * po.y + p.h2.z;
+    let s = vec2<f32>(hx, hy) / hw;
     // Clamp to the crop sub-rect (not the whole source texture) so a rotated
     // crop's out-of-bounds corners smear the CROP's own edge rather than the
     // frame's — see the `crop_bounds` field doc on `struct P`.
     let base_uv = clamp(
-        vec2<f32>(sx, sy) / p.src_dims,
+        s / p.src_dims,
         p.crop_bounds.xy,
         p.crop_bounds.zw,
     );

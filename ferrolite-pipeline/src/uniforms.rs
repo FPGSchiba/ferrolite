@@ -1726,6 +1726,106 @@ mod tests {
         }
     }
 
+    /// Regression (crop display bug, 2026-07): every consumer of the
+    /// geometry OUTPUT dims must derive the exact same WxH for the same
+    /// (fractional) crop. The consumers, and the path each takes:
+    ///
+    /// * `geometry_uniform`'s returned `(out_w, out_h)` — baked into
+    ///   `TileEditPipeline` (`out_dims()`, whose value the app pushes into
+    ///   the sparse VT's logical size) via `edited_output_dims`.
+    /// * the uniform's `out_dims: [f32; 2]` field — what the preview
+    ///   `EditPipeline`'s geometry node allocates its output texture from
+    ///   (`nodes.rs`: `u.out_dims[0] as u32`), i.e. the preview-tier dims.
+    ///
+    /// A 1px disagreement between any two (round vs truncate vs a second
+    /// independent rounding) makes the preview and full tiers place the image
+    /// differently, which presents as pan/zoom flicker and a wrong crop at
+    /// rest on cropped images.
+    #[test]
+    fn fractional_crop_all_dims_consumers_agree() {
+        use crate::op::{Aspect, CropRect, Geometry, Op, OpStack};
+
+        // Sources + crops chosen so crop_w_px/crop_h_px land on awkward
+        // fractions, including exact .5 (round-half) and near-integer cases.
+        let cases: &[((u32, u32), CropRect, f32)] = &[
+            // 0.500125 * 4000 = 2000.5 — exact round-half in width.
+            (
+                (4000, 3000),
+                CropRect {
+                    x: 0.1,
+                    y: 0.1,
+                    w: 0.500_125,
+                    h: 0.333_4,
+                },
+                0.0,
+            ),
+            // Both axes fractional, odd source dims, with rotation.
+            (
+                (4001, 2999),
+                CropRect {
+                    x: 0.1003,
+                    y: 0.2001,
+                    w: 0.4997,
+                    h: 0.5993,
+                },
+                12.5,
+            ),
+            // Near-integer remainder just below .5 (must round DOWN everywhere).
+            (
+                (6000, 4000),
+                CropRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.333_39,
+                    h: 0.666_61,
+                },
+                -30.0,
+            ),
+        ];
+
+        for &((src_w, src_h), crop, angle_deg) in cases {
+            let geo = Geometry {
+                crop,
+                angle_deg,
+                aspect: Aspect::Free,
+                ..Default::default()
+            };
+
+            // Consumer 1: geometry_uniform's rounded ints (the tile/full tier).
+            let (u, out_w, out_h) = geometry_uniform(Some(geo), src_w, src_h);
+
+            // Consumer 2: the uniform's f32 out_dims field cast back the way
+            // the preview geometry node does when allocating its output.
+            let preview_w = (u.out_dims[0] as u32).max(1);
+            let preview_h = (u.out_dims[1] as u32).max(1);
+
+            // Consumer 3: edited_output_dims (export + sparse-VT logical size).
+            let stack = OpStack::default().set_op(Op::Geometry(geo));
+            let export = crate::edited_output_dims(&stack, src_w, src_h);
+
+            assert_eq!(
+                (preview_w, preview_h),
+                (out_w, out_h),
+                "src {src_w}x{src_h} crop {crop:?}: preview-tier dims (from the \
+                 uniform's out_dims field) must equal geometry_uniform's rounded ints"
+            );
+            assert_eq!(
+                export,
+                (out_w, out_h),
+                "src {src_w}x{src_h} crop {crop:?}: edited_output_dims must equal \
+                 geometry_uniform's rounded ints"
+            );
+            // The crop always stays within the source, so the rounded output
+            // extent can never exceed it — the invariant that lets the sparse
+            // VT shrink its logical size in place (the full-source tile grid
+            // stays a superset).
+            assert!(
+                out_w <= src_w && out_h <= src_h,
+                "src {src_w}x{src_h} crop {crop:?}: out {out_w}x{out_h} exceeds source"
+            );
+        }
+    }
+
     #[test]
     fn geometry_uniform_default_out_origin_is_zero() {
         let (u, _, _) = geometry_uniform(None, 64, 48);

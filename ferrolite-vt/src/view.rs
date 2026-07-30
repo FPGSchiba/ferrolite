@@ -339,6 +339,39 @@ impl VirtualTexture {
         self.single.as_ref().map(|s| s.image_dims)
     }
 
+    /// Logical image dimensions of the sparse (rung-4) tier, if this is a
+    /// sparse VT.
+    pub fn sparse_dims(&self) -> Option<(u32, u32)> {
+        self.sparse.as_ref().map(|s| s.image_dims)
+    }
+
+    /// Set the sparse tier's LOGICAL image size — the extent the display
+    /// shader clips to, the transform maps, and the needed-set / convergence
+    /// math covers. Construction takes this from the tile source's level-0
+    /// size, which is the SOURCE extent; a producer that renders tiles in a
+    /// geometry-applied OUTPUT space (e.g. a crop, whose output is smaller
+    /// than the source) must have the logical size re-pointed at its output
+    /// dims whenever it is (re)built, or every consumer keeps presenting the
+    /// pre-crop extent (wrong crop at rest + preview↔full mismatch flicker).
+    ///
+    /// `dims` must not exceed the tile source's level-0 size on either axis
+    /// (a crop is always within the source, so its rounded output extent
+    /// never does): the tile-grid layout / page table / feedback buffer are
+    /// sized once from the source and remain a valid SUPERSET of the shrunken
+    /// logical grid — tile (lod, x, y) covers the same output-space pixels on
+    /// both sides. Values are clamped defensively to that capacity. A no-op
+    /// on a non-sparse VT or when the dims are unchanged.
+    pub fn set_sparse_image_dims(&mut self, dims: (u32, u32)) {
+        if let Some(s) = self.sparse.as_mut() {
+            // Level-0 grid capacity in pixels (cols/rows were ceil-divided from
+            // the source's level-0 size at construction).
+            let (cols, rows) = s.layout.dims(0);
+            let cap = (cols * TILE_SIZE, rows * TILE_SIZE);
+            let clamped = (dims.0.clamp(1, cap.0), dims.1.clamp(1, cap.1));
+            s.image_dims = clamped;
+        }
+    }
+
     /// The current rung-1 texture (`Rgba16Float`) as an `Arc`, for a compute pass
     /// (e.g. the histogram) that reads what is on screen. `None` on a non-single VT.
     pub fn single_texture_arc(&self) -> Option<std::sync::Arc<wgpu::Texture>> {

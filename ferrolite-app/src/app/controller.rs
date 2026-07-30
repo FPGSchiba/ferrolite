@@ -848,6 +848,7 @@ impl AppController {
         // tail), so the producer is attached unconditionally — identity stack =
         // unedited-but-color-managed.
         let version;
+        let out_dims;
         {
             let Some(v) = app.state.viewer.as_mut() else {
                 return false;
@@ -904,6 +905,11 @@ impl AppController {
                     .as_ref()
                     .and_then(|ep| ep.transmission_texture()),
             );
+            // The producer renders tiles in geometry-applied OUTPUT space (the
+            // rounded crop extent) — the sparse VT's logical size below must be
+            // re-pointed at these dims or a stack with a crop (e.g. a loaded
+            // sidecar) presents the full tier at the pre-crop source extent.
+            out_dims = producer.out_dims();
             v.edit_producer = Some(producer);
             // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
             // this producer was built from `v.op_stack`.
@@ -921,6 +927,7 @@ impl AppController {
             if g.image_id == image_id {
                 g.full = Some(full);
                 if let Some(full) = g.full.as_mut() {
+                    full.set_sparse_image_dims(out_dims);
                     full.set_producing(true);
                     full.set_opstack_version(&g.ctx, version);
                 }
@@ -1172,6 +1179,11 @@ impl AppController {
                     .as_ref()
                     .and_then(|ep| ep.transmission_texture()),
             );
+            // Sync the sparse VT's logical size to the rebuilt producer's
+            // geometry-applied output dims — same invariant as the rebuild in
+            // `set_preview_and_full` (a lens rebuild keeps the stack's crop, so
+            // this preserves the cropped extent rather than resetting it).
+            let out_dims = producer.out_dims();
             v.edit_producer = Some(producer);
             // Baseline for deferred-full-res rebuild decisions (see `full_stack`):
             // this producer was rebuilt from `shown`.
@@ -1183,6 +1195,7 @@ impl AppController {
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == image_id {
                     if let Some(full) = g.full.as_mut() {
+                        full.set_sparse_image_dims(out_dims);
                         full.set_producing(true);
                         full.set_opstack_version(&g.ctx, version);
                     }
@@ -1429,10 +1442,23 @@ impl AppController {
             v.full_synced_version = v.opstack_version;
             let version = v.opstack_version;
             let image_id = v.image_id;
+            // Keep the sparse VT's logical size in lockstep with the producer's
+            // geometry-applied OUTPUT dims (the rounded crop extent, the same
+            // dims the preview tier's texture just took above). Without this a
+            // crop commit leaves the full tier at the pre-crop source extent:
+            // wrongly cropped at rest, and pan/zoom flickers between the
+            // cropped preview and the uncropped front (they place the image at
+            // different centers/extents). Covers both branches: the rebuilt
+            // producer (geometry change) and the in-place update (color-only —
+            // a no-op, dims unchanged).
+            let out_dims = v.edit_producer.as_ref().map(|p| p.out_dims());
             let mut renderer = rs.renderer.write();
             if let Some(g) = renderer.callback_resources.get_mut::<viewer::ViewerGpu>() {
                 if g.image_id == image_id {
                     if let Some(full) = g.full.as_mut() {
+                        if let Some(dims) = out_dims {
+                            full.set_sparse_image_dims(dims);
+                        }
                         full.set_producing(true);
                         full.set_opstack_version(&g.ctx, version);
                     }

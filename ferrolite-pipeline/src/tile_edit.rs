@@ -324,6 +324,19 @@ impl TileEditPipeline {
         self.halo
     }
 
+    /// The geometry-applied OUTPUT dims this pipeline renders tiles in — the
+    /// rounded crop extent from `geometry_uniform`, identical to
+    /// `edited_output_dims(&stack, src_w, src_h)` for the construction stack.
+    /// This is the single source of truth every dims consumer must share: the
+    /// sparse VT's logical size, the compose/display transform, and the
+    /// convergence needed-set must all use THESE dims, or a cropped image's
+    /// full tier renders at the pre-crop extent (the wrong-crop-at-rest /
+    /// pan-zoom-flicker bug). Fixed at construction, like the geometry itself
+    /// (see the `set_stack` LIMITATION).
+    pub fn out_dims(&self) -> (u32, u32) {
+        (self.out_w, self.out_h)
+    }
+
     /// Re-derive the color-op param cells (exposure, white balance, contrast,
     /// tone curve, HSL, local adjustments, sharpen amount) from `stack` and
     /// dirty the chain so the next `produce_tile` re-renders.

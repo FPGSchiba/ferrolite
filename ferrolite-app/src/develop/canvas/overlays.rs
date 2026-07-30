@@ -39,11 +39,25 @@ pub fn draw_histogram(ui: &egui::Ui, state: &AppState) {
 
 /// Draw the floating EXIF info chip and toggle button.
 pub fn draw_info(ui: &egui::Ui, state: &mut AppState) {
-    crate::develop::info_overlay::draw_toggle_button(ui, &mut state.show_info_panel);
-
-    if state.settings.show_info_overlay
+    // Exactly the condition that gates the `draw()` call below, so the pill
+    // (see `draw_toggle_button`'s `overlay_visible` param) always agrees with
+    // whether the facts overlay is actually on screen this frame. NOT
+    // `state.show_info_panel` — that's the separate Develop left info panel
+    // toggle this same button also controls.
+    let overlay_visible = state.settings.show_info_overlay
         && state.tool_state.active_tab != crate::develop::tool::TabId("info")
-    {
+        && state
+            .viewer
+            .as_ref()
+            .is_some_and(|v| v.meta.is_some() && v.image_dims.is_some());
+
+    crate::develop::info_overlay::draw_toggle_button(
+        ui,
+        &mut state.show_info_panel,
+        overlay_visible,
+    );
+
+    if overlay_visible {
         if let Some(v) = state.viewer.as_ref() {
             if let (Some(meta), Some(dims)) = (v.meta.as_ref(), v.image_dims) {
                 let fit = ferrolite_vt::ViewTransform::fit(dims, v.viewport).zoom;

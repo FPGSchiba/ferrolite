@@ -52,8 +52,13 @@ impl DevelopTool for CropTool {
 /// Build the committing `EditOutcome` for a `Geometry` change: identity ->
 /// `reset`, otherwise `set_op`. Single source of truth for every control in
 /// this panel (angle, aspect combo, aspect chips, keystone V/H, "Reset crop")
-/// so they all write through the exact same path.
-fn geometry_edit(stack: &OpStack, new_geo: Geometry, commit: bool) -> EditOutcome {
+/// so they all write through the exact same path. `pub(crate)` so
+/// `crop_overlay`'s drag handler (mid-drag AND commit outcomes, plus the
+/// Escape-cancel restore) shares it too — it used to call `stack.set_op`
+/// directly, which left `Some(Geometry::default())` instead of a normalized
+/// `None` when a drag landed back exactly at the identity crop (Task 4
+/// review finding), desyncing `EditDoc::is_identity()`.
+pub(crate) fn geometry_edit(stack: &OpStack, new_geo: Geometry, commit: bool) -> EditOutcome {
     let s = if new_geo.is_identity() {
         stack.reset(OpKind::Geometry)
     } else {

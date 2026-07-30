@@ -3,11 +3,26 @@ use crate::app::FerroliteApp;
 pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe::Frame) {
     // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
     // closed image's work stops competing with whatever is opened next.
-    if app
-        .state
-        .settings
-        .keymap
-        .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
+    //
+    // Precedence (spec C5 "leaving crop feels safe"): this dispatch runs
+    // BEFORE the Develop canvas/tool rendering later in `app.rs`'s
+    // `update()`, i.e. before `crop_overlay::show` gets a chance to see this
+    // same Escape and cancel an in-progress handle drag. Without the
+    // `crop_drag_active` guard below, Escape would close the WHOLE viewer
+    // mid-drag before the drag-cancel code ever ran. Gated on the Crop tool
+    // being active too (not just `drag_in_progress`) so a stale drag record
+    // left behind by switching tools mid-drag (see `crop_overlay`'s module
+    // doc comment) can't suppress `CloseViewer` while some other tool is
+    // active. See `crop_overlay.rs`'s module doc comment for the full
+    // precedence rationale.
+    let crop_drag_active = app.state.tool_state.active == crate::develop::tool::ToolId::Crop
+        && crate::develop::crop_overlay::drag_in_progress(ctx);
+    if !crop_drag_active
+        && app
+            .state
+            .settings
+            .keymap
+            .pressed(ctx, crate::settings::keymap::Action::CloseViewer)
     {
         app.maybe_regen_on_leave(ctx, frame);
         if let Some(v) = app.state.viewer.take() {

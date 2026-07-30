@@ -221,4 +221,34 @@ mod tests {
             "valid tab kept across switch"
         );
     }
+
+    /// Regression for spec C5 ("leaving crop feels safe" — exiting the Crop
+    /// tool commits nothing by itself). `select_tool`'s signature IS the
+    /// proof: it takes no `OpStack`/`EditDoc` and returns `()`, so there is
+    /// no channel through which switching tools could itself produce an
+    /// `EditOutcome` (committed or not). The only place a crop edit can come
+    /// from is `CropTool::canvas` (which calls `crop_overlay::show`), and
+    /// `develop/canvas/viewer.rs`'s dispatch only invokes the CURRENTLY
+    /// ACTIVE tool's `canvas()` (`if let Some(id) = active_tool { ...
+    /// tool.canvas(...) }`, keyed off this exact `ToolState.active` field).
+    /// The instant this method flips `active` away from `ToolId::Crop`,
+    /// `crop_overlay::show` stops being called — drag in progress or not —
+    /// so there is nothing left that could commit. (See
+    /// `crop_overlay::tests::a_recorded_drag_produces_no_outcome_without_show_running_again`
+    /// for the other half of this guarantee: a stale mid-drag record left
+    /// behind by such a switch is inert without `show()` running again.)
+    #[test]
+    fn switching_away_from_crop_is_a_pure_state_flip_with_no_edit_channel() {
+        let reg = reg();
+        let mut s = ToolState::default();
+        s.select_tool(ToolId::Crop, true, &reg);
+        assert_eq!(s.active, ToolId::Crop);
+
+        // Switch away as if mid-drag (a real mid-drag has no bearing here —
+        // this call has no OpStack parameter at all, so "did it commit
+        // something" isn't even an expressible question).
+        s.select_tool(ToolId::Adjust, true, &reg);
+        assert_eq!(s.active, ToolId::Adjust);
+        assert_eq!(s.active_tab, s.base_tab, "back to the remembered base tab");
+    }
 }

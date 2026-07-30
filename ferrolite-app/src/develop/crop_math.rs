@@ -3,10 +3,10 @@
 
 use ferrolite_pipeline::{Aspect, CropRect};
 
-/// `#[repr(u8)]` makes `handle as u8` well-defined and lets crop_overlay index
-/// into HANDLES with a simple cast (`HANDLES[h as usize]`).
+/// Which crop-rect handle (or the body) a drag is manipulating. `crop_overlay`
+/// stores this directly (it's `Copy`) as part of its mid-drag state — no
+/// `u8` index translation needed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
 pub enum Handle {
     TopLeft,
     Top,

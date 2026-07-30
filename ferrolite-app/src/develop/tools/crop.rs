@@ -8,11 +8,12 @@
 //! this migration is behavior-preserving for angle/aspect/reset.
 
 use crate::develop::adjustment_panel::EditOutcome;
+use crate::develop::crop_math;
 use crate::develop::tool::{DevelopCtx, DevelopTool, PanelTab, TabId, ToolId};
 use crate::state::AppState;
 use crate::widgets::section_header;
 use crate::widgets::slider::EguiSlider;
-use ferrolite_pipeline::{Aspect, Geometry, Op, OpKind, OpStack};
+use ferrolite_pipeline::{Aspect, CropRect, Geometry, Op, OpKind, OpStack};
 
 pub struct CropTool;
 
@@ -68,6 +69,21 @@ pub(crate) fn geometry_edit(stack: &OpStack, new_geo: Geometry, commit: bool) ->
         stack: s,
         kind: OpKind::Geometry,
         commit,
+    }
+}
+
+/// The crop rect a just-picked aspect implies: conform the existing rect to
+/// the new ratio IMMEDIATELY (keep center, preserve area, clamp to bounds —
+/// `crop_math::conform_to_aspect`), instead of only constraining future
+/// drags. The ratio is converted to normalized space by the source dims
+/// first (`crop_math::normalized_aspect`) — the same conversion the overlay's
+/// drag path uses — so "3:2" means 3:2 in PIXELS. `Aspect::Free` (the
+/// "Custom" state) constrains nothing and leaves the rect untouched;
+/// `Aspect::Original` conforms back to the full-image ratio.
+fn conformed_crop(crop: CropRect, aspect: Aspect, dims: (u32, u32)) -> CropRect {
+    match crop_math::normalized_aspect(aspect, dims.0, dims.1) {
+        Some(ar) => crop_math::conform_to_aspect(crop, ar),
+        None => crop,
     }
 }
 
@@ -131,7 +147,10 @@ impl PanelTab for CropTab {
         "Crop"
     }
     fn show(&self, ui: &mut egui::Ui, state: &mut AppState) -> Option<EditOutcome> {
-        let stack = state.viewer.as_ref()?.op_stack.clone();
+        let (stack, dims) = {
+            let v = state.viewer.as_ref()?;
+            (v.op_stack.clone(), v.image_dims.unwrap_or((1, 1)))
+        };
         let mut out: Option<EditOutcome> = None;
         let geo = stack.geometry().unwrap_or_default();
 
@@ -174,9 +193,19 @@ impl PanelTab for CropTab {
                     }
                 });
             if r.changed() || aspect != geo.aspect {
+                // A combo-picked aspect conforms the existing rect to the new
+                // ratio right away (a discrete, committing action — the same
+                // behavior as the chip row below); an angle drag leaves the
+                // rect alone.
+                let crop = if aspect != geo.aspect {
+                    conformed_crop(geo.crop, aspect, dims)
+                } else {
+                    geo.crop
+                };
                 let new_geo = Geometry {
                     angle_deg: angle,
                     aspect,
+                    crop,
                     ..geo
                 };
                 out = Some(geometry_edit(
@@ -194,6 +223,7 @@ impl PanelTab for CropTab {
             if let Some(new_aspect) = aspect_chip_row(ui, aspect) {
                 let new_geo = Geometry {
                     aspect: new_aspect,
+                    crop: conformed_crop(geo.crop, new_aspect, dims),
                     ..geo
                 };
                 out = Some(geometry_edit(&stack, new_geo, true));
@@ -420,6 +450,59 @@ mod tests {
         });
 
         assert_eq!(picked, None, "clicking the already-active chip is a no-op");
+    }
+
+    /// UX gap B: picking an aspect conforms the EXISTING rect immediately —
+    /// and does so in PIXEL space (the ratio the chip names), i.e. the
+    /// source-dims conversion is applied, not skipped like the pre-fix
+    /// overlay drag path.
+    #[test]
+    fn conformed_crop_three_two_on_a_6000x4000_source_is_3_2_in_pixels() {
+        let c = CropRect {
+            x: 0.1,
+            y: 0.2,
+            w: 0.3,
+            h: 0.5,
+        };
+        let r = conformed_crop(c, Aspect::ThreeTwo, (6000, 4000));
+        let pixel_ratio = (r.w * 6000.0) / (r.h * 4000.0);
+        assert!(
+            (pixel_ratio - 1.5).abs() < 1e-3,
+            "pixel rect must be 3:2, got {pixel_ratio}"
+        );
+        // Center kept (feasible here) and bounds respected.
+        assert!((r.x + r.w * 0.5 - (c.x + c.w * 0.5)).abs() < 1e-4);
+        assert!((r.y + r.h * 0.5 - (c.y + c.h * 0.5)).abs() < 1e-4);
+        assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= 1.0 + 1e-6 && r.y + r.h <= 1.0 + 1e-6);
+    }
+
+    #[test]
+    fn conformed_crop_free_changes_nothing() {
+        let c = CropRect {
+            x: 0.1,
+            y: 0.2,
+            w: 0.3,
+            h: 0.5,
+        };
+        let r = conformed_crop(c, Aspect::Free, (6000, 4000));
+        assert_eq!((r.x, r.y, r.w, r.h), (c.x, c.y, c.w, c.h));
+    }
+
+    #[test]
+    fn conformed_crop_original_restores_the_full_image_ratio() {
+        // An uncropped frame stays uncropped...
+        let full = conformed_crop(CropRect::full(), Aspect::Original, (6000, 4000));
+        assert_eq!((full.x, full.y, full.w, full.h), (0.0, 0.0, 1.0, 1.0));
+        // ...and a partial crop becomes the source's own ratio in pixels.
+        let c = CropRect {
+            x: 0.1,
+            y: 0.2,
+            w: 0.3,
+            h: 0.6,
+        };
+        let r = conformed_crop(c, Aspect::Original, (6000, 4000));
+        let pixel_ratio = (r.w * 6000.0) / (r.h * 4000.0);
+        assert!((pixel_ratio - 1.5).abs() < 1e-3, "got {pixel_ratio}");
     }
 
     #[test]

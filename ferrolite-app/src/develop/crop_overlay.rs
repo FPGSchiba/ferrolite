@@ -187,7 +187,13 @@ pub fn show(
         return Some(outcome);
     }
 
-    let aspect = crop_math::aspect_ratio(geo.aspect, aspect_dims.0, aspect_dims.1);
+    // NORMALIZED-space ratio, NOT `aspect_ratio`'s image-space one: `resize`
+    // works in [0,1]² where a pixel ratio must be scaled by the source's own
+    // shape (3:2 on a 6000×4000 source is 1.0 here, not 1.5). Passing the
+    // image-space value straight in — as this line did from the first overlay
+    // commit (a563e7f) until now — made every aspect-locked drag hold the
+    // wrong ratio on non-square sources, which read as "aspect not held".
+    let aspect = crop_math::normalized_aspect(geo.aspect, aspect_dims.0, aspect_dims.1);
     let mut new_crop = crop;
     let mut changed = false;
     if resp.drag_started() {

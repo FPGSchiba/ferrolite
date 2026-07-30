@@ -3,7 +3,7 @@
 
 use crate::error::CatalogError;
 use crate::model::ImageRecord;
-use crate::queries::IMAGE_COLS;
+use crate::queries::{IMAGE_COLS, THUMB_JOIN};
 use ferrolite_image::{Flag, TagId};
 use rusqlite::{types::Value, Connection};
 use std::collections::BTreeSet;
@@ -147,7 +147,7 @@ impl LibraryQuery {
         // RecentlyAdded short-circuits scope + ordering.
         if let Scope::RecentlyAdded { limit } = self.scope {
             let sql = format!(
-                "SELECT {IMAGE_COLS} FROM images WHERE added_at IS NOT NULL \
+                "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE added_at IS NOT NULL \
                  ORDER BY added_at DESC LIMIT ?"
             );
             params.push(Value::Integer(limit));
@@ -296,7 +296,7 @@ impl LibraryQuery {
             params.push(Value::Text(to.clone()));
         }
 
-        let mut sql = format!("{prefix}SELECT {IMAGE_COLS} FROM images{joins}");
+        let mut sql = format!("{prefix}SELECT {IMAGE_COLS} FROM images{THUMB_JOIN}{joins}");
         if !where_clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));

@@ -47,6 +47,8 @@ mod tests {
             rating: Rating::default(),
             flag: Flag::None,
             has_edits: false,
+            thumb_w: None,
+            thumb_h: None,
         }
     }
 

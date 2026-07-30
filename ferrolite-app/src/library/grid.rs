@@ -153,10 +153,22 @@ fn label_width(ui: &egui::Ui, rec: &ImageRecord) -> f32 {
     (name.max(date) + 6.0).min(MAX_LABEL_W)
 }
 
-/// Upright aspect ratio (width / height) of an image, applying its orientation
-/// so portrait/landscape cells match what the thumbnail actually shows. Falls
-/// back to square (1.0) when dimensions are unknown.
+/// Upright aspect ratio (width / height) of an image, matching what the
+/// thumbnail actually shows.
+///
+/// Prefers the persisted thumbnail's OWN dimensions (`thumb_w`/`thumb_h`,
+/// joined from the `thumbnails` table) when present: those are already
+/// display-upright and reflect any crop/geometry edit baked in by a
+/// thumbnail regen (`develop::thumb_regen`), whereas `width`/`height` are the
+/// ingest-time SENSOR-space dims and never change after a crop (see
+/// `ImageRecord::thumb_w` doc comment) — using them directly would show the
+/// pre-crop aspect ratio forever. Falls back to `width`/`height` +
+/// orientation swap (and ultimately square 1.0) only when no thumbnail row
+/// exists yet, e.g. a freshly-scanned `Pending` row.
 pub(crate) fn cell_aspect(rec: &ImageRecord) -> f32 {
+    if let (Some(tw), Some(th)) = (rec.thumb_w, rec.thumb_h) {
+        return (tw.max(1) as f32 / th.max(1) as f32).clamp(0.1, 10.0);
+    }
     let w = rec.width.unwrap_or(0).max(1) as f32;
     let h = rec.height.unwrap_or(0).max(1) as f32;
     let (w, h) = if rec.orientation.swaps_dimensions() {
@@ -468,6 +480,94 @@ fn paint_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ferrolite_catalog::{DecodeStatus, FileKind};
+    use ferrolite_image::{Flag, Orientation, Rating};
+
+    /// Minimal `ImageRecord` fixture for `cell_aspect` tests. `width`/`height`
+    /// stand in for the ingest-time sensor dims; `thumb_w`/`thumb_h` stand in
+    /// for the persisted thumbnail's own (possibly cropped) dims.
+    fn rec(
+        width: Option<u32>,
+        height: Option<u32>,
+        orientation: Orientation,
+        thumb_w: Option<u32>,
+        thumb_h: Option<u32>,
+    ) -> ImageRecord {
+        ImageRecord {
+            id: 1,
+            folder_id: 1,
+            filename: "x.nef".into(),
+            width,
+            height,
+            orientation,
+            capture_time: None,
+            iso: None,
+            decode_status: DecodeStatus::Done,
+            kind: FileKind::Raw,
+            rating: Rating::default(),
+            flag: Flag::None,
+            has_edits: false,
+            thumb_w,
+            thumb_h,
+        }
+    }
+
+    #[test]
+    fn cell_aspect_prefers_thumbnail_dims_when_present() {
+        // Sensor dims say landscape 4:3, but the persisted thumbnail (after a
+        // crop-driven regen) is portrait — the cell must follow the thumbnail,
+        // not the stale ingest-time width/height.
+        let r = rec(
+            Some(4000),
+            Some(3000),
+            Orientation::Normal,
+            Some(120),
+            Some(200),
+        );
+        assert!(
+            (cell_aspect(&r) - 120.0 / 200.0).abs() < 1e-6,
+            "aspect must come from thumb_w/thumb_h, not width/height"
+        );
+    }
+
+    #[test]
+    fn cell_aspect_falls_back_to_width_height_when_no_thumbnail_yet() {
+        // A freshly-scanned Pending row has no thumbnails row yet.
+        let r = rec(Some(4000), Some(3000), Orientation::Normal, None, None);
+        assert!((cell_aspect(&r) - 4000.0 / 3000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cell_aspect_fallback_still_applies_orientation_swap() {
+        // No thumbnail yet + a 90°-rotated EXIF orientation: the fallback path
+        // must still swap width/height so the cell isn't the wrong way round.
+        let r = rec(Some(4000), Some(3000), Orientation::Rotate90, None, None);
+        assert!((cell_aspect(&r) - 3000.0 / 4000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cell_aspect_uncropped_reedit_restores_original_aspect() {
+        // A crop regen (portrait thumb) followed by an un-cropped re-edit
+        // regen: the thumbnail dims are back to the upright original aspect,
+        // and the cell must follow — no stale cropped aspect lingers.
+        let cropped = rec(
+            Some(4000),
+            Some(3000),
+            Orientation::Normal,
+            Some(120),
+            Some(200),
+        );
+        assert!((cell_aspect(&cropped) - 120.0 / 200.0).abs() < 1e-6);
+
+        let uncropped = rec(
+            Some(4000),
+            Some(3000),
+            Orientation::Normal,
+            Some(400),
+            Some(300),
+        );
+        assert!((cell_aspect(&uncropped) - 4000.0 / 3000.0).abs() < 1e-6);
+    }
 
     #[test]
     fn range_indices_low_to_high() {

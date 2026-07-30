@@ -1688,6 +1688,8 @@ mod tests {
             rating: Rating::default(),
             flag: Flag::None,
             has_edits: false,
+            thumb_w: None,
+            thumb_h: None,
         };
 
         s.images = vec![mk_rec(1), mk_rec(2)];
@@ -1918,6 +1920,8 @@ mod tests {
             rating: Rating::default(),
             flag: Flag::None,
             has_edits: false,
+            thumb_w: None,
+            thumb_h: None,
         };
         s.images = vec![mk(1), mk(2)];
         // Selection is image 2, but we edit image 1 explicitly.
@@ -1997,6 +2001,8 @@ mod tests {
                 rating: Rating::default(),
                 flag: Flag::None,
                 has_edits: false,
+                thumb_w: None,
+                thumb_h: None,
             })
             .collect();
     }

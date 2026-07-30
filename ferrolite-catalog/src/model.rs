@@ -66,6 +66,18 @@ pub struct ImageRecord {
     pub flag: Flag,
     /// Cache of "has a non-identity frl:ops stack" (rebuildable from the sidecar).
     pub has_edits: bool,
+    /// The persisted thumbnail's own pixel dimensions (`thumbnails.w`/`h`),
+    /// joined in from the `thumbnails` table. Already display-upright at BOTH
+    /// ingest time and after an edited-thumbnail regen (`thumb_regen.rs`
+    /// renders through the full `EditPipeline`, including crop/geometry, then
+    /// `generate_thumbnail` resizes that upright output preserving its
+    /// aspect) — unlike `width`/`height` above, which are the ingest-time
+    /// SENSOR-space dims (pre-orientation-swap) and never change after a
+    /// crop. This is the source of truth for the grid/filmstrip cell aspect
+    /// ratio (`library::grid::cell_aspect`). `None` when no thumbnail row
+    /// exists yet (e.g. a `Pending` row not yet reached by ingest).
+    pub thumb_w: Option<u32>,
+    pub thumb_h: Option<u32>,
 }
 
 /// A tag row read back from the catalog.

@@ -29,17 +29,31 @@ pub(crate) fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRe
         rating: Rating::from_i64(rating),
         flag: Flag::from_i64(flag),
         has_edits: has_edits != 0,
+        thumb_w: row.get::<_, Option<i64>>(13)?.map(|v| v as u32),
+        thumb_h: row.get::<_, Option<i64>>(14)?.map(|v| v as u32),
     })
 }
 
 pub(crate) const IMAGE_COLS: &str = "id, folder_id, filename, width, height, orientation,
-                          capture_time, iso, decode_status, kind, rating, flag, has_edits";
+                          capture_time, iso, decode_status, kind, rating, flag, has_edits,
+                          thumbnails.w, thumbnails.h";
+
+/// Every `IMAGE_COLS` query joins the `thumbnails` table (1:1 on `image_id`,
+/// so this never fans out a row) to surface `thumb_w`/`thumb_h` — the actual
+/// persisted thumbnail's own dimensions, which is the only dimension pair
+/// that reflects a crop/geometry edit after a thumbnail regen (see
+/// `ImageRecord::thumb_w` doc comment). `LEFT JOIN` so a row with no
+/// thumbnail yet (freshly-scanned `Pending`) still returns, with `thumb_w`/
+/// `thumb_h` as `NULL`.
+pub(crate) const THUMB_JOIN: &str = " LEFT JOIN thumbnails ON thumbnails.image_id = images.id";
 
 pub(crate) fn list_images(
     conn: &Connection,
     folder_id: i64,
 ) -> Result<Vec<ImageRecord>, CatalogError> {
-    let sql = format!("SELECT {IMAGE_COLS} FROM images WHERE folder_id = ?1 ORDER BY filename");
+    let sql = format!(
+        "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE folder_id = ?1 ORDER BY filename"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(rusqlite::params![folder_id], row_to_record)?;
     let mut out = Vec::new();
@@ -54,7 +68,9 @@ pub(crate) fn image_by_name(
     folder_id: i64,
     filename: &str,
 ) -> Result<Option<ImageRecord>, CatalogError> {
-    let sql = format!("SELECT {IMAGE_COLS} FROM images WHERE folder_id = ?1 AND filename = ?2");
+    let sql = format!(
+        "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE folder_id = ?1 AND filename = ?2"
+    );
     let mut stmt = conn.prepare(&sql)?;
     let mut rows = stmt.query_map(rusqlite::params![folder_id, filename], row_to_record)?;
     Ok(match rows.next() {
@@ -134,7 +150,7 @@ pub(crate) fn list_images_recursive(
              UNION ALL
              SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
          )
-         SELECT {IMAGE_COLS} FROM images
+         SELECT {IMAGE_COLS} FROM images{THUMB_JOIN}
          WHERE folder_id IN (SELECT id FROM subtree)
          ORDER BY filename"
     );
@@ -338,7 +354,9 @@ pub(crate) fn images_by_ids(
 ) -> Result<Vec<ImageRecord>, CatalogError> {
     // Preserve the input order; skip ids that no longer exist.
     let mut out = Vec::with_capacity(ids.len());
-    let mut stmt = conn.prepare(&format!("SELECT {IMAGE_COLS} FROM images WHERE id = ?1"))?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {IMAGE_COLS} FROM images{THUMB_JOIN} WHERE id = ?1"
+    ))?;
     for &id in ids {
         let mut rows = stmt.query_map(rusqlite::params![id], row_to_record)?;
         if let Some(r) = rows.next() {

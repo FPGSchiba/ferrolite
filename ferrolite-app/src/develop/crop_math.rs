@@ -54,9 +54,14 @@ pub fn hit_test(c: CropRect, pos: (f32, f32), r: f32) -> Option<Handle> {
 }
 
 pub fn resize(c: CropRect, handle: Handle, pos: (f32, f32), aspect: Option<f32>) -> CropRect {
-    let (mut l, mut t, mut rt, mut b) = (c.x, c.y, c.x + c.w, c.y + c.h);
     let px = clamp01(pos.0);
     let py = clamp01(pos.1);
+
+    if let Some(ar) = aspect.filter(|a| a.is_finite() && *a > 0.0) {
+        return resize_aspect(c, handle, px, py, ar);
+    }
+
+    let (mut l, mut t, mut rt, mut b) = (c.x, c.y, c.x + c.w, c.y + c.h);
     match handle {
         Handle::Left | Handle::TopLeft | Handle::BottomLeft => l = px.min(rt - MIN_SIZE),
         Handle::Right | Handle::TopRight | Handle::BottomRight => rt = px.max(l + MIN_SIZE),
@@ -73,46 +78,127 @@ pub fn resize(c: CropRect, handle: Handle, pos: (f32, f32), aspect: Option<f32>)
         w: rt - l,
         h: b - t,
     };
-    if let Some(ar) = aspect {
-        match handle {
-            // Vertical handles drive HEIGHT; derive width from height, keep the
-            // horizontal center fixed.
-            Handle::Top | Handle::Bottom => {
-                let new_w = (out.h * ar).clamp(MIN_SIZE, 1.0);
-                let cx = c.x + c.w * 0.5;
-                out.x = clamp01(cx - new_w * 0.5);
-                out.w = new_w;
-            }
-            // Horizontal handles drive WIDTH; derive height, keep vertical center fixed.
-            Handle::Left | Handle::Right => {
-                let new_h = (out.w / ar).clamp(MIN_SIZE, 1.0);
-                let cy = c.y + c.h * 0.5;
-                out.y = clamp01(cy - new_h * 0.5);
-                out.h = new_h;
-            }
-            // Corners drive WIDTH; derive height, anchored at the opposite corner.
-            _ => {
-                let new_h = (out.w / ar).clamp(MIN_SIZE, 1.0);
-                if matches!(handle, Handle::TopLeft | Handle::TopRight) {
-                    out.y = (b - new_h).max(0.0);
-                }
-                out.h = new_h;
-            }
-        }
-        if out.y + out.h > 1.0 {
-            out.h = (1.0 - out.y).max(MIN_SIZE);
-            out.w = out.h * ar;
-        }
-        if out.x + out.w > 1.0 {
-            out.w = (1.0 - out.x).max(MIN_SIZE);
-        }
-    }
     out.x = clamp01(out.x);
     out.y = clamp01(out.y);
     // Upper bounds use `.max(MIN_SIZE)` so f32::clamp can never see min > max.
     out.w = out.w.clamp(MIN_SIZE, (1.0 - out.x).max(MIN_SIZE));
     out.h = out.h.clamp(MIN_SIZE, (1.0 - out.y).max(MIN_SIZE));
     out
+}
+
+/// How one axis of the aspect-true rect relates to the drag: either pinned to a
+/// fixed edge (the side opposite the dragged handle — no freedom to move, only
+/// to shrink if it would overflow `[0,1]`), or centered on the rect's own
+/// midpoint (the axis orthogonal to an edge handle's drag — free to shift
+/// within bounds, only forced to shrink if the ideal size itself exceeds the
+/// full `[0,1]` span).
+#[derive(Clone, Copy)]
+enum Anchor {
+    Low(f32),    // fixed at this coordinate; the rect extends toward 1.0
+    High(f32),   // fixed at this coordinate; the rect extends toward 0.0
+    Center(f32), // fixed at this midpoint; the rect may shift either way
+}
+
+impl Anchor {
+    /// Largest scale `s` (relative to `ideal`, the unscaled aspect-true size on
+    /// this axis) that keeps `s * ideal` inside `[0,1]` given how this axis is
+    /// anchored.
+    fn max_scale(self, ideal: f32) -> f32 {
+        match self {
+            Anchor::Low(at) => ((1.0 - at) / ideal).max(0.0),
+            Anchor::High(at) => (at / ideal).max(0.0),
+            // A centered axis can always shift to fit as long as the ideal size
+            // itself isn't larger than the whole [0,1] span.
+            Anchor::Center(_) => (1.0 / ideal).max(0.0),
+        }
+    }
+
+    /// The coordinate for a rect of size `size` on this axis: the fixed
+    /// position for a pinned edge, or a bounds-clamped shift for a centered one.
+    fn place(self, size: f32) -> f32 {
+        match self {
+            Anchor::Low(at) => at,
+            Anchor::High(at) => at - size,
+            Anchor::Center(at) => (at - size * 0.5).clamp(0.0, (1.0 - size).max(0.0)),
+        }
+    }
+}
+
+/// Aspect-locked resize. Derives the aspect-true rect the handle's drag
+/// implies, then scales BOTH axes together by the largest factor that fits the
+/// image bounds and the min-size floor, anchored at the handle's fixed
+/// corner/edge — so the ratio never drifts, unlike clamping each axis
+/// independently after the fact. If no scale satisfies both the min-size floor
+/// and the bounds (an extreme ratio anchored right at a corner/edge can make
+/// this infeasible), the previous rect is returned unchanged rather than emit
+/// an out-of-bounds or sub-floor crop.
+fn resize_aspect(c: CropRect, handle: Handle, px: f32, py: f32, ar: f32) -> CropRect {
+    let (l, t, rt, b) = (c.x, c.y, c.x + c.w, c.y + c.h);
+    let cx = c.x + c.w * 0.5;
+    let cy = c.y + c.h * 0.5;
+
+    // Corners and the width-driving edge handles (Left/Right) derive height
+    // from a pointer-driven width; the height-driving edge handles (Top/Bottom)
+    // derive width from a pointer-driven height — matches the pre-fix behavior.
+    let (ideal_w, ideal_h, x_anchor, y_anchor) = match handle {
+        Handle::Left => {
+            let w = (rt - px).max(MIN_SIZE);
+            (w, w / ar, Anchor::High(rt), Anchor::Center(cy))
+        }
+        Handle::Right => {
+            let w = (px - l).max(MIN_SIZE);
+            (w, w / ar, Anchor::Low(l), Anchor::Center(cy))
+        }
+        Handle::Top => {
+            let h = (b - py).max(MIN_SIZE);
+            (h * ar, h, Anchor::Center(cx), Anchor::High(b))
+        }
+        Handle::Bottom => {
+            let h = (py - t).max(MIN_SIZE);
+            (h * ar, h, Anchor::Center(cx), Anchor::Low(t))
+        }
+        Handle::TopLeft => {
+            let w = (rt - px).max(MIN_SIZE);
+            (w, w / ar, Anchor::High(rt), Anchor::High(b))
+        }
+        Handle::TopRight => {
+            let w = (px - l).max(MIN_SIZE);
+            (w, w / ar, Anchor::Low(l), Anchor::High(b))
+        }
+        Handle::BottomLeft => {
+            let w = (rt - px).max(MIN_SIZE);
+            (w, w / ar, Anchor::High(rt), Anchor::Low(t))
+        }
+        Handle::BottomRight => {
+            let w = (px - l).max(MIN_SIZE);
+            (w, w / ar, Anchor::Low(l), Anchor::Low(t))
+        }
+        // Not driven through resize() in practice (Body drags route through
+        // move_body instead), but kept exhaustive and non-panicking: hold the
+        // current width, derive height, anchored at the rect's own top-left.
+        Handle::Body => {
+            let w = c.w.max(MIN_SIZE);
+            (w, w / ar, Anchor::Low(l), Anchor::Low(t))
+        }
+    };
+
+    let s_max = x_anchor.max_scale(ideal_w).min(y_anchor.max_scale(ideal_h));
+    let s_min_floor = (MIN_SIZE / ideal_w).max(MIN_SIZE / ideal_h);
+    if s_min_floor > s_max {
+        // No aspect-true rect anchored here satisfies both the min-size floor
+        // and the image bounds. Degrade gracefully: keep the previous rect.
+        return c;
+    }
+    let s = 1.0_f32.clamp(s_min_floor, s_max);
+
+    let w = ideal_w * s;
+    let h = ideal_h * s;
+    CropRect {
+        x: clamp01(x_anchor.place(w)),
+        y: clamp01(y_anchor.place(h)),
+        w,
+        h,
+    }
 }
 
 pub fn move_body(c: CropRect, delta: (f32, f32)) -> CropRect {
@@ -298,6 +384,124 @@ mod tests {
             let _ = resize(c, h, (0.99, 0.99), Some(0.1));
             let _ = resize(c, h, (-0.5, -0.5), Some(50.0));
         }
+    }
+
+    // Same sweep as `resize_adversarial_does_not_panic`, now also asserting the
+    // aspect ratio holds whenever `resize` doesn't fall back to the documented
+    // "no feasible rect" case (see `resize_aspect_no_feasible_rect_keeps_previous_rect`).
+    // A result is treated as that fallback when it is exactly the input rect.
+    #[test]
+    fn resize_adversarial_keeps_ratio() {
+        for h in [
+            Handle::Top,
+            Handle::Bottom,
+            Handle::Left,
+            Handle::Right,
+            Handle::TopLeft,
+            Handle::TopRight,
+            Handle::BottomLeft,
+            Handle::BottomRight,
+        ] {
+            let c = CropRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.98,
+                h: 0.98,
+            };
+            for (pos, ar) in [((0.99_f32, 0.99_f32), 0.1_f32), ((-0.5, -0.5), 50.0_f32)] {
+                let r = resize(c, h, pos, Some(ar));
+                let is_fallback = (r.x - c.x).abs() < 1e-6
+                    && (r.y - c.y).abs() < 1e-6
+                    && (r.w - c.w).abs() < 1e-6
+                    && (r.h - c.h).abs() < 1e-6;
+                if is_fallback {
+                    continue;
+                }
+                assert!(
+                    (r.w / r.h - ar).abs() < 1e-3,
+                    "{h:?} @ ar {ar}: ratio not held, got {} ({r:?})",
+                    r.w / r.h
+                );
+                assert!(
+                    r.x >= -1e-6 && r.y >= -1e-6,
+                    "{h:?} @ ar {ar}: origin in bounds, got {r:?}"
+                );
+                assert!(
+                    r.x + r.w <= 1.0 + 1e-6 && r.y + r.h <= 1.0 + 1e-6,
+                    "{h:?} @ ar {ar}: extent in bounds, got {r:?}"
+                );
+                assert!(
+                    r.w >= MIN_SIZE - 1e-6 && r.h >= MIN_SIZE - 1e-6,
+                    "{h:?} @ ar {ar}: min size enforced, got {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resize_boundary_holds_ratio_for_all_handles() {
+        // A moderate centered crop, dragged far past each edge/corner: with a
+        // non-extreme ratio + tiny MIN_SIZE floor, a feasible aspect-true rect
+        // always exists, so the ratio must hold exactly (not just approximately
+        // by the independent per-axis clamps that used to run after).
+        let c = CropRect {
+            x: 0.3,
+            y: 0.3,
+            w: 0.4,
+            h: 0.4,
+        };
+        // 1.0, 1.5, and a 16:9 preset adjusted by a non-square (6000x4000) sensor
+        // factor — i.e. the same kind of value `aspect_ratio` callers pass in.
+        let ratios = [1.0_f32, 1.5_f32, (16.0_f32 / 9.0) * (4000.0 / 6000.0)];
+        let drags: [(Handle, (f32, f32)); 8] = [
+            (Handle::TopLeft, (-10.0, -10.0)),
+            (Handle::Top, (0.5, -10.0)),
+            (Handle::TopRight, (10.0, -10.0)),
+            (Handle::Right, (10.0, 0.5)),
+            (Handle::BottomRight, (10.0, 10.0)),
+            (Handle::Bottom, (0.5, 10.0)),
+            (Handle::BottomLeft, (-10.0, 10.0)),
+            (Handle::Left, (-10.0, 0.5)),
+        ];
+        for ratio in ratios {
+            for (handle, pos) in drags {
+                let r = resize(c, handle, pos, Some(ratio));
+                assert!(
+                    (r.w / r.h - ratio).abs() < 1e-4,
+                    "{handle:?} @ ratio {ratio}: ratio not held, got {} ({r:?})",
+                    r.w / r.h
+                );
+                assert!(
+                    r.x >= -1e-6
+                        && r.y >= -1e-6
+                        && r.x + r.w <= 1.0 + 1e-6
+                        && r.y + r.h <= 1.0 + 1e-6,
+                    "{handle:?} @ ratio {ratio}: out of [0,1]^2: {r:?}"
+                );
+                assert!(
+                    r.w >= MIN_SIZE - 1e-6 && r.h >= MIN_SIZE - 1e-6,
+                    "{handle:?} @ ratio {ratio}: below min size: {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resize_aspect_no_feasible_rect_keeps_previous_rect() {
+        // A tiny rect pinned near the top-left corner, asked to resize to an
+        // extreme 1000:1 aspect anchored at the fixed left edge: no rect of at
+        // least MIN_SIZE in both dimensions fits inside [0,1] at that anchor
+        // (height would have to be 0.02/1000). Per the documented fallback,
+        // resize() leaves the crop unchanged rather than emit an out-of-bounds
+        // or sub-floor rect.
+        let c = CropRect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.1,
+            h: 0.1,
+        };
+        let r = resize(c, Handle::Right, (0.02, 0.02), Some(1000.0));
+        assert_eq!((r.x, r.y, r.w, r.h), (c.x, c.y, c.w, c.h));
     }
 
     #[test]

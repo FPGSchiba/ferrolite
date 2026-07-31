@@ -61,6 +61,20 @@ fn weights(radius: f32) -> Vec<f32> {
 /// Separable unsharp mask over an interleaved RGB buffer, in place.
 /// `rgb` is `u8` bytes for `BitDepth::Eight` and native-endian `u16` bytes for
 /// `BitDepth::Sixteen` (the caller casts, exactly as `resize.rs` does).
+///
+/// **One transient f32 buffer, not three** (final-review FIX 2): a large
+/// no-resize export (61 MP = 3 × 720 MB with three full-image `w*h*3` f32
+/// buffers, 102 MP = 3.7 GB) could exhaust memory, and `Vec` allocation
+/// failure ABORTS the process — no `ExportError`, no unwind. The horizontal
+/// pass reads straight out of `rgb` (still fully original — nothing has been
+/// written yet) into the one `tmp` buffer; the vertical pass reads the
+/// per-pixel ORIGINAL value straight back out of `rgb` (again before this
+/// SAME loop overwrites that pixel — see the inline comment below) instead of
+/// from a separate `src` copy, and reads its blur input from `tmp` (never
+/// from `rgb`, which is actively being overwritten), so `tmp` is the only
+/// intermediate ever allocated. Purely an allocation-count optimization —
+/// verified bit-for-bit identical to the three-buffer version on both 8-bit
+/// and 16-bit fixtures before landing (final-review report).
 pub(crate) fn apply_output_sharpen(
     rgb: &mut [u8],
     w: u32,
@@ -77,21 +91,29 @@ pub(crate) fn apply_output_sharpen(
         BitDepth::Eight => 255.0f32,
         BitDepth::Sixteen => 65535.0f32,
     };
+    let bpp = match depth {
+        BitDepth::Eight => 1usize,
+        BitDepth::Sixteen => 2usize,
+    };
 
-    // Read into f32 planes (one rounding at the very end — design §5.2).
-    let read = |i: usize| -> f32 {
+    // Read one pixel-channel (index `i`, NOT byte offset) out of `buf` as f32
+    // (one rounding at the very end — design §5.2). Generic over the buffer
+    // passed in: the horizontal pass reads the full `rgb`, the vertical pass
+    // reads a single per-row slice of it.
+    let read = |buf: &[u8], i: usize| -> f32 {
         match depth {
-            BitDepth::Eight => rgb[i] as f32,
-            BitDepth::Sixteen => u16::from_ne_bytes([rgb[i * 2], rgb[i * 2 + 1]]) as f32,
+            BitDepth::Eight => buf[i] as f32,
+            BitDepth::Sixteen => u16::from_ne_bytes([buf[i * 2], buf[i * 2 + 1]]) as f32,
         }
     };
     let n = w * h * 3;
-    let src: Vec<f32> = (0..n).map(read).collect();
 
     let kernel = weights(radius);
     let half = kernel.len() / 2;
 
-    // Horizontal blur.
+    // Horizontal blur, reading straight out of `rgb` — still fully original
+    // at this point, since nothing has written to it yet. `tmp` is the only
+    // buffer this function allocates.
     let mut tmp = vec![0.0f32; n];
     tmp.par_chunks_mut(w * 3).enumerate().for_each(|(y, row)| {
         for x in 0..w {
@@ -100,41 +122,46 @@ pub(crate) fn apply_output_sharpen(
                 for (k, kw) in kernel.iter().enumerate() {
                     let sx =
                         (x as isize + k as isize - half as isize).clamp(0, w as isize - 1) as usize;
-                    acc += kw * src[(y * w + sx) * 3 + c];
+                    acc += kw * read(rgb, (y * w + sx) * 3 + c);
                 }
                 row[x * 3 + c] = acc;
             }
         }
     });
 
-    // Vertical blur + unsharp combine, written straight back out.
-    let blur: Vec<f32> = (0..n)
-        .into_par_iter()
-        .map(|i| {
-            let px = i / 3;
-            let c = i % 3;
-            let (x, y) = (px % w, px / w);
-            let mut acc = 0.0;
-            for (k, kw) in kernel.iter().enumerate() {
-                let sy =
-                    (y as isize + k as isize - half as isize).clamp(0, h as isize - 1) as usize;
-                acc += kw * tmp[(sy * w + x) * 3 + c];
+    // Vertical blur (from `tmp`, never mutated after the pass above — safe to
+    // read concurrently) + unsharp combine, written straight back into `rgb`.
+    // Each row reads its OWN original source pixel out of `rgb` via `read`
+    // strictly BEFORE this same iteration overwrites that pixel — safe under
+    // per-row parallelism (no row ever touches another row's slice, and the
+    // read of pixel `idx` always precedes the write of that same `idx`), and
+    // correct because at the start of this pass `rgb` is still fully
+    // original (the pass above only READ it).
+    rgb.par_chunks_mut(w * bpp * 3)
+        .enumerate()
+        .for_each(|(y, row)| {
+            for x in 0..w {
+                for c in 0..3 {
+                    let idx = x * 3 + c;
+                    let s = read(row, idx); // this row's original value, read before overwrite
+                    let mut acc = 0.0;
+                    for (k, kw) in kernel.iter().enumerate() {
+                        let sy = (y as isize + k as isize - half as isize).clamp(0, h as isize - 1)
+                            as usize;
+                        acc += kw * tmp[(sy * w + x) * 3 + c];
+                    }
+                    let v = (s + amount * (s - acc)).clamp(0.0, max_val);
+                    match depth {
+                        BitDepth::Eight => row[idx] = v.round() as u8,
+                        BitDepth::Sixteen => {
+                            let b = (v.round() as u16).to_ne_bytes();
+                            row[idx * 2] = b[0];
+                            row[idx * 2 + 1] = b[1];
+                        }
+                    }
+                }
             }
-            acc
-        })
-        .collect();
-
-    for i in 0..n {
-        let v = (src[i] + amount * (src[i] - blur[i])).clamp(0.0, max_val);
-        match depth {
-            BitDepth::Eight => rgb[i] = v.round() as u8,
-            BitDepth::Sixteen => {
-                let b = (v.round() as u16).to_ne_bytes();
-                rgb[i * 2] = b[0];
-                rgb[i * 2 + 1] = b[1];
-            }
-        }
-    }
+        });
 }
 
 #[cfg(test)]

@@ -617,7 +617,6 @@ out of scope for this phase.
 - Create: `ferrolite-pipeline/src/shaders/nr_atrous.wgsl`
 - Create: `ferrolite-pipeline/src/shaders/nr_combine.wgsl`
 - Create: `ferrolite-pipeline/src/nr_node.rs`
-- Create: `ferrolite-pipeline/tests/nr_node.rs`
 - Modify: `ferrolite-pipeline/tests/common/mod.rs` (add the `noisy_flat` fixture)
 - Modify: `ferrolite-pipeline/src/lib.rs` (`mod nr_node;`, 2 `prewarm_shaders` entries)
 
@@ -650,13 +649,15 @@ accumulation folded in. This single pass is what keeps the texture count at four
 // At level 0 the node binds the ORIGINAL working-space image as both `src` and
 // `approx`, and this shader converts RGB->YCbCr on load (the `p.level == 0`
 // branch) so no separate conversion pass or texture is needed.
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var approx: texture_2d<f32>;
-@group(0) @binding(2) var acc_in: texture_2d<f32>;
-@group(0) @binding(3) var dst_next: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(4) var dst_acc: texture_storage_2d<rgba16float, write>;
+// `approx` serves BOTH roles — the convolution input and the detail base —
+// because the reference is `detail = approx - b3_spline_2d(approx)`. One binding,
+// not two.
+@group(0) @binding(0) var approx: texture_2d<f32>;
+@group(0) @binding(1) var acc_in: texture_2d<f32>;
+@group(0) @binding(2) var dst_next: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var dst_acc: texture_storage_2d<rgba16float, write>;
 struct P { thresholds: array<vec4<f32>, 2>, active: i32, spacing: i32, level: i32, pad: f32 };
-@group(0) @binding(5) var<uniform> p: P;
+@group(0) @binding(4) var<uniform> p: P;
 
 const B: array<f32, 5> = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
 
@@ -665,9 +666,10 @@ fn to_ycbcr(rgb: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(y, rgb.b - y, rgb.r - y);
 }
 
-// Load a texel already in the working colour space, converting at level 0 only.
+// Load a texel, converting RGB->YCbCr at level 0 only (level 0's input is the
+// original working-space image; later levels are already YCbCr).
 fn fetch(xy: vec2<i32>, lvl: i32) -> vec3<f32> {
-    let c = textureLoad(src, xy, 0).rgb;
+    let c = textureLoad(approx, xy, 0).rgb;
     if (lvl == 0) { return to_ycbcr(c); }
     return c;
 }
@@ -682,7 +684,7 @@ fn soft_shrink(d: f32, t: f32) -> f32 {
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = vec2<i32>(textureDimensions(src));
+    let dims = vec2<i32>(textureDimensions(approx));
     if (i32(gid.x) >= dims.x || i32(gid.y) >= dims.y) { return; }
     let xy = vec2<i32>(i32(gid.x), i32(gid.y));
     let s = p.spacing;
@@ -700,7 +702,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // `approx` at level 0 IS `src` (bound twice) — convert it identically.
     let a_raw = textureLoad(approx, xy, 0);
     var a = a_raw.rgb;
     if (p.level == 0) { a = to_ycbcr(a); }
@@ -767,7 +768,14 @@ pub fn noisy_flat(w: u32, h: u32) -> LinearRgbaF32 {
 
 - [ ] **Step 3: Write the failing GPU tests**
 
-Create `ferrolite-pipeline/tests/nr_node.rs`:
+Create `ferrolite-pipeline/tests/nr_node.rs`. **Note:** three of these assertions need
+`EditPipeline::nr_eval_count`/`nr_live_bytes`, which Task 4 adds. So this file is written **here as
+the spec of what Task 4 must satisfy** but is **created by Task 4**, not committed in this task —
+otherwise this task's own commit would leave `cargo test -p ferrolite-pipeline` unable to compile,
+violating the plan's Global Constraint that every task gates green. Save it to the workspace as
+`nr_node.rs.pending` in this task; Task 4 moves it into `tests/`.
+
+The file to write:
 
 ```rust
 //! GPU behaviour of the NR node: the identity gate, real denoising, and the
@@ -882,15 +890,80 @@ fn nr_leaves_a_flat_field_alone() {
 }
 ```
 
-Note: `nr_eval_count`/`nr_live_bytes` on `EditPipeline` are added in **Task 4**, so this test file
-will not compile until then. That is intentional and expected — the node itself is finished and
-unit-provable here; Task 4 completes the wiring these three assertions need. Run the compile check
-in Step 6 and let Task 4 turn them green.
+- [ ] **Step 4: Prove the node works NOW with an in-module unit test**
 
-- [ ] **Step 4: Run to verify it fails**
+Since the integration test lands in Task 4, this task must still prove its own deliverable. Add a
+`#[cfg(test)] mod tests` at the bottom of `nr_node.rs` that drives the node **directly**, with no
+`EditPipeline` involved:
 
-Run: `cargo test -p ferrolite-pipeline --test nr_node`
-Expected: FAIL — `no method named nr_eval_count found for struct EditPipeline`.
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nodes::upload_source;
+
+    /// The node's identity passthrough: no dispatch, no allocation, and the
+    /// returned image is the SAME texture (an `Arc` clone, not a copy).
+    #[test]
+    fn identity_is_a_zero_cost_passthrough() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let px = vec![0.4f32; 16 * 16 * 4];
+        let img = ferrolite_image::LinearRgbaF32::new(16, 16, px).expect("len");
+        let src = upload_source(&ctx, &img);
+
+        let node = NoiseReductionNode::new(
+            ctx.clone(),
+            std::rc::Rc::new(Cell::new(NoiseReduction::default())),
+        );
+        let out = node.evaluate(&[&src]);
+
+        assert_eq!(node.eval_count(), 0, "identity must not dispatch");
+        assert_eq!(node.live_bytes(), 0, "identity must not allocate");
+        assert!(
+            Arc::ptr_eq(&out.texture, &src.texture),
+            "identity must return the SAME texture, not a copy"
+        );
+    }
+
+    /// Active NR dispatches once and allocates its four intermediates + output.
+    #[test]
+    fn active_nr_dispatches_and_allocates_four_plus_out() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let px = vec![0.4f32; 16 * 16 * 4];
+        let img = ferrolite_image::LinearRgbaF32::new(16, 16, px).expect("len");
+        let src = upload_source(&ctx, &img);
+
+        let node = NoiseReductionNode::new(
+            ctx.clone(),
+            std::rc::Rc::new(Cell::new(NoiseReduction {
+                luminance: 0.5,
+                ..Default::default()
+            })),
+        );
+        let out = node.evaluate(&[&src]);
+
+        assert_eq!(node.eval_count(), 1);
+        assert!(!Arc::ptr_eq(&out.texture, &src.texture), "must be a new texture");
+        // 4 intermediates + 1 output, `rgba16float` = 8 B/px at 16x16.
+        assert_eq!(node.live_bytes(), 16 * 16 * 8 * 5);
+    }
+}
+```
+
+If `upload_source`'s signature differs, match how `golden.rs` already calls it.
+
+- [ ] **Step 4b: Run to verify the unit tests fail**
+
+Run: `cargo test -p ferrolite-pipeline nr_node`
+Expected: FAIL — `NoiseReductionNode` does not exist yet.
 
 - [ ] **Step 5: Implement `nr_node.rs`**
 
@@ -1125,13 +1198,11 @@ impl Node<PipelineImage> for NoiseReductionNode {
                 label: Some("nr-atrous"),
                 layout: &self.atrous_bgl,
                 entries: &[
-                    // `src` and `approx` are the SAME texture at level 0.
                     bind_tex(0, &view(&approx_in)),
-                    bind_tex(1, &view(&approx_in)),
-                    bind_tex(2, &view(&acc_read)),
-                    bind_tex(3, &view(&next_out)),
-                    bind_tex(4, &view(&acc_write)),
-                    bind_buf(5, &ubuf),
+                    bind_tex(1, &view(&acc_read)),
+                    bind_tex(2, &view(&next_out)),
+                    bind_tex(3, &view(&acc_write)),
+                    bind_buf(4, &ubuf),
                 ],
             });
             let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1226,6 +1297,9 @@ Read spec §3.1 and §7.2's "two repo asserts" note.
 - Modify: `ferrolite-pipeline/src/pipeline.rs`
 - Modify: `ferrolite-pipeline/src/tile_edit.rs`
 - Modify: `ferrolite-pipeline/tests/golden.rs`
+- Create: `ferrolite-pipeline/tests/nr_node.rs` — move it from the workspace's
+  `nr_node.rs.pending` (Task 3 wrote it there; it needs this task's two accessors to compile)
+- Modify: `ferrolite-app/src/develop/ops_edit.rs`
 
 **Interfaces:**
 - Consumes: `NoiseReductionNode::new` (Task 3), `nr_halo_doc` (Task 2).
@@ -1582,7 +1656,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 - [ ] **Step 5: Extend `SharpenNode`**
 
-In `sharpen_node.rs`: build the `sharpen_apply_detail` pipeline + BGL in `new`. In `evaluate`, when `detail != 0.0 || masking != 0.0` for a given dispatch, request an ADDITIONAL distinct blur radius `max(1, radius / 3)` through the existing per-distinct-radius `blur_slots` mechanism and dispatch `sharpen_apply_detail` instead of `sharpen_apply`. When both are zero, keep dispatching `sharpen_apply` with the identical bind group as today — this is what makes gate 2 byte-exact rather than merely close.
+In `sharpen_node.rs`: build the `sharpen_apply_detail` pipeline + BGL in `new`. In `evaluate`, for a given dispatch:
+
+- **Both zero** → dispatch `sharpen_apply` with the identical bind group as today. This is what makes gate 2 byte-exact rather than merely close.
+- **Either non-zero** → dispatch `sharpen_apply_detail`.
+- **Request the extra `max(1, radius / 3)` blur ONLY when `detail != 0.0`**, through the existing per-distinct-radius `blur_slots` mechanism. When `detail == 0.0` but `masking != 0.0`, bind the MAIN blur to the `blur_fine` slot too — `mix(delta_r, delta_fine, 0.0)` discards it, so the result is identical and no second blur is computed. Computing an unused blur whenever masking alone is on would be pure waste.
 
 Register in `prewarm_shaders`:
 

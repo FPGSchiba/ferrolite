@@ -28,6 +28,21 @@ pub fn gradient(w: u32, h: u32) -> LinearRgbaF32 {
     LinearRgbaF32::new(w, h, px).expect("gradient length")
 }
 
+/// A flat mid-grey field with deterministic pseudo-noise — the NR fixture.
+/// Deterministic (an LCG, no `rand` dependency) so goldens are reproducible.
+pub fn noisy_flat(w: u32, h: u32) -> LinearRgbaF32 {
+    let mut state = 987_654_321u32;
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for _ in 0..w * h {
+        for _ in 0..3 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            px.push(0.35 + ((state >> 16) as f32 / 65535.0 - 0.5) * 0.10);
+        }
+        px.push(1.0);
+    }
+    LinearRgbaF32::new(w, h, px).expect("noisy_flat length")
+}
+
 pub fn max_abs_diff(a: &[u8], b: &[u8]) -> u8 {
     a.iter()
         .zip(b.iter())

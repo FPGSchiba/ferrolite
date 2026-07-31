@@ -13,6 +13,7 @@ mod local_node;
 mod mask_overlay;
 mod nodes;
 mod nr;
+mod nr_node;
 mod op;
 mod pipeline;
 mod rcd_gpu;
@@ -140,6 +141,9 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "sharpen-apply-masked",
             include_str!("shaders/sharpen_apply_masked.wgsl"),
         ),
+        ("nr-atrous", include_str!("shaders/nr_atrous.wgsl")),
+        ("nr-combine", include_str!("shaders/nr_combine.wgsl")),
+        ("nr-clear", include_str!("shaders/nr_clear.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
         ("local-adjust", include_str!("shaders/local_adjust.wgsl")),

@@ -71,10 +71,10 @@ pub use tile_edit::TileEditPipeline;
 // is the single named tuning constant for keystone responsiveness (spec C4).
 pub use uniforms::{
     clamp_uv_to_crop_bounds, color_grade_px, curve_lut, geometry_src_px, geometry_tile_uniform,
-    geometry_uniform, lens_halo_px, lens_uniform, parametric_curve_lut, sharpen_halo,
-    sharpen_halo_doc, tone_curve_luts, vignette_amount, ColorGradeUniform, GeometryUniform,
-    HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
-    KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS,
+    geometry_uniform, lens_halo_px, lens_uniform, nr_halo, nr_halo_doc, nr_uniform,
+    parametric_curve_lut, sharpen_halo, sharpen_halo_doc, tone_curve_luts, vignette_amount,
+    ColorGradeUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, NrUniform,
+    SharpenUniform, VignetteUniform, KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

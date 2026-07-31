@@ -351,6 +351,60 @@ pub fn sharpen_halo_doc(doc: &crate::op::OpStack) -> u32 {
     max_r
 }
 
+/// GPU layout for one NR level's dispatch. Only the CURRENT level is live per
+/// dispatch, so `thresholds[0]` is this level's luma threshold and
+/// `thresholds[1]` its chroma threshold; `[2..8]` is reserved padding keeping
+/// the struct 16-byte-aligned for WGSL uniform rules.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct NrUniform {
+    pub thresholds: [f32; 8],
+    /// 0 = identity (the node never dispatches in this state).
+    pub active: i32,
+    /// À trous hole spacing for this level: `2^level`.
+    pub spacing: i32,
+    pub level: i32,
+    pub pad: f32,
+}
+
+// The uniform's size is the GPU ABI — keep in lock-step with the WGSL side
+// (mirrors `GeometryUniform`'s own size assert above): 8 f32 thresholds (32B)
+// + active/spacing/level/pad (16B) = 48B, already 16-byte-aligned.
+const _: () = assert!(std::mem::size_of::<NrUniform>() == 48);
+const _: () = assert!(std::mem::size_of::<NrUniform>().is_multiple_of(16));
+
+/// Build the uniform for `level` of the à trous loop.
+pub fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrUniform {
+    let mut thresholds = [0.0f32; 8];
+    thresholds[0] = crate::nr::threshold_at(nr.luminance, nr.detail, level);
+    thresholds[1] = crate::nr::threshold_at(nr.color, nr.color_detail, level);
+    NrUniform {
+        thresholds,
+        active: (!nr.is_identity()) as i32,
+        spacing: 1 << level,
+        level: level as i32,
+        pad: 0.0,
+    }
+}
+
+/// Halo (pixels) a tiled NR pass must over-fetch. Zero at identity, mirroring
+/// `sharpen_halo`'s contract.
+pub fn nr_halo(nr: &crate::local::NoiseReduction) -> u32 {
+    if nr.is_identity() {
+        0
+    } else {
+        crate::nr::nr_halo_px()
+    }
+}
+
+/// Whole-document NR halo. NR is GLOBAL-ONLY (design §3.5) — it runs upstream of
+/// where masks are composited — so unlike `sharpen_halo_doc` this deliberately
+/// does NOT walk the layers. A layer's `noise_reduction` fields are never
+/// applied, so they must contribute no halo.
+pub fn nr_halo_doc(doc: &crate::op::OpStack) -> u32 {
+    nr_halo(&doc.global.noise_reduction)
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GeometryUniform {
@@ -1583,6 +1637,86 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(sharpen_halo_doc(&huge_layer), MAX_SHARPEN_RADIUS);
+    }
+
+    #[test]
+    fn nr_halo_is_total_atrous_support_or_zero() {
+        use crate::local::NoiseReduction;
+        assert_eq!(
+            nr_halo(&NoiseReduction::default()),
+            0,
+            "identity -> no halo"
+        );
+        let active = NoiseReduction {
+            luminance: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(nr_halo(&active), crate::nr::nr_halo_px());
+        assert_eq!(nr_halo(&active), 62, "L=5 -> 2*(2^5-1)");
+        // Chroma-only NR still needs the full halo (same decomposition).
+        let chroma = NoiseReduction {
+            color: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(nr_halo(&chroma), 62);
+    }
+
+    #[test]
+    fn nr_halo_doc_is_zero_unless_the_global_set_has_nr() {
+        use crate::op::EditDoc;
+        assert_eq!(nr_halo_doc(&EditDoc::default()), 0);
+        let mut doc = EditDoc::default();
+        doc.global.noise_reduction.luminance = 0.4;
+        assert_eq!(nr_halo_doc(&doc), 62, "global NR contributes the halo");
+        // NR is GLOBAL-ONLY (design §3.5): a mask layer's NR must NOT contribute.
+        let mut masked = EditDoc::default();
+        if let Some(layer) = masked.layers.first_mut() {
+            layer.adjustments.noise_reduction.luminance = 0.9;
+        }
+        assert_eq!(
+            nr_halo_doc(&masked),
+            0,
+            "per-mask NR is not applied, so it must contribute no halo"
+        );
+    }
+
+    #[test]
+    fn nr_uniform_is_inactive_at_identity() {
+        use crate::local::NoiseReduction;
+        let u = nr_uniform(&NoiseReduction::default(), 0);
+        assert_eq!(u.active, 0);
+        let u = nr_uniform(
+            &NoiseReduction {
+                luminance: 0.5,
+                ..Default::default()
+            },
+            0,
+        );
+        assert_eq!(u.active, 1);
+    }
+
+    #[test]
+    fn nr_uniform_carries_the_levels_spacing_and_thresholds() {
+        use crate::local::NoiseReduction;
+        let nr = NoiseReduction {
+            luminance: 1.0,
+            detail: 0.0,
+            color: 0.5,
+            color_detail: 0.0,
+        };
+        for level in 0..crate::nr::NR_LEVELS {
+            let u = nr_uniform(&nr, level);
+            assert_eq!(u.level, level as i32);
+            assert_eq!(u.spacing, 1 << level, "spacing = 2^level");
+            assert!(
+                (u.thresholds[0] - crate::nr::threshold_at(1.0, 0.0, level)).abs() < 1e-9,
+                "luma threshold at level {level}"
+            );
+            assert!(
+                (u.thresholds[1] - crate::nr::threshold_at(0.5, 0.0, level)).abs() < 1e-9,
+                "chroma threshold at level {level}"
+            );
+        }
     }
 
     #[test]

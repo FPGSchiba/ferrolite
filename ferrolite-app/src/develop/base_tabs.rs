@@ -251,10 +251,10 @@ impl PanelTab for EffectsTab {
         let scope_is_mask = matches!(scope, EditScope::Mask(_) | EditScope::MaskNone);
         let mut out: Option<EditOutcome> = None;
 
-        // Sharpening (Amount, Radius). "Detail" from the pre-registry block is
-        // dropped — it mapped to no field/shader parameter (see adjustments.rs).
-        // per-scope disclosure state (spec §3 / V2 README): Adjust and Mask
-        // scopes remember their open/closed sections independently.
+        // Sharpening (Amount, Radius, Detail, Masking — P4). Detail suppresses
+        // halos; Masking protects flat areas so sharpening does not re-amplify
+        // the noise NR removed. Per-scope disclosure state (spec §3 / V2
+        // README): Adjust and Mask scopes remember their sections independently.
         let open = if scope_is_mask {
             &mut state.settings.mask_sharpening_open
         } else {
@@ -272,9 +272,9 @@ impl PanelTab for EffectsTab {
             }
         }
 
-        // Noise Reduction (Luminance, Detail, Color, Color Detail) — honestly
-        // greyed in both scopes: no GPU pass wired yet (was enabled-but-dead
-        // locals before this registry rewrite).
+        // Noise Reduction (Luminance, Detail, Color, Color Detail) — wired
+        // globally in P4 via the a trous wavelet node; greyed in Mask scope
+        // because NR runs upstream of mask compositing (P4 design §3.5).
         ui.separator();
         let open = if scope_is_mask {
             &mut state.settings.mask_noise_reduction_open
@@ -283,6 +283,15 @@ impl PanelTab for EffectsTab {
         };
         section_header(ui, "NOISE REDUCTION", open);
         if *open {
+            // P4 design §6.2: NR and sharpening only read truthfully at 1:1 —
+            // at a coarse LOD the tile pixels are already downscaled, so the
+            // noise really is averaged away. Same subheader convention as
+            // REGION TONES.
+            ui.label(
+                egui::RichText::new("Judge noise reduction and sharpening at 1:1.")
+                    .color(theme::TEXT_FAINT)
+                    .size(11.0_f32),
+            );
             for spec in effects_sliders()
                 .iter()
                 .filter(|s| s.id.0.starts_with("nr_"))

@@ -371,21 +371,29 @@ pub fn color_sliders() -> &'static [SliderSpec] {
 }
 
 /// The Effects tab's SHARPENING/NOISE REDUCTION/DEHAZE specs, in display order
-/// (design 2026-07-28 §2 table; Task 6's invariant tests iterate this). NR is
-/// `global_ready: false, mask_ready: false` on all four rows — noise
-/// reduction has no GPU pass wired in any scope yet, so it renders honestly
-/// greyed everywhere (replacing the pre-registry enabled-but-dead sliders).
-/// Sharpen (both Amount and Radius — Phase 4 Task 4) is
-/// `global_ready: true, mask_ready: true`: `SharpenNode` shares the separable
-/// blur machinery and reads each visible mask layer's OWN
-/// `adjustments.sharpen` via the Color engine's composited-masks handle
-/// (`SharedMasks`, `local_node.rs`), so unlike Dehaze's radius (which shapes
-/// ONE shared whole-image transmission map) a mask layer carries its own
-/// independent radius — both fields are fully per-mask. The Sharpen "Detail"
-/// slider from the pre-registry hand-rolled block is dropped here: it mapped
-/// to no field and no planned shader parameter (YAGNI — the registry makes
-/// re-adding trivial once a shader defines it).
-static EFFECTS_SLIDERS: [SliderSpec; 8] = [
+/// (design 2026-07-28 §2 table; Task 6's invariant tests iterate this).
+///
+/// NR (Luminance/Detail/Color/Color Detail, P4) is `global_ready: true,
+/// mask_ready: false`: the `a trous` wavelet NR node runs upstream of where
+/// masks are composited, so per-mask NR is architecturally impossible — it
+/// renders enabled globally and honestly greyed (with an explanatory reason)
+/// in Mask scope.
+///
+/// Sharpen Amount and Radius (Phase 4 Task 4) are `global_ready: true,
+/// mask_ready: true`: `SharpenNode` shares the separable blur machinery and
+/// reads each visible mask layer's OWN `adjustments.sharpen` via the Color
+/// engine's composited-masks handle (`SharedMasks`, `local_node.rs`), so
+/// unlike Dehaze's radius (which shapes ONE shared whole-image transmission
+/// map) a mask layer carries its own independent radius — both fields are
+/// fully per-mask.
+///
+/// Sharpen Detail and Masking (P4 Task 5/7) are `global_ready: true,
+/// mask_ready: false`: the per-layer apply shader
+/// (`sharpen_apply_masked.wgsl`) does not read `detail`/`masking`, so a
+/// per-mask slider would persist to the sidecar and change nothing on
+/// screen — greyed in Mask scope with a reason, same precedent as
+/// `dehaze_radius`.
+static EFFECTS_SLIDERS: [SliderSpec; 10] = [
     SliderSpec {
         id: AdjustmentId("sharpen_amount"),
         label: "Amount",
@@ -423,6 +431,47 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         mask_reason: "",
     },
     SliderSpec {
+        id: AdjustmentId("sharpen_detail"),
+        label: "Detail",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.sharpen.detail,
+        set: |s, v| s.sharpen.detail = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: true,
+        // GLOBAL-ONLY (author decision 2026-07-31): the per-layer apply pass
+        // `sharpen_apply_masked.wgsl` does not read `detail`/`masking`, so a
+        // per-mask slider would persist and do nothing. Greyed with a reason,
+        // same precedent as `dehaze_radius`.
+        mask_ready: false,
+        global_reason: "",
+        mask_reason: "Detail and Masking apply to the global sharpen only for now",
+    },
+    SliderSpec {
+        id: AdjustmentId("sharpen_masking"),
+        label: "Masking",
+        min: 0.0,
+        max: 1.0,
+        default: 0.0,
+        step: 0.01,
+        decimals: 2,
+        unit: "",
+        bipolar: false,
+        get: |s| s.sharpen.masking,
+        set: |s, v| s.sharpen.masking = v,
+        kind: ferrolite_pipeline::OpKind::LocalAdjustments,
+        global_ready: true,
+        // GLOBAL-ONLY — see `sharpen_detail` above.
+        mask_ready: false,
+        global_reason: "",
+        mask_reason: "Detail and Masking apply to the global sharpen only for now",
+    },
+    SliderSpec {
         id: AdjustmentId("nr_luminance"),
         label: "Luminance",
         min: 0.0,
@@ -435,10 +484,10 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.noise_reduction.luminance,
         set: |s, v| s.noise_reduction.luminance = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: false,
-        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
-        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        global_reason: "",
+        mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
     },
     SliderSpec {
         id: AdjustmentId("nr_detail"),
@@ -453,10 +502,10 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.noise_reduction.detail,
         set: |s, v| s.noise_reduction.detail = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: false,
-        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
-        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        global_reason: "",
+        mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
     },
     SliderSpec {
         id: AdjustmentId("nr_color"),
@@ -471,10 +520,10 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.noise_reduction.color,
         set: |s, v| s.noise_reduction.color = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: false,
-        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
-        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        global_reason: "",
+        mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
     },
     SliderSpec {
         id: AdjustmentId("nr_color_detail"),
@@ -489,10 +538,10 @@ static EFFECTS_SLIDERS: [SliderSpec; 8] = [
         get: |s| s.noise_reduction.color_detail,
         set: |s, v| s.noise_reduction.color_detail = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
-        global_ready: false,
+        global_ready: true,
         mask_ready: false,
-        global_reason: "Noise reduction is not wired yet — coming with its GPU pass",
-        mask_reason: "Noise reduction is not wired yet — coming with its GPU pass",
+        global_reason: "",
+        mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
     },
     SliderSpec {
         id: AdjustmentId("dehaze_amount"),
@@ -674,6 +723,8 @@ mod tests {
             vec![
                 "sharpen_amount",
                 "sharpen_radius",
+                "sharpen_detail",
+                "sharpen_masking",
                 "nr_luminance",
                 "nr_detail",
                 "nr_color",
@@ -682,17 +733,26 @@ mod tests {
                 "dehaze_radius"
             ]
         );
+        // P4: NR is wired globally (the a trous wavelet node runs upstream of
+        // mask compositing), so it is global-ready but never mask-ready.
         assert!(specs
             .iter()
             .filter(|s| s.id.0.starts_with("nr_"))
-            .all(|s| !s.global_ready && !s.mask_ready));
+            .all(|s| s.global_ready && !s.mask_ready));
         // Phase 4 Task 4: per-mask sharpen — both Amount and Radius are
         // mask-ready (unlike Dehaze's radius, a mask layer's sharpen radius
         // is fully independent, not a shared whole-image parameter).
+        let sharpen_amount = specs.iter().find(|s| s.id.0 == "sharpen_amount").unwrap();
+        assert!(sharpen_amount.global_ready && sharpen_amount.mask_ready);
+        let sharpen_radius = specs.iter().find(|s| s.id.0 == "sharpen_radius").unwrap();
+        assert!(sharpen_radius.global_ready && sharpen_radius.mask_ready);
+        // P4 Task 7 (author decision): Detail and Masking are global-only —
+        // the per-layer apply shader doesn't read them, so a per-mask slider
+        // would persist and do nothing.
         assert!(specs
             .iter()
-            .filter(|s| s.id.0.starts_with("sharpen"))
-            .all(|s| s.global_ready && s.mask_ready));
+            .filter(|s| s.id.0 == "sharpen_detail" || s.id.0 == "sharpen_masking")
+            .all(|s| s.global_ready && !s.mask_ready));
         // Phase 4 Task 3: per-mask dehaze AMOUNT is live (reuses the shared
         // whole-image transmission map, blended per-layer); RADIUS stays
         // global-only (it shapes that one shared map, not exposed per-mask).
@@ -771,5 +831,99 @@ mod tests {
                 spec.id.0
             );
         }
+    }
+
+    /// P4: NR is wired globally, so all four sliders are enabled in Adjust scope.
+    #[test]
+    fn nr_sliders_are_enabled_in_global_scope() {
+        for spec in effects_sliders()
+            .iter()
+            .filter(|s| s.id.0.starts_with("nr_"))
+        {
+            let (enabled, reason) = readiness(EditScope::Global, spec);
+            assert!(enabled, "{} must be enabled globally", spec.id.0);
+            assert!(
+                reason.is_empty(),
+                "{} must have no global reason",
+                spec.id.0
+            );
+        }
+    }
+
+    /// P4 design §3.5: NR runs upstream of mask compositing, so it stays greyed in
+    /// Mask scope — with an accurate reason, not the old "not wired yet" placeholder.
+    #[test]
+    fn nr_sliders_are_greyed_in_mask_scope_with_the_chain_position_reason() {
+        for spec in effects_sliders()
+            .iter()
+            .filter(|s| s.id.0.starts_with("nr_"))
+        {
+            let (enabled, reason) = readiness(EditScope::Mask(0), spec);
+            assert!(!enabled, "{} must be greyed in mask scope", spec.id.0);
+            assert!(
+                reason.contains("global only"),
+                "{}'s mask reason must explain global-only, got {reason:?}",
+                spec.id.0
+            );
+            assert!(
+                !reason.contains("not wired yet"),
+                "{}'s placeholder reason must be gone",
+                spec.id.0
+            );
+        }
+    }
+
+    /// P4 Task 7 (author decision 2026-07-31, post-dates the original brief):
+    /// Detail and Masking are registered and global-ready, but stay greyed in
+    /// Mask scope — `sharpen_apply_masked.wgsl` (the per-layer apply pass)
+    /// doesn't read either field, so a per-mask slider would persist to the
+    /// sidecar and visibly do nothing. This supersedes an earlier brief draft
+    /// that expected both fields ready in both scopes.
+    #[test]
+    fn sharpen_detail_and_masking_are_registered_global_only() {
+        let ids: Vec<&str> = effects_sliders().iter().map(|s| s.id.0).collect();
+        assert!(
+            ids.contains(&"sharpen_detail"),
+            "sharpen_detail missing: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"sharpen_masking"),
+            "sharpen_masking missing: {ids:?}"
+        );
+        for spec in effects_sliders()
+            .iter()
+            .filter(|s| s.id.0 == "sharpen_detail" || s.id.0 == "sharpen_masking")
+        {
+            let (global_ok, global_reason) = readiness(EditScope::Global, spec);
+            assert!(global_ok, "{} must be enabled globally", spec.id.0);
+            assert!(global_reason.is_empty(), "{} global reason", spec.id.0);
+
+            let (mask_ok, mask_reason) = readiness(EditScope::Mask(0), spec);
+            assert!(!mask_ok, "{} must be greyed in mask scope", spec.id.0);
+            assert!(
+                mask_reason.contains("global sharpen only"),
+                "{}'s mask reason must explain global-only, got {mask_reason:?}",
+                spec.id.0
+            );
+        }
+    }
+
+    /// The registry's get/set must round-trip through the real op fields.
+    #[test]
+    fn sharpen_detail_and_masking_round_trip_through_the_adjustment_set() {
+        let mut set = ferrolite_pipeline::AdjustmentSet::default();
+        for spec in effects_sliders()
+            .iter()
+            .filter(|s| s.id.0 == "sharpen_detail" || s.id.0 == "sharpen_masking")
+        {
+            (spec.set)(&mut set, 0.5);
+            assert!(
+                ((spec.get)(&set) - 0.5).abs() < 1e-6,
+                "{} round trip",
+                spec.id.0
+            );
+        }
+        assert_eq!(set.sharpen.detail, 0.5);
+        assert_eq!(set.sharpen.masking, 0.5);
     }
 }

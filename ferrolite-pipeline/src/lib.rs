@@ -70,13 +70,15 @@ pub use tile_edit::TileEditPipeline;
 // geometry pass's projective (keystone) mapping — GPU parity tests and any
 // future keystone-aware coordinate mapping consume them; `KEYSTONE_STRENGTH`
 // is the single named tuning constant for keystone responsiveness (spec C4).
+// `nr_uniform`/`NrUniform` stay `pub(crate)` (final-review FIX 9): built and
+// consumed entirely inside `nr_node.rs`, with no external consumer — only
+// `nr_halo`/`nr_halo_doc` (which `ferrolite-app` actually uses) are exported.
 pub use uniforms::{
     clamp_uv_to_crop_bounds, color_grade_px, curve_lut, geometry_src_px, geometry_tile_uniform,
-    geometry_uniform, lens_halo_px, lens_uniform, nr_halo, nr_halo_doc, nr_uniform,
-    parametric_curve_lut, sharpen_halo, sharpen_halo_doc, tone_curve_luts, vignette_amount,
-    ColorGradeUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, NrUniform,
-    SharpenUniform, VignetteUniform, KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS,
-    SHARPEN_MASK_GRADIENT_NORM,
+    geometry_uniform, lens_halo_px, lens_uniform, nr_halo, nr_halo_doc, parametric_curve_lut,
+    sharpen_halo, sharpen_halo_doc, tone_curve_luts, vignette_amount, ColorGradeUniform,
+    GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
+    KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS, SHARPEN_MASK_GRADIENT_NORM,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses

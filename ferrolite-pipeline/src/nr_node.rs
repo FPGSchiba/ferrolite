@@ -404,7 +404,14 @@ impl Node<PipelineImage> for NoiseReductionNode {
         // the pipeline's lifetime. The reallocation this costs on the next
         // on-cycle is accepted (see the module doc): a strength drag never
         // passes through this branch mid-interaction.
-        if nr.is_identity() {
+        //
+        // Keyed off `is_active()`, NOT `is_identity()` (final-review FIX 1):
+        // `detail`/`color_detail` alone (zero `luminance`/`color`) leaves
+        // every threshold at zero too, so a detail-only edit is `is_identity()
+        // == false` yet changes no pixel — without this, that state ran a
+        // full, lossy 6-dispatch, ~1 GiB round-trip to reproduce its own
+        // input. `is_active()` is exactly "can this possibly change a pixel".
+        if !nr.is_active() {
             *self.textures.borrow_mut() = None;
             *self.out.borrow_mut() = None;
             return src.clone();
@@ -545,6 +552,40 @@ mod tests {
         assert!(
             Arc::ptr_eq(&out.texture, &src.texture),
             "identity must return the SAME texture, not a copy"
+        );
+    }
+
+    /// Final-review FIX 1: `detail`/`color_detail` alone (with zero
+    /// `luminance`/`color`) must take the SAME zero-cost passthrough as true
+    /// identity — no dispatch, no allocation, same texture returned. Before
+    /// this fix the node keyed its early return off `is_identity()`, so this
+    /// exact state (dragging Detail right after Luminance defaults to 0) fell
+    /// through to a full 6-dispatch, ~1 GiB round-trip that changed nothing.
+    #[test]
+    fn detail_only_noise_reduction_is_a_zero_cost_passthrough() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let px = vec![0.4f32; 16 * 16 * 4];
+        let img = ferrolite_image::LinearRgbaF32::new(16, 16, px).expect("len");
+        let src = upload_source(&ctx, &img);
+
+        let nr = NoiseReduction {
+            detail: 0.1,
+            color_detail: 0.1,
+            ..Default::default()
+        };
+        assert!(!nr.is_identity(), "sanity: detail alone is not is_identity");
+        let node = NoiseReductionNode::new(ctx.clone(), Rc::new(Cell::new(nr)));
+        let out = node.evaluate(&[&src]);
+
+        assert_eq!(node.eval_count(), 0, "detail-only must not dispatch");
+        assert_eq!(node.live_bytes(), 0, "detail-only must not allocate");
+        assert!(
+            Arc::ptr_eq(&out.texture, &src.texture),
+            "detail-only must return the SAME texture, not a copy"
         );
     }
 

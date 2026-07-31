@@ -387,9 +387,14 @@ pub fn sharpen_halo_doc(doc: &crate::op::OpStack) -> u32 {
 /// dispatch, so `thresholds[0]` is this level's luma threshold and
 /// `thresholds[1]` its chroma threshold; `[2..8]` is reserved padding keeping
 /// the struct 16-byte-aligned for WGSL uniform rules.
+///
+/// `pub(crate)` (final-review FIX 9): built and consumed entirely inside
+/// `nr_node.rs`'s per-level dispatch loop — nothing outside this crate needs
+/// the raw GPU layout. Narrow, don't widen, unless a real external consumer
+/// shows up.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct NrUniform {
+pub(crate) struct NrUniform {
     pub thresholds: [f32; 8],
     /// 0 = identity (the node never dispatches in this state).
     pub active: i32,
@@ -405,8 +410,18 @@ pub struct NrUniform {
 const _: () = assert!(std::mem::size_of::<NrUniform>() == 48);
 const _: () = assert!(std::mem::size_of::<NrUniform>().is_multiple_of(16));
 
-/// Build the uniform for `level` of the à trous loop.
-pub fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrUniform {
+/// Build the uniform for `level` of the à trous loop. `pub(crate)` — see
+/// `NrUniform`'s doc. `level` must be `< NR_LEVELS`: `threshold_at` clamps it
+/// defensively, but `spacing: 1 << level` below does not, so an out-of-range
+/// `level` would silently produce a nonsensical (but not out-of-bounds)
+/// spacing rather than panicking — asserted in debug builds since the sole
+/// caller (`nr_node.rs`'s `0..NR_LEVELS` loop) should never pass one.
+pub(crate) fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrUniform {
+    debug_assert!(
+        level < crate::nr::NR_LEVELS,
+        "nr_uniform: level {level} out of range (NR_LEVELS = {})",
+        crate::nr::NR_LEVELS
+    );
     let mut thresholds = [0.0f32; 8];
     thresholds[0] = crate::nr::threshold_at(nr.luminance, nr.detail, level);
     thresholds[1] = crate::nr::threshold_at(nr.color, nr.color_detail, level);
@@ -419,13 +434,18 @@ pub fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrUniform 
     }
 }
 
-/// Halo (pixels) a tiled NR pass must over-fetch. Zero at identity, mirroring
-/// `sharpen_halo`'s contract.
+/// Halo (pixels) a tiled NR pass must over-fetch. Zero unless NR is
+/// [`is_active`](crate::local::NoiseReduction::is_active) — NOT merely
+/// non-identity (final-review FIX 1): a detail-only edit (zero
+/// `luminance`/`color`) is non-identity but dispatches nothing, so it must
+/// contribute no halo either, or a detail-only drag would force a full
+/// `TileEditPipeline` rebuild for zero visual effect. Mirrors
+/// `sharpen_halo`'s contract otherwise.
 pub fn nr_halo(nr: &crate::local::NoiseReduction) -> u32 {
-    if nr.is_identity() {
-        0
-    } else {
+    if nr.is_active() {
         crate::nr::nr_halo_px()
+    } else {
+        0
     }
 }
 
@@ -1764,6 +1784,40 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(nr_halo(&chroma), 62);
+    }
+
+    /// Final-review FIX 1: `detail`/`color_detail` alone (zero
+    /// `luminance`/`color`) is non-identity but INACTIVE — every threshold it
+    /// could scale is already zero, so it dispatches nothing and must
+    /// contribute no halo. Before this fix `nr_halo` keyed off `is_identity`,
+    /// so this exact state (the very next slider a user touches after
+    /// Luminance) forced a full `TileEditPipeline` rebuild for zero effect.
+    #[test]
+    fn nr_halo_is_zero_for_detail_only_noise_reduction() {
+        use crate::local::NoiseReduction;
+        let detail_only = NoiseReduction {
+            detail: 0.1,
+            ..Default::default()
+        };
+        assert!(
+            !detail_only.is_identity(),
+            "sanity: detail alone is not is_identity"
+        );
+        assert!(
+            !detail_only.is_active(),
+            "detail alone cannot move any threshold off zero"
+        );
+        assert_eq!(
+            nr_halo(&detail_only),
+            0,
+            "detail-only must contribute no halo"
+        );
+
+        let color_detail_only = NoiseReduction {
+            color_detail: 0.1,
+            ..Default::default()
+        };
+        assert_eq!(nr_halo(&color_detail_only), 0, "color_detail-only: same");
     }
 
     #[test]

@@ -743,7 +743,12 @@ mod tests {
     /// hand-diffing once did.
     #[test]
     fn disclosure_snapshot_covers_every_open_field() {
-        let field_declarations = include_str!("dto.rs").matches("_open: bool,\n").count();
+        // Normalize CRLF first: a Windows checkout with core.autocrlf gives the
+        // source ",\r\n" line endings, which would silently zero this count.
+        let field_declarations = include_str!("dto.rs")
+            .replace('\r', "")
+            .matches("_open: bool,\n")
+            .count();
         assert_eq!(
             field_declarations, DISCLOSURE_FLAG_COUNT,
             "a `*_open` field was added to/removed from Settings without updating \

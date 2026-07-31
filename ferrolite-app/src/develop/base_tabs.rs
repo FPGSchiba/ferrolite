@@ -702,7 +702,7 @@ mod tests {
     #[test]
     fn light_tab_edits_the_selected_mask_when_mask_scope_active() {
         let ctx = egui::Context::default();
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).
@@ -740,7 +740,7 @@ mod tests {
     #[test]
     fn test_light_tab_collapsible_sections() {
         let ctx = egui::Context::default();
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn test_color_tab_collapsible_sections() {
         let ctx = egui::Context::default();
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).
@@ -788,7 +788,7 @@ mod tests {
         // No viewer ⇒ tab renders nothing and returns None (unchanged behavior),
         // mirroring `light_tab_edits_the_selected_mask_when_mask_scope_active`.
         let ctx = egui::Context::default();
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn test_effects_tab_collapsible_sections() {
         let ctx = egui::Context::default();
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).
@@ -828,7 +828,7 @@ mod tests {
 
     #[test]
     fn test_all_section_headers_bound_and_persist() {
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).
@@ -882,7 +882,7 @@ mod tests {
 
     #[test]
     fn mask_scope_uses_its_own_section_flags() {
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).

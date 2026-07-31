@@ -700,3 +700,135 @@ prescribed by this task (Task 5 is fixture/doc coverage, not a perf-improving ta
 per-mask dehaze/sharpen features Tasks 3-4 added contribute ZERO overhead to this bench's
 `full_global`/`two_masks` docs (neither carries a per-layer dehaze or sharpen amount), so
 this bench continues to measure only the global-path effect of Tasks 1-2, as it always has.
+
+---
+
+## P4 increments — Noise Reduction & Sharpening (Task 8, 2026-07-31)
+
+**Phase:** `.superpowers/sdd/2026-07-31-p4-noise-reduction-and-sharpening/` (design doc
+`docs/superpowers/specs/2026-07-31-p4-noise-reduction-and-sharpening-design.md`). Not to be
+confused with the "Phase 4 increments" section above, which is a DIFFERENT, earlier plan
+(`2026-07-29-unified-engine-phase4-mask-neighborhood`, per-mask dehaze/sharpen). This section
+covers Task 8 of the noise-reduction-and-sharpening plan: two new `engine_bench` cases (NR-dirty;
+NR-dirty + sharpen Detail/Masking) and the spec section 3.3 peak-GPU-memory gate.
+
+### Method
+
+Same method as every prior entry in this doc — `full_global` fixture (light_trio, curve_hsl_grade,
+sharpen 0.8/r2, dehaze 0.3/r8) as the shared base, 6000x4000 synthetic source, 20 iterations/case,
+`ctx.device.poll(Maintain::Wait)` per iteration, median reported, release profile. **N: 3
+independent process runs** (a spot-check, not the full 5-run protocol — no engine code changed in
+this task, only new tests, so the a priori regression risk on the EXISTING three cases is near
+zero; 3 runs is enough to confirm that and to bound NR's own new cost with an honest range rather
+than a single sample).
+
+Two new cases, added to `ferrolite-pipeline/tests/engine_bench.rs`'s `engine_bench_medians`:
+
+- **(d) NR-dirty evaluate** — `full_global` plus active NR (`luminance: 0.6, color: 0.3`),
+  alternating `NoiseReduction.luminance` by `base +/- 0.01` each iteration. `noise_reduction` sits
+  right after the color-matrix node — the SECOND node in the graph, upstream of the light engine,
+  dehaze, color engine, sharpen, and geometry — so dirtying it forces the entire rest of the chain
+  to re-run too: a strict superset of case (a)'s downstream cost, plus NR's own à trous
+  decomposition (5 fused 2D passes, levels 0-4).
+- **(e) NR-dirty + sharpen Detail/Masking** — same NR-luminance alternation as (d), on a doc that
+  ALSO sets `Sharpen { amount: 0.8, radius: 2, detail: 0.5, masking: 0.5 }` (both new P4 sharpen
+  fields active), measuring the combined worst-case pass count when both P4 features are live at
+  once (NR's decomposition plus the sharpen node's extra fine-blur and gradient-mask passes).
+- `noise_reduction` has no dedicated `Op` variant (same category as `vibrance` — see
+  `vibrance_global` in `common/layer_engine.rs`), so it is set by cloning the doc and mutating
+  `global.noise_reduction` directly (matching `nr_node.rs`'s test pattern), not via `with_global`
+  (which would wipe `full_global`'s other already-set global fields).
+
+**Run:** `cargo test -p ferrolite-pipeline --test engine_bench engine_bench_medians --release -- --ignored --nocapture`
+
+### 3-run results (ms), release, 6000x4000
+
+| Run | (a) exposure-dirty | (b) grade-dirty | (c) exposure-dirty + two_masks | (d) NR-dirty | (e) NR-dirty + sharpen D/M |
+|---|---|---|---|---|---|
+| 1 | 47.359 | 31.065 | 63.293 | 151.150 | 164.367 |
+| 2 | 55.176 | 35.931 | 73.270 | 172.369 | 192.754 |
+| 3 | 52.976 | 33.807 | 72.022 | 171.856 | 186.287 |
+
+| Case | Median (ms) | Range (ms) |
+|---|---|---|
+| (a) exposure-dirty | 52.976 | 47.359 - 55.176 |
+| (b) grade-dirty | 33.807 | 31.065 - 35.931 |
+| (c) exposure-dirty + two_masks | 72.022 | 63.293 - 73.270 |
+| (d) NR-dirty | 171.856 | 151.150 - 172.369 |
+| (e) NR-dirty + sharpen Detail/Masking | 186.287 | 164.367 - 192.754 |
+
+### Gate 1: no regression on the existing (a)/(b)/(c) cases
+
+Compared against the most recent recorded baseline (Phase 4 final tip, `46c58a5`, 5-run median),
+recorded earlier in this document:
+
+| Case | Phase 4 final median (ms) | P4 (this entry) median (ms) | Delta |
+|---|---|---|---|
+| (a) exposure-dirty | 61.613 | 52.976 | -14.0% |
+| (b) grade-dirty | 42.262 | 33.807 | -20.0% |
+| (c) exposure-dirty + two_masks | 84.656 | 72.022 | -14.9% |
+
+**PASS** — every existing case is faster, not slower (within this machine's already-documented
+run-to-run ambient noise; this session read on the faster side of that noise band). No engine
+code changed in this task (Task 8 is fixture/bench/doc coverage only, same class of task as the
+Phase-4-final Task 5 entry above), so this result is expected, not surprising — recorded per the
+gate's own requirement to check anyway.
+
+### NR's own cost — a new, honestly-reported baseline
+
+(d) minus (a) isolates NR's incremental cost on top of the same downstream chain (light engine +
+dehaze transmission + color engine + sharpen + geometry, all re-run either way once something
+upstream of them is dirty): **171.856 - 52.976 = 118.9 ms**, roughly **3.2x** case (a)'s own
+median. This is a substantial, real cost — the 5-level à trous decomposition is five full-res
+fused 2D 25-tap passes (one per level), each in the same bandwidth-bound regime Task 5b's profile
+already showed dominates this GPU's per-pass budget, and NR pays five of them where the other
+engine nodes pay one or two. **Reported honestly, not minimized**: at the current L=5 setting this
+is the single most expensive node in the pipeline when active and dirty. Design section 3.3 names
+the two-coarsest-level cache as the escape hatch if this cost is judged too high in practice; this
+measurement is what that decision would be judged against, but no such change is made by this
+task (Task 8 is measurement, not optimization — see the memory-gate decision below for the one
+decision this task IS chartered to make).
+
+(e) minus (d) isolates the added cost of sharpen's Detail/Masking fields on top of an already-NR-
+dirty evaluate: **186.287 - 171.856 = 14.4 ms** — modest relative to NR's own cost, consistent with
+Detail/Masking adding one extra narrow-radius separable blur pass plus one cheap gradient pass to
+a node (`SharpenNode`) that was already re-running.
+
+### Memory gate (design section 3.3 / section 7.4) — decision: keep NR on both paths, no code change
+
+**Method:** `ferrolite-pipeline/tests/engine_bench.rs::nr_memory_gate` (`#[ignore]`d, run via
+`cargo test -p ferrolite-pipeline --test engine_bench nr_memory_gate --release -- --ignored --nocapture`).
+Measured at **6048x4024 (24.3 MP)** — the REAL pixel dimensions of the largest RAW fixture in this
+repo, `fixtures/raw/DSC04692.ARW` (Sony ILCE-7M2), read via `ferrolite_decode::read_metadata` (not
+re-decoded/demosaiced for this test — the memory figure depends only on pixel count, not pixel
+content, and `read_metadata` gives the real dimensions without paying for a full RAW decode). This
+is an actual full-resolution measurement, not an extrapolation from a smaller synthetic size — the
+brief's fallback ("measure smaller and extrapolate linearly, `w*h*8` bytes x 4 textures") was not
+needed since the real fixture's resolution was available and used directly.
+
+| Quantity | Value |
+|---|---|
+| Identity NR bytes (whole-image `EditPipeline`) | 0 |
+| Active NR bytes (`luminance: 0.8, color: 0.5`, whole-image `EditPipeline`) | 973,486,080 B (0.907 GiB) |
+| Resident source pyramid bytes (`GpuPyramidSource`, same image, held concurrently as in real develop-canvas/1:1 usage) | 259,530,264 B (0.242 GiB) |
+| **Total peak (pyramid + active NR)** | **1,233,016,344 B (1.148 GiB)** |
+
+Gate 1 (identity allocates zero): **CONFIRMED** — `nr_live_bytes() == 0` with `NoiseReduction::default()`.
+
+Gate 2 (active figure vs the 6-8 GB budget): active NR's own 0.907 GiB, plus the 0.242 GiB source
+pyramid a real develop session keeps resident for the same image, totals **1.148 GiB** — roughly
+**14-19%** of a 6-8 GB budget. Even a generous allowance for every OTHER full-res texture this
+pipeline holds at once (light-engine output, color-engine output, sharpen's H/V + fine-blur
+intermediates, geometry output — each order-of-magnitude ~185 MiB at this resolution; call it 8-10
+more full-res-equivalent textures, ~1.5-1.9 GiB) still lands total resident GPU memory at roughly
+**2.7-3.0 GiB** — comfortably inside the 6-8 GB budget with headroom to spare, nowhere near an OOM.
+
+**Decision (per the pre-agreed rule in design section 3.3 — not re-opened):** the active figure is
+comfortably within the 6-8 GB budget, so **NR stays on both the tile and whole-image paths — the
+current, already-shipped state. No code change.** The section 3.3 tile-path-only fallback is not
+invoked. The measured active-NR figure (0.907 GiB at 24.3 MP, ~973 MB) is close to but somewhat
+above the spec's own order-of-magnitude estimate (~768 MB = 4 x 192 MB at 24 MP) — the extra ~200
+MB is not broken down further here (not required by the gate, which only asks whether the figure
+threatens the budget, not that it match the estimate exactly), but is consistent with the four
+`rgba16float` intermediates plus some additional bookkeeping/allocation overhead the estimate's
+back-of-envelope 4-texture count did not itemize.

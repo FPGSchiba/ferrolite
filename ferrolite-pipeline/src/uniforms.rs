@@ -1663,21 +1663,60 @@ mod tests {
 
     #[test]
     fn nr_halo_doc_is_zero_unless_the_global_set_has_nr() {
-        use crate::op::EditDoc;
+        use crate::local::{AdjustmentSet, MaskLayer, NoiseReduction};
+        use crate::op::{EditDoc, Sharpen};
+        use ferrolite_mask::MaskDefinition;
+
         assert_eq!(nr_halo_doc(&EditDoc::default()), 0);
         let mut doc = EditDoc::default();
         doc.global.noise_reduction.luminance = 0.4;
         assert_eq!(nr_halo_doc(&doc), 62, "global NR contributes the halo");
-        // NR is GLOBAL-ONLY (design §3.5): a mask layer's NR must NOT contribute.
-        let mut masked = EditDoc::default();
-        if let Some(layer) = masked.layers.first_mut() {
-            layer.adjustments.noise_reduction.luminance = 0.9;
-        }
+
+        // NR is GLOBAL-ONLY (design §3.5): a REAL, VISIBLE mask layer carrying
+        // its own non-zero NR must NOT contribute a halo -- this is the actual
+        // guard on the load-bearing constraint (a doc with no layers at all
+        // would pass this trivially and prove nothing).
+        let masked = EditDoc {
+            layers: vec![MaskLayer {
+                name: "l".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: AdjustmentSet {
+                    noise_reduction: NoiseReduction {
+                        luminance: 0.9,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
         assert_eq!(
             nr_halo_doc(&masked),
             0,
             "per-mask NR is not applied, so it must contribute no halo"
         );
+
+        // Contrast: the identical layer shape, but carrying an active sharpen
+        // instead, DOES contribute via `sharpen_halo_doc` -- proving the zero
+        // above is a deliberate global-only choice for NR specifically, not
+        // an artifact of a doc whose layers never get walked at all.
+        let sharpened = EditDoc {
+            layers: vec![MaskLayer {
+                name: "l".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: AdjustmentSet {
+                    sharpen: Sharpen {
+                        amount: 0.5,
+                        radius: 4,
+                    },
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        assert_eq!(sharpen_halo_doc(&sharpened), 4);
     }
 
     #[test]

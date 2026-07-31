@@ -374,6 +374,12 @@ pub(crate) struct SharpenNode {
     // actually re-runs this node when expected, e.g. a mask-layer
     // sharpen-amount-only change).
     evals: Cell<u32>,
+    // Test hook (Phase 4 Task 5 review fix): cumulative count of GLOBAL
+    // dispatches that went through `encode_apply_detail` (bumped ONLY there,
+    // never in `encode_apply`) — proves the both-zero case actually ROUTES to
+    // the old `sharpen_apply.wgsl` rather than merely rendering pixels that
+    // happen to match it on this adapter (see `sharpen_detail_zero_case_routes_to_old_shader`).
+    detail_dispatches: Cell<u32>,
 }
 
 impl SharpenNode {
@@ -443,6 +449,7 @@ impl SharpenNode {
             out: RefCell::new(None),
             blurs: Cell::new(0),
             evals: Cell::new(0),
+            detail_dispatches: Cell::new(0),
         }
     }
 
@@ -758,6 +765,16 @@ impl SharpenNode {
     pub(crate) fn eval_count(&self) -> u32 {
         self.evals.get()
     }
+
+    /// Number of GLOBAL dispatches routed through `sharpen_apply_detail.wgsl`
+    /// so far (cumulative, test hook): proves the both-zero case actually
+    /// routes to the OLD `sharpen_apply.wgsl` rather than merely rendering
+    /// matching pixels through the new shader (review fix — see
+    /// `sharpen_detail_zero_case_routes_to_old_shader`).
+    #[cfg(test)]
+    pub(crate) fn detail_dispatch_count(&self) -> u32 {
+        self.detail_dispatches.get()
+    }
 }
 
 impl Node<PipelineImage> for SharpenNode {
@@ -906,6 +923,7 @@ impl Node<PipelineImage> for SharpenNode {
                     w,
                     h,
                 );
+                self.detail_dispatches.set(self.detail_dispatches.get() + 1);
             } else {
                 // Both zero: dispatch the OLD shader with the identical bind
                 // group as before this task — gate 2 (design §7.2), so this
@@ -1234,6 +1252,74 @@ mod tests {
         assert!(
             Arc::ptr_eq(&out2.texture, &src.texture),
             "radius <= 0 must return the input texture unchanged"
+        );
+    }
+
+    /// Review fix (Phase 4 Task 5): `sharpen_detail_masking_zero_is_byte_identical`
+    /// (in `tests/golden.rs`) only proves the two shaders render identically ON
+    /// THIS ADAPTER — it cannot prove the both-zero case actually ROUTES to the
+    /// old `sharpen_apply.wgsl`, which is the requirement design §7.2 exists
+    /// for (we do NOT trust `mix`/`smoothstep`-at-zero bit-exactness across
+    /// drivers). `detail_dispatch_count()` asserts the PIPELINE SELECTION
+    /// directly, bumped only inside `encode_apply_detail` (never
+    /// `encode_apply`) — mirrors the `blurs`/`evals` test-hook pattern above.
+    #[test]
+    fn sharpen_detail_zero_case_routes_to_old_shader() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let (w, h) = (8u32, 8u32);
+        let px = vec![0.3f32; (w * h * 4) as usize];
+        let img = LinearRgbaF32::new(w, h, px).expect("flat fixture");
+        let src = upload_source(&ctx, &img);
+
+        // Both zero: the OLD sharpen_apply.wgsl must be used, so the
+        // detail-path counter stays at 0.
+        let both_zero = Rc::new(Cell::new(SharpenUniform {
+            amount: 0.5,
+            radius: 3,
+            detail: 0.0,
+            masking: 0.0,
+        }));
+        let node = SharpenNode::new(ctx.clone(), both_zero, no_layers(), no_shared_masks());
+        node.evaluate(&[&src]);
+        assert_eq!(
+            node.detail_dispatch_count(),
+            0,
+            "both zero must dispatch the OLD sharpen_apply.wgsl, not sharpen_apply_detail.wgsl"
+        );
+
+        // Detail alone active: routes through sharpen_apply_detail.wgsl.
+        let detail_only = Rc::new(Cell::new(SharpenUniform {
+            amount: 0.5,
+            radius: 3,
+            detail: 0.5,
+            masking: 0.0,
+        }));
+        let node_detail =
+            SharpenNode::new(ctx.clone(), detail_only, no_layers(), no_shared_masks());
+        node_detail.evaluate(&[&src]);
+        assert_eq!(
+            node_detail.detail_dispatch_count(),
+            1,
+            "detail != 0 alone must route through sharpen_apply_detail.wgsl"
+        );
+
+        // Masking alone active: also routes through sharpen_apply_detail.wgsl.
+        let masking_only = Rc::new(Cell::new(SharpenUniform {
+            amount: 0.5,
+            radius: 3,
+            detail: 0.0,
+            masking: 0.5,
+        }));
+        let node_masking = SharpenNode::new(ctx, masking_only, no_layers(), no_shared_masks());
+        node_masking.evaluate(&[&src]);
+        assert_eq!(
+            node_masking.detail_dispatch_count(),
+            1,
+            "masking != 0 alone must route through sharpen_apply_detail.wgsl"
         );
     }
 

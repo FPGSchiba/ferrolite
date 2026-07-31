@@ -8,10 +8,14 @@
 // `sharpen_node.rs`), so no in-shader identity branch is needed here (unlike
 // the old fused `sharpen.wgsl`, which had to branch because it was the only
 // pass).
+// `p.detail`/`p.masking` (P4 Task 5) are declared for layout match, unused in
+// this pass — this shader is only ever dispatched when BOTH are 0.0 (see
+// `sharpen_node.rs`'s `evaluate`); the non-zero case routes to
+// `sharpen_apply_detail.wgsl` instead.
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var blur: texture_2d<f32>;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
-struct P { amount: f32, radius: i32, pad0: f32, pad1: f32 };
+struct P { amount: f32, radius: i32, detail: f32, masking: f32 };
 @group(0) @binding(3) var<uniform> p: P;
 
 @compute @workgroup_size(8, 8, 1)

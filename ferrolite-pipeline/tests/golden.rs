@@ -1183,14 +1183,20 @@ fn sharpen_masking_protects_flat_areas() {
 // happen to agree only up to sub-pixel/bilinear-vs-nearest differences,
 // which this fixture's 2px-period checker (deliberately built to have large
 // local gradients everywhere, including at the border) amplifies well past
-// f16 rounding. This is the same class of "different edge-extension
-// mechanism" finding this file's own `dehaze_tiled_matches_whole_image`
-// comment already documents as the historical reason a true-edge margin was
-// needed before the dehaze shared-transmission fix — this test adopts the
-// same precedent rather than the (already-disproven-for-dehaze) assumption
-// that no margin is ever needed. The fixture below is sized so the interior
-// seam sits comfortably outside this margin, so excluding it does not weaken
-// the seam check this test exists to make.
+// f16 rounding. This is the SAME CLASS of "different edge-extension
+// mechanism" finding `dehaze_tiled_matches_whole_image` below once had — but
+// NOT the same resolution: that test's margin was later REMOVED once its
+// root cause was fixed (shared transmission, one computation for both
+// tiers), and `dehaze_tiled_matches_whole_image`'s own comment states so
+// explicitly. This test's margin is a WORKAROUND for a genuine, still-
+// unresolved discrepancy (root-caused above, not fixed — fixing the tile
+// geometry head's edge-extension to match the whole-image shader's clamp is
+// out of scope for this measurement/fixture task), not an instance of
+// established current practice in this file. The fixture below is sized so
+// BOTH interior seams sit comfortably outside this margin (see the asserts
+// after the loop, added after review caught a 450x300 fixture whose y-seam
+// sat inside the margin and was silently never compared), so excluding it
+// does not weaken the seam check this test exists to make.
 //
 // MANDATORY sensitivity check (recorded in the task report): temporarily
 // forcing `uniforms::nr_halo` to always return `0` (so `TileEditPipeline`
@@ -1214,12 +1220,16 @@ fn nr_tiled_matches_whole_image_at_the_seam() {
         return;
     };
     let ctx = Arc::new(ctx);
-    // A multi-tile image: 450x300 -> 2x2 tiles at LOD 0 (seams at x=256,
+    // A multi-tile image: 450x450 -> 2x2 tiles at LOD 0 (seams at x=256 AND
     // y=256). Sized so BOTH seams sit >= 194 px from every true canvas edge
-    // (well outside `NR_EDGE_MARGIN`), unlike a minimal 300x200 fixture where
-    // the seam sits only 44 px from the right edge — too close to separate
-    // the seam question from the true-edge-margin question documented above.
-    let (iw, ih) = (450u32, 300u32);
+    // (well outside `NR_EDGE_MARGIN`) — symmetric on both axes, unlike an
+    // earlier 450x300 attempt where the y-seam sat only 44 px from the
+    // bottom edge, entirely inside the margin, which silently dropped tile
+    // row 1 from the comparison (caught in review: `compared` printed
+    // exactly `270*120`, i.e. only the single strip between the margins on
+    // BOTH axes at once, zero contribution from row 1). The asserts below
+    // guard against that regressing silently again.
+    let (iw, ih) = (450u32, 450u32);
     let src = common::high_frequency_checker(iw, ih);
     let mut doc = OpStack::default();
     doc.global.noise_reduction = NoiseReduction {
@@ -1240,6 +1250,15 @@ fn nr_tiled_matches_whole_image_at_the_seam() {
     let mut max_diff = 0.0f32;
     let mut max_loc = (0u32, 0u32);
     let mut compared = 0u32;
+    // Bounding box of every COMPARED pixel — asserted below to strictly
+    // contain both seam coordinates (x=256, y=256), so a future canvas-size
+    // or margin change that silently drops one seam from coverage (as a
+    // 450x300 fixture did here, caught in review) fails loudly instead of
+    // quietly shrinking what this test actually checks.
+    let mut min_gx = u32::MAX;
+    let mut max_gx = 0u32;
+    let mut min_gy = u32::MAX;
+    let mut max_gy = 0u32;
     for ty in 0..2u32 {
         for tx in 0..2u32 {
             let tile = tep.produce_tile(TileCoord {
@@ -1266,6 +1285,10 @@ fn nr_tiled_matches_whole_image_at_the_seam() {
                         continue;
                     }
                     compared += 1;
+                    min_gx = min_gx.min(gx);
+                    max_gx = max_gx.max(gx);
+                    min_gy = min_gy.min(gy);
+                    max_gy = max_gy.max(gy);
                     let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
                     let wi = ((gy * iw + gx) * 4) as usize;
                     for c in 0..3 {
@@ -1283,7 +1306,22 @@ fn nr_tiled_matches_whole_image_at_the_seam() {
         compared > 10_000,
         "sanity: the edge-margin exclusion must not have eaten the whole interior ({compared} px compared)"
     );
-    eprintln!("NR tile-seam max linear diff = {max_diff} at {max_loc:?} ({compared} interior px compared)");
+    // The load-bearing coverage guard the review flagged: the compared region
+    // must strictly straddle BOTH seams (x=256, y=256), not just one. A
+    // margin/canvas-size change that shrinks coverage down to one seam (as
+    // happened here before review) must fail this assert, not pass silently.
+    assert!(
+        min_gx < 256 && max_gx > 256,
+        "compared region does not straddle the x=256 seam: gx in [{min_gx}, {max_gx}] — only one tile column was exercised"
+    );
+    assert!(
+        min_gy < 256 && max_gy > 256,
+        "compared region does not straddle the y=256 seam: gy in [{min_gy}, {max_gy}] — only one tile row was exercised"
+    );
+    eprintln!(
+        "NR tile-seam max linear diff = {max_diff} at {max_loc:?} ({compared} interior px compared, \
+         gx in [{min_gx}, {max_gx}], gy in [{min_gy}, {max_gy}])"
+    );
     assert!(
         max_diff <= NR_SEAM_TOL,
         "per-tile NR disagrees with whole-image at the interior seam (diff {max_diff} at {max_loc:?}) — halo fold-in broken?"

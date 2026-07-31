@@ -118,30 +118,31 @@ pub fn settings_form(ui: &mut egui::Ui, o: &mut ExportOptions) {
 
     // Greyed with a reason while no medium is chosen — the amount tier only
     // means something once output sharpening is on (same greyed-with-reason
-    // convention as the Develop panel's unavailable controls).
-    ui.add_enabled_ui(o.sharpen_for != OutputMedium::None, |ui| {
-        egui::ComboBox::from_label("Sharpen amount")
-            .selected_text(match o.sharpen_amount {
-                OutputSharpenAmount::Low => "Low",
-                OutputSharpenAmount::Standard => "Standard",
-                OutputSharpenAmount::High => "High",
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut o.sharpen_amount, OutputSharpenAmount::Low, "Low");
-                ui.selectable_value(
-                    &mut o.sharpen_amount,
-                    OutputSharpenAmount::Standard,
-                    "Standard",
-                );
-                ui.selectable_value(&mut o.sharpen_amount, OutputSharpenAmount::High, "High");
-            });
-    })
-    .response
-    .on_hover_text(if o.sharpen_for == OutputMedium::None {
-        "Choose an output medium to enable output sharpening"
-    } else {
-        ""
-    });
+    // convention as the Develop panel's unavailable controls). Only attach a
+    // tooltip on the disabled path: an empty `on_hover_text("")` on the
+    // enabled path renders an empty tooltip frame on hover for no reason.
+    let amount_response = ui
+        .add_enabled_ui(o.sharpen_for != OutputMedium::None, |ui| {
+            egui::ComboBox::from_label("Sharpen amount")
+                .selected_text(match o.sharpen_amount {
+                    OutputSharpenAmount::Low => "Low",
+                    OutputSharpenAmount::Standard => "Standard",
+                    OutputSharpenAmount::High => "High",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut o.sharpen_amount, OutputSharpenAmount::Low, "Low");
+                    ui.selectable_value(
+                        &mut o.sharpen_amount,
+                        OutputSharpenAmount::Standard,
+                        "Standard",
+                    );
+                    ui.selectable_value(&mut o.sharpen_amount, OutputSharpenAmount::High, "High");
+                });
+        })
+        .response;
+    if o.sharpen_for == OutputMedium::None {
+        amount_response.on_hover_text("Choose an output medium to enable output sharpening");
+    }
 
     ui.separator();
     ui.checkbox(&mut o.copy_exif, "Copy EXIF metadata");

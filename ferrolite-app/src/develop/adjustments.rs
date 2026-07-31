@@ -14,6 +14,10 @@ use crate::widgets::slider::EguiSlider;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AdjustmentId(pub &'static str);
 
+/// `SliderSpec::value_gate`'s type, factored out per clippy's
+/// `type_complexity` lint. See that field's doc for the semantics.
+pub type ValueGate = Option<(fn(&ferrolite_pipeline::AdjustmentSet) -> bool, &'static str)>;
+
 /// A declarative description of one scoped slider control: its `EguiSlider`
 /// layout, how to read/write it from an `AdjustmentSet`, the `OpKind` its
 /// edits carry, and its readiness (enabled/disabled + hover reason) in each
@@ -36,19 +40,49 @@ pub struct SliderSpec {
     /// Hover reason shown when greyed in that scope (empty ⇒ ready).
     pub global_reason: &'static str,
     pub mask_reason: &'static str,
+    /// Extra gate evaluated against the CURRENT `AdjustmentSet`'s VALUE, on
+    /// top of the static per-scope `*_ready` above (final-review FIX 5).
+    /// `None` (every existing control) means "always ready once scope-ready"
+    /// — unaffected. `Some((predicate, reason))` greys the control with
+    /// `reason` whenever `predicate(current) == false`, in EITHER scope where
+    /// the control is otherwise ready. For a control whose usefulness
+    /// depends on a SIBLING field rather than on scope (e.g. Sharpen Detail/
+    /// Masking only modulate a delta that Amount multiplies, so at
+    /// `amount == 0.0` they genuinely cannot change anything) — distinct from
+    /// `normalized()` snapping the whole `Sharpen` struct to identity at
+    /// `amount == 0.0`, which is a SEPARATE, deliberately unrelated invariant
+    /// (amount == 0 stays functionally identity regardless of what Detail/
+    /// Masking are dragged to; this field only controls what the UI SHOWS).
+    pub value_gate: ValueGate,
 }
 
-/// Resolve whether `spec`'s control renders enabled for `scope`, and the
-/// hover reason to show when it doesn't (brief: `Global`/`Mask(_)` use their
-/// own `*_ready`/`*_reason` pair; `MaskNone` is ALWAYS disabled with a fixed
-/// reason that overrides the spec's). Pulled out of `scoped_slider` so the
-/// readiness rule is unit-testable without an egui context.
-fn readiness(scope: EditScope, spec: &SliderSpec) -> (bool, &'static str) {
-    match scope {
-        EditScope::MaskNone => (false, MASK_NONE_HINT),
+/// Resolve whether `spec`'s control renders enabled for `scope` against
+/// `current` (the scope's live `AdjustmentSet`, if any), and the hover reason
+/// to show when it doesn't. `Global`/`Mask(_)` use their own
+/// `*_ready`/`*_reason` pair, then `spec.value_gate` if the scope-level check
+/// passed; `MaskNone` is ALWAYS disabled with a fixed reason that overrides
+/// the spec's (and never reaches `value_gate` — there is no `current` to
+/// gate on). Pulled out of `scoped_slider` so the readiness rule is
+/// unit-testable without an egui context.
+fn readiness(
+    scope: EditScope,
+    spec: &SliderSpec,
+    current: Option<&ferrolite_pipeline::AdjustmentSet>,
+) -> (bool, &'static str) {
+    let (scope_ready, scope_reason) = match scope {
+        EditScope::MaskNone => return (false, MASK_NONE_HINT),
         EditScope::Mask(_) => (spec.mask_ready, spec.mask_reason),
         EditScope::Global => (spec.global_ready, spec.global_reason),
+    };
+    if !scope_ready {
+        return (false, scope_reason);
     }
+    if let (Some((ok, value_reason)), Some(set)) = (spec.value_gate, current) {
+        if !ok(set) {
+            return (false, value_reason);
+        }
+    }
+    (true, scope_reason)
 }
 
 /// Build the `EguiSlider` widget for `spec`, bound to `value`, exactly as
@@ -90,8 +124,8 @@ pub fn scoped_slider(
     spec: &SliderSpec,
     scoped: &ScopedEdit<'_>,
 ) -> Option<EditOutcome> {
-    let (ready, reason) = readiness(scoped.scope, spec);
     let current = scoped.set();
+    let (ready, reason) = readiness(scoped.scope, spec, current);
     let ready = ready && current.is_some();
 
     if !ready {
@@ -150,6 +184,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("contrast"),
@@ -168,6 +203,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("highlights"),
@@ -186,6 +222,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("shadows"),
@@ -204,6 +241,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("whites"),
@@ -222,6 +260,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("blacks"),
@@ -240,6 +279,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("temp"),
@@ -258,6 +298,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("tint"),
@@ -276,6 +317,7 @@ static LIGHT_SLIDERS: [SliderSpec; 8] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
 ];
 
@@ -308,6 +350,7 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("hue"),
@@ -326,6 +369,7 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("vibrance"),
@@ -344,6 +388,7 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("color_amount"),
@@ -362,6 +407,7 @@ static COLOR_SLIDERS: [SliderSpec; 4] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
 ];
 
@@ -392,7 +438,12 @@ pub fn color_sliders() -> &'static [SliderSpec] {
 /// (`sharpen_apply_masked.wgsl`) does not read `detail`/`masking`, so a
 /// per-mask slider would persist to the sidecar and change nothing on
 /// screen — greyed in Mask scope with a reason, same precedent as
-/// `dehaze_radius`.
+/// `dehaze_radius`. They ALSO carry a `value_gate` (final-review FIX 5,
+/// author decision): both fields only modulate a delta that Amount
+/// multiplies, so at `amount == 0.0` they cannot change anything in EITHER
+/// scope — greyed with a distinct, actionable reason ("Set Amount above 0 to
+/// use Detail and Masking") rather than letting the slider silently spring
+/// back to its own default.
 static EFFECTS_SLIDERS: [SliderSpec; 10] = [
     SliderSpec {
         id: AdjustmentId("sharpen_amount"),
@@ -411,6 +462,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("sharpen_radius"),
@@ -429,6 +481,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("sharpen_detail"),
@@ -451,6 +504,15 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: false,
         global_reason: "",
         mask_reason: "Detail and Masking apply to the global sharpen only for now",
+        // Author decision (final-review FIX 5): both fields only modulate a
+        // delta that Amount multiplies, so at Amount 0 they genuinely cannot
+        // change anything — grey them (in whichever scope is otherwise
+        // ready) rather than let the slider spring back to its own default
+        // with no explanation the moment Amount returns to 0.
+        value_gate: Some((
+            |s| s.sharpen.amount > 0.0,
+            "Set Amount above 0 to use Detail and Masking",
+        )),
     },
     SliderSpec {
         id: AdjustmentId("sharpen_masking"),
@@ -470,6 +532,15 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: false,
         global_reason: "",
         mask_reason: "Detail and Masking apply to the global sharpen only for now",
+        // Author decision (final-review FIX 5): both fields only modulate a
+        // delta that Amount multiplies, so at Amount 0 they genuinely cannot
+        // change anything — grey them (in whichever scope is otherwise
+        // ready) rather than let the slider spring back to its own default
+        // with no explanation the moment Amount returns to 0.
+        value_gate: Some((
+            |s| s.sharpen.amount > 0.0,
+            "Set Amount above 0 to use Detail and Masking",
+        )),
     },
     SliderSpec {
         id: AdjustmentId("nr_luminance"),
@@ -488,6 +559,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: false,
         global_reason: "",
         mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("nr_detail"),
@@ -506,6 +578,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: false,
         global_reason: "",
         mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("nr_color"),
@@ -524,6 +597,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: false,
         global_reason: "",
         mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("nr_color_detail"),
@@ -542,6 +616,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: false,
         global_reason: "",
         mask_reason: "Noise reduction runs before the tone and color stages so its strength stays independent of your other edits — global only",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("dehaze_amount"),
@@ -560,6 +635,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: true,
         global_reason: "",
         mask_reason: "",
+        value_gate: None,
     },
     SliderSpec {
         id: AdjustmentId("dehaze_radius"),
@@ -578,6 +654,7 @@ static EFFECTS_SLIDERS: [SliderSpec; 10] = [
         mask_ready: false,
         global_reason: "",
         mask_reason: "Radius shapes the shared whole-image transmission — global only",
+        value_gate: None,
     },
 ];
 
@@ -609,6 +686,7 @@ mod tests {
             mask_ready: false,
             global_reason: "",
             mask_reason: "Not available on masks yet",
+            value_gate: None,
         }
     }
 
@@ -621,9 +699,9 @@ mod tests {
     #[test]
     fn readiness_uses_scope_specific_ready_and_reason() {
         let spec = exposure_spec();
-        assert_eq!(readiness(EditScope::Global, &spec), (true, ""));
+        assert_eq!(readiness(EditScope::Global, &spec, None), (true, ""));
         assert_eq!(
-            readiness(EditScope::Mask(0), &spec),
+            readiness(EditScope::Mask(0), &spec, None),
             (false, "Not available on masks yet")
         );
     }
@@ -634,7 +712,7 @@ mod tests {
         let mut spec = exposure_spec();
         spec.mask_ready = true;
         assert_eq!(
-            readiness(EditScope::MaskNone, &spec),
+            readiness(EditScope::MaskNone, &spec, None),
             (false, "Create or select a mask first")
         );
     }
@@ -840,7 +918,7 @@ mod tests {
             .iter()
             .filter(|s| s.id.0.starts_with("nr_"))
         {
-            let (enabled, reason) = readiness(EditScope::Global, spec);
+            let (enabled, reason) = readiness(EditScope::Global, spec, None);
             assert!(enabled, "{} must be enabled globally", spec.id.0);
             assert!(
                 reason.is_empty(),
@@ -858,7 +936,7 @@ mod tests {
             .iter()
             .filter(|s| s.id.0.starts_with("nr_"))
         {
-            let (enabled, reason) = readiness(EditScope::Mask(0), spec);
+            let (enabled, reason) = readiness(EditScope::Mask(0), spec, None);
             assert!(!enabled, "{} must be greyed in mask scope", spec.id.0);
             assert!(
                 reason.contains("global only"),
@@ -894,15 +972,55 @@ mod tests {
             .iter()
             .filter(|s| s.id.0 == "sharpen_detail" || s.id.0 == "sharpen_masking")
         {
-            let (global_ok, global_reason) = readiness(EditScope::Global, spec);
+            let (global_ok, global_reason) = readiness(EditScope::Global, spec, None);
             assert!(global_ok, "{} must be enabled globally", spec.id.0);
             assert!(global_reason.is_empty(), "{} global reason", spec.id.0);
 
-            let (mask_ok, mask_reason) = readiness(EditScope::Mask(0), spec);
+            let (mask_ok, mask_reason) = readiness(EditScope::Mask(0), spec, None);
             assert!(!mask_ok, "{} must be greyed in mask scope", spec.id.0);
             assert!(
                 mask_reason.contains("global sharpen only"),
                 "{}'s mask reason must explain global-only, got {mask_reason:?}",
+                spec.id.0
+            );
+        }
+    }
+
+    /// Final-review FIX 5 (author decision): Detail/Masking must grey out
+    /// with a NEW, explanatory reason while `sharpen.amount == 0.0` — not
+    /// spring back to their own default silently — and become enabled the
+    /// instant Amount rises above 0. `normalized()` still snaps the whole
+    /// `Sharpen` struct to identity at `amount == 0.0` (a load-bearing,
+    /// UNCHANGED invariant); this test is entirely about what the UI SHOWS,
+    /// not what the doc stores.
+    #[test]
+    fn sharpen_detail_and_masking_are_greyed_globally_at_zero_amount_and_enabled_above_it() {
+        let zero_amount = ferrolite_pipeline::AdjustmentSet::default();
+        assert_eq!(zero_amount.sharpen.amount, 0.0, "sanity: default is 0");
+        let mut nonzero_amount = ferrolite_pipeline::AdjustmentSet::default();
+        nonzero_amount.sharpen.amount = 0.5;
+
+        for spec in effects_sliders()
+            .iter()
+            .filter(|s| s.id.0 == "sharpen_detail" || s.id.0 == "sharpen_masking")
+        {
+            let (ok_at_zero, reason_at_zero) =
+                readiness(EditScope::Global, spec, Some(&zero_amount));
+            assert!(
+                !ok_at_zero,
+                "{} must be greyed globally at Amount == 0",
+                spec.id.0
+            );
+            assert_eq!(
+                reason_at_zero, "Set Amount above 0 to use Detail and Masking",
+                "{}'s zero-amount reason",
+                spec.id.0
+            );
+
+            let (ok_above_zero, _) = readiness(EditScope::Global, spec, Some(&nonzero_amount));
+            assert!(
+                ok_above_zero,
+                "{} must be enabled globally once Amount > 0",
                 spec.id.0
             );
         }

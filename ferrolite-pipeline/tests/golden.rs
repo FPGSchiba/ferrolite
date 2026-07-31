@@ -1103,31 +1103,27 @@ fn dehaze_coarse_lod_matches_whole_image_mean_luminance() {
     );
 }
 
-/// Gate 2 (design §7.2): `detail == 0 && masking == 0` must render EXACTLY as
-/// the pre-P4 sharpen did. Proven here by rendering the same stack twice —
-/// once through the plain apply path and once with the new fields explicitly
-/// zeroed — and requiring byte equality.
-#[test]
-fn sharpen_detail_masking_zero_is_byte_identical() {
-    let Some(ctx) = GpuContext::headless() else {
-        eprintln!("no GPU adapter; skipping (headless CI)");
-        return;
-    };
-    let ctx = Arc::new(ctx);
-    let img = common::gradient(W, H);
-    let plain = OpStack::default().set_op(Op::Sharpen(Sharpen {
-        amount: 0.8,
-        radius: 4,
-        detail: 0.0,
-        masking: 0.0,
-    }));
-    let mut a = EditPipeline::new(ctx.clone(), &img, plain.clone(), IDENTITY);
-    let mut b = EditPipeline::new(ctx.clone(), &img, plain, IDENTITY);
-    assert_eq!(
-        blit_to_rgba8(&ctx, &a.evaluate()),
-        blit_to_rgba8(&ctx, &b.evaluate())
-    );
-}
+// Gate 2 (design §7.2): `detail == 0 && masking == 0` must render EXACTLY as
+// the pre-P4 sharpen did.
+//
+// A test formerly lived here (`sharpen_detail_masking_zero_is_byte_identical`)
+// that built TWO `EditPipeline`s from the identical stack and asserted their
+// renders matched — which cannot fail for any implementation, including one
+// that wrongly routes `detail == 0` through the NEW shader (both pipelines
+// would still take the same wrong path and agree with each other). It was
+// removed in the final-branch review (FIX 3) rather than kept as a
+// misleading proof. Gate 2 is genuinely covered by two REAL checks instead:
+//
+// 1. The 13 pre-P4 goldens under `tests/golden/layer_engine/` (driven by
+//    `layer_engine_parity.rs`) are byte-identical across this entire branch —
+//    they pin the OLD sharpen path's actual pixel output and would catch any
+//    drift, wrong-shader routing included.
+// 2. `sharpen_node.rs`'s `sharpen_detail_zero_case_routes_to_old_shader`
+//    asserts the PIPELINE SELECTION directly via `detail_dispatch_count()`
+//    (bumped only inside `encode_apply_detail`, never `encode_apply`) — it
+//    proves the both-zero case actually DISPATCHES the old
+//    `sharpen_apply.wgsl`, not merely that two identical stacks render
+//    identically to each other.
 
 /// Masking must suppress sharpening in flat regions: on a flat field, a
 /// masked sharpen changes nothing, while an unmasked one may.
@@ -1207,10 +1203,15 @@ fn sharpen_masking_protects_flat_areas() {
 // FAIL (max diff far above `NR_SEAM_TOL`) with `nr_halo` forced to 0; see
 // the task report for the exact numbers.
 const NR_SEAM_TOL: f32 = 0.02; // display-linear; absorbs f16 + the head resample.
-                               // Excludes the true-canvas-edge geometry-resample discrepancy documented
-                               // above (independent of, and larger than, the seam-fold-in question this
-                               // test targets). Comfortably larger than the observed ~0.06-diff true-edge
-                               // band and still much smaller than the fixture's own margin to the seam.
+
+// Pixels excluded from the comparison near every true canvas edge (see the
+// "TRUE-CANVAS-EDGE MARGIN" note above): that discrepancy runs up to ~0.06,
+// LARGER than `NR_SEAM_TOL` (0.02), so it is excluded from the comparison
+// entirely rather than folded into the tolerance — raising `NR_SEAM_TOL` to
+// 0.06 would make the seam check this test exists for far less sensitive.
+// 90 px is comfortably larger than the observed ~0.06-diff true-edge band and
+// still much smaller than the fixture's own margin to the seam (both seams
+// sit >= 194 px from every canvas edge, see below).
 const NR_EDGE_MARGIN: u32 = 90;
 
 #[test]

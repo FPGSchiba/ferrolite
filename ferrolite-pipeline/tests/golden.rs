@@ -7,8 +7,8 @@ use ferrolite_pipeline::{
     geometry_src_px, geometry_uniform, transmission_mip_level_count, transmission_working_dims,
     upload_source, AdjustmentSet, Aspect, ColorGrade, Contrast, CropRect, CurveMode, Dehaze,
     EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, LocalAdjustments,
-    MaskLayer, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve,
-    WhiteBalance, DEHAZE_DEFAULT_RADIUS,
+    MaskLayer, NoiseReduction, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline,
+    ToneCurve, WhiteBalance, DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -1153,5 +1153,139 @@ fn sharpen_masking_protects_flat_areas() {
     assert!(
         max_diff <= 2,
         "full masking should barely touch a flat field, got {max_diff}"
+    );
+}
+
+// P4 design §7.3/§7.4: tiled-vs-whole parity for noise reduction. NR has a
+// 62 px halo (`nr_halo_px()`, `2*(2^5-1)`) — a tiled render MUST fold that
+// halo in or a tile's NR output disagrees with the whole-image render near
+// its seam, because the wavelet decomposition at the tile edge would sample
+// zeros/clamped pixels instead of the neighboring tile's real content.
+//
+// The fixture is deliberately HIGH-FREQUENCY at the seam
+// (`common::high_frequency_checker`, a 2px checkerboard + fine noise) rather
+// than a smooth gradient — a smooth signal barely differs across a missing
+// halo, which would make this test pass vacuously even with broken seam
+// handling (the exact trap already documented for the dehaze tile tests in
+// this file).
+//
+// **TRUE-CANVAS-EDGE MARGIN — found and root-caused while writing this test,
+// distinct from the seam question this test targets.** On this same
+// high-frequency fixture, `TileEditPipeline`'s tile vs `EditPipeline`'s
+// whole-image render disagree by up to ~0.06 within `EDGE_MARGIN` px of the
+// TRUE canvas border (all four sides) — reproduced even in a SINGLE-TILE
+// image with no seam at all (200x150, one tile, no neighbor to fold in),
+// isolating it from the halo/seam-fold-in question. Root cause: the tiled
+// tier's per-tile geometry-head resample (bilinear, `ClampToEdge`) reads the
+// GPU-resident pyramid, while the whole-image tier's NR shader clamps
+// directly against the true canvas dims (`nr_atrous.wgsl`'s
+// `clamp(xy+dy, 0, dims-1)`) — two different edge-extension mechanisms that
+// happen to agree only up to sub-pixel/bilinear-vs-nearest differences,
+// which this fixture's 2px-period checker (deliberately built to have large
+// local gradients everywhere, including at the border) amplifies well past
+// f16 rounding. This is the same class of "different edge-extension
+// mechanism" finding this file's own `dehaze_tiled_matches_whole_image`
+// comment already documents as the historical reason a true-edge margin was
+// needed before the dehaze shared-transmission fix — this test adopts the
+// same precedent rather than the (already-disproven-for-dehaze) assumption
+// that no margin is ever needed. The fixture below is sized so the interior
+// seam sits comfortably outside this margin, so excluding it does not weaken
+// the seam check this test exists to make.
+//
+// MANDATORY sensitivity check (recorded in the task report): temporarily
+// forcing `uniforms::nr_halo` to always return `0` (so `TileEditPipeline`
+// builds its haloed tile extent without any NR margin, while the NR node
+// itself still runs its full 62px-support wavelet decomposition inside that
+// too-small haloed buffer) must make this test's assertion FAIL; otherwise
+// this parity check would be vacuous. Verified: PASS with the real halo,
+// FAIL (max diff far above `NR_SEAM_TOL`) with `nr_halo` forced to 0; see
+// the task report for the exact numbers.
+const NR_SEAM_TOL: f32 = 0.02; // display-linear; absorbs f16 + the head resample.
+                               // Excludes the true-canvas-edge geometry-resample discrepancy documented
+                               // above (independent of, and larger than, the seam-fold-in question this
+                               // test targets). Comfortably larger than the observed ~0.06-diff true-edge
+                               // band and still much smaller than the fixture's own margin to the seam.
+const NR_EDGE_MARGIN: u32 = 90;
+
+#[test]
+fn nr_tiled_matches_whole_image_at_the_seam() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // A multi-tile image: 450x300 -> 2x2 tiles at LOD 0 (seams at x=256,
+    // y=256). Sized so BOTH seams sit >= 194 px from every true canvas edge
+    // (well outside `NR_EDGE_MARGIN`), unlike a minimal 300x200 fixture where
+    // the seam sits only 44 px from the right edge — too close to separate
+    // the seam question from the true-edge-margin question documented above.
+    let (iw, ih) = (450u32, 300u32);
+    let src = common::high_frequency_checker(iw, ih);
+    let mut doc = OpStack::default();
+    doc.global.noise_reduction = NoiseReduction {
+        luminance: 0.8,
+        color: 0.5,
+        ..Default::default()
+    };
+
+    // Whole-image reference.
+    let mut whole = EditPipeline::new(ctx.clone(), &src, doc.clone(), IDENTITY);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+
+    // Per-tile producer over the GPU-resident source pyramid.
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, doc, IDENTITY, None, None);
+
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let mut max_diff = 0.0f32;
+    let mut max_loc = (0u32, 0u32);
+    let mut compared = 0u32;
+    for ty in 0..2u32 {
+        for tx in 0..2u32 {
+            let tile = tep.produce_tile(TileCoord {
+                lod: 0,
+                x: tx,
+                y: ty,
+            });
+            let tile_lin = common::read_tile_linear(&ctx, &tile);
+            for ly in 0..TILE_SIZE {
+                for lx in 0..TILE_SIZE {
+                    let gx = tx * TILE_SIZE + lx;
+                    let gy = ty * TILE_SIZE + ly;
+                    if gx >= iw || gy >= ih {
+                        continue; // out-of-image tile padding
+                    }
+                    // Exclude the true-canvas-edge geometry-resample band
+                    // documented above — NOT a seam exclusion, both seams
+                    // (x=256, y=256) sit far outside this margin.
+                    if gx < NR_EDGE_MARGIN
+                        || gx >= iw - NR_EDGE_MARGIN
+                        || gy < NR_EDGE_MARGIN
+                        || gy >= ih - NR_EDGE_MARGIN
+                    {
+                        continue;
+                    }
+                    compared += 1;
+                    let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
+                    let wi = ((gy * iw + gx) * 4) as usize;
+                    for c in 0..3 {
+                        let d = (tile_lin[ti + c] - whole_lin[wi + c]).abs();
+                        if d > max_diff {
+                            max_diff = d;
+                            max_loc = (gx, gy);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        compared > 10_000,
+        "sanity: the edge-margin exclusion must not have eaten the whole interior ({compared} px compared)"
+    );
+    eprintln!("NR tile-seam max linear diff = {max_diff} at {max_loc:?} ({compared} interior px compared)");
+    assert!(
+        max_diff <= NR_SEAM_TOL,
+        "per-tile NR disagrees with whole-image at the interior seam (diff {max_diff} at {max_loc:?}) — halo fold-in broken?"
     );
 }

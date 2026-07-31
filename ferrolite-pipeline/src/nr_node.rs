@@ -51,12 +51,8 @@
 //! confirmed; switching to an all-compute clear removed it across 15+
 //! repeated full-suite runs.
 //!
-//! Not yet wired into `EditPipeline`/`TileEditPipeline` — Task 4 does that.
-//! Until then nothing outside this module's own `#[cfg(test)]` block
-//! constructs `NoiseReductionNode`, so a plain (non-test) `--lib` build sees
-//! every item here as dead; suppressed the same way `tests/common/mod.rs`
-//! suppresses it for its own not-yet-all-consumed fixtures.
-#![allow(dead_code)]
+//! Wired into both `EditPipeline` and `TileEditPipeline` by Task 4 (see
+//! `pipeline.rs`/`tile_edit.rs`), between `color_matrix` and `vignette`.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -381,6 +377,16 @@ impl NoiseReductionNode {
         pass.set_pipeline(&self.clear_pipeline);
         pass.set_bind_group(0, &bg, &[]);
         pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
+    }
+}
+
+/// Delegating `Node` impl so a `NoiseReductionNode` can be shared via `Rc`
+/// (mirrors `Rc<VignetteNode>`/`Rc<SharpenNode>` — the pipelines retain their
+/// own `Rc` clone for the `nr_eval_count`/`nr_live_bytes` test hooks while the
+/// graph owns another for evaluation).
+impl Node<PipelineImage> for Rc<NoiseReductionNode> {
+    fn evaluate(&self, inputs: &[&PipelineImage]) -> PipelineImage {
+        (**self).evaluate(inputs)
     }
 }
 

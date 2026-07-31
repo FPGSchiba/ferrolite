@@ -300,17 +300,18 @@ fn editing_one_op_reevaluates_minimally() {
         "no node re-ran when nothing changed"
     );
 
-    // Dirtying exposure re-runs it + every downstream op; the three nodes ahead
-    // of exposure in the chain — source, the camera→working color-matrix, and the
-    // scene-linear vignette pass — stay cached -> exactly node_count - 3
+    // Dirtying exposure re-runs it + every downstream op; the four nodes ahead
+    // of exposure in the chain — source, the camera→working color-matrix, the
+    // noise-reduction pass (P4, global-only, sits pre-vignette), and the
+    // scene-linear vignette pass — stay cached -> exactly node_count - 4
     // re-evaluations.
     let prev = pipe.eval_count();
     pipe.set_stack(OpStack::default().set_op(Op::Exposure(Exposure { ev: 1.5 })));
     let _ = pipe.evaluate();
     assert_eq!(
         pipe.eval_count(),
-        prev + (pipe.node_count() - 3),
-        "exposure + downstream re-evaluated; source, color-matrix, and vignette stay cached"
+        prev + (pipe.node_count() - 4),
+        "exposure + downstream re-evaluated; source, color-matrix, NR, and vignette stay cached"
     );
 }
 

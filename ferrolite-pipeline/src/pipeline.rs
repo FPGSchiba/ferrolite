@@ -12,9 +12,10 @@ use crate::dehaze::estimate_atmospheric_light;
 use crate::dehaze_node::{DehazeTransmissionNode, TransmissionParams};
 use crate::image::PipelineImage;
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
-use crate::local::{AdjustmentSet, LocalAdjustments};
+use crate::local::{AdjustmentSet, LocalAdjustments, NoiseReduction};
 use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode, SharedMasks};
 use crate::nodes::{GeometryNode, PointOpNode, SourceNode, TileFrame, VignetteNode};
+use crate::nr_node::NoiseReductionNode;
 use crate::op::OpStack;
 use crate::sharpen_node::SharpenNode;
 use crate::uniforms::{
@@ -31,6 +32,16 @@ pub struct EditPipeline {
     output_id: NodeId,
     color_matrix_id: NodeId,
     color_matrix: Rc<Cell<ColorMatrixUniform>>,
+    // P4: noise reduction sits between `color_matrix` and `vignette` (see
+    // `new`'s doc comment at the insertion point for the rationale). Global-only
+    // — `nr_params` is reseeded straight from `stack.global.noise_reduction` in
+    // both `new` and `set_stack`.
+    nr_id: NodeId,
+    nr_params: Rc<Cell<NoiseReduction>>,
+    // Handle to `NoiseReductionNode`, retained for the `nr_eval_count`/
+    // `nr_live_bytes` test hooks (spec §7.2/§7.4). The graph owns its own `Rc`
+    // clone for evaluation — mirrors `vignette_node`'s retention rationale.
+    nr_node: Rc<NoiseReductionNode>,
     vignette_id: NodeId,
     vignette: Rc<Cell<VignetteUniform>>,
     vignette_node: Rc<VignetteNode>,
@@ -116,6 +127,16 @@ impl EditPipeline {
         );
         let color_matrix_id = graph.add_node(Box::new(color_matrix_node), vec![source_id]);
 
+        // P4 (design §3.1): noise reduction sits AFTER the camera→working
+        // color-matrix (so the luma/chroma decomposition is in a well-defined
+        // space) and BEFORE vignette (which multiplies the corners up and would
+        // otherwise hand NR spatially-varying noise variance). Global-only:
+        // masks are composited downstream in the Color-stage engine, so no
+        // composited mask exists at this position (design §3.5).
+        let nr_params = Rc::new(Cell::new(stack.global.noise_reduction));
+        let nr_node = Rc::new(NoiseReductionNode::new(ctx.clone(), nr_params.clone()));
+        let nr_id = graph.add_node(Box::new(nr_node.clone()), vec![color_matrix_id]);
+
         // Vignetting sits scene-linear at the head, before exposure (spec §6.2).
         // Default `vig_amount = 0` → identity, so an uncorrected image is unchanged.
         let vignette = Rc::new(Cell::new(VignetteUniform::default()));
@@ -123,7 +144,7 @@ impl EditPipeline {
         // tile frame → the vignette shader keeps its per-texture (whole-image)
         // radius path, byte-identical to before the tiled fix.
         let vignette_node = Rc::new(VignetteNode::new(ctx.clone(), vignette.clone(), None));
-        let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
+        let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![nr_id]);
 
         // Phase 3 (fused layer engine): the Light-stage engine node replaces the
         // old exposure/white-balance/contrast `PointOpNode` trio at this exact
@@ -241,6 +262,9 @@ impl EditPipeline {
             output_id: geometry_id,
             color_matrix_id,
             color_matrix,
+            nr_id,
+            nr_params,
+            nr_node,
             vignette_id,
             vignette,
             vignette_node,
@@ -263,9 +287,10 @@ impl EditPipeline {
             geometry_node,
             src_w,
             src_h,
-            // source, color-matrix, vignette, light-engine, dehaze-transmission,
-            // color-engine (recovery fused in), sharpen, geometry.
-            node_count: 8,
+            // source, color-matrix, NR, vignette, light-engine,
+            // dehaze-transmission, color-engine (recovery fused in), sharpen,
+            // geometry.
+            node_count: 9,
             stack,
         }
     }
@@ -348,6 +373,14 @@ impl EditPipeline {
         if stack.global.color_segment() != self.stack.global.color_segment() {
             self.graph.mark_dirty(self.local_adjust_id);
         }
+        // P4: NR is global-only and lives outside the light/color segment
+        // split, so it gets its own direct comparison — dirtying ONLY the NR
+        // node (its downstream, vignette onward, follows via the graph's own
+        // dependent-propagation).
+        if self.stack.global.noise_reduction != stack.global.noise_reduction {
+            self.nr_params.set(stack.global.noise_reduction);
+            self.graph.mark_dirty(self.nr_id);
+        }
         *self.global_set.borrow_mut() = stack.global.clone();
         // Phase 4 Task 2/3: route `radius`/`active-anywhere` to the
         // transmission node (dirtying it only when one of those actually
@@ -425,6 +458,18 @@ impl EditPipeline {
     /// Total node evaluations so far (for per-op invalidation tests).
     pub fn eval_count(&self) -> usize {
         self.graph.eval_count()
+    }
+
+    /// Number of times the NR node actually dispatched (test hook: proves the
+    /// identity passthrough runs no passes).
+    pub fn nr_eval_count(&self) -> u32 {
+        self.nr_node.eval_count()
+    }
+
+    /// GPU bytes held by the NR node's intermediates + output. Zero until the
+    /// first non-identity evaluate. Instruments the spec §7.4 memory gate.
+    pub fn nr_live_bytes(&self) -> u64 {
+        self.nr_node.live_bytes()
     }
 
     /// The shared GPU context (for building overlay compositors, etc.).

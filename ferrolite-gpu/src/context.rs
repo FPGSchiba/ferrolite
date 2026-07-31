@@ -1,6 +1,7 @@
 //! wgpu device handle wrapper. In the app it borrows eframe's device; for tests
-//! it spins up a headless adapter (returning None when none is available so
-//! GPU tests skip cleanly in headless CI). Engine-transferable.
+//! it spins up a headless adapter (returning None when none is available, or
+//! when only a software rasterizer is available, so GPU tests skip cleanly in
+//! CI). Engine-transferable.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -8,6 +9,30 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub struct GpuContext {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
+}
+
+/// True for adapters that are software rasterizers rather than real GPUs:
+/// wgpu's own `DeviceType::Cpu` classification, plus the specific
+/// known-by-name software adapters CI runners expose (Microsoft's "Basic
+/// Render Driver" / WARP on Windows, Mesa's llvmpipe, Google's SwiftShader).
+/// Matched case-insensitively since exact capitalization varies by driver
+/// version. See [`GpuContext::headless`] for why these are treated as
+/// "no adapter" in tests.
+fn is_software_adapter(info: &wgpu::AdapterInfo) -> bool {
+    if info.device_type == wgpu::DeviceType::Cpu {
+        return true;
+    }
+    let name = info.name.to_lowercase();
+    ["basic render driver", "warp", "llvmpipe", "swiftshader"]
+        .iter()
+        .any(|marker| name.contains(marker))
+}
+
+/// Escape hatch for [`GpuContext::headless`]'s software-adapter skip, for
+/// reproducing a CI-only failure on a local machine that only has a software
+/// adapter available.
+fn force_software_gpu_requested() -> bool {
+    std::env::var("FERROLITE_TEST_SOFTWARE_GPU").as_deref() == Ok("1")
 }
 
 /// One device's compiled shader modules, keyed by WGSL source (content-compared
@@ -35,6 +60,21 @@ impl GpuContext {
 
     /// Create a standalone headless context for tests. Returns `None` if no
     /// adapter is available (e.g. CI runners without a GPU) so callers skip.
+    ///
+    /// Also returns `None` when the only adapter available is a *software*
+    /// rasterizer (Microsoft Basic Render Driver / WARP on Windows CI,
+    /// llvmpipe/SwiftShader on Linux/macOS CI) — see [`is_software_adapter`].
+    /// CI runners without a real GPU commonly expose exactly one of these
+    /// instead of no adapter at all, and they are not a faithful stand-in for
+    /// a real GPU for two independent reasons this crate has hit in practice:
+    /// they have a tiny memory budget (`Queue::write_texture` fails with "not
+    /// enough memory" on ordinary test-sized textures), and their rendering
+    /// diverges in floating point from goldens authored on a real GPU by more
+    /// than tight parity tolerances allow. Tests should skip on them exactly
+    /// like they skip with no adapter at all, so this is the one place that
+    /// decision is made. Set `FERROLITE_TEST_SOFTWARE_GPU=1` to force running
+    /// on a software adapter anyway (e.g. to reproduce a CI-only failure
+    /// locally).
     pub fn headless() -> Option<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -42,6 +82,15 @@ impl GpuContext {
             compatible_surface: None,
             force_fallback_adapter: false,
         }))?;
+        let info = adapter.get_info();
+        if is_software_adapter(&info) && !force_software_gpu_requested() {
+            eprintln!(
+                "GpuContext::headless: adapter '{}' ({:?}) is a software rasterizer; \
+                 skipping like no-adapter (set FERROLITE_TEST_SOFTWARE_GPU=1 to force)",
+                info.name, info.device_type
+            );
+            return None;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("ferrolite-headless"),

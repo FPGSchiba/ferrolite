@@ -23,7 +23,11 @@ fn is_software_adapter(info: &wgpu::AdapterInfo) -> bool {
         return true;
     }
     let name = info.name.to_lowercase();
-    ["basic render driver", "warp", "llvmpipe", "swiftshader"]
+    // "Apple Paravirtual device": GitHub's macOS runners expose a virtualized
+    // Metal GPU that reports as a real IntegratedGpu but whose float behavior
+    // diverges from native hardware (layer-engine parity diffs up to ~0.012 vs
+    // the 2e-3 tolerance) — same skip class as the software rasterizers.
+    ["basic render driver", "warp", "llvmpipe", "swiftshader", "paravirtual"]
         .iter()
         .any(|marker| name.contains(marker))
 }

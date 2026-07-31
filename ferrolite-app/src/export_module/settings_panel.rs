@@ -205,7 +205,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let mut state = crate::state::AppState::new().expect("app state");
+                let mut state = crate::state::AppState::for_test();
                 state.export_settings = opts;
                 export_settings_panel(ui, &mut state);
                 // JPEG does not support 16-bit so bit_depth should be forced to 8-bit
@@ -219,7 +219,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let mut state = crate::state::AppState::new().expect("app state");
+                let mut state = crate::state::AppState::for_test();
 
                 state.export_settings.format = ExportFormat::Png;
                 state.export_settings.bit_depth = BitDepth::Sixteen;

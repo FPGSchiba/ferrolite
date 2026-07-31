@@ -392,7 +392,7 @@ mod tests {
     use crate::viewer::ViewerState;
 
     fn state_with_viewer() -> AppState {
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         // Hermetic: AppState::new loads the developer's REAL settings file; these
         // tests assert against defaults, so reset (the author collapsing a section
         // in the running app must never fail the suite).
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn crop_tab_renders_without_viewer() {
         let ctx = egui::Context::default();
-        let mut state = AppState::new().unwrap();
+        let mut state = AppState::for_test();
         state.settings = crate::settings::Settings::default();
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {

@@ -826,9 +826,11 @@ more full-res-equivalent textures, ~1.5-1.9 GiB) still lands total resident GPU 
 **Decision (per the pre-agreed rule in design section 3.3 — not re-opened):** the active figure is
 comfortably within the 6-8 GB budget, so **NR stays on both the tile and whole-image paths — the
 current, already-shipped state. No code change.** The section 3.3 tile-path-only fallback is not
-invoked. The measured active-NR figure (0.907 GiB at 24.3 MP, ~973 MB) is close to but somewhat
-above the spec's own order-of-magnitude estimate (~768 MB = 4 x 192 MB at 24 MP) — the extra ~200
-MB is not broken down further here (not required by the gate, which only asks whether the figure
-threatens the budget, not that it match the estimate exactly), but is consistent with the four
-`rgba16float` intermediates plus some additional bookkeeping/allocation overhead the estimate's
-back-of-envelope 4-texture count did not itemize.
+invoked. The measured active-NR figure (0.907 GiB at 24.3 MP, 973,486,080 B) is somewhat above the
+spec's own order-of-magnitude estimate (~768 MB = 4 x 192 MB at 24 MP) — **fully explained, not
+overhead**: `6048 x 4024 x 8 x 5 = 973,486,080` exactly. The measured figure is precisely FIVE
+full-res `rgba16float` textures, not four plus unaccounted-for bookkeeping — the spec's
+back-of-envelope estimate counted the node's four ping-pong intermediates (`approx_a`, `approx_b`,
+`acc_a`, `acc_b`) but not its fifth texture, the node's own OUTPUT (the accumulated/reconstructed
+result the next node in the graph reads). No allocation overhead needs explaining; the corrected
+count is simply 5 textures, not 4.

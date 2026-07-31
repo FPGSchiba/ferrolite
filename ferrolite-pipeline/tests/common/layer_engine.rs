@@ -466,41 +466,51 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                 })),
         ),
         // `nr_luma`: P4 (noise-reduction phase) coverage — luma-only à trous
-        // NR (strength 0.8, detail 0.2) on top of `light_trio`'s exposure/
+        // NR (strength 0.8, detail 0.2) COMPOSED WITH `light_trio`'s exposure/
         // contrast/WB, so the fixture exercises NR alongside the pre-existing
-        // Light-stage engine rather than in isolation. `noise_reduction` lives
-        // on the shared `AdjustmentSet` (same struct per-mask layers use) but
-        // is GLOBAL-ONLY (design §3.5 — NR sits upstream of where masks
-        // composite), so it is written via `with_global`, mirroring
-        // `vibrance_global`'s pattern for a global-only `AdjustmentSet` field
-        // with no dedicated `Op` variant.
-        (
-            "nr_luma",
-            light_trio_stack().with_global(AdjustmentSet {
-                noise_reduction: NoiseReduction {
-                    luminance: 0.8,
-                    detail: 0.2,
-                    ..Default::default()
-                },
+        // Light-stage engine rather than in isolation (NR sits upstream of the
+        // light engine, so "NR then light adjustments" is a genuinely distinct
+        // scenario from "NR alone" — the one this fixture is meant to pin).
+        //
+        // A first attempt wrote this via `light_trio_stack().with_global(AdjustmentSet
+        // { noise_reduction: ..., ..Default::default() })` — WRONG, caught in review:
+        // `EditDoc::with_global` does `d.global = set.normalized()`, replacing `global`
+        // WHOLESALE, so that call silently zeroed the exposure/contrast/temp/tint
+        // `light_trio_stack()` had just set, leaving the doc's `global.exposure == 0.0`
+        // etc. (confirmed empirically) — the fixture rendered NR in isolation on the bare
+        // sweep, contradicting its own doc comment. Fixed below by mutating
+        // `global.noise_reduction` directly on the ALREADY-BUILT `light_trio_stack()`
+        // doc (the same direct-field pattern `nr_node.rs`'s and `engine_bench.rs`'s own
+        // NR tests use), so light_trio's fields survive. `vibrance_global`
+        // (a few fixtures above) remains the correct precedent for a genuinely
+        // GLOBAL-ONLY `AdjustmentSet` field with no dedicated `Op` variant written via
+        // a SINGLE `with_global` call that sets every field it needs at once — the bug
+        // here was calling `with_global` a SECOND time on a doc whose `global` was
+        // already populated by a different path (`set_op`), not `with_global` itself.
+        ("nr_luma", {
+            let mut d = light_trio_stack();
+            d.global.noise_reduction = NoiseReduction {
+                luminance: 0.8,
+                detail: 0.2,
                 ..Default::default()
-            }),
-        ),
-        // `nr_chroma`: chroma-only NR (strength 0.8, chroma detail 0.2) on the
-        // same `light_trio` base. Guards the specific failure mode design §9
-        // calls out: chroma shrinkage desaturating hard color edges — this
-        // fixture pins the fused engine's chroma NR output against exactly
-        // that risk on the HSV-sweep source's saturated bands.
-        (
-            "nr_chroma",
-            light_trio_stack().with_global(AdjustmentSet {
-                noise_reduction: NoiseReduction {
-                    color: 0.8,
-                    color_detail: 0.2,
-                    ..Default::default()
-                },
+            };
+            d
+        }),
+        // `nr_chroma`: chroma-only NR (strength 0.8, chroma detail 0.2) composed with
+        // the same `light_trio` base (see `nr_luma`'s comment for the composition-bug
+        // history and why the direct-field-mutation form below is correct). Guards the
+        // specific failure mode design §9 calls out: chroma shrinkage desaturating hard
+        // color edges — this fixture pins the fused engine's chroma NR output against
+        // exactly that risk on the HSV-sweep source's saturated bands.
+        ("nr_chroma", {
+            let mut d = light_trio_stack();
+            d.global.noise_reduction = NoiseReduction {
+                color: 0.8,
+                color_detail: 0.2,
                 ..Default::default()
-            }),
-        ),
+            };
+            d
+        }),
         // `sharpen_detail_masking`: P4 sharpen upgrade coverage — non-zero
         // `detail` (narrows the high-pass toward `r/3` to suppress halos) and
         // `masking` (suppresses sharpening in flat areas) TOGETHER, at a

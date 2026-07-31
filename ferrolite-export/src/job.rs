@@ -17,6 +17,7 @@ use crate::encode::encode_to_file;
 use crate::error::ExportError;
 use crate::metadata::copy_exif;
 use crate::options::ExportOptions;
+use crate::output_sharpen::{apply_output_sharpen, output_sharpen_params};
 use crate::render::{render_tiled, PixelData, RenderedImage};
 use crate::resize::{apply_resize, resize_dims};
 
@@ -109,6 +110,22 @@ pub fn run_export(
             height: th,
             data: resized,
         };
+    }
+
+    // 2b. Optional output sharpening (P4 design §5.2): AFTER resize so it
+    // compensates for resampling softness, BEFORE encode. Inactive by default
+    // (`OutputMedium::None`), which keeps existing exports byte-identical.
+    if let Some((radius, amount)) = output_sharpen_params(opts.sharpen_for, opts.sharpen_amount) {
+        let (sw, sh) = (rendered.width, rendered.height);
+        match &mut rendered.data {
+            PixelData::Eight(v) => {
+                apply_output_sharpen(v, sw, sh, depth, radius, amount);
+            }
+            PixelData::Sixteen(v) => {
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(v);
+                apply_output_sharpen(bytes, sw, sh, depth, radius, amount);
+            }
+        }
     }
 
     // 3. Encode (+ ICC embed). Collect non-fatal warnings.

@@ -1308,6 +1308,7 @@ dependencies = [
  "jxl-oxide",
  "little_exif",
  "ravif",
+ "rayon",
  "thiserror 2.0.18",
  "wgpu",
  "zune-core 0.4.12",

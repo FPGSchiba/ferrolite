@@ -11,6 +11,7 @@ pub mod filename;
 pub mod job;
 mod metadata;
 mod options;
+mod output_sharpen;
 mod render;
 mod resize;
 
@@ -20,7 +21,9 @@ pub use filename::{
     FilenameCtx,
 };
 pub use job::{run_export, ExportOutcome, ExportRequest};
-pub use options::{BitDepth, Effort, ExportFormat, ExportOptions, ResizeSpec};
+pub use options::{
+    BitDepth, Effort, ExportFormat, ExportOptions, OutputMedium, OutputSharpenAmount, ResizeSpec,
+};
 pub use render::{render_tiled, PixelData, RenderedImage};
 
 /// Test-only re-export of the internal encoder so integration tests can encode a

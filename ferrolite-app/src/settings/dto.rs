@@ -122,6 +122,10 @@ impl PersistedExport {
             copy_exif: self.copy_exif,
             embed_icc: self.embed_icc,
             strip_metadata: self.strip_metadata,
+            // Not yet persisted (export-panel combos land in Task 7); default
+            // to inactive, matching `ExportOptions::default()`.
+            sharpen_for: ferrolite_export::OutputMedium::None,
+            sharpen_amount: ferrolite_export::OutputSharpenAmount::Standard,
         }
     }
 }

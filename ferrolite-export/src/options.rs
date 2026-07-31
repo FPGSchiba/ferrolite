@@ -107,6 +107,26 @@ pub enum ResizeSpec {
     Percent(f32),
 }
 
+/// Output medium for export sharpening (design §5.1). Selects the unsharp
+/// radius: `Screen` crispest, `Matte` widest to fight paper dot gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputMedium {
+    #[default]
+    None,
+    Screen,
+    Glossy,
+    Matte,
+}
+
+/// Output-sharpening strength tier. Scales the medium's amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputSharpenAmount {
+    Low,
+    #[default]
+    Standard,
+    High,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExportOptions {
     pub format: ExportFormat,
@@ -120,6 +140,10 @@ pub struct ExportOptions {
     pub copy_exif: bool,
     pub embed_icc: bool,
     pub strip_metadata: bool,
+    /// Output medium for export sharpening. `None` = no output sharpening.
+    pub sharpen_for: OutputMedium,
+    /// Strength tier for output sharpening. Ignored when `sharpen_for` is `None`.
+    pub sharpen_amount: OutputSharpenAmount,
 }
 
 impl Default for ExportOptions {
@@ -134,6 +158,8 @@ impl Default for ExportOptions {
             copy_exif: true,
             embed_icc: true,
             strip_metadata: false,
+            sharpen_for: OutputMedium::None,
+            sharpen_amount: OutputSharpenAmount::Standard,
         }
     }
 }

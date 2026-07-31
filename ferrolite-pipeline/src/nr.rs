@@ -9,8 +9,27 @@ pub const NR_LEVELS: usize = 5;
 /// The factor by which unit-variance white noise's standard deviation survives
 /// into each à trous level of a B3-spline decomposition. Using these means ONE
 /// strength slider yields a physically consistent threshold at every scale.
-/// Verified by `white_noise_variance_drops` rather than trusted from literature.
+/// These are the standard B3-spline ([1,4,6,4,1]/16) noise-propagation table
+/// (design §3.4), not fitted to this codebase. `white_noise_variance_drops`
+/// checks only an AGGREGATE variance reduction on synthetic white noise — it
+/// would pass for almost any roughly-decaying constants, so it does not (and
+/// is not meant to) verify these specific per-level values; the per-level
+/// shape is instead the literature table itself.
 pub const NR_NOISE_SCALE: [f32; NR_LEVELS] = [0.890, 0.201, 0.086, 0.041, 0.020];
+
+/// Slider→scene-linear-threshold scale (final-review FIX 4, author decision).
+/// `t_l = strength · s_l` uses `NR_NOISE_SCALE`, the noise-propagation table
+/// for UNIT-VARIANCE noise, but the Luminance/Color sliders feed `strength`
+/// raw as a `0..1` value in scene-linear working-space units. Real RAW noise
+/// sits at σ ≈ 0.005–0.02 linear, so the threshold that actually matters is
+/// ≈`3σ·s_l`, i.e. an effective `strength` of ≈0.02–0.06 — without this
+/// scale, only the bottom few percent of the slider's travel did anything
+/// useful and the rest destroyed detail. This is the SINGLE tuning knob for
+/// NR strength (same role as `KEYSTONE_STRENGTH`/`SHARPEN_MASK_GRADIENT_NORM`
+/// — change ONLY this constant to retune, not the formula). The author may
+/// re-tune this value after hands-on testing at ISO 3200–6400; it is not
+/// claimed to be final.
+pub const NR_STRENGTH_SCALE: f32 = 0.05;
 
 /// The B3-spline kernel [1,4,6,4,1]/16.
 const B3: [f32; 5] = [1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0];
@@ -22,12 +41,14 @@ pub fn nr_halo_px() -> u32 {
     2 * ((1u32 << NR_LEVELS) - 1)
 }
 
-/// `t_l = strength · s_l · f(detail, l)`, `f = 1 − detail·max(0, 1 − l/2)`.
-/// `detail = 1` zeroes level 0, halves level 1, leaves `l >= 2` untouched.
+/// `t_l = NR_STRENGTH_SCALE · strength · s_l · f(detail, l)`,
+/// `f = 1 − detail·max(0, 1 − l/2)`. `detail = 1` zeroes level 0, halves
+/// level 1, leaves `l >= 2` untouched. `NR_STRENGTH_SCALE` maps the slider's
+/// raw `0..1` range onto the useful scene-linear threshold band (see its doc).
 pub fn threshold_at(strength: f32, detail: f32, level: usize) -> f32 {
     let s_l = NR_NOISE_SCALE[level.min(NR_LEVELS - 1)];
     let f = 1.0 - detail * (1.0 - level as f32 / 2.0).max(0.0);
-    strength * s_l * f
+    NR_STRENGTH_SCALE * strength * s_l * f
 }
 
 /// Soft shrinkage. Hard thresholding is what produces the "plastic" look.

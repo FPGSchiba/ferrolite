@@ -206,8 +206,18 @@ Slider mapping onto the four fields that already exist on `NoiseReduction`:
 | Color Detail | `color_detail` | `detail` for the two chroma channels |
 
 All four are `vec4`-wide in the same passes, so chroma NR is free relative to luma-only. The `s_l`
-constants are verified in implementation against a synthetic white-noise image (§7.1) rather than
-trusted from the literature.
+constants are the standard B3-spline noise-propagation table, not fitted to this codebase; the
+§7.1 synthetic white-noise test checks only an aggregate variance reduction, which would pass for
+almost any roughly-decaying constants — it does not (and is not meant to) verify these specific
+per-level values.
+
+**Post-implementation correction (final-review FIX 4):** `strength` as fed by the Luminance/Color
+sliders is a raw `0..1` value in scene-linear working-space units, while `s_l` above is calibrated
+for UNIT-VARIANCE noise — real RAW noise sits at σ ≈ 0.005–0.02 linear, so only the bottom few
+percent of slider travel was ever useful. `nr.rs` applies a single named `NR_STRENGTH_SCALE`
+constant (starting value `0.05`, author-tunable) inside `threshold_at` so the slider's full range
+maps onto the useful threshold band; the formula above should be read as
+`t_l = NR_STRENGTH_SCALE · strength · s_l · f(detail, l)`.
 
 `nr_halo(&NoiseReduction) -> u32` returns `2·(2^L − 1)` when NR is active anywhere and **0 at
 identity**, exactly like `sharpen_halo`. It joins the existing halo max in `tile_edit.rs`:

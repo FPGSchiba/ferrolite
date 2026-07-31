@@ -27,9 +27,15 @@ fn is_software_adapter(info: &wgpu::AdapterInfo) -> bool {
     // Metal GPU that reports as a real IntegratedGpu but whose float behavior
     // diverges from native hardware (layer-engine parity diffs up to ~0.012 vs
     // the 2e-3 tolerance) — same skip class as the software rasterizers.
-    ["basic render driver", "warp", "llvmpipe", "swiftshader", "paravirtual"]
-        .iter()
-        .any(|marker| name.contains(marker))
+    [
+        "basic render driver",
+        "warp",
+        "llvmpipe",
+        "swiftshader",
+        "paravirtual",
+    ]
+    .iter()
+    .any(|marker| name.contains(marker))
 }
 
 /// Escape hatch for [`GpuContext::headless`]'s software-adapter skip, for

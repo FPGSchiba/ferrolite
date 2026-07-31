@@ -138,9 +138,18 @@ CPU forms and `separable_b3spline_equals_direct` proves they agree, so the shipp
 verified oracle.
 
 **Honest memory accounting.** These are full-res `rgba16float` textures: **192 MB each at 24 MP**,
-so ~**768 MB** while NR is active on the whole-image path, and **0** at identity (nothing is
-allocated until after the passthrough early-return). On the tile path — haloed tiles of ~380² —
-all four total ~2.9 MB, i.e. free.
+and **0** at identity (nothing is allocated until after the passthrough early-return, and a node
+that goes back to identity releases them). On the tile path — haloed tiles of ~380² — the whole set
+totals ~3.6 MB, i.e. free.
+
+**Corrected 2026-07-31 with the measured figure.** An earlier draft of this paragraph said
+"~768 MB", counting only the four ping-pong intermediates. That undercounted by one texture: the
+node also holds its **output**, so the real cost is `5 × w × h × 8` bytes. Measured on the largest
+RAW fixture in the repo (6048×4024 = 24.3 MP) through the whole-image `EditPipeline`:
+**973,486,080 bytes = 0.907 GiB** active NR, plus 0.242 GiB for the resident source pyramid, for a
+**1.148 GiB total peak** — comfortably inside a 6–8 GB budget. Identity NR measured **exactly 0**.
+Per the gate below, the tile-path-only fallback was therefore **not** invoked: NR ships on both the
+tile and whole-image paths.
 
 **Which paths pay it.** The develop canvas, 1:1 inspection, and export all go through
 `TileEditPipeline`, so the full-res cost applies *only* to the whole-image `EditPipeline`

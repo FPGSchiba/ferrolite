@@ -302,25 +302,56 @@ pub fn hsl_uniform(op: Option<Hsl>) -> HslUniform {
 pub struct SharpenUniform {
     pub amount: f32,
     pub radius: i32,
-    pub pad: [f32; 2],
+    /// P4 Task 5: halo suppression (0..1). Occupies what was `pad[0]`, so the
+    /// struct size and 16-byte alignment are UNCHANGED — load-bearing, because
+    /// `SharpenNode` writes ONE buffer per dispatch and binds it to shaders
+    /// whose WGSL `struct P` must match this layout byte-for-byte (the box-h/
+    /// box-v/masked-apply passes never read this field, but declare it for
+    /// layout match; growing this struct would desync them and corrupt the
+    /// box passes).
+    pub detail: f32,
+    /// P4 Task 5: edge masking (0..1). Occupies what was `pad[1]`.
+    pub masking: f32,
 }
 
+// The uniform's size is the GPU ABI, shared byte-for-byte across every sharpen
+// shader's `struct P` (box-h, box-v, apply, apply-detail, apply-masked) —
+// keep in lock-step (mirrors `NrUniform`/`GeometryUniform`'s own size asserts
+// above). MUST stay exactly 16 bytes: `detail`/`masking` replaced `pad: [f32;
+// 2]` rather than growing the struct (see the field docs above).
+const _: () = assert!(std::mem::size_of::<SharpenUniform>() == 16);
+const _: () = assert!(std::mem::size_of::<SharpenUniform>().is_multiple_of(16));
+
 pub fn sharpen_uniform(op: Option<Sharpen>) -> SharpenUniform {
-    let (amount, radius) = op.map(|s| (s.amount, s.radius)).unwrap_or((0.0, 0));
+    let (amount, radius, detail, masking) = op
+        .map(|s| (s.amount, s.radius, s.detail, s.masking))
+        .unwrap_or((0.0, 0, 0.0, 0.0));
     SharpenUniform {
         amount,
         radius: radius.min(MAX_SHARPEN_RADIUS) as i32,
-        pad: [0.0; 2],
+        detail,
+        masking,
     }
 }
+
+/// Gradient normalization for the sharpen edge mask (`G`, design §4.3) — the
+/// single named tuning knob for masking responsiveness, in the spirit of
+/// `KEYSTONE_STRENGTH`. **Mirrored as `G` in `sharpen_apply_detail.wgsl`**: it
+/// is a WGSL `const` there rather than a uniform field, precisely so
+/// `SharpenUniform` stays 16 bytes. Change both together.
+pub const SHARPEN_MASK_GRADIENT_NORM: f32 = 0.25;
 
 /// Halo (pixels) a tiled full-res sharpen pass must over-fetch. Zero when the
 /// op is absent or a no-op (amount 0). Consumed by Plan 3's tile producer.
 /// Global-only — see `sharpen_halo_doc` for the whole-document (Phase 4 Task
-/// 4, per-mask sharpen) version.
+/// 4, per-mask sharpen) version. P4 Task 5: active masking adds exactly one
+/// extra pixel for the central-difference gradient sample (design §4.4) —
+/// `detail`'s narrower `r/3` blur never widens the halo (`r` dominates), so
+/// it contributes nothing here. The `MAX_SHARPEN_RADIUS` clamp is applied to
+/// `radius` BEFORE the gradient pixel is added.
 pub fn sharpen_halo(op: Option<Sharpen>) -> u32 {
     match op {
-        Some(s) if s.amount != 0.0 => s.radius.min(MAX_SHARPEN_RADIUS),
+        Some(s) if s.amount != 0.0 => s.radius.min(MAX_SHARPEN_RADIUS) + (s.masking > 0.0) as u32,
         _ => 0,
     }
 }
@@ -345,7 +376,8 @@ pub fn sharpen_halo_doc(doc: &crate::op::OpStack) -> u32 {
     for layer in doc.layers.iter().filter(|l| l.visible) {
         let s = layer.adjustments.sharpen;
         if s.amount != 0.0 {
-            max_r = max_r.max(s.radius.min(MAX_SHARPEN_RADIUS));
+            let r = s.radius.min(MAX_SHARPEN_RADIUS) + (s.masking > 0.0) as u32;
+            max_r = max_r.max(r);
         }
     }
     max_r
@@ -1532,6 +1564,7 @@ mod tests {
         let u = sharpen_uniform(Some(Sharpen {
             amount: 0.75,
             radius: 3,
+            ..Default::default()
         }));
         assert_eq!(u.amount, 0.75);
         assert_eq!(u.radius, 3);
@@ -1545,14 +1578,16 @@ mod tests {
         assert_eq!(
             sharpen_halo(Some(Sharpen {
                 amount: 0.0,
-                radius: 4
+                radius: 4,
+                ..Default::default()
             })),
             0
         );
         assert_eq!(
             sharpen_halo(Some(Sharpen {
                 amount: 0.5,
-                radius: 4
+                radius: 4,
+                ..Default::default()
             })),
             4
         );
@@ -1564,6 +1599,7 @@ mod tests {
         let huge = Sharpen {
             amount: 0.5,
             radius: u32::MAX,
+            ..Default::default()
         };
         assert_eq!(
             sharpen_uniform(Some(huge)).radius,
@@ -1585,7 +1621,11 @@ mod tests {
             visible,
             mask: MaskDefinition::default(),
             adjustments: AdjustmentSet {
-                sharpen: Sharpen { amount, radius },
+                sharpen: Sharpen {
+                    amount,
+                    radius,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         };
@@ -1597,6 +1637,7 @@ mod tests {
         let global_only = EditDoc::default().set_op(Op::Sharpen(Sharpen {
             amount: 0.5,
             radius: 4,
+            ..Default::default()
         }));
         assert_eq!(sharpen_halo_doc(&global_only), 4);
 
@@ -1637,6 +1678,70 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(sharpen_halo_doc(&huge_layer), MAX_SHARPEN_RADIUS);
+    }
+
+    /// Gate 2 (design §7.2): the new fields default to zero, so an old sidecar
+    /// and a fresh default are indistinguishable, and the render is unchanged.
+    #[test]
+    fn sharpen_new_fields_default_to_zero_identity() {
+        let s = Sharpen::default();
+        assert_eq!(s.detail, 0.0);
+        assert_eq!(s.masking, 0.0);
+        let u = sharpen_uniform(Some(s));
+        assert_eq!(u.detail, 0.0);
+        assert_eq!(u.masking, 0.0);
+    }
+
+    /// Masking adds exactly 1 px (the central-difference gradient) and only
+    /// when it is actually active.
+    #[test]
+    fn sharpen_halo_adds_one_only_when_masking_is_active() {
+        let plain = Sharpen {
+            amount: 0.5,
+            radius: 8,
+            detail: 0.0,
+            masking: 0.0,
+        };
+        assert_eq!(sharpen_halo(Some(plain)), 8, "no masking -> unchanged halo");
+        let masked = Sharpen {
+            amount: 0.5,
+            radius: 8,
+            detail: 0.0,
+            masking: 0.4,
+        };
+        assert_eq!(
+            sharpen_halo(Some(masked)),
+            9,
+            "masking -> +1 for the gradient"
+        );
+        // Detail's r/3 blur is strictly narrower than r, so it adds nothing.
+        let detailed = Sharpen {
+            amount: 0.5,
+            radius: 8,
+            detail: 1.0,
+            masking: 0.0,
+        };
+        assert_eq!(sharpen_halo(Some(detailed)), 8, "r dominates r/3");
+        // Inactive sharpen contributes nothing regardless of the new fields.
+        let inactive = Sharpen {
+            amount: 0.0,
+            radius: 8,
+            detail: 1.0,
+            masking: 1.0,
+        };
+        assert_eq!(sharpen_halo(Some(inactive)), 0);
+    }
+
+    /// An old sidecar (no `detail`/`masking` keys) must deserialize to the
+    /// exact pre-P4 behavior — the back-compat half of gate 2.
+    #[test]
+    fn sharpen_deserializes_pre_p4_payload_as_identity_extras() {
+        let old = r#"{"amount":0.5,"radius":8}"#;
+        let s: Sharpen = serde_json::from_str(old).expect("pre-P4 payload must load");
+        assert_eq!(s.amount, 0.5);
+        assert_eq!(s.radius, 8);
+        assert_eq!(s.detail, 0.0, "absent detail -> identity");
+        assert_eq!(s.masking, 0.0, "absent masking -> identity");
     }
 
     #[test]
@@ -1710,6 +1815,7 @@ mod tests {
                     sharpen: Sharpen {
                         amount: 0.5,
                         radius: 4,
+                        ..Default::default()
                     },
                     ..Default::default()
                 },
@@ -2601,6 +2707,7 @@ mod tests {
             sharpen: crate::op::Sharpen {
                 amount: 0.5,
                 radius: 2,
+                ..Default::default()
             },
             dehaze: crate::op::Dehaze {
                 amount: 0.2,

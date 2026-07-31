@@ -76,6 +76,7 @@ pub use uniforms::{
     parametric_curve_lut, sharpen_halo, sharpen_halo_doc, tone_curve_luts, vignette_amount,
     ColorGradeUniform, GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, NrUniform,
     SharpenUniform, VignetteUniform, KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS,
+    SHARPEN_MASK_GRADIENT_NORM,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
@@ -133,13 +134,21 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         // compiled here — `SharpenNode` (both pipelines) now dispatches the
         // passes below instead. `sharpen-apply-masked` (Phase 4 Task 4) is
         // the per-mask-layer masked apply, only ever dispatched when a
-        // visible layer has its own active sharpen.
+        // visible layer has its own active sharpen. `sharpen-apply-detail`
+        // (Phase 4 Task 5) is the Detail/Masking-aware GLOBAL apply, only
+        // dispatched when the global op's `detail`/`masking` isn't both zero
+        // (the zero case keeps dispatching `sharpen-apply` unchanged, so that
+        // path stays byte-exact — see `sharpen_node.rs`'s doc).
         ("sharpen-box-h", include_str!("shaders/sharpen_box_h.wgsl")),
         ("sharpen-box-v", include_str!("shaders/sharpen_box_v.wgsl")),
         ("sharpen-apply", include_str!("shaders/sharpen_apply.wgsl")),
         (
             "sharpen-apply-masked",
             include_str!("shaders/sharpen_apply_masked.wgsl"),
+        ),
+        (
+            "sharpen-apply-detail",
+            include_str!("shaders/sharpen_apply_detail.wgsl"),
         ),
         ("nr-atrous", include_str!("shaders/nr_atrous.wgsl")),
         ("nr-combine", include_str!("shaders/nr_combine.wgsl")),

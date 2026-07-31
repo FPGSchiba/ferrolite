@@ -424,6 +424,7 @@ mod tests {
         s.sharpen = crate::op::Sharpen {
             amount: 0.8,
             radius: 2,
+            ..Default::default()
         };
         s.dehaze.amount = -0.3;
         let json = serde_json::to_string(&s).unwrap();

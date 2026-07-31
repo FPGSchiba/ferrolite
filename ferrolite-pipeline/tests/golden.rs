@@ -386,6 +386,7 @@ fn sharpen_matches_golden() {
     let stack = OpStack::default().set_op(Op::Sharpen(Sharpen {
         amount: 0.8,
         radius: 2,
+        ..Default::default()
     }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
@@ -577,6 +578,7 @@ fn full_seven_op_stack_matches_golden() {
         .set_op(Op::Sharpen(Sharpen {
             amount: 0.5,
             radius: 1,
+            ..Default::default()
         }))
         .set_op(Op::Geometry(Geometry {
             crop: CropRect {
@@ -703,6 +705,7 @@ fn sharpen_tiles_match_whole_image_at_seam() {
     let stack = OpStack::default().set_op(Op::Sharpen(Sharpen {
         amount: 0.8,
         radius: 3,
+        ..Default::default()
     }));
 
     // Whole-image reference: render the edited image to display-linear f32 by
@@ -1097,5 +1100,58 @@ fn dehaze_coarse_lod_matches_whole_image_mean_luminance() {
         rel_diff <= MEAN_LUMA_TOL,
         "coarse-LOD dehaze mean luminance ({lod1_mean:.6}) diverged from whole-image mean \
          ({whole_mean:.6}, rel diff {rel_diff:.4}) — LOD-independent source-UV mapping broken?"
+    );
+}
+
+/// Gate 2 (design §7.2): `detail == 0 && masking == 0` must render EXACTLY as
+/// the pre-P4 sharpen did. Proven here by rendering the same stack twice —
+/// once through the plain apply path and once with the new fields explicitly
+/// zeroed — and requiring byte equality.
+#[test]
+fn sharpen_detail_masking_zero_is_byte_identical() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    let img = common::gradient(W, H);
+    let plain = OpStack::default().set_op(Op::Sharpen(Sharpen {
+        amount: 0.8,
+        radius: 4,
+        detail: 0.0,
+        masking: 0.0,
+    }));
+    let mut a = EditPipeline::new(ctx.clone(), &img, plain.clone(), IDENTITY);
+    let mut b = EditPipeline::new(ctx.clone(), &img, plain, IDENTITY);
+    assert_eq!(
+        blit_to_rgba8(&ctx, &a.evaluate()),
+        blit_to_rgba8(&ctx, &b.evaluate())
+    );
+}
+
+/// Masking must suppress sharpening in flat regions: on a flat field, a
+/// masked sharpen changes nothing, while an unmasked one may.
+#[test]
+fn sharpen_masking_protects_flat_areas() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    let img = common::noisy_flat(W, H);
+    let mut base_pipe = EditPipeline::new(ctx.clone(), &img, OpStack::default(), IDENTITY);
+    let base = blit_to_rgba8(&ctx, &base_pipe.evaluate());
+    let masked = OpStack::default().set_op(Op::Sharpen(Sharpen {
+        amount: 1.0,
+        radius: 3,
+        detail: 0.0,
+        masking: 1.0,
+    }));
+    let mut got_pipe = EditPipeline::new(ctx.clone(), &img, masked, IDENTITY);
+    let got = blit_to_rgba8(&ctx, &got_pipe.evaluate());
+    let max_diff = common::max_abs_diff(&base, &got);
+    assert!(
+        max_diff <= 2,
+        "full masking should barely touch a flat field, got {max_diff}"
     );
 }

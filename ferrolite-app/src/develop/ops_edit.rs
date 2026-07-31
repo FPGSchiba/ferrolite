@@ -290,6 +290,7 @@ mod tests {
         let sharper = base.set_op(Op::Sharpen(Sharpen {
             amount: 0.5,
             radius: 5,
+            ..Default::default()
         }));
         assert!(needs_full_rebuild(&base, &sharper), "halo change: rebuild");
         let geo = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
@@ -394,7 +395,11 @@ mod tests {
                 visible: true,
                 mask: Default::default(),
                 adjustments: AdjustmentSet {
-                    sharpen: Sharpen { amount, radius },
+                    sharpen: Sharpen {
+                        amount,
+                        radius,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             }],

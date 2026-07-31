@@ -304,6 +304,7 @@ fn masked_layer_sharpen_distinct_radius() -> MaskLayer {
             sharpen: Sharpen {
                 amount: 1.0,
                 radius: 4,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -326,6 +327,7 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                 .set_op(Op::Sharpen(Sharpen {
                     amount: 0.8,
                     radius: 2,
+                    ..Default::default()
                 }))
                 .set_op(Op::Dehaze(Dehaze {
                     amount: 0.3,
@@ -457,6 +459,7 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                 .set_op(Op::Sharpen(Sharpen {
                     amount: 0.8,
                     radius: 2,
+                    ..Default::default()
                 }))
                 .set_op(Op::LocalAdjustments(LocalAdjustments {
                     layers: vec![masked_layer_sharpen_distinct_radius()],

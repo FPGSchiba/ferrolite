@@ -53,6 +53,23 @@
 //!     `accum`, the ORIGINAL `src`, this layer's radius's `blur`, and this
 //!     layer's own composited `mask`.
 //!
+//! **Phase 4 Task 5 (Detail + Masking, GLOBAL dispatch only):** when the
+//! global op's `detail != 0.0 || masking != 0.0`, the global apply dispatch
+//! routes through `sharpen_apply_detail.wgsl` instead of `sharpen_apply.wgsl`
+//! — `out = src + amount*edge*mix(src-blur_r, src-blur_fine, detail)` (design
+//! §4.3). `blur_fine` is the SAME separable-blur machinery at radius
+//! `max(1, r/3)`, requested as just another DISTINCT radius — computed only
+//! when `detail != 0.0`; when `masking != 0.0` alone, the MAIN blur is bound
+//! to the `blur_fine` slot too (so `mix(..., 0.0)` discards it at zero cost,
+//! no extra blur dispatched). When BOTH are `0.0`, the node dispatches the
+//! OLD `sharpen_apply.wgsl` with the IDENTICAL bind group as before this
+//! task — not merely an equivalent formula through the new shader — so every
+//! pre-P4 parity golden stays byte-exact. Per-mask-layer sharpen
+//! (`sharpen_apply_masked.wgsl`) is UNCHANGED by this task: a layer's own
+//! `detail`/`masking` fields exist on `Sharpen` (so they round-trip through
+//! `AdjustmentSet` without extra plumbing) but are not yet consumed by the
+//! masked-apply dispatch.
+//!
 //! **Identity passthrough:** when NEITHER the global op (`amount == 0 ||
 //! radius <= 0`) NOR any visible layer has an active sharpen, `evaluate`
 //! returns `src.clone()` (a cheap `Arc` clone of `PipelineImage`, mirroring
@@ -206,6 +223,23 @@ fn apply_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+/// `0 = src, 1 = blur, 2 = blur_fine, 3 = storage-write dst, 4 = uniform` —
+/// the Phase 4 Task 5 Detail/Masking-aware GLOBAL apply pass's bind shape
+/// (`sharpen_apply_detail.wgsl`). Only ever bound for the GLOBAL dispatch
+/// (see the module doc); per-mask-layer sharpen keeps using `masked_apply_bgl`.
+fn apply_detail_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sharpen-apply-detail-bgl"),
+        entries: &[
+            texture_entry(0),
+            texture_entry(1),
+            texture_entry(2),
+            storage_out_entry(3, PIPELINE_FORMAT),
+            uniform_entry(4),
+        ],
+    })
+}
+
 /// `0 = accum (running total), 1 = orig_src (this node's ORIGINAL input), 2 =
 /// this dispatch's blur, 3 = mask (R32Float, non-filterable — mirrors
 /// `local_adjust.wgsl`'s mask binding), 4 = storage-write dst, 5 = uniform` —
@@ -306,6 +340,12 @@ pub(crate) struct SharpenNode {
     apply_bgl: wgpu::BindGroupLayout,
     apply_pipeline: wgpu::ComputePipeline,
 
+    // Phase 4 Task 5: Detail/Masking-aware GLOBAL apply pass, dispatched
+    // instead of `apply_pipeline` only when the global op's `detail` and
+    // `masking` aren't both zero (see the module doc's gate-2 note).
+    apply_detail_bgl: wgpu::BindGroupLayout,
+    apply_detail_pipeline: wgpu::ComputePipeline,
+
     masked_apply_bgl: wgpu::BindGroupLayout,
     masked_apply_pipeline: wgpu::ComputePipeline,
 
@@ -367,6 +407,14 @@ impl SharpenNode {
             include_str!("shaders/sharpen_apply.wgsl"),
         );
 
+        let apply_detail_bgl_layout = apply_detail_bgl(device);
+        let apply_detail_pipeline = compute_pipeline(
+            &ctx,
+            &apply_detail_bgl_layout,
+            "sharpen-apply-detail",
+            include_str!("shaders/sharpen_apply_detail.wgsl"),
+        );
+
         let masked_apply_bgl_layout = masked_apply_bgl(device);
         let masked_apply_pipeline = compute_pipeline(
             &ctx,
@@ -387,6 +435,8 @@ impl SharpenNode {
             v_pipeline,
             apply_bgl: apply_bgl_layout,
             apply_pipeline,
+            apply_detail_bgl: apply_detail_bgl_layout,
+            apply_detail_pipeline,
             masked_apply_bgl: masked_apply_bgl_layout,
             masked_apply_pipeline,
             blur_slots: RefCell::new(Vec::new()),
@@ -584,6 +634,60 @@ impl SharpenNode {
         dispatch(enc, "sharpen-apply", &self.apply_pipeline, &bind, w, h);
     }
 
+    /// Encode the Detail/Masking-aware GLOBAL apply dispatch (Phase 4 Task
+    /// 5) — same as `encode_apply` plus a second blur texture (`blur_fine`,
+    /// binding 2). Only ever used for the GLOBAL op; see the module doc.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_apply_detail(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        blur_view: &wgpu::TextureView,
+        blur_fine_view: &wgpu::TextureView,
+        dst_view: &wgpu::TextureView,
+        uniform_buf: &wgpu::Buffer,
+        w: u32,
+        h: u32,
+    ) {
+        let bind = self
+            .ctx
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("sharpen-apply-detail-bind"),
+                layout: &self.apply_detail_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(blur_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(blur_fine_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(dst_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: uniform_buf.as_entire_binding(),
+                    },
+                ],
+            });
+        dispatch(
+            enc,
+            "sharpen-apply-detail",
+            &self.apply_detail_pipeline,
+            &bind,
+            w,
+            h,
+        );
+    }
+
     /// Encode a per-mask-layer masked apply dispatch (Phase 4 Task 4).
     #[allow(clippy::too_many_arguments)]
     fn encode_masked_apply(
@@ -664,6 +768,15 @@ impl Node<PipelineImage> for SharpenNode {
 
         let p = self.params.get();
         let global_active = p.amount != 0.0 && p.radius > 0;
+        // Phase 4 Task 5: the global dispatch needs the Detail/Masking apply
+        // shader whenever either is active. `blur_fine` (radius
+        // `max(1, r/3)`) is only actually COMPUTED (a distinct blur pair
+        // requested below) when `detail != 0.0` — when only `masking` is
+        // active the main blur is bound to the `blur_fine` slot too, since
+        // `mix(delta_r, delta_fine, 0.0)` discards it (see the module doc's
+        // efficiency note).
+        let global_extras_active = global_active && (p.detail != 0.0 || p.masking != 0.0);
+        let global_fine_radius = (global_active && p.detail != 0.0).then(|| (p.radius / 3).max(1));
 
         // Phase 4 Task 4: gather each VISIBLE layer's own active sharpen
         // (amount != 0, radius > 0 after the same `MAX_SHARPEN_RADIUS` clamp
@@ -697,10 +810,17 @@ impl Node<PipelineImage> for SharpenNode {
         let (w, h) = (src.width, src.height);
 
         // One blur per DISTINCT radius: the global radius (if active) first,
-        // then each active layer's radius, deduplicated.
+        // then the global op's `blur_fine` radius (Phase 4 Task 5, only when
+        // `detail != 0.0` — see above), then each active layer's radius, all
+        // deduplicated.
         let mut radii: Vec<i32> = Vec::new();
         if global_active {
             radii.push(p.radius);
+        }
+        if let Some(fr) = global_fine_radius {
+            if !radii.contains(&fr) {
+                radii.push(fr);
+            }
         }
         for (r, _, _) in &layer_ops {
             if !radii.contains(r) {
@@ -722,7 +842,8 @@ impl Node<PipelineImage> for SharpenNode {
             let slot = self.uniform_slot(SharpenUniform {
                 amount: 0.0,
                 radius: r,
-                pad: [0.0; 2],
+                detail: 0.0,
+                masking: 0.0,
             });
             let bufs = self.uniform_pool.borrow();
             let ubuf = &bufs[slot];
@@ -749,9 +870,46 @@ impl Node<PipelineImage> for SharpenNode {
             let slot = self.uniform_slot(SharpenUniform {
                 amount: p.amount,
                 radius: p.radius,
-                pad: [0.0; 2],
+                detail: p.detail,
+                masking: p.masking,
             });
-            {
+            if global_extras_active {
+                // Phase 4 Task 5: either detail or masking is active, so
+                // route through the Detail/Masking apply shader. When
+                // `detail == 0.0` (masking-only), `global_fine_radius` is
+                // `None` and `blur_fine` binds the SAME main-blur texture as
+                // `blur` — `mix(delta_r, delta_fine, 0.0)` in the shader
+                // discards it, so this stays correct without computing a
+                // second blur.
+                let fine_idx = match global_fine_radius {
+                    Some(fr) => radii
+                        .iter()
+                        .position(|&x| x == fr)
+                        .expect("fine radius pushed above"),
+                    None => idx,
+                };
+                let blur_fine_view = {
+                    let blur_slots = self.blur_slots.borrow();
+                    view(&blur_slots[fine_idx].blur)
+                };
+                let bufs = self.uniform_pool.borrow();
+                let ubuf = &bufs[slot];
+                let cur_view = view(&current.texture);
+                let out_view = view(&out.texture);
+                self.encode_apply_detail(
+                    &mut enc,
+                    &cur_view,
+                    &blur_view,
+                    &blur_fine_view,
+                    &out_view,
+                    ubuf,
+                    w,
+                    h,
+                );
+            } else {
+                // Both zero: dispatch the OLD shader with the identical bind
+                // group as before this task — gate 2 (design §7.2), so this
+                // path stays byte-exact rather than merely equivalent.
                 let bufs = self.uniform_pool.borrow();
                 let ubuf = &bufs[slot];
                 let cur_view = view(&current.texture);
@@ -774,7 +932,8 @@ impl Node<PipelineImage> for SharpenNode {
             let slot = self.uniform_slot(SharpenUniform {
                 amount: *amount,
                 radius: *r,
-                pad: [0.0; 2],
+                detail: 0.0,
+                masking: 0.0,
             });
             {
                 let bufs = self.uniform_pool.borrow();
@@ -1007,7 +1166,8 @@ mod tests {
         let params = Rc::new(Cell::new(SharpenUniform {
             amount,
             radius: r,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let node = SharpenNode::new(ctx.clone(), params, no_layers(), no_shared_masks());
         let out = node.evaluate(&[&src]);
@@ -1052,7 +1212,8 @@ mod tests {
         let params = Rc::new(Cell::new(SharpenUniform {
             amount: 0.0,
             radius: 5,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let node = SharpenNode::new(ctx.clone(), params, no_layers(), no_shared_masks());
         let out = node.evaluate(&[&src]);
@@ -1065,7 +1226,8 @@ mod tests {
         let params2 = Rc::new(Cell::new(SharpenUniform {
             amount: 0.8,
             radius: 0,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let node2 = SharpenNode::new(ctx, params2, no_layers(), no_shared_masks());
         let out2 = node2.evaluate(&[&src]);
@@ -1093,7 +1255,11 @@ mod tests {
             visible: true,
             mask: MaskDefinition::default(),
             adjustments: AdjustmentSet {
-                sharpen: Sharpen { amount, radius },
+                sharpen: Sharpen {
+                    amount,
+                    radius,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         }
@@ -1154,7 +1320,8 @@ mod tests {
         let global_params = Rc::new(Cell::new(SharpenUniform {
             amount,
             radius: r,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let node_a = SharpenNode::new(ctx.clone(), global_params, no_layers(), no_shared_masks());
         let out_a = node_a.evaluate(&[&src]);
@@ -1164,7 +1331,8 @@ mod tests {
         let inactive_global = Rc::new(Cell::new(SharpenUniform {
             amount: 0.0,
             radius: 0,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let layers = Rc::new(RefCell::new(LocalAdjustments {
             layers: vec![sharpen_layer(amount, r as u32)],
@@ -1223,7 +1391,8 @@ mod tests {
         let inactive_global = Rc::new(Cell::new(SharpenUniform {
             amount: 0.0,
             radius: 0,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let layers = Rc::new(RefCell::new(LocalAdjustments {
             layers: vec![sharpen_layer(amount, r as u32)],
@@ -1293,7 +1462,8 @@ mod tests {
         let params = Rc::new(Cell::new(SharpenUniform {
             amount: 0.5,
             radius: 2,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let layers = Rc::new(RefCell::new(LocalAdjustments {
             layers: vec![sharpen_layer(0.4, 5)],
@@ -1309,7 +1479,8 @@ mod tests {
         let params2 = Rc::new(Cell::new(SharpenUniform {
             amount: 0.5,
             radius: 3,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let layers2 = Rc::new(RefCell::new(LocalAdjustments {
             layers: vec![sharpen_layer(0.4, 3)],
@@ -1349,7 +1520,8 @@ mod tests {
         let params = Rc::new(Cell::new(SharpenUniform {
             amount: 0.0,
             radius: 0,
-            pad: [0.0; 2],
+            detail: 0.0,
+            masking: 0.0,
         }));
         let layers = Rc::new(RefCell::new(LocalAdjustments {
             layers: vec![sharpen_layer(0.0, 9)],

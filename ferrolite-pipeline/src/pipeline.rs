@@ -745,7 +745,11 @@ mod edit_pipeline_tests {
                     invert: false,
                 },
                 adjustments: AdjustmentSet {
-                    sharpen: crate::op::Sharpen { amount, radius },
+                    sharpen: crate::op::Sharpen {
+                        amount,
+                        radius,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             }],

@@ -4,11 +4,11 @@
 // result equals the fused 2D box mean within float order — see
 // `sharpen_node.rs`'s module doc.
 //
-// `p.amount` is unused here (see `sharpen_box_h.wgsl`'s doc for why the
-// uniform layout still carries it).
+// `p.amount`/`p.detail`/`p.masking` are unused here (see `sharpen_box_h.wgsl`'s
+// doc for why the uniform layout still carries them).
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba16float, write>;
-struct P { amount: f32, radius: i32, pad0: f32, pad1: f32 };
+struct P { amount: f32, radius: i32, detail: f32, masking: f32 };
 @group(0) @binding(2) var<uniform> p: P;
 
 @compute @workgroup_size(8, 8, 1)

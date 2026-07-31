@@ -256,8 +256,17 @@ Both new fields must satisfy `op.rs`'s stated invariant — an identity-valued `
 to a reset across `is_identity()`, `PartialEq` against `Default`, and the serde hash
 (`hash_serde`). Defaulting to `0.0` satisfies all three.
 
-Because `Sharpen` lives inside `AdjustmentSet`, `detail` and `masking` are **per-mask automatically**,
-consistent with `amount`/`radius` already being per-mask.
+**Corrected 2026-07-31 (author decision).** An earlier draft of this section claimed `detail` and
+`masking` would be "per-mask automatically" because `Sharpen` lives inside `AdjustmentSet`. **That was
+wrong.** The per-layer fields do exist and persist, but the per-layer apply pass
+(`sharpen_apply_masked.wgsl`) is a *separate shader* from the global one and does not read them — so a
+per-mask Detail/Masking slider would persist to the sidecar and change nothing on screen.
+
+Therefore **Detail and Masking are GLOBAL-ONLY in this phase**, and the two sliders ship greyed in
+Mask scope with an honest reason (§6.1) — the same precedent as `dehaze_radius` and as this phase's own
+NR sliders. Wiring `sharpen_apply_masked.wgsl` (a per-layer fine-blur radius per distinct layer radius,
+plus new per-mask parity fixtures) is deliberately deferred rather than added to an already five-task
+phase. `amount` and `radius` remain per-mask exactly as before.
 
 ### 4.3 Math
 

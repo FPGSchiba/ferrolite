@@ -2208,9 +2208,13 @@ Insert directly after the existing `sharpen_radius` spec (so the prefix filter k
         set: |s, v| s.sharpen.detail = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
         global_ready: true,
-        mask_ready: true,
+        // GLOBAL-ONLY (author decision 2026-07-31): the per-layer apply pass
+        // `sharpen_apply_masked.wgsl` does not read `detail`/`masking`, so a
+        // per-mask slider would persist and do nothing. Greyed with a reason,
+        // same precedent as `dehaze_radius`.
+        mask_ready: false,
         global_reason: "",
-        mask_reason: "",
+        mask_reason: "Detail and Masking apply to the global sharpen only for now",
     },
     SliderSpec {
         id: AdjustmentId("sharpen_masking"),
@@ -2226,9 +2230,10 @@ Insert directly after the existing `sharpen_radius` spec (so the prefix filter k
         set: |s, v| s.sharpen.masking = v,
         kind: ferrolite_pipeline::OpKind::LocalAdjustments,
         global_ready: true,
-        mask_ready: true,
+        // GLOBAL-ONLY — see `sharpen_detail` above.
+        mask_ready: false,
         global_reason: "",
-        mask_reason: "",
+        mask_reason: "Detail and Masking apply to the global sharpen only for now",
     },
 ```
 

@@ -12,6 +12,7 @@ mod local;
 mod local_node;
 mod mask_overlay;
 mod nodes;
+mod nr;
 mod op;
 mod pipeline;
 mod rcd_gpu;
@@ -42,6 +43,10 @@ pub use local::{
 pub use local_node::EngineStage;
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
+pub use nr::{
+    atrous_shrink_reference, b3_spline_2d, b3_spline_h, b3_spline_v, nr_halo_px, rgb_to_ycbcr,
+    shrink, threshold_at, ycbcr_to_rgb, NR_LEVELS, NR_NOISE_SCALE,
+};
 pub use op::{
     Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Dehaze, EditDoc, Exposure,
     Geometry, GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve,

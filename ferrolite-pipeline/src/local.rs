@@ -29,6 +29,14 @@ pub struct NoiseReduction {
     pub color_detail: f32,
 }
 
+impl NoiseReduction {
+    /// True when every field is zero-identity — the gate the GPU node's
+    /// passthrough and `nr_halo` both key off.
+    pub fn is_identity(&self) -> bool {
+        self.luminance == 0.0 && self.detail == 0.0 && self.color == 0.0 && self.color_detail == 0.0
+    }
+}
+
 /// Per-mask point-op adjustments. All scalars are zero-identity; `Default` is the
 /// no-op set. Serde uses `#[serde(default)]` on every field so a payload written
 /// by an older/newer build (missing/extra fields) loads as identity for those.
@@ -122,7 +130,7 @@ impl AdjustmentSet {
             && self.color_grade.is_identity()
             && self.sharpen.amount == 0.0
             && self.dehaze.is_identity()
-            && self.noise_reduction == NoiseReduction::default()
+            && self.noise_reduction.is_identity()
     }
 
     /// Copy with every identity-valued STRUCTURED field snapped to its exact

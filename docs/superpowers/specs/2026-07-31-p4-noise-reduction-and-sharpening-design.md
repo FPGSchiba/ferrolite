@@ -107,9 +107,10 @@ hole spacing `2^l`, soft-threshold each level's coefficients, and reconstruct as
 
 ### 3.3 Streaming form (memory-bounded — load-bearing)
 
-The naive reading of the repo's heavy-map/cheap-apply pattern would cache all `L` detail levels.
-At 24 MP × 5 levels × 8 B/px that is **~960 MB of GPU memory**, and this repo already carries
-live-instance/live-byte pyramid diagnostics precisely because of that class of problem.
+The naive reading of the repo's heavy-map/cheap-apply pattern would cache all `L` detail levels:
+approximately **7 full-res textures**, and this repo already carries live-instance/live-byte
+diagnostics precisely because of that class of problem (`dehaze_node` caps its intermediates at a
+working resolution — its comment calls that "the QS-Task fix for the full-res preview-tier OOM").
 
 À trous does not need it: reconstruction is a **sum**, so shrinkage fuses into the decomposition
 loop and no level is ever retained.
@@ -118,15 +119,39 @@ loop and no level is ever retained.
 approx = to_ycbcr(src)
 acc    = 0
 for l in 0..L:
-    next   = separable_b3spline(approx, spacing = 1 << l)   // H pass, then V pass
-    acc   += shrink(approx - next, threshold(l))            // fused into the V pass
+    next   = b3_spline_2d(approx, spacing = 1 << l)   // ONE fused 2D pass
+    acc   += shrink(approx - next, threshold(l))      // fused into the same pass
     approx = next
 out = to_working(acc + approx)
 ```
 
-**Four live textures regardless of `L`** — `approx`, `next`, `acc`, and one H-pass intermediate —
-and `~2L` passes. Ping-pong to avoid read==write aliasing, mirroring `local_node.rs`'s existing
-multi-pass structure.
+**Four live textures regardless of `L`** — `approx_a`, `approx_b`, `acc_a`, `acc_b`. Both pairs
+ping-pong because each is read-modify-write across levels and a read==write binding would alias.
+
+**The convolution is a fused 2D pass, not separable H-then-V.** For a 5-tap B3-spline the separable
+form is 10 taps vs 25 fused — but it also costs a fifth full-res texture and an extra full-res
+round-trip, and these passes are bandwidth-bound rather than ALU-bound. The fused 2D form is
+therefore expected to be both **smaller and faster** here. (This is the opposite of the separable-
+sharpen conclusion, and for a concrete reason: sharpen's box radius reaches 256, where separable's
+`O(r)` vs `O(r²)` is decisive. At a fixed 5 taps that asymmetry vanishes.) `nr.rs` keeps **both**
+CPU forms and `separable_b3spline_equals_direct` proves they agree, so the shipped 2D pass has a
+verified oracle.
+
+**Honest memory accounting.** These are full-res `rgba16float` textures: **192 MB each at 24 MP**,
+so ~**768 MB** while NR is active on the whole-image path, and **0** at identity (nothing is
+allocated until after the passthrough early-return). On the tile path — haloed tiles of ~380² —
+all four total ~2.9 MB, i.e. free.
+
+**Which paths pay it.** The develop canvas, 1:1 inspection, and export all go through
+`TileEditPipeline`, so the full-res cost applies *only* to the whole-image `EditPipeline`
+(reveal / before-view / thumbnail-regen).
+
+**Pre-agreed fallback (settled 2026-07-31, so no mid-implementation decision is needed):** the
+implementation measures peak GPU bytes on the largest available RAW using the existing
+live-GPU-byte gauges. If that is at or near an OOM on the target 6–8 GB budget, NR becomes
+**tile-path-only** — the whole-image reveal/before-view/thumbnail path renders NR-free, accepting a
+transient un-denoised reveal and NR-free regenerated thumbnails, since every path the user actually
+judges NR on is the tile path.
 
 **Why no heavy/cheap node split.** The split exists to keep slider drags responsive, but a drag at
 fit-view re-renders **visible VT tiles**, not the whole image, so cost is bounded by tile size and
@@ -432,6 +457,11 @@ deliberately rather than discovered as failures:
 * New `engine_bench` cases: NR-dirty evaluate, and NR + sharpen combined. Recorded in the
   benchmark doc. Gate: **no regression on existing cases**; NR's own cost is recorded as a new
   baseline, and it is what §3.3's escape hatch is judged against.
+* **Peak-GPU-memory measurement (gates §3.3's fallback).** Using the existing
+  `live_gpu_pyramid_bytes`-style gauges, record peak GPU bytes with NR active on the largest
+  available RAW through the whole-image `EditPipeline`, and confirm identity NR allocates **zero**
+  NR textures. If the active figure is at or near an OOM on a 6-8 GB budget, take §3.3's
+  pre-agreed tile-path-only fallback rather than opening a new decision.
 
 ### 7.5 UI tests
 
@@ -472,6 +502,7 @@ and Masking enabled in **both** scopes; per-control reset present on all four sh
 | Wavelet shrinkage goes **plastic / blotchy** at high strength. | Soft thresholding with per-level falloff (§3.4). This defect is invisible to `cargo test` — the author's hands-on visual test is the real gate, exactly as it was for dehaze's halos. |
 | Chroma shrinkage **desaturates hard color edges**. | The `nr_chroma` fixture (§7.3) exists specifically for this. |
 | The 62 px halo makes a haloed 256 px tile **~2.2× the area**. | Paid only while NR is active; `nr_halo` is 0 at identity, so no existing edit gets slower. |
+| NR's 4 full-res textures (~768 MB at 24 MP) **OOM the whole-image path** on a 6-8 GB budget. | Measured in implementation via the existing live-GPU-byte gauges on the largest available RAW; the pre-agreed fallback (§3.3) makes NR tile-path-only, which costs ~2.9 MB. Zero bytes at identity. |
 | NR **slider drag lag** at 1:1. | `engine_bench` NR-dirty case gates it; §3.3's two-coarsest-level cache is the documented, measurement-gated escape hatch. |
 | The fit-view preview **does not match the export** (inherent, §3.6). | The 1:1 hint line (§6.2). Accepted per P4-D5 — the alternative lies about the pixels on screen. |
 | Output sharpening on **quantized 8-bit** data could posterize. | f32 internally, one rounding at the end (§5.2). |

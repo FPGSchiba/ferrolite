@@ -29,27 +29,33 @@
 //! (even, not 0) writes `approx_a`; level 3 writes `approx_b`; level 4 writes
 //! `approx_a` — so the LAST write (level 4) lands in `approx_a`, matching
 //! `final_approx`'s `NR_LEVELS % 2 == 1 => approx_a` below. `acc`: level 0
-//! reads `acc_a` (zeroed, see below) and writes `acc_b`; level 1 reads
+//! binds `acc_a` without reading it (see below) and writes `acc_b`; level 1 reads
 //! `acc_b`/writes `acc_a`; level 2 reads `acc_a`/writes `acc_b`; level 3 reads
 //! `acc_b`/writes `acc_a`; level 4 reads `acc_a`/writes `acc_b` — so the LAST
 //! write (level 4) lands in `acc_b`, matching `final_acc`'s
 //! `NR_LEVELS % 2 == 1 => acc_b` below.
 //!
-//! **The accumulator MUST start at zero every evaluate** (stale content from a
-//! previous evaluate would silently corrupt output, uncaught by the identity
-//! gate — `nr_leaves_a_flat_field_alone` in `tests/nr_node.rs`, and this
-//! module's own `second_evaluate_on_same_input_matches_the_first`, are the
-//! regression tests). Only `acc_a` needs zeroing: it is the only acc slot read
-//! before this evaluate has written it (level 0's read); every later read
-//! targets a slot this SAME evaluate already wrote in full (every level's
-//! dispatch covers every pixel), so a prior evaluate's leftovers there are
-//! always overwritten before being read. Zeroed via a trivial dedicated
-//! zero-fill COMPUTE pass (`nr_clear.wgsl`), not a render-pass `LoadOp::Clear`:
-//! a render-pass version (requiring `RENDER_ATTACHMENT` on `acc_a`) was tried
-//! first but reproduced rare, load-dependent test divergence when run
-//! concurrently with the crate's ~200 other GPU tests. The root cause was not
-//! confirmed; switching to an all-compute clear removed it across 15+
-//! repeated full-suite runs.
+//! **The accumulator starts at zero by construction, not by clearing.** Level 0
+//! SEEDS `dst_acc` with its shrunk detail alone; only levels >= 1 add to
+//! `acc_in` (`nr_atrous.wgsl`'s `p.level != 0` branch). Since level 0 is the
+//! only pass that reads an acc slot this evaluate has not itself written
+//! (`acc_a`, and it no longer reads it), no acc slot's residual content can
+//! ever reach the output — every later read targets a slot this SAME evaluate
+//! already wrote in full, because every level's dispatch covers every pixel.
+//! `acc_a` is still bound at level 0 (the bind-group shape is fixed) but is
+//! never sampled there.
+//!
+//! This replaced a dedicated zero-fill compute pass (`nr_clear.wgsl`, deleted)
+//! that re-zeroed `acc_a` at the top of every evaluate. Deriving the zero from
+//! the LEVEL INDEX rather than from a texture's residual state removes one
+//! dispatch per evaluate, a pipeline/BGL/bind group, a `prewarm_shaders` entry,
+//! and the entire "the accumulator must be zeroed every evaluate" correctness
+//! class — a class that consumed most of P4's risk budget and that included a
+//! rare, load-dependent divergence under concurrent GPU tests whose root cause
+//! was never confirmed (an earlier render-pass `LoadOp::Clear` variant, which
+//! also needed `RENDER_ATTACHMENT` on `acc_a`). `second_evaluate_on_same_input_matches_the_first`
+//! below remains the regression test: it was confirmed to FAIL when the clear
+//! dispatch was removed WITHOUT the shader's level-0 seed, and to pass with it.
 //!
 //! Wired into both `EditPipeline` and `TileEditPipeline` by Task 4 (see
 //! `pipeline.rs`/`tile_edit.rs`), between `color_matrix` and `vignette`.
@@ -131,14 +137,6 @@ fn combine_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-/// `0 = dst (storage)` — `nr_clear.wgsl`'s bind shape.
-fn clear_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("nr-clear-bgl"),
-        entries: &[storage_out_entry(0, PIPELINE_FORMAT)],
-    })
-}
-
 fn bind_tex(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
@@ -187,10 +185,8 @@ fn view(tex: &wgpu::Texture) -> wgpu::TextureView {
 }
 
 /// The four ping-pong textures, reallocated only when dims change. All four
-/// share IDENTICAL usage flags — unlike an earlier render-pass-clear version
-/// of this node, `acc_a` needs no extra usage bit (see `clear_pipeline`'s
-/// doc and the module doc's "accumulator MUST start at zero" note for why
-/// only `acc_a` is ever cleared, and why it's cleared via compute).
+/// share IDENTICAL usage flags — no slot needs a clear or an extra usage bit
+/// (see the module doc's "accumulator starts at zero by construction" note).
 struct Textures {
     dims: (u32, u32),
     approx_a: Arc<wgpu::Texture>,
@@ -206,10 +202,6 @@ pub(crate) struct NoiseReductionNode {
     atrous_pipeline: wgpu::ComputePipeline,
     combine_bgl: wgpu::BindGroupLayout,
     combine_pipeline: wgpu::ComputePipeline,
-    /// Zero-fills `acc_a` at the top of every non-identity `evaluate` — see
-    /// the module doc's "accumulator MUST start at zero" note.
-    clear_bgl: wgpu::BindGroupLayout,
-    clear_pipeline: wgpu::ComputePipeline,
     textures: RefCell<Option<Textures>>,
     /// Pooled per-level uniform buffers. Required because every level's dispatch
     /// batches into ONE encoder/submit: a later `write_buffer` on a buffer an
@@ -238,13 +230,6 @@ impl NoiseReductionNode {
             "nr-combine",
             include_str!("shaders/nr_combine.wgsl"),
         );
-        let clear_bgl_layout = clear_bgl(device);
-        let clear_pipeline = compute_pipeline(
-            &ctx,
-            &clear_bgl_layout,
-            "nr-clear",
-            include_str!("shaders/nr_clear.wgsl"),
-        );
         Self {
             ctx,
             params,
@@ -252,8 +237,6 @@ impl NoiseReductionNode {
             atrous_pipeline,
             combine_bgl: combine_bgl_layout,
             combine_pipeline,
-            clear_bgl: clear_bgl_layout,
-            clear_pipeline,
             textures: RefCell::new(None),
             uniform_pool: RefCell::new(Vec::new()),
             uniform_cursor: Cell::new(0),
@@ -356,28 +339,6 @@ impl NoiseReductionNode {
             .write_buffer(&pool[idx], 0, bytemuck::bytes_of(&u));
         idx
     }
-
-    /// Encode a zero-fill dispatch on `tex` (`nr_clear.wgsl`) — see the module
-    /// doc's "accumulator MUST start at zero" note for why only `acc_a` is
-    /// ever passed here.
-    fn clear(&self, enc: &mut wgpu::CommandEncoder, tex: &wgpu::Texture, w: u32, h: u32) {
-        let tex_view = view(tex);
-        let bg = self
-            .ctx
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("nr-clear"),
-                layout: &self.clear_bgl,
-                entries: &[bind_tex(0, &tex_view)],
-            });
-        let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("nr-clear"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.clear_pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        pass.dispatch_workgroups(w.div_ceil(8), h.div_ceil(8), 1);
-    }
 }
 
 /// Delegating `Node` impl so a `NoiseReductionNode` can be shared via `Rc`
@@ -429,12 +390,6 @@ impl Node<PipelineImage> for NoiseReductionNode {
             .ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("nr") });
-
-        // The accumulator MUST start at zero every evaluate: stale content from
-        // a previous evaluate would silently corrupt output and would NOT be
-        // caught by the identity gate. See the module doc's ping-pong/zeroing
-        // note for why only `acc_a` needs this.
-        self.clear(&mut enc, &t.acc_a, w, h);
 
         for level in 0..NR_LEVELS {
             // Ping-pong: level 0 reads the ORIGINAL image (the shader converts
@@ -644,12 +599,18 @@ mod tests {
 
     /// Repeating `evaluate` on the SAME node/input must reproduce the SAME
     /// output — the direct regression test (at this node's level, not the
-    /// pipeline's) for a stale/un-zeroed accumulator: if `acc_a` weren't
-    /// re-cleared every evaluate, the SECOND evaluate's level-0 accumulator
-    /// read would pick up the FIRST evaluate's leftover `acc_a` content
-    /// (nonzero here, since this fixture has real detail at every scale)
-    /// instead of starting from zero like the first evaluate did, and the two
-    /// outputs would diverge.
+    /// pipeline's) for a stale accumulator: if level 0 ADDED to `acc_in`
+    /// instead of seeding `dst_acc` outright, the SECOND evaluate would pick up
+    /// the FIRST's leftover `acc_a` content (nonzero here, since this fixture
+    /// has real detail at every scale) instead of starting from zero like the
+    /// first evaluate did, and the two outputs would diverge.
+    ///
+    /// Note the first evaluate alone CANNOT catch this — wgpu zero-initializes
+    /// a freshly created texture, so a broken accumulator looks correct until
+    /// the node is reused. Confirmed by removing the old `nr_clear` dispatch
+    /// without the shader's level-0 seed: this test failed while every
+    /// single-evaluate NR test (including the CPU-oracle parity one) still
+    /// passed.
     #[test]
     fn second_evaluate_on_same_input_matches_the_first() {
         let Some(ctx) = GpuContext::headless() else {

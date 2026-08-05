@@ -86,6 +86,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         soft_shrink(detail.b, t_chroma),
     );
 
+    // Level 0 SEEDS the accumulator (writes `shrunk` alone) instead of adding
+    // to `acc_in`; every later level accumulates. This is what makes a separate
+    // zero-fill pass unnecessary: the reference (`nr::atrous_shrink_reference`)
+    // starts `acc` at zero, so "level 0 = shrunk" is exactly equivalent to
+    // "level 0 = 0 + shrunk" — but it derives the zero from the LEVEL INDEX,
+    // which is always correct, rather than from the accumulator texture's
+    // residual content, which had to be re-zeroed every evaluate and silently
+    // corrupted output when it wasn't (see the retired `nr_clear.wgsl`).
+    // `acc_in` is still BOUND at level 0 (the bind group's shape is fixed) but
+    // is never read there, so its content is irrelevant.
+    var acc_prev = vec3<f32>(0.0);
+    if (p.level != 0) { acc_prev = textureLoad(acc_in, xy, 0).rgb; }
+
     textureStore(dst_next, xy, vec4<f32>(next, a_raw.a));
-    textureStore(dst_acc, xy, vec4<f32>(textureLoad(acc_in, xy, 0).rgb + shrunk, a_raw.a));
+    textureStore(dst_acc, xy, vec4<f32>(acc_prev + shrunk, a_raw.a));
 }

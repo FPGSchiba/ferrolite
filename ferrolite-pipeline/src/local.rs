@@ -105,7 +105,16 @@ pub struct AdjustmentSet {
     pub dehaze: crate::op::Dehaze,
     #[serde(default)]
     pub noise_reduction: NoiseReduction,
-    // Reserved neighborhood locals — no shader yet (Phase 4 owns them).
+    // Reserved neighbourhood locals — declared for schema-forward
+    // compatibility, with NO shader, NO UI, and NO consumer anywhere in the
+    // workspace. P4 (classical NR + sharpening) was expected to claim them and
+    // did not: it shipped Detail/Masking on `Sharpen` instead, so these two are
+    // currently unowned. They are zero-identity and `#[serde(default)]`, so
+    // they round-trip harmlessly and cost nothing until some phase wires them.
+    //
+    // Whichever phase does own them: both are neighbourhood ops, so they need a
+    // halo and would inherit the tiled-vs-whole edge-extension convention the
+    // rest of this crate's neighbourhood nodes share.
     #[serde(default)]
     pub texture: f32,
     #[serde(default)]

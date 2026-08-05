@@ -775,6 +775,28 @@ impl SharpenNode {
     pub(crate) fn detail_dispatch_count(&self) -> u32 {
         self.detail_dispatches.get()
     }
+
+    /// GPU bytes currently held by this node's blur intermediates + A/B output
+    /// (test hook). Mirrors `NoiseReductionNode::live_bytes`, and exists for
+    /// the same reason: a control returning to identity must not leave
+    /// full-res planes parked for the pipeline's lifetime.
+    #[cfg(test)]
+    pub(crate) fn live_bytes(&self) -> u64 {
+        // `rgba16float` = 8 B/px. Each `Intermediates` holds two planes
+        // (`h_blur` + `blur`); the A/B output is two more.
+        let slots: u64 = self
+            .blur_slots
+            .borrow()
+            .iter()
+            .map(|i| (i.dims.0 as u64) * (i.dims.1 as u64) * 8 * 2)
+            .sum();
+        let out = self
+            .out
+            .borrow()
+            .as_ref()
+            .map_or(0, |[a, _]| (a.width as u64) * (a.height as u64) * 8 * 2);
+        slots + out
+    }
 }
 
 impl Node<PipelineImage> for SharpenNode {
@@ -820,7 +842,18 @@ impl Node<PipelineImage> for SharpenNode {
         // Identity passthrough: neither the global op nor any visible layer
         // has an active sharpen — return the input unchanged, no GPU work at
         // all (mirrors `DehazeTransmissionNode`'s early-return pattern).
+        //
+        // Also FREE the blur intermediates and the A/B output: "no GPU work at
+        // all" must mean no RETAINED GPU memory either, or dragging Amount to 0
+        // leaves every blur pair plus both output planes parked for the
+        // pipeline's lifetime. Mirrors `NoiseReductionNode`'s inactive branch
+        // exactly, and makes the same tradeoff: the realloc on the next
+        // on-cycle is accepted because an Amount drag never passes through
+        // here mid-interaction (amount > 0 keeps sharpen active throughout).
+        // Asserted by `identity_after_active_releases_all_sharpen_memory`.
         if !global_active && layer_ops.is_empty() {
+            self.blur_slots.borrow_mut().clear();
+            *self.out.borrow_mut() = None;
             return src.clone();
         }
 
@@ -844,6 +877,17 @@ impl Node<PipelineImage> for SharpenNode {
                 radii.push(*r);
             }
         }
+
+        // Release any slot beyond what THIS evaluate needs. Without this the
+        // pool only ever grows to the high-water mark of any past evaluate:
+        // touching Detail once adds the `blur_fine` pair (~384 MB at 24 MP) and
+        // returning Detail to 0 neither requests it nor changes the halo, so
+        // nothing would ever reclaim it. Truncating is safe because slots are
+        // addressed by POSITION in this evaluate's distinct-radii list (see the
+        // `blur_slots` field doc) — a shorter list simply re-derives the prefix
+        // it needs, and `ensure_blur_slot` regrows on demand. Asserted by
+        // `returning_detail_to_zero_releases_the_fine_blur_slot`.
+        self.blur_slots.borrow_mut().truncate(radii.len());
 
         let mut enc = self
             .ctx
@@ -1580,6 +1624,116 @@ mod tests {
             node2.blur_count(),
             1,
             "a radius shared by global + layer must yield exactly 1 blur"
+        );
+    }
+
+    /// Returning **Detail** to 0 while a global sharpen stays active must
+    /// RELEASE the `blur_fine` slot that touching Detail allocated.
+    ///
+    /// Detail adds a second distinct radius (`max(1, r/3)`), hence a second
+    /// `Intermediates` pair — two full-res `rgba16float` planes, ~384 MB at
+    /// 24 MP. Because the fine radius stops being requested but nothing trims
+    /// `blur_slots`, and because the halo does not change (so no dims-keyed
+    /// reallocation is triggered either), the pair would otherwise stay parked
+    /// for the pipeline's lifetime. Same class as the "strength-to-0 must not
+    /// leave ~1 GiB parked" issue `NoiseReductionNode` fixes in its inactive
+    /// branch.
+    #[test]
+    fn returning_detail_to_zero_releases_the_fine_blur_slot() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let (w, h) = (16u32, 16u32);
+        let img = LinearRgbaF32::new(w, h, vec![0.3f32; (w * h * 4) as usize]).expect("fixture");
+        let src = upload_source(&ctx, &img);
+
+        // Global sharpen with Detail active: radius 6 plus fine radius 2.
+        let params = Rc::new(Cell::new(SharpenUniform {
+            amount: 0.5,
+            radius: 6,
+            detail: 0.7,
+            masking: 0.0,
+        }));
+        let node = SharpenNode::new(
+            ctx.clone(),
+            params.clone(),
+            Rc::new(RefCell::new(LocalAdjustments { layers: vec![] })),
+            Rc::new(RefCell::new(SharedMasks { buffers: vec![] })),
+        );
+        node.evaluate(&[&src]);
+        let with_detail = node.live_bytes();
+        assert_eq!(
+            node.blur_count(),
+            2,
+            "detail must request a second distinct (fine) radius"
+        );
+
+        // Detail back to 0 — the global sharpen itself stays active.
+        params.set(SharpenUniform {
+            amount: 0.5,
+            radius: 6,
+            detail: 0.0,
+            masking: 0.0,
+        });
+        node.evaluate(&[&src]);
+
+        let one_pair = (w as u64) * (h as u64) * 8 * 2;
+        assert_eq!(
+            node.live_bytes(),
+            with_detail - one_pair,
+            "the fine blur pair must be released once Detail returns to 0 \
+             (was {with_detail} B with Detail)"
+        );
+    }
+
+    /// Disabling sharpen entirely (amount to 0, no active layer) must release
+    /// EVERY blur slot and the A/B output — the identity passthrough is
+    /// documented as "no GPU work at all", which must mean no retained GPU
+    /// memory either, matching `NoiseReductionNode`'s inactive branch.
+    #[test]
+    fn identity_after_active_releases_all_sharpen_memory() {
+        let Some(ctx) = GpuContext::headless() else {
+            eprintln!("no GPU adapter; skipping (expected in headless CI)");
+            return;
+        };
+        let ctx = Arc::new(ctx);
+        let (w, h) = (16u32, 16u32);
+        let img = LinearRgbaF32::new(w, h, vec![0.3f32; (w * h * 4) as usize]).expect("fixture");
+        let src = upload_source(&ctx, &img);
+
+        let params = Rc::new(Cell::new(SharpenUniform {
+            amount: 0.5,
+            radius: 6,
+            detail: 0.7,
+            masking: 0.4,
+        }));
+        let node = SharpenNode::new(
+            ctx.clone(),
+            params.clone(),
+            Rc::new(RefCell::new(LocalAdjustments { layers: vec![] })),
+            Rc::new(RefCell::new(SharedMasks { buffers: vec![] })),
+        );
+        node.evaluate(&[&src]);
+        assert!(node.live_bytes() > 0, "active sharpen must hold planes");
+
+        params.set(SharpenUniform {
+            amount: 0.0,
+            radius: 6,
+            detail: 0.7,
+            masking: 0.4,
+        });
+        let out = node.evaluate(&[&src]);
+
+        assert!(
+            Arc::ptr_eq(&out.texture, &src.texture),
+            "identity must still be a passthrough of the same texture"
+        );
+        assert_eq!(
+            node.live_bytes(),
+            0,
+            "identity sharpen must retain zero GPU bytes"
         );
     }
 

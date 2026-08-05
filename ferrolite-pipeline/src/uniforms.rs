@@ -427,7 +427,11 @@ pub(crate) fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrU
     thresholds[1] = crate::nr::threshold_at(nr.color, nr.color_detail, level);
     NrUniform {
         thresholds,
-        active: (!nr.is_identity()) as i32,
+        // `is_active`, NOT `!is_identity`: see
+        // `nr_uniform_is_inactive_for_detail_only_noise_reduction`. Keeps this
+        // flag consistent with the two gates that actually skip work
+        // (`NoiseReductionNode::evaluate` and `nr_halo`).
+        active: nr.is_active() as i32,
         spacing: 1 << level,
         level: level as i32,
         pad: 0.0,
@@ -1892,6 +1896,33 @@ mod tests {
             0,
         );
         assert_eq!(u.active, 1);
+    }
+
+    /// `active` must mean "can this change a pixel" (`is_active`), not "differs
+    /// from a reset" (`is_identity`). A detail-only NR (zero `luminance`/
+    /// `color`) is non-identity yet provably cannot move any threshold off
+    /// zero, and `NoiseReductionNode`/`nr_halo` both already gate on
+    /// `is_active` — so this field, the last `is_identity`-flavoured activity
+    /// check, must agree with them. The flag is currently unread by
+    /// `nr_atrous.wgsl` (it exists for `NrUniform` layout parity), which is
+    /// exactly why it should be right BEFORE some future pass starts reading it.
+    #[test]
+    fn nr_uniform_is_inactive_for_detail_only_noise_reduction() {
+        use crate::local::NoiseReduction;
+        let detail_only = NoiseReduction {
+            detail: 0.8,
+            color_detail: 0.8,
+            ..Default::default()
+        };
+        assert!(
+            !detail_only.is_identity(),
+            "fixture must be non-identity, or this test is vacuous"
+        );
+        assert_eq!(
+            nr_uniform(&detail_only, 0).active,
+            0,
+            "detail-only NR dispatches nothing, so the uniform must read inactive"
+        );
     }
 
     #[test]

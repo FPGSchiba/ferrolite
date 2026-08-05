@@ -585,6 +585,12 @@ test** with a numbered checklist before finishing the branch.
 Carried out of the implementation's review record so they survive the deletion of the
 git-ignored SDD scratch. None blocked the merge; the whole-branch review triaged each.
 
+> **STATUS 2026-08-05 — all of §12 except the tuning knob is RESOLVED** on branch
+> `chore/p4-followups-hygiene` (commits `10355d0`, `c87790b`), run as a hygiene pass before
+> picking up the next v2 phase. Each item below is annotated with its outcome. The tiled-edge
+> item's recorded root cause turned out to be **wrong** — see its annotation, and prefer that
+> text to the original paragraph above it.
+
 **Known issue — tiled-vs-whole divergence at the true canvas edge.** With NR active, the
 whole-image render and the settled tiled render disagree by up to ~0.06 (display-linear) within
 ~90 px of the true image border. Root cause is a geometry-resample discrepancy at the canvas
@@ -594,12 +600,43 @@ the opposite of the precedent in the same file — the dehaze tiled tests once n
 and it was **removed** once the cause was fixed. Possible user-visible effect: the frame edge may
 pop when tiles replace the initial reveal. Worth root-causing.
 
+> **RESOLVED (`c87790b`) — and the root cause above is WRONG.** It was not a geometry-resample
+> discrepancy. Measured directly with identity ops, the geometry head is **bit-exact**
+> tiled-vs-whole (max diff 0.00000); with NR active the interior, both seams included, is
+> bit-exact too. The divergence had a hard cutoff at exactly `nr_halo_px()` = 62 px (nonzero at
+> distance 59, exactly zero at 60) — the total à trous support, not a resample artifact. The
+> measured magnitude was 0.0132, not ~0.06.
+>
+> **Actual cause:** an *iterated* à trous decomposition does not commute with replicate-padding.
+> The whole-image tier clamps every level's taps to the canvas, so a border tap reads *that
+> level's* already-convolved approx. The tiled tier ran NR over a haloed buffer whose
+> out-of-canvas region the geometry head had filled with a replicate of the *original* source, so
+> the same tap read an approx computed from a constant region. Level 0 agrees; levels 1–4 do not,
+> and the error compounds out to the full support.
+>
+> **Fix:** `NrUniform` now carries the true canvas as an inclusive rect in buffer coords (48 → 64
+> B) and `nr_atrous.wgsl` clamps taps to it instead of to `dims`; `TileEditPipeline::produce_tile`
+> derives it from the haloed tile origin + level dims it already computes for
+> `set_tile_transform`. `EditPipeline` leaves the default, which resolves to the whole buffer —
+> literally the old clamp — so the whole-image tier is unchanged and every existing golden holds.
+> `NR_EDGE_MARGIN` is deleted; the seam golden now compares all 202,500 px at max diff 0.
+>
+> **Generalizes:** any future neighbourhood op run through the tiled tier (P5 heal, P6
+> auto-perspective resampling, the reserved `clarity`/`texture`, A1/A3 tiling) faces this same
+> boundary-convention question. `NrUniform::canvas` is the pattern to copy.
+
 **Follow-up — delete `nr_clear.wgsl` entirely.** `nr_atrous.wgsl` already branches on
 `p.level == 0`. Having level 0 write `shrunk` directly instead of `acc_in + shrunk` removes the
 clear shader, its pipeline/BGL/bind group, one dispatch per evaluate, a `prewarm_shaders` entry,
 **and** the whole "the accumulator must be zeroed every evaluate" correctness class that consumed
 most of this phase's risk budget. Deferred only to avoid churning verified-correct code at branch
 end.
+
+> **RESOLVED (`10355d0`)** exactly as described. The guard was verified first: removing the clear
+> dispatch *without* the shader's level-0 seed makes
+> `second_evaluate_on_same_input_matches_the_first` fail, while every single-evaluate NR test
+> (CPU-oracle parity included) still passes — wgpu zero-initializes a fresh texture, so the defect
+> only appears on node reuse. That asymmetry is now recorded in the test's doc comment.
 
 **Follow-up — pre-warm the NR and detail-sharpen passes.** `prewarm_pipelines` evaluates
 `OpStack::default()`, where NR early-returns and sharpen is inactive, so `nr-atrous` / `nr-clear` /
@@ -608,16 +645,27 @@ them on first use, on the render thread. Consistent with dehaze's existing behav
 CLAUDE.md names pre-warm load-bearing; a second dummy evaluate with NR + detail/masking active
 would close it.
 
+> **RESOLVED (`10355d0`).** The warmed stacks are now data (`prewarm_stacks`), with a second entry
+> activating NR + detail/masking sharpen. A GPU-free unit test asserts the coverage, so a future
+> conditionally dispatched pass cannot be added without warming it.
+
 **Follow-up — `SharpenNode::blur_slots` grows monotonically.** Touching Detail once with a global
 sharpen active adds a blur pair (~384 MB at 24 MP on the whole-image pipeline), and returning
 Detail to 0 does not change the halo, so no rebuild occurs and the slot stays parked for the
 pipeline's lifetime. Same class as the "strength-to-0 must not leave ~1 GiB parked" issue that
 `NoiseReductionNode` deliberately fixes by releasing in its inactive branch.
 
+> **RESOLVED (`10355d0`).** `blur_slots` is truncated to the radii each evaluate needs, and the
+> identity passthrough now releases the slots *and* the A/B output outright — the second half was
+> the larger leak and was not in the original write-up. A `live_bytes()` test hook (mirroring
+> `NoiseReductionNode`'s) backs both new tests.
+
 **Tuning knob.** `NR_STRENGTH_SCALE` (`ferrolite-pipeline/src/nr.rs`, currently `0.05`) is the
 single constant governing NR strength calibration. It was set from first principles
 (`3σ·s_l` for σ ≈ 0.005–0.02 linear) and is the intended adjustment point if real-world use shows
 the slider range is off.
+
+> **STILL OPEN — by design.** Not a defect; awaits the author's hands-on ISO 3200–6400 testing.
 
 **Cosmetic.** The retired reference shader `sharpen.wgsl` still names the last two uniform fields
 `pad0`/`pad1` (dead code — not in `prewarm_shaders`, bound to nothing). `uniforms.rs`'s
@@ -625,3 +673,14 @@ the slider range is off.
 predicate — provably unreachable for detail-only NR, but `is_active()` would be more robust.
 `docs/design/V2/README.md` and §6.3 call the second export combo "Amount" where the code labels it
 "Sharpen amount".
+
+> **RESOLVED (`10355d0`).** `sharpen.wgsl`'s fields are named `detail`/`masking` to match the Rust
+> layout, with a header noting the shader is retired and implements neither. `nr_uniform` keys off
+> `is_active()`. The doc/code label mismatch was settled **doc-side** — `docs/design/V2/README.md`
+> now says "Sharpen amount", matching the code — because it is a visible UI string and the wording
+> is the author's call; flip the code instead if "Amount" is preferred, since it sits directly
+> under "Sharpen for".
+>
+> Also fixed in passing: `AdjustmentSet::texture`/`clarity` were commented "Phase 4 owns them",
+> pointing at a phase that shipped without claiming them. They now say they are unowned, with a
+> note that both are neighbourhood ops and so inherit the canvas-clamp question above.

@@ -302,25 +302,56 @@ pub fn hsl_uniform(op: Option<Hsl>) -> HslUniform {
 pub struct SharpenUniform {
     pub amount: f32,
     pub radius: i32,
-    pub pad: [f32; 2],
+    /// P4 Task 5: halo suppression (0..1). Occupies what was `pad[0]`, so the
+    /// struct size and 16-byte alignment are UNCHANGED — load-bearing, because
+    /// `SharpenNode` writes ONE buffer per dispatch and binds it to shaders
+    /// whose WGSL `struct P` must match this layout byte-for-byte (the box-h/
+    /// box-v/masked-apply passes never read this field, but declare it for
+    /// layout match; growing this struct would desync them and corrupt the
+    /// box passes).
+    pub detail: f32,
+    /// P4 Task 5: edge masking (0..1). Occupies what was `pad[1]`.
+    pub masking: f32,
 }
 
+// The uniform's size is the GPU ABI, shared byte-for-byte across every sharpen
+// shader's `struct P` (box-h, box-v, apply, apply-detail, apply-masked) —
+// keep in lock-step (mirrors `NrUniform`/`GeometryUniform`'s own size asserts
+// above). MUST stay exactly 16 bytes: `detail`/`masking` replaced `pad: [f32;
+// 2]` rather than growing the struct (see the field docs above).
+const _: () = assert!(std::mem::size_of::<SharpenUniform>() == 16);
+const _: () = assert!(std::mem::size_of::<SharpenUniform>().is_multiple_of(16));
+
 pub fn sharpen_uniform(op: Option<Sharpen>) -> SharpenUniform {
-    let (amount, radius) = op.map(|s| (s.amount, s.radius)).unwrap_or((0.0, 0));
+    let (amount, radius, detail, masking) = op
+        .map(|s| (s.amount, s.radius, s.detail, s.masking))
+        .unwrap_or((0.0, 0, 0.0, 0.0));
     SharpenUniform {
         amount,
         radius: radius.min(MAX_SHARPEN_RADIUS) as i32,
-        pad: [0.0; 2],
+        detail,
+        masking,
     }
 }
+
+/// Gradient normalization for the sharpen edge mask (`G`, design §4.3) — the
+/// single named tuning knob for masking responsiveness, in the spirit of
+/// `KEYSTONE_STRENGTH`. **Mirrored as `G` in `sharpen_apply_detail.wgsl`**: it
+/// is a WGSL `const` there rather than a uniform field, precisely so
+/// `SharpenUniform` stays 16 bytes. Change both together.
+pub const SHARPEN_MASK_GRADIENT_NORM: f32 = 0.25;
 
 /// Halo (pixels) a tiled full-res sharpen pass must over-fetch. Zero when the
 /// op is absent or a no-op (amount 0). Consumed by Plan 3's tile producer.
 /// Global-only — see `sharpen_halo_doc` for the whole-document (Phase 4 Task
-/// 4, per-mask sharpen) version.
+/// 4, per-mask sharpen) version. P4 Task 5: active masking adds exactly one
+/// extra pixel for the central-difference gradient sample (design §4.4) —
+/// `detail`'s narrower `r/3` blur never widens the halo (`r` dominates), so
+/// it contributes nothing here. The `MAX_SHARPEN_RADIUS` clamp is applied to
+/// `radius` BEFORE the gradient pixel is added.
 pub fn sharpen_halo(op: Option<Sharpen>) -> u32 {
     match op {
-        Some(s) if s.amount != 0.0 => s.radius.min(MAX_SHARPEN_RADIUS),
+        Some(s) if s.amount != 0.0 => s.radius.min(MAX_SHARPEN_RADIUS) + (s.masking > 0.0) as u32,
         _ => 0,
     }
 }
@@ -345,10 +376,85 @@ pub fn sharpen_halo_doc(doc: &crate::op::OpStack) -> u32 {
     for layer in doc.layers.iter().filter(|l| l.visible) {
         let s = layer.adjustments.sharpen;
         if s.amount != 0.0 {
-            max_r = max_r.max(s.radius.min(MAX_SHARPEN_RADIUS));
+            let r = s.radius.min(MAX_SHARPEN_RADIUS) + (s.masking > 0.0) as u32;
+            max_r = max_r.max(r);
         }
     }
     max_r
+}
+
+/// GPU layout for one NR level's dispatch. Only the CURRENT level is live per
+/// dispatch, so `thresholds[0]` is this level's luma threshold and
+/// `thresholds[1]` its chroma threshold; `[2..8]` is reserved padding keeping
+/// the struct 16-byte-aligned for WGSL uniform rules.
+///
+/// `pub(crate)` (final-review FIX 9): built and consumed entirely inside
+/// `nr_node.rs`'s per-level dispatch loop — nothing outside this crate needs
+/// the raw GPU layout. Narrow, don't widen, unless a real external consumer
+/// shows up.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct NrUniform {
+    pub thresholds: [f32; 8],
+    /// 0 = identity (the node never dispatches in this state).
+    pub active: i32,
+    /// À trous hole spacing for this level: `2^level`.
+    pub spacing: i32,
+    pub level: i32,
+    pub pad: f32,
+}
+
+// The uniform's size is the GPU ABI — keep in lock-step with the WGSL side
+// (mirrors `GeometryUniform`'s own size assert above): 8 f32 thresholds (32B)
+// + active/spacing/level/pad (16B) = 48B, already 16-byte-aligned.
+const _: () = assert!(std::mem::size_of::<NrUniform>() == 48);
+const _: () = assert!(std::mem::size_of::<NrUniform>().is_multiple_of(16));
+
+/// Build the uniform for `level` of the à trous loop. `pub(crate)` — see
+/// `NrUniform`'s doc. `level` must be `< NR_LEVELS`: `threshold_at` clamps it
+/// defensively, but `spacing: 1 << level` below does not, so an out-of-range
+/// `level` would silently produce a nonsensical (but not out-of-bounds)
+/// spacing rather than panicking — asserted in debug builds since the sole
+/// caller (`nr_node.rs`'s `0..NR_LEVELS` loop) should never pass one.
+pub(crate) fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrUniform {
+    debug_assert!(
+        level < crate::nr::NR_LEVELS,
+        "nr_uniform: level {level} out of range (NR_LEVELS = {})",
+        crate::nr::NR_LEVELS
+    );
+    let mut thresholds = [0.0f32; 8];
+    thresholds[0] = crate::nr::threshold_at(nr.luminance, nr.detail, level);
+    thresholds[1] = crate::nr::threshold_at(nr.color, nr.color_detail, level);
+    NrUniform {
+        thresholds,
+        active: (!nr.is_identity()) as i32,
+        spacing: 1 << level,
+        level: level as i32,
+        pad: 0.0,
+    }
+}
+
+/// Halo (pixels) a tiled NR pass must over-fetch. Zero unless NR is
+/// [`is_active`](crate::local::NoiseReduction::is_active) — NOT merely
+/// non-identity (final-review FIX 1): a detail-only edit (zero
+/// `luminance`/`color`) is non-identity but dispatches nothing, so it must
+/// contribute no halo either, or a detail-only drag would force a full
+/// `TileEditPipeline` rebuild for zero visual effect. Mirrors
+/// `sharpen_halo`'s contract otherwise.
+pub fn nr_halo(nr: &crate::local::NoiseReduction) -> u32 {
+    if nr.is_active() {
+        crate::nr::nr_halo_px()
+    } else {
+        0
+    }
+}
+
+/// Whole-document NR halo. NR is GLOBAL-ONLY (design §3.5) — it runs upstream of
+/// where masks are composited — so unlike `sharpen_halo_doc` this deliberately
+/// does NOT walk the layers. A layer's `noise_reduction` fields are never
+/// applied, so they must contribute no halo.
+pub fn nr_halo_doc(doc: &crate::op::OpStack) -> u32 {
+    nr_halo(&doc.global.noise_reduction)
 }
 
 #[repr(C)]
@@ -1478,6 +1584,7 @@ mod tests {
         let u = sharpen_uniform(Some(Sharpen {
             amount: 0.75,
             radius: 3,
+            ..Default::default()
         }));
         assert_eq!(u.amount, 0.75);
         assert_eq!(u.radius, 3);
@@ -1491,14 +1598,16 @@ mod tests {
         assert_eq!(
             sharpen_halo(Some(Sharpen {
                 amount: 0.0,
-                radius: 4
+                radius: 4,
+                ..Default::default()
             })),
             0
         );
         assert_eq!(
             sharpen_halo(Some(Sharpen {
                 amount: 0.5,
-                radius: 4
+                radius: 4,
+                ..Default::default()
             })),
             4
         );
@@ -1510,6 +1619,7 @@ mod tests {
         let huge = Sharpen {
             amount: 0.5,
             radius: u32::MAX,
+            ..Default::default()
         };
         assert_eq!(
             sharpen_uniform(Some(huge)).radius,
@@ -1531,7 +1641,11 @@ mod tests {
             visible,
             mask: MaskDefinition::default(),
             adjustments: AdjustmentSet {
-                sharpen: Sharpen { amount, radius },
+                sharpen: Sharpen {
+                    amount,
+                    radius,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         };
@@ -1543,6 +1657,7 @@ mod tests {
         let global_only = EditDoc::default().set_op(Op::Sharpen(Sharpen {
             amount: 0.5,
             radius: 4,
+            ..Default::default()
         }));
         assert_eq!(sharpen_halo_doc(&global_only), 4);
 
@@ -1583,6 +1698,224 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(sharpen_halo_doc(&huge_layer), MAX_SHARPEN_RADIUS);
+    }
+
+    /// Gate 2 (design §7.2): the new fields default to zero, so an old sidecar
+    /// and a fresh default are indistinguishable, and the render is unchanged.
+    #[test]
+    fn sharpen_new_fields_default_to_zero_identity() {
+        let s = Sharpen::default();
+        assert_eq!(s.detail, 0.0);
+        assert_eq!(s.masking, 0.0);
+        let u = sharpen_uniform(Some(s));
+        assert_eq!(u.detail, 0.0);
+        assert_eq!(u.masking, 0.0);
+    }
+
+    /// Masking adds exactly 1 px (the central-difference gradient) and only
+    /// when it is actually active.
+    #[test]
+    fn sharpen_halo_adds_one_only_when_masking_is_active() {
+        let plain = Sharpen {
+            amount: 0.5,
+            radius: 8,
+            detail: 0.0,
+            masking: 0.0,
+        };
+        assert_eq!(sharpen_halo(Some(plain)), 8, "no masking -> unchanged halo");
+        let masked = Sharpen {
+            amount: 0.5,
+            radius: 8,
+            detail: 0.0,
+            masking: 0.4,
+        };
+        assert_eq!(
+            sharpen_halo(Some(masked)),
+            9,
+            "masking -> +1 for the gradient"
+        );
+        // Detail's r/3 blur is strictly narrower than r, so it adds nothing.
+        let detailed = Sharpen {
+            amount: 0.5,
+            radius: 8,
+            detail: 1.0,
+            masking: 0.0,
+        };
+        assert_eq!(sharpen_halo(Some(detailed)), 8, "r dominates r/3");
+        // Inactive sharpen contributes nothing regardless of the new fields.
+        let inactive = Sharpen {
+            amount: 0.0,
+            radius: 8,
+            detail: 1.0,
+            masking: 1.0,
+        };
+        assert_eq!(sharpen_halo(Some(inactive)), 0);
+    }
+
+    /// An old sidecar (no `detail`/`masking` keys) must deserialize to the
+    /// exact pre-P4 behavior — the back-compat half of gate 2.
+    #[test]
+    fn sharpen_deserializes_pre_p4_payload_as_identity_extras() {
+        let old = r#"{"amount":0.5,"radius":8}"#;
+        let s: Sharpen = serde_json::from_str(old).expect("pre-P4 payload must load");
+        assert_eq!(s.amount, 0.5);
+        assert_eq!(s.radius, 8);
+        assert_eq!(s.detail, 0.0, "absent detail -> identity");
+        assert_eq!(s.masking, 0.0, "absent masking -> identity");
+    }
+
+    #[test]
+    fn nr_halo_is_total_atrous_support_or_zero() {
+        use crate::local::NoiseReduction;
+        assert_eq!(
+            nr_halo(&NoiseReduction::default()),
+            0,
+            "identity -> no halo"
+        );
+        let active = NoiseReduction {
+            luminance: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(nr_halo(&active), crate::nr::nr_halo_px());
+        assert_eq!(nr_halo(&active), 62, "L=5 -> 2*(2^5-1)");
+        // Chroma-only NR still needs the full halo (same decomposition).
+        let chroma = NoiseReduction {
+            color: 0.5,
+            ..Default::default()
+        };
+        assert_eq!(nr_halo(&chroma), 62);
+    }
+
+    /// Final-review FIX 1: `detail`/`color_detail` alone (zero
+    /// `luminance`/`color`) is non-identity but INACTIVE — every threshold it
+    /// could scale is already zero, so it dispatches nothing and must
+    /// contribute no halo. Before this fix `nr_halo` keyed off `is_identity`,
+    /// so this exact state (the very next slider a user touches after
+    /// Luminance) forced a full `TileEditPipeline` rebuild for zero effect.
+    #[test]
+    fn nr_halo_is_zero_for_detail_only_noise_reduction() {
+        use crate::local::NoiseReduction;
+        let detail_only = NoiseReduction {
+            detail: 0.1,
+            ..Default::default()
+        };
+        assert!(
+            !detail_only.is_identity(),
+            "sanity: detail alone is not is_identity"
+        );
+        assert!(
+            !detail_only.is_active(),
+            "detail alone cannot move any threshold off zero"
+        );
+        assert_eq!(
+            nr_halo(&detail_only),
+            0,
+            "detail-only must contribute no halo"
+        );
+
+        let color_detail_only = NoiseReduction {
+            color_detail: 0.1,
+            ..Default::default()
+        };
+        assert_eq!(nr_halo(&color_detail_only), 0, "color_detail-only: same");
+    }
+
+    #[test]
+    fn nr_halo_doc_is_zero_unless_the_global_set_has_nr() {
+        use crate::local::{AdjustmentSet, MaskLayer, NoiseReduction};
+        use crate::op::{EditDoc, Sharpen};
+        use ferrolite_mask::MaskDefinition;
+
+        assert_eq!(nr_halo_doc(&EditDoc::default()), 0);
+        let mut doc = EditDoc::default();
+        doc.global.noise_reduction.luminance = 0.4;
+        assert_eq!(nr_halo_doc(&doc), 62, "global NR contributes the halo");
+
+        // NR is GLOBAL-ONLY (design §3.5): a REAL, VISIBLE mask layer carrying
+        // its own non-zero NR must NOT contribute a halo -- this is the actual
+        // guard on the load-bearing constraint (a doc with no layers at all
+        // would pass this trivially and prove nothing).
+        let masked = EditDoc {
+            layers: vec![MaskLayer {
+                name: "l".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: AdjustmentSet {
+                    noise_reduction: NoiseReduction {
+                        luminance: 0.9,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            nr_halo_doc(&masked),
+            0,
+            "per-mask NR is not applied, so it must contribute no halo"
+        );
+
+        // Contrast: the identical layer shape, but carrying an active sharpen
+        // instead, DOES contribute via `sharpen_halo_doc` -- proving the zero
+        // above is a deliberate global-only choice for NR specifically, not
+        // an artifact of a doc whose layers never get walked at all.
+        let sharpened = EditDoc {
+            layers: vec![MaskLayer {
+                name: "l".into(),
+                visible: true,
+                mask: MaskDefinition::default(),
+                adjustments: AdjustmentSet {
+                    sharpen: Sharpen {
+                        amount: 0.5,
+                        radius: 4,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        };
+        assert_eq!(sharpen_halo_doc(&sharpened), 4);
+    }
+
+    #[test]
+    fn nr_uniform_is_inactive_at_identity() {
+        use crate::local::NoiseReduction;
+        let u = nr_uniform(&NoiseReduction::default(), 0);
+        assert_eq!(u.active, 0);
+        let u = nr_uniform(
+            &NoiseReduction {
+                luminance: 0.5,
+                ..Default::default()
+            },
+            0,
+        );
+        assert_eq!(u.active, 1);
+    }
+
+    #[test]
+    fn nr_uniform_carries_the_levels_spacing_and_thresholds() {
+        use crate::local::NoiseReduction;
+        let nr = NoiseReduction {
+            luminance: 1.0,
+            detail: 0.0,
+            color: 0.5,
+            color_detail: 0.0,
+        };
+        for level in 0..crate::nr::NR_LEVELS {
+            let u = nr_uniform(&nr, level);
+            assert_eq!(u.level, level as i32);
+            assert_eq!(u.spacing, 1 << level, "spacing = 2^level");
+            assert!(
+                (u.thresholds[0] - crate::nr::threshold_at(1.0, 0.0, level)).abs() < 1e-9,
+                "luma threshold at level {level}"
+            );
+            assert!(
+                (u.thresholds[1] - crate::nr::threshold_at(0.5, 0.0, level)).abs() < 1e-9,
+                "chroma threshold at level {level}"
+            );
+        }
     }
 
     #[test]
@@ -2428,6 +2761,7 @@ mod tests {
             sharpen: crate::op::Sharpen {
                 amount: 0.5,
                 radius: 2,
+                ..Default::default()
             },
             dehaze: crate::op::Dehaze {
                 amount: 0.2,

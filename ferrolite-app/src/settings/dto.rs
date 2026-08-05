@@ -36,6 +36,28 @@ pub enum PersistedEffort {
     Best,
 }
 
+/// Mirrors `ferrolite_export::OutputMedium` (P4 Task 7). `#[serde(default)]`
+/// on the field that holds this keeps settings blobs saved before Task 7
+/// deserializable — see `legacy_export_json_without_effort_defaults_to_balanced`
+/// for the established precedent.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum PersistedOutputMedium {
+    #[default]
+    None,
+    Screen,
+    Glossy,
+    Matte,
+}
+
+/// Mirrors `ferrolite_export::OutputSharpenAmount` (P4 Task 7).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub enum PersistedOutputSharpenAmount {
+    Low,
+    #[default]
+    Standard,
+    High,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PersistedExport {
     pub format: PersistedFormat,
@@ -48,6 +70,10 @@ pub struct PersistedExport {
     pub copy_exif: bool,
     pub embed_icc: bool,
     pub strip_metadata: bool,
+    #[serde(default)]
+    pub sharpen_for: PersistedOutputMedium,
+    #[serde(default)]
+    pub sharpen_amount: PersistedOutputSharpenAmount,
 }
 
 impl Default for PersistedExport {
@@ -88,6 +114,19 @@ impl PersistedExport {
             copy_exif: o.copy_exif,
             embed_icc: o.embed_icc,
             strip_metadata: o.strip_metadata,
+            sharpen_for: match o.sharpen_for {
+                ferrolite_export::OutputMedium::None => PersistedOutputMedium::None,
+                ferrolite_export::OutputMedium::Screen => PersistedOutputMedium::Screen,
+                ferrolite_export::OutputMedium::Glossy => PersistedOutputMedium::Glossy,
+                ferrolite_export::OutputMedium::Matte => PersistedOutputMedium::Matte,
+            },
+            sharpen_amount: match o.sharpen_amount {
+                ferrolite_export::OutputSharpenAmount::Low => PersistedOutputSharpenAmount::Low,
+                ferrolite_export::OutputSharpenAmount::Standard => {
+                    PersistedOutputSharpenAmount::Standard
+                }
+                ferrolite_export::OutputSharpenAmount::High => PersistedOutputSharpenAmount::High,
+            },
         }
     }
 
@@ -122,6 +161,19 @@ impl PersistedExport {
             copy_exif: self.copy_exif,
             embed_icc: self.embed_icc,
             strip_metadata: self.strip_metadata,
+            sharpen_for: match self.sharpen_for {
+                PersistedOutputMedium::None => ferrolite_export::OutputMedium::None,
+                PersistedOutputMedium::Screen => ferrolite_export::OutputMedium::Screen,
+                PersistedOutputMedium::Glossy => ferrolite_export::OutputMedium::Glossy,
+                PersistedOutputMedium::Matte => ferrolite_export::OutputMedium::Matte,
+            },
+            sharpen_amount: match self.sharpen_amount {
+                PersistedOutputSharpenAmount::Low => ferrolite_export::OutputSharpenAmount::Low,
+                PersistedOutputSharpenAmount::Standard => {
+                    ferrolite_export::OutputSharpenAmount::Standard
+                }
+                PersistedOutputSharpenAmount::High => ferrolite_export::OutputSharpenAmount::High,
+            },
         }
     }
 }
@@ -616,6 +668,55 @@ mod tests {
         }"#;
         let parsed: PersistedExport = serde_json::from_str(legacy).expect("deserialize legacy");
         assert_eq!(parsed.effort, PersistedEffort::Balanced);
+    }
+
+    /// P4 Task 7: the export panel's two new combos (`Sharpen for` /
+    /// `Sharpen amount`) must actually persist across a save/load cycle —
+    /// `to_options()` previously hardcoded both to their inactive defaults,
+    /// which would silently discard a user's choice on the very next dialog
+    /// open. If `to_options`/`from_options` regressed back to hardcoding,
+    /// this would fail because the round-tripped value wouldn't match the
+    /// non-default input.
+    #[test]
+    fn export_roundtrip_preserves_output_sharpening_choice() {
+        use ferrolite_export::{ExportOptions, OutputMedium, OutputSharpenAmount};
+        for opts in [
+            ExportOptions {
+                sharpen_for: OutputMedium::Screen,
+                sharpen_amount: OutputSharpenAmount::High,
+                ..ExportOptions::default()
+            },
+            ExportOptions {
+                sharpen_for: OutputMedium::Glossy,
+                sharpen_amount: OutputSharpenAmount::Low,
+                ..ExportOptions::default()
+            },
+            ExportOptions {
+                sharpen_for: OutputMedium::Matte,
+                sharpen_amount: OutputSharpenAmount::Standard,
+                ..ExportOptions::default()
+            },
+        ] {
+            let round = PersistedExport::from_options(&opts).to_options();
+            assert_eq!(round, opts);
+        }
+    }
+
+    /// A settings blob serialized before Task 7's combos existed must still
+    /// deserialize, falling back to the inactive default (`None`/`Standard`)
+    /// rather than failing to parse.
+    #[test]
+    fn legacy_export_json_without_output_sharpening_defaults_to_inactive() {
+        let legacy = r#"{
+            "format":"Jpeg","output_space":"Rec2020","bit_depth":"Eight",
+            "quality":90,"resize":"None","copy_exif":true,"embed_icc":true,"strip_metadata":false
+        }"#;
+        let parsed: PersistedExport = serde_json::from_str(legacy).expect("deserialize legacy");
+        assert_eq!(parsed.sharpen_for, PersistedOutputMedium::None);
+        assert_eq!(
+            parsed.sharpen_amount,
+            PersistedOutputSharpenAmount::Standard
+        );
     }
 
     #[test]

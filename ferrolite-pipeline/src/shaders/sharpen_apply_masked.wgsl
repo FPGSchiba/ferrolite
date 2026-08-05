@@ -27,7 +27,11 @@
 @group(0) @binding(2) var blur: texture_2d<f32>;
 @group(0) @binding(3) var mask: texture_2d<f32>;
 @group(0) @binding(4) var dst: texture_storage_2d<rgba16float, write>;
-struct P { amount: f32, radius: i32, pad0: f32, pad1: f32 };
+// `p.detail`/`p.masking` (P4 Task 5) are declared for layout match, unused in
+// this pass — per-mask-layer sharpen does not yet consume its own
+// detail/masking (they ship greyed pending Task 7); `sharpen_node.rs` always
+// writes 0.0 for both fields on this dispatch.
+struct P { amount: f32, radius: i32, detail: f32, masking: f32 };
 @group(0) @binding(5) var<uniform> p: P;
 
 @compute @workgroup_size(8, 8, 1)

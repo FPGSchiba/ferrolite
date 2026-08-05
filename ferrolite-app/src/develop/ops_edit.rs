@@ -7,7 +7,7 @@
 //! whose `with_global`/`with_layer_adjustments` normalize identity structures
 //! away doc-side, same effect as the old identity-eliding helpers.
 
-use ferrolite_pipeline::{sharpen_halo_doc, LensCorrection, Op, OpStack};
+use ferrolite_pipeline::{nr_halo_doc, sharpen_halo_doc, LensCorrection, Op, OpStack};
 
 /// The stack whose render the viewer should SHOW this frame — the single
 /// source of truth for what extent the preview tier evaluates to:
@@ -125,6 +125,7 @@ pub fn needs_full_rebuild(old: &OpStack, new: &OpStack) -> bool {
     old.geometry() != new.geometry()
         || sharpen_halo_doc(old) != sharpen_halo_doc(new)
         || lens_rebuild_key(old) != lens_rebuild_key(new)
+        || nr_halo_doc(old) != nr_halo_doc(new)
 }
 
 #[cfg(test)]
@@ -289,6 +290,7 @@ mod tests {
         let sharper = base.set_op(Op::Sharpen(Sharpen {
             amount: 0.5,
             radius: 5,
+            ..Default::default()
         }));
         assert!(needs_full_rebuild(&base, &sharper), "halo change: rebuild");
         let geo = base.set_op(Op::Geometry(ferrolite_pipeline::Geometry {
@@ -393,7 +395,11 @@ mod tests {
                 visible: true,
                 mask: Default::default(),
                 adjustments: AdjustmentSet {
-                    sharpen: Sharpen { amount, radius },
+                    sharpen: Sharpen {
+                        amount,
+                        radius,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             }],
@@ -428,6 +434,37 @@ mod tests {
         assert!(
             !needs_full_rebuild(&base, &hidden),
             "hidden mask layer's sharpen: no halo contribution, no rebuild"
+        );
+    }
+
+    /// P4: NR's 62 px halo is baked into `TileEditPipeline` at construction, so
+    /// flipping NR on or off must force a full rebuild.
+    #[test]
+    fn nr_toggle_forces_rebuild_via_halo() {
+        use ferrolite_pipeline::NoiseReduction;
+        let base = OpStack::default();
+        let mut on = OpStack::default();
+        on.global.noise_reduction = NoiseReduction {
+            luminance: 0.5,
+            ..Default::default()
+        };
+        assert!(
+            needs_full_rebuild(&base, &on),
+            "NR on: halo 0 -> 62 forces rebuild"
+        );
+        assert!(
+            needs_full_rebuild(&on, &base),
+            "NR off: halo 62 -> 0 forces rebuild"
+        );
+        // A strength change at constant halo does NOT need a rebuild.
+        let mut stronger = OpStack::default();
+        stronger.global.noise_reduction = NoiseReduction {
+            luminance: 0.9,
+            ..Default::default()
+        };
+        assert!(
+            !needs_full_rebuild(&on, &stronger),
+            "strength-only change keeps the same halo"
         );
     }
 }

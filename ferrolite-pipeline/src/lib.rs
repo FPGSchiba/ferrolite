@@ -12,6 +12,8 @@ mod local;
 mod local_node;
 mod mask_overlay;
 mod nodes;
+mod nr;
+mod nr_node;
 mod op;
 mod pipeline;
 mod rcd_gpu;
@@ -42,6 +44,10 @@ pub use local::{
 pub use local_node::EngineStage;
 pub use mask_overlay::{overlay_tint, MaskOverlayCompositor, OverlayTexture};
 pub use nodes::{color_convert, upload_source};
+pub use nr::{
+    atrous_shrink_reference, b3_spline_2d, b3_spline_h, b3_spline_v, nr_halo_px, rgb_to_ycbcr,
+    shrink, threshold_at, ycbcr_to_rgb, NR_LEVELS, NR_NOISE_SCALE,
+};
 pub use op::{
     Aspect, ColorGrade, Contrast, Correction, CropRect, CurveMode, Dehaze, EditDoc, Exposure,
     Geometry, GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve,
@@ -64,12 +70,15 @@ pub use tile_edit::TileEditPipeline;
 // geometry pass's projective (keystone) mapping — GPU parity tests and any
 // future keystone-aware coordinate mapping consume them; `KEYSTONE_STRENGTH`
 // is the single named tuning constant for keystone responsiveness (spec C4).
+// `nr_uniform`/`NrUniform` stay `pub(crate)` (final-review FIX 9): built and
+// consumed entirely inside `nr_node.rs`, with no external consumer — only
+// `nr_halo`/`nr_halo_doc` (which `ferrolite-app` actually uses) are exported.
 pub use uniforms::{
     clamp_uv_to_crop_bounds, color_grade_px, curve_lut, geometry_src_px, geometry_tile_uniform,
-    geometry_uniform, lens_halo_px, lens_uniform, parametric_curve_lut, sharpen_halo,
-    sharpen_halo_doc, tone_curve_luts, vignette_amount, ColorGradeUniform, GeometryUniform,
-    HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
-    KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS,
+    geometry_uniform, lens_halo_px, lens_uniform, nr_halo, nr_halo_doc, parametric_curve_lut,
+    sharpen_halo, sharpen_halo_doc, tone_curve_luts, vignette_amount, ColorGradeUniform,
+    GeometryUniform, HslUniform, LensUniform, LocalAdjustUniform, SharpenUniform, VignetteUniform,
+    KEYSTONE_STRENGTH, MAX_SHARPEN_RADIUS, SHARPEN_MASK_GRADIENT_NORM,
 };
 
 /// Pre-compile every edit-pass shader on `ctx` so the first image open reuses
@@ -127,7 +136,11 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
         // compiled here — `SharpenNode` (both pipelines) now dispatches the
         // passes below instead. `sharpen-apply-masked` (Phase 4 Task 4) is
         // the per-mask-layer masked apply, only ever dispatched when a
-        // visible layer has its own active sharpen.
+        // visible layer has its own active sharpen. `sharpen-apply-detail`
+        // (Phase 4 Task 5) is the Detail/Masking-aware GLOBAL apply, only
+        // dispatched when the global op's `detail`/`masking` isn't both zero
+        // (the zero case keeps dispatching `sharpen-apply` unchanged, so that
+        // path stays byte-exact — see `sharpen_node.rs`'s doc).
         ("sharpen-box-h", include_str!("shaders/sharpen_box_h.wgsl")),
         ("sharpen-box-v", include_str!("shaders/sharpen_box_v.wgsl")),
         ("sharpen-apply", include_str!("shaders/sharpen_apply.wgsl")),
@@ -135,6 +148,13 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "sharpen-apply-masked",
             include_str!("shaders/sharpen_apply_masked.wgsl"),
         ),
+        (
+            "sharpen-apply-detail",
+            include_str!("shaders/sharpen_apply_detail.wgsl"),
+        ),
+        ("nr-atrous", include_str!("shaders/nr_atrous.wgsl")),
+        ("nr-combine", include_str!("shaders/nr_combine.wgsl")),
+        ("nr-clear", include_str!("shaders/nr_clear.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
         ("local-adjust", include_str!("shaders/local_adjust.wgsl")),

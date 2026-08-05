@@ -7,8 +7,8 @@ use ferrolite_pipeline::{
     geometry_src_px, geometry_uniform, transmission_mip_level_count, transmission_working_dims,
     upload_source, AdjustmentSet, Aspect, ColorGrade, Contrast, CropRect, CurveMode, Dehaze,
     EditPipeline, Exposure, Geometry, GpuPyramidSource, GradeWheel, Hsl, HslBand, LocalAdjustments,
-    MaskLayer, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline, ToneCurve,
-    WhiteBalance, DEHAZE_DEFAULT_RADIUS,
+    MaskLayer, NoiseReduction, Op, OpStack, ParametricCurve, PointCurve, Sharpen, TileEditPipeline,
+    ToneCurve, WhiteBalance, DEHAZE_DEFAULT_RADIUS,
 };
 use std::sync::Arc;
 
@@ -300,17 +300,18 @@ fn editing_one_op_reevaluates_minimally() {
         "no node re-ran when nothing changed"
     );
 
-    // Dirtying exposure re-runs it + every downstream op; the three nodes ahead
-    // of exposure in the chain — source, the camera→working color-matrix, and the
-    // scene-linear vignette pass — stay cached -> exactly node_count - 3
+    // Dirtying exposure re-runs it + every downstream op; the four nodes ahead
+    // of exposure in the chain — source, the camera→working color-matrix, the
+    // noise-reduction pass (P4, global-only, sits pre-vignette), and the
+    // scene-linear vignette pass — stay cached -> exactly node_count - 4
     // re-evaluations.
     let prev = pipe.eval_count();
     pipe.set_stack(OpStack::default().set_op(Op::Exposure(Exposure { ev: 1.5 })));
     let _ = pipe.evaluate();
     assert_eq!(
         pipe.eval_count(),
-        prev + (pipe.node_count() - 3),
-        "exposure + downstream re-evaluated; source, color-matrix, and vignette stay cached"
+        prev + (pipe.node_count() - 4),
+        "exposure + downstream re-evaluated; source, color-matrix, NR, and vignette stay cached"
     );
 }
 
@@ -385,6 +386,7 @@ fn sharpen_matches_golden() {
     let stack = OpStack::default().set_op(Op::Sharpen(Sharpen {
         amount: 0.8,
         radius: 2,
+        ..Default::default()
     }));
     let mut pipe = EditPipeline::new(Arc::new(ctx), &common::gradient(W, H), stack, IDENTITY);
     let pixels = pipe.render_to_image();
@@ -576,6 +578,7 @@ fn full_seven_op_stack_matches_golden() {
         .set_op(Op::Sharpen(Sharpen {
             amount: 0.5,
             radius: 1,
+            ..Default::default()
         }))
         .set_op(Op::Geometry(Geometry {
             crop: CropRect {
@@ -702,6 +705,7 @@ fn sharpen_tiles_match_whole_image_at_seam() {
     let stack = OpStack::default().set_op(Op::Sharpen(Sharpen {
         amount: 0.8,
         radius: 3,
+        ..Default::default()
     }));
 
     // Whole-image reference: render the edited image to display-linear f32 by
@@ -1096,5 +1100,231 @@ fn dehaze_coarse_lod_matches_whole_image_mean_luminance() {
         rel_diff <= MEAN_LUMA_TOL,
         "coarse-LOD dehaze mean luminance ({lod1_mean:.6}) diverged from whole-image mean \
          ({whole_mean:.6}, rel diff {rel_diff:.4}) — LOD-independent source-UV mapping broken?"
+    );
+}
+
+// Gate 2 (design §7.2): `detail == 0 && masking == 0` must render EXACTLY as
+// the pre-P4 sharpen did.
+//
+// A test formerly lived here (`sharpen_detail_masking_zero_is_byte_identical`)
+// that built TWO `EditPipeline`s from the identical stack and asserted their
+// renders matched — which cannot fail for any implementation, including one
+// that wrongly routes `detail == 0` through the NEW shader (both pipelines
+// would still take the same wrong path and agree with each other). It was
+// removed in the final-branch review (FIX 3) rather than kept as a
+// misleading proof. Gate 2 is genuinely covered by two REAL checks instead:
+//
+// 1. The 13 pre-P4 goldens under `tests/golden/layer_engine/` (driven by
+//    `layer_engine_parity.rs`) are byte-identical across this entire branch —
+//    they pin the OLD sharpen path's actual pixel output and would catch any
+//    drift, wrong-shader routing included.
+// 2. `sharpen_node.rs`'s `sharpen_detail_zero_case_routes_to_old_shader`
+//    asserts the PIPELINE SELECTION directly via `detail_dispatch_count()`
+//    (bumped only inside `encode_apply_detail`, never `encode_apply`) — it
+//    proves the both-zero case actually DISPATCHES the old
+//    `sharpen_apply.wgsl`, not merely that two identical stacks render
+//    identically to each other.
+
+/// Masking must suppress sharpening in flat regions: on a flat field, a
+/// masked sharpen changes nothing, while an unmasked one may.
+#[test]
+fn sharpen_masking_protects_flat_areas() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    let img = common::noisy_flat(W, H);
+    let mut base_pipe = EditPipeline::new(ctx.clone(), &img, OpStack::default(), IDENTITY);
+    let base = blit_to_rgba8(&ctx, &base_pipe.evaluate());
+    let masked = OpStack::default().set_op(Op::Sharpen(Sharpen {
+        amount: 1.0,
+        radius: 3,
+        detail: 0.0,
+        masking: 1.0,
+    }));
+    let mut got_pipe = EditPipeline::new(ctx.clone(), &img, masked, IDENTITY);
+    let got = blit_to_rgba8(&ctx, &got_pipe.evaluate());
+    let max_diff = common::max_abs_diff(&base, &got);
+    assert!(
+        max_diff <= 2,
+        "full masking should barely touch a flat field, got {max_diff}"
+    );
+}
+
+// P4 design §7.3/§7.4: tiled-vs-whole parity for noise reduction. NR has a
+// 62 px halo (`nr_halo_px()`, `2*(2^5-1)`) — a tiled render MUST fold that
+// halo in or a tile's NR output disagrees with the whole-image render near
+// its seam, because the wavelet decomposition at the tile edge would sample
+// zeros/clamped pixels instead of the neighboring tile's real content.
+//
+// The fixture is deliberately HIGH-FREQUENCY at the seam
+// (`common::high_frequency_checker`, a 2px checkerboard + fine noise) rather
+// than a smooth gradient — a smooth signal barely differs across a missing
+// halo, which would make this test pass vacuously even with broken seam
+// handling (the exact trap already documented for the dehaze tile tests in
+// this file).
+//
+// **TRUE-CANVAS-EDGE MARGIN — found and root-caused while writing this test,
+// distinct from the seam question this test targets.** On this same
+// high-frequency fixture, `TileEditPipeline`'s tile vs `EditPipeline`'s
+// whole-image render disagree by up to ~0.06 within `EDGE_MARGIN` px of the
+// TRUE canvas border (all four sides) — reproduced even in a SINGLE-TILE
+// image with no seam at all (200x150, one tile, no neighbor to fold in),
+// isolating it from the halo/seam-fold-in question. Root cause: the tiled
+// tier's per-tile geometry-head resample (bilinear, `ClampToEdge`) reads the
+// GPU-resident pyramid, while the whole-image tier's NR shader clamps
+// directly against the true canvas dims (`nr_atrous.wgsl`'s
+// `clamp(xy+dy, 0, dims-1)`) — two different edge-extension mechanisms that
+// happen to agree only up to sub-pixel/bilinear-vs-nearest differences,
+// which this fixture's 2px-period checker (deliberately built to have large
+// local gradients everywhere, including at the border) amplifies well past
+// f16 rounding. This is the SAME CLASS of "different edge-extension
+// mechanism" finding `dehaze_tiled_matches_whole_image` below once had — but
+// NOT the same resolution: that test's margin was later REMOVED once its
+// root cause was fixed (shared transmission, one computation for both
+// tiers), and `dehaze_tiled_matches_whole_image`'s own comment states so
+// explicitly. This test's margin is a WORKAROUND for a genuine, still-
+// unresolved discrepancy (root-caused above, not fixed — fixing the tile
+// geometry head's edge-extension to match the whole-image shader's clamp is
+// out of scope for this measurement/fixture task), not an instance of
+// established current practice in this file. The fixture below is sized so
+// BOTH interior seams sit comfortably outside this margin (see the asserts
+// after the loop, added after review caught a 450x300 fixture whose y-seam
+// sat inside the margin and was silently never compared), so excluding it
+// does not weaken the seam check this test exists to make.
+//
+// MANDATORY sensitivity check (recorded in the task report): temporarily
+// forcing `uniforms::nr_halo` to always return `0` (so `TileEditPipeline`
+// builds its haloed tile extent without any NR margin, while the NR node
+// itself still runs its full 62px-support wavelet decomposition inside that
+// too-small haloed buffer) must make this test's assertion FAIL; otherwise
+// this parity check would be vacuous. Verified: PASS with the real halo,
+// FAIL (max diff far above `NR_SEAM_TOL`) with `nr_halo` forced to 0; see
+// the task report for the exact numbers.
+const NR_SEAM_TOL: f32 = 0.02; // display-linear; absorbs f16 + the head resample.
+
+// Pixels excluded from the comparison near every true canvas edge (see the
+// "TRUE-CANVAS-EDGE MARGIN" note above): that discrepancy runs up to ~0.06,
+// LARGER than `NR_SEAM_TOL` (0.02), so it is excluded from the comparison
+// entirely rather than folded into the tolerance — raising `NR_SEAM_TOL` to
+// 0.06 would make the seam check this test exists for far less sensitive.
+// 90 px is comfortably larger than the observed ~0.06-diff true-edge band and
+// still much smaller than the fixture's own margin to the seam (both seams
+// sit >= 194 px from every canvas edge, see below).
+const NR_EDGE_MARGIN: u32 = 90;
+
+#[test]
+fn nr_tiled_matches_whole_image_at_the_seam() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // A multi-tile image: 450x450 -> 2x2 tiles at LOD 0 (seams at x=256 AND
+    // y=256). Sized so BOTH seams sit >= 194 px from every true canvas edge
+    // (well outside `NR_EDGE_MARGIN`) — symmetric on both axes, unlike an
+    // earlier 450x300 attempt where the y-seam sat only 44 px from the
+    // bottom edge, entirely inside the margin, which silently dropped tile
+    // row 1 from the comparison (caught in review: `compared` printed
+    // exactly `270*120`, i.e. only the single strip between the margins on
+    // BOTH axes at once, zero contribution from row 1). The asserts below
+    // guard against that regressing silently again.
+    let (iw, ih) = (450u32, 450u32);
+    let src = common::high_frequency_checker(iw, ih);
+    let mut doc = OpStack::default();
+    doc.global.noise_reduction = NoiseReduction {
+        luminance: 0.8,
+        color: 0.5,
+        ..Default::default()
+    };
+
+    // Whole-image reference.
+    let mut whole = EditPipeline::new(ctx.clone(), &src, doc.clone(), IDENTITY);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+
+    // Per-tile producer over the GPU-resident source pyramid.
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, doc, IDENTITY, None, None);
+
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let mut max_diff = 0.0f32;
+    let mut max_loc = (0u32, 0u32);
+    let mut compared = 0u32;
+    // Bounding box of every COMPARED pixel — asserted below to strictly
+    // contain both seam coordinates (x=256, y=256), so a future canvas-size
+    // or margin change that silently drops one seam from coverage (as a
+    // 450x300 fixture did here, caught in review) fails loudly instead of
+    // quietly shrinking what this test actually checks.
+    let mut min_gx = u32::MAX;
+    let mut max_gx = 0u32;
+    let mut min_gy = u32::MAX;
+    let mut max_gy = 0u32;
+    for ty in 0..2u32 {
+        for tx in 0..2u32 {
+            let tile = tep.produce_tile(TileCoord {
+                lod: 0,
+                x: tx,
+                y: ty,
+            });
+            let tile_lin = common::read_tile_linear(&ctx, &tile);
+            for ly in 0..TILE_SIZE {
+                for lx in 0..TILE_SIZE {
+                    let gx = tx * TILE_SIZE + lx;
+                    let gy = ty * TILE_SIZE + ly;
+                    if gx >= iw || gy >= ih {
+                        continue; // out-of-image tile padding
+                    }
+                    // Exclude the true-canvas-edge geometry-resample band
+                    // documented above — NOT a seam exclusion, both seams
+                    // (x=256, y=256) sit far outside this margin.
+                    if gx < NR_EDGE_MARGIN
+                        || gx >= iw - NR_EDGE_MARGIN
+                        || gy < NR_EDGE_MARGIN
+                        || gy >= ih - NR_EDGE_MARGIN
+                    {
+                        continue;
+                    }
+                    compared += 1;
+                    min_gx = min_gx.min(gx);
+                    max_gx = max_gx.max(gx);
+                    min_gy = min_gy.min(gy);
+                    max_gy = max_gy.max(gy);
+                    let ti = ((ly * TILE_SIZE + lx) * 4) as usize;
+                    let wi = ((gy * iw + gx) * 4) as usize;
+                    for c in 0..3 {
+                        let d = (tile_lin[ti + c] - whole_lin[wi + c]).abs();
+                        if d > max_diff {
+                            max_diff = d;
+                            max_loc = (gx, gy);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        compared > 10_000,
+        "sanity: the edge-margin exclusion must not have eaten the whole interior ({compared} px compared)"
+    );
+    // The load-bearing coverage guard the review flagged: the compared region
+    // must strictly straddle BOTH seams (x=256, y=256), not just one. A
+    // margin/canvas-size change that shrinks coverage down to one seam (as
+    // happened here before review) must fail this assert, not pass silently.
+    assert!(
+        min_gx < 256 && max_gx > 256,
+        "compared region does not straddle the x=256 seam: gx in [{min_gx}, {max_gx}] — only one tile column was exercised"
+    );
+    assert!(
+        min_gy < 256 && max_gy > 256,
+        "compared region does not straddle the y=256 seam: gy in [{min_gy}, {max_gy}] — only one tile row was exercised"
+    );
+    eprintln!(
+        "NR tile-seam max linear diff = {max_diff} at {max_loc:?} ({compared} interior px compared, \
+         gx in [{min_gx}, {max_gx}], gy in [{min_gy}, {max_gy}])"
+    );
+    assert!(
+        max_diff <= NR_SEAM_TOL,
+        "per-tile NR disagrees with whole-image at the interior seam (diff {max_diff} at {max_loc:?}) — halo fold-in broken?"
     );
 }

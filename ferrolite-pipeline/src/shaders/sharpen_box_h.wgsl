@@ -11,9 +11,12 @@
 // writes ONE buffer and binds it to all three passes). The node's `evaluate`
 // never dispatches this shader when `amount == 0 || radius <= 0` (identity
 // passthrough — see `sharpen_node.rs`), so `p.radius` is always >= 1 here.
+// `p.detail`/`p.masking` (P4 Task 5) are likewise unused here — declared only
+// so this struct's layout matches `SharpenUniform` byte-for-byte (see that
+// struct's field docs for why it must stay exactly 16 bytes).
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba16float, write>;
-struct P { amount: f32, radius: i32, pad0: f32, pad1: f32 };
+struct P { amount: f32, radius: i32, detail: f32, masking: f32 };
 @group(0) @binding(2) var<uniform> p: P;
 
 @compute @workgroup_size(8, 8, 1)

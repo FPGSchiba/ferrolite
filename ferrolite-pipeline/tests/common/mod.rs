@@ -28,6 +28,64 @@ pub fn gradient(w: u32, h: u32) -> LinearRgbaF32 {
     LinearRgbaF32::new(w, h, px).expect("gradient length")
 }
 
+/// A flat mid-grey field with deterministic pseudo-noise — the NR fixture.
+/// Deterministic (an LCG, no `rand` dependency) so goldens are reproducible.
+pub fn noisy_flat(w: u32, h: u32) -> LinearRgbaF32 {
+    let mut state = 987_654_321u32;
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for _ in 0..w * h {
+        for _ in 0..3 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            px.push(0.35 + ((state >> 16) as f32 / 65535.0 - 0.5) * 0.10);
+        }
+        px.push(1.0);
+    }
+    LinearRgbaF32::new(w, h, px).expect("noisy_flat length")
+}
+
+/// A deterministic HIGH-FREQUENCY fixture: a 64px macro-block checker (large-
+/// scale content that genuinely DIFFERS from one side of a `TILE_SIZE=256`
+/// boundary to the other, since 256 is a multiple of 64) carrying a 2px-period
+/// fine checkerboard plus fine pseudo-noise on top (an LCG, no `rand`
+/// dependency, so comparisons are reproducible).
+///
+/// **Both layers are load-bearing, found by bug-injection while writing the
+/// P4 tile-seam test.** A pure 2px checker + noise (no macro-block layer) is
+/// *stationary* — statistically identical on both sides of any tile
+/// boundary — so à trous NR's wide-support (up to 32px reach at level 4)
+/// taps see the "same distribution" whether they read the real neighboring
+/// tile or a clamped duplicate of their own tile's edge column/row; forcing
+/// `nr_halo` to 0 measurably changed almost nothing (~1e-3) with that fixture
+/// alone, which would have made the seam test vacuous. The 64px macro-block
+/// (aligned so a step in its coarse value sits exactly at every multiple of
+/// `TILE_SIZE`) gives the wide-support taps a genuine large-scale
+/// discontinuity to disagree about, while the fine checker still prevents the
+/// OTHER vacuous failure mode (a smooth gradient barely differing across a
+/// missing halo at all).
+pub fn high_frequency_checker(w: u32, h: u32) -> LinearRgbaF32 {
+    let mut state = 421_337_777u32;
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let macro_block = if (x / 64 + y / 64) % 2 == 0 {
+                0.75
+            } else {
+                0.25
+            };
+            let fine = if (x / 2 + y / 2) % 2 == 0 {
+                0.06
+            } else {
+                -0.06
+            };
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((state >> 16) as f32 / 65535.0 - 0.5) * 0.04;
+            let v = (macro_block + fine + noise).clamp(0.0, 1.0);
+            px.extend_from_slice(&[v, v, v, 1.0]);
+        }
+    }
+    LinearRgbaF32::new(w, h, px).expect("high_frequency_checker length")
+}
+
 pub fn max_abs_diff(a: &[u8], b: &[u8]) -> u8 {
     a.iter()
         .zip(b.iter())

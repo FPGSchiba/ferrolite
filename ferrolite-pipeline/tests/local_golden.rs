@@ -312,6 +312,7 @@ fn tile_masked_adjustment_with_sharpen_halo_matches_preview_region() {
     let sharpen = Sharpen {
         amount: 0.5,
         radius: 3,
+        ..Default::default()
     };
     assert!(
         sharpen_halo(Some(sharpen)) > 0,

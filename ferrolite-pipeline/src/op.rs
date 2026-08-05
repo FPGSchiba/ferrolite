@@ -208,6 +208,14 @@ pub struct Sharpen {
     pub amount: f32,
     /// Box-blur radius in pixels (drives the halo size in Plan 3). 0 = identity.
     pub radius: u32,
+    /// Halo suppression (0..1): weights the high-pass toward a narrower `r/3`
+    /// kernel. 0 = pre-P4 behavior exactly (design §4.3).
+    #[serde(default)]
+    pub detail: f32,
+    /// Edge masking (0..1): suppresses sharpening in flat areas so it does not
+    /// re-amplify the noise NR removed. 0 = no masking, `edge == 1` everywhere.
+    #[serde(default)]
+    pub masking: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -667,6 +675,7 @@ mod tests {
             .set_op(Op::Sharpen(Sharpen {
                 amount: 0.6,
                 radius: 3,
+                ..Default::default()
             }));
         assert_eq!(d.exposure(), Some(Exposure { ev: 0.75 }));
         assert_eq!(
@@ -688,7 +697,8 @@ mod tests {
             d.sharpen(),
             Some(Sharpen {
                 amount: 0.6,
-                radius: 3
+                radius: 3,
+                ..Default::default()
             })
         );
         assert!(!d.is_identity());
@@ -731,6 +741,7 @@ mod tests {
         let sharpened = default.set_op(Op::Sharpen(Sharpen {
             amount: 0.0,
             radius: 3, // non-canonical radius, but amount 0 => identity
+            ..Default::default()
         }));
         assert!(sharpened.is_identity());
         assert_eq!(
@@ -848,6 +859,7 @@ mod tests {
             .set_op(Op::Sharpen(Sharpen {
                 amount: 0.5,
                 radius: 2,
+                ..Default::default()
             }))
             .set_op(Op::Geometry(Geometry {
                 crop: CropRect {
@@ -866,7 +878,8 @@ mod tests {
             d.sharpen(),
             Some(Sharpen {
                 amount: 0.5,
-                radius: 2
+                radius: 2,
+                ..Default::default()
             })
         );
         assert_eq!(d.geometry().unwrap().angle_deg, 5.0);
@@ -948,6 +961,7 @@ mod tests {
             .set_op(Op::Sharpen(Sharpen {
                 amount: 0.3,
                 radius: 1,
+                ..Default::default()
             }))
             .set_op(Op::LocalAdjustments(la.clone()))
             .set_op(Op::Hsl(Hsl {
@@ -961,7 +975,8 @@ mod tests {
             d.sharpen(),
             Some(Sharpen {
                 amount: 0.3,
-                radius: 1
+                radius: 1,
+                ..Default::default()
             })
         );
         assert_eq!(d.local_adjustments(), Some(la));
@@ -1040,6 +1055,7 @@ mod tests {
             .set_op(Op::Sharpen(Sharpen {
                 amount: 0.3,
                 radius: 1,
+                ..Default::default()
             }))
             .set_op(cg.clone())
             .set_op(Op::Hsl(Hsl {
@@ -1054,7 +1070,8 @@ mod tests {
             d.sharpen(),
             Some(Sharpen {
                 amount: 0.3,
-                radius: 1
+                radius: 1,
+                ..Default::default()
             })
         );
         assert_eq!(d.hsl().unwrap().bands[0].hue, 0.1);
@@ -1337,6 +1354,7 @@ mod tests {
             .set_op(Op::Sharpen(Sharpen {
                 amount: 0.6,
                 radius: 3,
+                ..Default::default()
             }));
         let json = serde_json::to_string(&d).unwrap();
         assert_eq!(serde_json::from_str::<EditDoc>(&json).unwrap(), d);
@@ -1389,6 +1407,7 @@ mod tests {
         set.sharpen = Sharpen {
             amount: 0.0,
             radius: 5,
+            ..Default::default()
         }; // identity, non-canonical
         let d2 = d.with_layer_adjustments(1, set);
         assert_eq!(

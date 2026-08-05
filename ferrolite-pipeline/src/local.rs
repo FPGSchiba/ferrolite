@@ -29,6 +29,38 @@ pub struct NoiseReduction {
     pub color_detail: f32,
 }
 
+impl NoiseReduction {
+    /// True when EVERY field, including `detail`/`color_detail`, is
+    /// zero-identity — "byte-equal to a reset". This is the meaning
+    /// `normalized()`, the serde hash, and the identity-equals-reset
+    /// invariant need: a struct that is bit-for-bit its own `Default`.
+    ///
+    /// Deliberately NOT the gate for "will this actually change pixels" —
+    /// that is [`is_active`](Self::is_active). `detail`/`color_detail` alone
+    /// (with `luminance == 0.0 && color == 0.0`) is NOT identity by this
+    /// definition, yet changes no pixel: every threshold is
+    /// `strength · s_l · f(detail, l)`, so a zero `strength` zeroes the
+    /// threshold regardless of `detail`, and `soft_shrink(d, 0) == d`
+    /// exactly. Keep the two concepts distinct — conflating them is exactly
+    /// what let a detail-only edit fall through to a full, lossy, ~1 GiB
+    /// no-op pipeline rebuild (final-review FIX 1).
+    pub fn is_identity(&self) -> bool {
+        self.luminance == 0.0 && self.detail == 0.0 && self.color == 0.0 && self.color_detail == 0.0
+    }
+
+    /// True when NR will actually change pixels — i.e. some threshold can be
+    /// nonzero. Only `luminance`/`color` (the two `strength` inputs) gate
+    /// this: `detail`/`color_detail` alone cannot move a threshold off zero
+    /// (see [`is_identity`](Self::is_identity)'s doc for why). This, NOT
+    /// `is_identity`, is the gate `NoiseReductionNode::evaluate`'s early
+    /// return and `uniforms::nr_halo` key off — both must skip all GPU work
+    /// whenever NR cannot possibly change the image, not only when every
+    /// field happens to be a byte-exact reset.
+    pub fn is_active(&self) -> bool {
+        self.luminance > 0.0 || self.color > 0.0
+    }
+}
+
 /// Per-mask point-op adjustments. All scalars are zero-identity; `Default` is the
 /// no-op set. Serde uses `#[serde(default)]` on every field so a payload written
 /// by an older/newer build (missing/extra fields) loads as identity for those.
@@ -122,7 +154,7 @@ impl AdjustmentSet {
             && self.color_grade.is_identity()
             && self.sharpen.amount == 0.0
             && self.dehaze.is_identity()
-            && self.noise_reduction == NoiseReduction::default()
+            && self.noise_reduction.is_identity()
     }
 
     /// Copy with every identity-valued STRUCTURED field snapped to its exact
@@ -416,6 +448,7 @@ mod tests {
         s.sharpen = crate::op::Sharpen {
             amount: 0.8,
             radius: 2,
+            ..Default::default()
         };
         s.dehaze.amount = -0.3;
         let json = serde_json::to_string(&s).unwrap();

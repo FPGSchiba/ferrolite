@@ -23,6 +23,10 @@ fast_image_resize = { workspace = true }
 little_exif = { workspace = true }
 half = { workspace = true }
 bytemuck = { workspace = true }
+# Already resolved in the workspace lockfile (ferrolite-app/-catalog/-decode depend
+# on it); wiring it into this crate for the output-sharpen unsharp pass adds no new
+# crate to the dependency graph.
+rayon = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }
 # `asm` (a ravif default feature) enables rav1e's NASM-assembly path, whose build

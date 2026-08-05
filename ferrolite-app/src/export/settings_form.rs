@@ -2,7 +2,9 @@
 //! dialog so the batch Export module's settings panel renders identical controls.
 
 use ferrolite_color::WorkingSpace;
-use ferrolite_export::{BitDepth, Effort, ExportFormat, ExportOptions, ResizeSpec};
+use ferrolite_export::{
+    BitDepth, Effort, ExportFormat, ExportOptions, OutputMedium, OutputSharpenAmount, ResizeSpec,
+};
 
 /// Draw every export option control into `ui`. Callers own the surrounding
 /// window/panel and any confirm/cancel affordances.
@@ -99,6 +101,48 @@ pub fn settings_form(ui: &mut egui::Ui, o: &mut ExportOptions) {
         }
         _ => ResizeSpec::None,
     };
+
+    egui::ComboBox::from_label("Sharpen for")
+        .selected_text(match o.sharpen_for {
+            OutputMedium::None => "None",
+            OutputMedium::Screen => "Screen",
+            OutputMedium::Glossy => "Glossy paper",
+            OutputMedium::Matte => "Matte paper",
+        })
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut o.sharpen_for, OutputMedium::None, "None");
+            ui.selectable_value(&mut o.sharpen_for, OutputMedium::Screen, "Screen");
+            ui.selectable_value(&mut o.sharpen_for, OutputMedium::Glossy, "Glossy paper");
+            ui.selectable_value(&mut o.sharpen_for, OutputMedium::Matte, "Matte paper");
+        });
+
+    // Greyed with a reason while no medium is chosen — the amount tier only
+    // means something once output sharpening is on (same greyed-with-reason
+    // convention as the Develop panel's unavailable controls). Only attach a
+    // tooltip on the disabled path: an empty `on_hover_text("")` on the
+    // enabled path renders an empty tooltip frame on hover for no reason.
+    let amount_response = ui
+        .add_enabled_ui(o.sharpen_for != OutputMedium::None, |ui| {
+            egui::ComboBox::from_label("Sharpen amount")
+                .selected_text(match o.sharpen_amount {
+                    OutputSharpenAmount::Low => "Low",
+                    OutputSharpenAmount::Standard => "Standard",
+                    OutputSharpenAmount::High => "High",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut o.sharpen_amount, OutputSharpenAmount::Low, "Low");
+                    ui.selectable_value(
+                        &mut o.sharpen_amount,
+                        OutputSharpenAmount::Standard,
+                        "Standard",
+                    );
+                    ui.selectable_value(&mut o.sharpen_amount, OutputSharpenAmount::High, "High");
+                });
+        })
+        .response;
+    if o.sharpen_for == OutputMedium::None {
+        amount_response.on_hover_text("Choose an output medium to enable output sharpening");
+    }
 
     ui.separator();
     ui.checkbox(&mut o.copy_exif, "Copy EXIF metadata");

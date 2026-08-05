@@ -36,7 +36,7 @@ use ferrolite_image::LinearRgbaF32;
 use ferrolite_mask::{CompositeMode, MaskComponent, MaskDefinition, Rgb, Vec2};
 use ferrolite_pipeline::{
     AdjustmentSet, ColorGrade, ColorSwatch, Contrast, Dehaze, Exposure, GradeWheel, Hsl,
-    LocalAdjustments, MaskLayer, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
+    LocalAdjustments, MaskLayer, NoiseReduction, Op, OpStack, Sharpen, ToneCurve, WhiteBalance,
 };
 
 /// Tolerance for comparing rendered fixture output (scene-linear f32, RGB
@@ -304,6 +304,7 @@ fn masked_layer_sharpen_distinct_radius() -> MaskLayer {
             sharpen: Sharpen {
                 amount: 1.0,
                 radius: 4,
+                ..Default::default()
             },
             ..Default::default()
         },
@@ -326,6 +327,7 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                 .set_op(Op::Sharpen(Sharpen {
                     amount: 0.8,
                     radius: 2,
+                    ..Default::default()
                 }))
                 .set_op(Op::Dehaze(Dehaze {
                     amount: 0.3,
@@ -457,10 +459,83 @@ pub fn fixture_docs() -> Vec<(&'static str, OpStack)> {
                 .set_op(Op::Sharpen(Sharpen {
                     amount: 0.8,
                     radius: 2,
+                    ..Default::default()
                 }))
                 .set_op(Op::LocalAdjustments(LocalAdjustments {
                     layers: vec![masked_layer_sharpen_distinct_radius()],
                 })),
+        ),
+        // `nr_luma`: P4 (noise-reduction phase) coverage — luma-only à trous
+        // NR (strength 0.8, detail 0.2) COMPOSED WITH `light_trio`'s exposure/
+        // contrast/WB, so the fixture exercises NR alongside the pre-existing
+        // Light-stage engine rather than in isolation (NR sits upstream of the
+        // light engine, so "NR then light adjustments" is a genuinely distinct
+        // scenario from "NR alone" — the one this fixture is meant to pin).
+        //
+        // A first attempt wrote this via `light_trio_stack().with_global(AdjustmentSet
+        // { noise_reduction: ..., ..Default::default() })` — WRONG, caught in review:
+        // `EditDoc::with_global` does `d.global = set.normalized()`, replacing `global`
+        // WHOLESALE, so that call silently zeroed the exposure/contrast/temp/tint
+        // `light_trio_stack()` had just set, leaving the doc's `global.exposure == 0.0`
+        // etc. (confirmed empirically) — the fixture rendered NR in isolation on the bare
+        // sweep, contradicting its own doc comment. Fixed below by mutating
+        // `global.noise_reduction` directly on the ALREADY-BUILT `light_trio_stack()`
+        // doc (the same direct-field pattern `nr_node.rs`'s and `engine_bench.rs`'s own
+        // NR tests use), so light_trio's fields survive. `vibrance_global`
+        // (a few fixtures above) remains the correct precedent for a genuinely
+        // GLOBAL-ONLY `AdjustmentSet` field with no dedicated `Op` variant written via
+        // a SINGLE `with_global` call that sets every field it needs at once — the bug
+        // here was calling `with_global` a SECOND time on a doc whose `global` was
+        // already populated by a different path (`set_op`), not `with_global` itself.
+        ("nr_luma", {
+            let mut d = light_trio_stack();
+            d.global.noise_reduction = NoiseReduction {
+                luminance: 0.8,
+                detail: 0.2,
+                ..Default::default()
+            };
+            d
+        }),
+        // `nr_chroma`: chroma-only NR (strength 0.8, chroma detail 0.2) composed with
+        // the same `light_trio` base (see `nr_luma`'s comment for the composition-bug
+        // history and why the direct-field-mutation form below is correct). Guards the
+        // specific failure mode design §9 calls out: chroma shrinkage desaturating hard
+        // color edges — this fixture pins the fused engine's chroma NR output against
+        // exactly that risk on the HSV-sweep source's saturated bands.
+        ("nr_chroma", {
+            let mut d = light_trio_stack();
+            d.global.noise_reduction = NoiseReduction {
+                color: 0.8,
+                color_detail: 0.2,
+                ..Default::default()
+            };
+            d
+        }),
+        // `sharpen_detail_masking`: P4 sharpen upgrade coverage — non-zero
+        // `detail` (narrows the high-pass toward `r/3` to suppress halos) and
+        // `masking` (suppresses sharpening in flat areas) TOGETHER, at a
+        // higher amount/radius than any existing sharpen fixture. Layered on
+        // `curve_hsl_grade`'s tone-curve/HSL/grade (the same base
+        // `full_global` uses) rather than the bare HSV sweep: a first attempt
+        // at this fixture used `OpStack::default()` (sweep source only) and
+        // rendered BIT-IDENTICAL to `identity` (max diff exactly 0) — caught
+        // by this suite's own no-op sanity assert. Root cause: the raw HSV
+        // sweep's local luma gradient is low almost everywhere (hue rotation
+        // at fixed value barely moves luma), so `masking`'s
+        // `smoothstep(t0, t1, |∇luma|)` edge term was ~0 across the whole
+        // frame — a real, honest property of that source, not a masking bug,
+        // but it made the fixture worthless for pinning the sharpen+masking
+        // math. The tone-curve/HSL/grade base gives the source genuine local
+        // contrast for masking's edge detector to key off, so this fixture
+        // now actually exercises the combined detail+masking formula.
+        (
+            "sharpen_detail_masking",
+            with_curve_hsl_grade(OpStack::default()).set_op(Op::Sharpen(Sharpen {
+                amount: 0.9,
+                radius: 4,
+                detail: 0.6,
+                masking: 0.5,
+            })),
         ),
     ]
 }

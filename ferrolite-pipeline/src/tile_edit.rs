@@ -62,14 +62,15 @@ use crate::dehaze::{DEHAZE_ATMOS_MIN, DEHAZE_ATMOS_NEUTRAL};
 use crate::gpu_pyramid::GpuPyramidSource;
 use crate::image::{PipelineImage, PIPELINE_FORMAT};
 use crate::lens_gpu::{VignetteTexture, WarpGridTexture};
-use crate::local::{AdjustmentSet, LocalAdjustments};
+use crate::local::{AdjustmentSet, LocalAdjustments, NoiseReduction};
 use crate::local_node::{ColorDehazeParams, EngineStage, LocalAdjustmentsNode, SharedMasks};
 use crate::nodes::{GeometryHeadNode, PointOpNode, TileFrame, TileRequest, VignetteNode};
+use crate::nr_node::NoiseReductionNode;
 use crate::op::{LensCorrection, OpStack};
 use crate::sharpen_node::SharpenNode;
 use crate::uniforms::{
-    color_matrix_uniform, geometry_uniform, lens_halo_px, sharpen_halo_doc, sharpen_uniform,
-    ColorMatrixUniform, LensUniform, SharpenUniform, VignetteUniform,
+    color_matrix_uniform, geometry_uniform, lens_halo_px, nr_halo_doc, sharpen_halo_doc,
+    sharpen_uniform, ColorMatrixUniform, LensUniform, SharpenUniform, VignetteUniform,
 };
 use ferrolite_lens::{VignetteMap, WarpGrid};
 
@@ -82,6 +83,16 @@ pub struct TileEditPipeline {
     head: Rc<GeometryHeadNode>,
     color_matrix_id: NodeId,
     color_matrix: Rc<Cell<ColorMatrixUniform>>,
+    // P4: noise reduction sits between `color_matrix` and `vignette` — mirrors
+    // `EditPipeline`'s wiring exactly (see its doc for the rationale).
+    nr_id: NodeId,
+    nr_params: Rc<Cell<NoiseReduction>>,
+    // Handle to `NoiseReductionNode`, retained for parity with `EditPipeline`'s
+    // `nr_node` (no test hook needed here today — the tile producer has no
+    // eval-count regression test — but kept for symmetry/future use, mirroring
+    // `light_engine_node`'s own `#[allow(dead_code)]` retention above).
+    #[allow(dead_code)]
+    nr_node: Rc<NoiseReductionNode>,
     vignette_id: NodeId,
     vignette: Rc<Cell<VignetteUniform>>,
     vignette_node: Rc<VignetteNode>,
@@ -149,7 +160,11 @@ impl TileEditPipeline {
         // REAL per-pixel neighbourhood op with its own radius, so the tile
         // halo must cover the largest one anyone will actually blur at) plus
         // the lens-warp halo.
-        let halo = sharpen_halo_doc(&stack).max(lens_halo_px(lc.as_ref(), warp_grid));
+        // P4: NR is a halo consumer (62 px at L=5, zero at identity) — it must
+        // join the max or a tiled NR would read past the haloed tile's edge.
+        let halo = sharpen_halo_doc(&stack)
+            .max(lens_halo_px(lc.as_ref(), warp_grid))
+            .max(nr_halo_doc(&stack));
         let geometry = stack.geometry().unwrap_or_default();
         let request = Rc::new(Cell::new(TileRequest {
             coord: TileCoord { lod: 0, x: 0, y: 0 },
@@ -186,6 +201,14 @@ impl TileEditPipeline {
             vec![head_id],
         );
 
+        // P4 (design §3.1): noise reduction sits AFTER the camera→working
+        // color-matrix and BEFORE vignette — mirrors `EditPipeline::new`'s
+        // wiring exactly (see its doc for the rationale). Global-only: masks
+        // are composited downstream in the Color-stage engine.
+        let nr_params = Rc::new(Cell::new(stack.global.noise_reduction));
+        let nr_node = Rc::new(NoiseReductionNode::new(ctx.clone(), nr_params.clone()));
+        let nr_id = graph.add_node(Box::new(nr_node.clone()), vec![color_matrix_id]);
+
         // Vignetting: scene-linear point op, before exposure (spec §6.2). It is
         // point-wise, so its position in the per-tile color chain only needs to be
         // scene-linear. Default `vig_amount = 0` → identity (tile-seam golden safe).
@@ -195,7 +218,7 @@ impl TileEditPipeline {
             vignette.clone(),
             Some(frame.clone()),
         ));
-        let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![color_matrix_id]);
+        let vignette_id = graph.add_node(Box::new(vignette_node.clone()), vec![nr_id]);
 
         // Phase 3 (fused layer engine): the Light-stage engine node replaces the
         // old exposure/white-balance/contrast `PointOpNode` trio at this exact
@@ -300,6 +323,9 @@ impl TileEditPipeline {
             head,
             color_matrix_id,
             color_matrix,
+            nr_id,
+            nr_params,
+            nr_node,
             vignette_id,
             vignette,
             vignette_node,
@@ -375,6 +401,13 @@ impl TileEditPipeline {
         }
         if stack.global.color_segment() != self.global_set.borrow().color_segment() {
             self.graph.mark_dirty(self.local_adjust_id);
+        }
+        // P4: same direct NR comparison as `EditPipeline::set_stack` — also
+        // subsumed by the unconditional `mark_dirty(self.head_id)` below, kept
+        // for the same parity reason as the light/color-segment routing above.
+        if self.global_set.borrow().noise_reduction != stack.global.noise_reduction {
+            self.nr_params.set(stack.global.noise_reduction);
+            self.graph.mark_dirty(self.nr_id);
         }
         *self.global_set.borrow_mut() = stack.global.clone();
         // Phase 4 Task 2: no transmission node here anymore — only

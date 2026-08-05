@@ -23,7 +23,12 @@
 // match the Rust `NrUniform` field name, only the byte layout (order/size),
 // since the buffer is uploaded as raw bytes via `bytemuck`. Unused by this
 // shader (kept only for layout parity with `NrUniform`).
-struct P { thresholds: array<vec4<f32>, 2>, nr_active: i32, spacing: i32, level: i32, pad: f32 };
+// `canvas` is the inclusive [min_x, min_y, max_x, max_y] of the TRUE CANVAS in
+// this buffer's coords — see `NrUniform::canvas`. Taps clamp to it, NOT to
+// `dims`, so the tiled tier (whose buffer extends past the canvas into a
+// geometry-head-replicated halo) reproduces the whole-image tier's boundary
+// exactly. For the whole-image tier it IS `[0, 0, dims-1]`.
+struct P { thresholds: array<vec4<f32>, 2>, nr_active: i32, spacing: i32, level: i32, pad: f32, canvas: vec4<i32> };
 @group(0) @binding(4) var<uniform> p: P;
 
 fn to_ycbcr(rgb: vec3<f32>) -> vec3<f32> {
@@ -61,14 +66,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var b: array<f32, 5> = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
 
     // Fused 2D B3-spline: the separable kernel's outer product, clamping both
-    // axes (clamp DUPLICATES the border texel, matching `nr.rs`'s `clamp_idx`).
+    // axes to the CANVAS (clamp DUPLICATES the border texel, matching `nr.rs`'s
+    // `clamp_idx`). Clamping to `p.canvas` rather than to `dims` is what keeps
+    // the tiled tier in step with the whole-image tier — a tap that would land
+    // in the haloed buffer's replicated out-of-canvas region instead reads the
+    // canvas border texel of THIS level's approx, which is precisely what the
+    // whole-image tier reads. See the `canvas` note on `struct P`.
     var next = vec3<f32>(0.0);
     for (var ky = 0; ky < 5; ky = ky + 1) {
         let dy = (ky - 2) * s;
-        let yy = clamp(xy.y + dy, 0, dims.y - 1);
+        let yy = clamp(xy.y + dy, p.canvas.y, p.canvas.w);
         for (var kx = 0; kx < 5; kx = kx + 1) {
             let dx = (kx - 2) * s;
-            let xx = clamp(xy.x + dx, 0, dims.x - 1);
+            let xx = clamp(xy.x + dx, p.canvas.x, p.canvas.z);
             next = next + b[ky] * b[kx] * fetch(vec2<i32>(xx, yy), p.level);
         }
     }

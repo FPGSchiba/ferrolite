@@ -211,6 +211,11 @@ pub(crate) struct NoiseReductionNode {
     uniform_cursor: Cell<usize>,
     out: RefCell<Option<PipelineImage>>,
     evals: Cell<u32>,
+    /// The true canvas inside the dispatch buffer, as inclusive
+    /// `[min_x, min_y, max_x, max_y]` in buffer coords — see `NrUniform::canvas`.
+    /// `None` (the default, and what `EditPipeline` leaves it at) means "the
+    /// buffer IS the canvas" and yields `[0, 0, w-1, h-1]`.
+    canvas: Cell<Option<[i32; 4]>>,
 }
 
 impl NoiseReductionNode {
@@ -242,6 +247,41 @@ impl NoiseReductionNode {
             uniform_cursor: Cell::new(0),
             out: RefCell::new(None),
             evals: Cell::new(0),
+            canvas: Cell::new(None),
+        }
+    }
+
+    /// Tell this node where the TRUE CANVAS sits inside the buffer it will be
+    /// dispatched over, so à trous taps clamp to the canvas instead of to the
+    /// haloed buffer's edge (`NrUniform::canvas`).
+    ///
+    /// `origin` is the haloed tile origin in the tile's LOD-level output pixel
+    /// space (negative on tiles that touch the frame), `level_dims` that
+    /// level's full size — the same pair `LocalAdjustmentsNode::set_tile_transform`
+    /// takes. Only the TILED pipeline calls this; `EditPipeline` leaves the
+    /// default, whose uniform is bit-identical to the pre-fix behaviour.
+    pub(crate) fn set_tile_canvas(&self, origin: [i32; 2], level_dims: [u32; 2]) {
+        self.canvas.set(Some([
+            -origin[0],
+            -origin[1],
+            level_dims[0] as i32 - 1 - origin[0],
+            level_dims[1] as i32 - 1 - origin[1],
+        ]));
+    }
+
+    /// Resolve the canvas rect for a `w × h` dispatch buffer, clamping it into
+    /// the buffer (a tap must never address outside the texture) and falling
+    /// back to the whole buffer when unset.
+    fn canvas_rect(&self, w: u32, h: u32) -> [i32; 4] {
+        let (mx, my) = (w as i32 - 1, h as i32 - 1);
+        match self.canvas.get() {
+            None => [0, 0, mx, my],
+            Some([x0, y0, x1, y1]) => [
+                x0.clamp(0, mx),
+                y0.clamp(0, my),
+                x1.clamp(0, mx),
+                y1.clamp(0, my),
+            ],
         }
     }
 
@@ -381,6 +421,7 @@ impl Node<PipelineImage> for NoiseReductionNode {
         self.evals.set(self.evals.get() + 1);
         self.uniform_cursor.set(0);
         let (w, h) = (src.width, src.height);
+        let canvas = self.canvas_rect(w, h);
         self.ensure_textures(w, h);
         let out = self.ensure_out(w, h);
         let t = self.textures.borrow();
@@ -407,7 +448,7 @@ impl Node<PipelineImage> for NoiseReductionNode {
                 (&t.acc_b, &t.acc_a)
             };
 
-            let uidx = self.uniform_slot(nr_uniform(&nr, level));
+            let uidx = self.uniform_slot(nr_uniform(&nr, level, canvas));
             let approx_view = view(approx_in);
             let acc_in_view = view(acc_read);
             let next_view = view(next_out);

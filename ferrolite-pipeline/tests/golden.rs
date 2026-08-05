@@ -1165,54 +1165,49 @@ fn sharpen_masking_protects_flat_areas() {
 // handling (the exact trap already documented for the dehaze tile tests in
 // this file).
 //
-// **TRUE-CANVAS-EDGE MARGIN — found and root-caused while writing this test,
-// distinct from the seam question this test targets.** On this same
-// high-frequency fixture, `TileEditPipeline`'s tile vs `EditPipeline`'s
-// whole-image render disagree by up to ~0.06 within `EDGE_MARGIN` px of the
-// TRUE canvas border (all four sides) — reproduced even in a SINGLE-TILE
-// image with no seam at all (200x150, one tile, no neighbor to fold in),
-// isolating it from the halo/seam-fold-in question. Root cause: the tiled
-// tier's per-tile geometry-head resample (bilinear, `ClampToEdge`) reads the
-// GPU-resident pyramid, while the whole-image tier's NR shader clamps
-// directly against the true canvas dims (`nr_atrous.wgsl`'s
-// `clamp(xy+dy, 0, dims-1)`) — two different edge-extension mechanisms that
-// happen to agree only up to sub-pixel/bilinear-vs-nearest differences,
-// which this fixture's 2px-period checker (deliberately built to have large
-// local gradients everywhere, including at the border) amplifies well past
-// f16 rounding. This is the SAME CLASS of "different edge-extension
-// mechanism" finding `dehaze_tiled_matches_whole_image` below once had — but
-// NOT the same resolution: that test's margin was later REMOVED once its
-// root cause was fixed (shared transmission, one computation for both
-// tiers), and `dehaze_tiled_matches_whole_image`'s own comment states so
-// explicitly. This test's margin is a WORKAROUND for a genuine, still-
-// unresolved discrepancy (root-caused above, not fixed — fixing the tile
-// geometry head's edge-extension to match the whole-image shader's clamp is
-// out of scope for this measurement/fixture task), not an instance of
-// established current practice in this file. The fixture below is sized so
-// BOTH interior seams sit comfortably outside this margin (see the asserts
-// after the loop, added after review caught a 450x300 fixture whose y-seam
-// sat inside the margin and was silently never compared), so excluding it
-// does not weaken the seam check this test exists to make.
+// **TRUE-CANVAS-EDGE MARGIN — REMOVED, root cause found and fixed.** This test
+// used to skip an `NR_EDGE_MARGIN` (90 px) band around the true canvas border,
+// where tiled and whole-image disagreed. Like the dehaze margin below, that
+// margin is now gone because the cause was fixed rather than tolerated.
 //
-// MANDATORY sensitivity check (recorded in the task report): temporarily
-// forcing `uniforms::nr_halo` to always return `0` (so `TileEditPipeline`
-// builds its haloed tile extent without any NR margin, while the NR node
-// itself still runs its full 62px-support wavelet decomposition inside that
-// too-small haloed buffer) must make this test's assertion FAIL; otherwise
-// this parity check would be vacuous. Verified: PASS with the real halo,
-// FAIL (max diff far above `NR_SEAM_TOL`) with `nr_halo` forced to 0; see
-// the task report for the exact numbers.
+// The originally recorded root cause — "the tiled tier's geometry-head bilinear
+// resample vs the whole-image NR shader's integer clamp" — was WRONG. Measured
+// directly: with identity ops the geometry head is BIT-EXACT tiled-vs-whole
+// (max diff 0.00000), and with NR active the interior, both seams included, is
+// bit-exact too. The divergence was entirely NR's boundary convention, and it
+// had a hard cutoff at exactly `nr_halo_px()` = 62 px (nonzero at distance 59,
+// exactly zero at 60) — the total à trous support, not a resample artifact.
+//
+// The actual cause: an ITERATED à trous decomposition does not commute with
+// replicate-padding. The whole-image tier clamps every level's taps to the
+// canvas, so a border tap reads THAT LEVEL's already-convolved approx. The
+// tiled tier ran NR over a haloed buffer whose out-of-canvas region the
+// geometry head had filled with a replicate of the ORIGINAL source, so a border
+// tap read an approx computed from a constant region instead. Level 0 agrees;
+// levels 1..4 do not, and the error compounds out to the full support.
+//
+// Fixed by giving NR the canvas rect in buffer coords (`NrUniform::canvas`) and
+// clamping taps to it instead of to the buffer dims, which makes the tiled tier
+// reproduce the whole-image boundary exactly (`nr_tiled_matches_whole_image_at_the_true_canvas_edge`
+// measures max diff 0 — bit-exact, not merely within tolerance). The
+// whole-image tier passes the full buffer, so its uniform and output are
+// unchanged.
+//
+// MANDATORY sensitivity check: temporarily forcing `uniforms::nr_halo` to
+// always return `0` (so `TileEditPipeline` builds its haloed tile extent
+// without any NR margin, while the NR node itself still runs its full
+// 62px-support wavelet decomposition inside that too-small haloed buffer) must
+// make THIS test's assertion FAIL; otherwise this parity check would be
+// vacuous. Re-verified after the canvas-clamp fix below: PASS (max diff 0) with
+// the real halo, FAIL with `nr_halo` forced to 0 — max diff 0.098 at (256, 6),
+// i.e. squarely on the x=256 seam.
+//
+// Note the two NR tiled tests now isolate DIFFERENT properties, and the
+// sensitivity check shows it: this multi-tile test is the one sensitive to halo
+// SIZE, while `nr_tiled_matches_whole_image_at_the_true_canvas_edge` is
+// single-tile and still passes with the halo zeroed, because it tests boundary
+// CONVENTION instead. Keep both; neither subsumes the other.
 const NR_SEAM_TOL: f32 = 0.02; // display-linear; absorbs f16 + the head resample.
-
-// Pixels excluded from the comparison near every true canvas edge (see the
-// "TRUE-CANVAS-EDGE MARGIN" note above): that discrepancy runs up to ~0.06,
-// LARGER than `NR_SEAM_TOL` (0.02), so it is excluded from the comparison
-// entirely rather than folded into the tolerance — raising `NR_SEAM_TOL` to
-// 0.06 would make the seam check this test exists for far less sensitive.
-// 90 px is comfortably larger than the observed ~0.06-diff true-edge band and
-// still much smaller than the fixture's own margin to the seam (both seams
-// sit >= 194 px from every canvas edge, see below).
-const NR_EDGE_MARGIN: u32 = 90;
 
 #[test]
 fn nr_tiled_matches_whole_image_at_the_seam() {
@@ -1222,14 +1217,12 @@ fn nr_tiled_matches_whole_image_at_the_seam() {
     };
     let ctx = Arc::new(ctx);
     // A multi-tile image: 450x450 -> 2x2 tiles at LOD 0 (seams at x=256 AND
-    // y=256). Sized so BOTH seams sit >= 194 px from every true canvas edge
-    // (well outside `NR_EDGE_MARGIN`) — symmetric on both axes, unlike an
-    // earlier 450x300 attempt where the y-seam sat only 44 px from the
-    // bottom edge, entirely inside the margin, which silently dropped tile
-    // row 1 from the comparison (caught in review: `compared` printed
-    // exactly `270*120`, i.e. only the single strip between the margins on
-    // BOTH axes at once, zero contribution from row 1). The asserts below
-    // guard against that regressing silently again.
+    // y=256). Every in-image pixel is now compared — the true-canvas-edge
+    // margin this test used to skip is gone (see the note above). The
+    // coverage asserts after the loop are kept: they caught an earlier
+    // 450x300 fixture whose y-seam sat inside the then-margin and was
+    // silently never compared, and they still guard the "both seams are
+    // actually exercised" property that this test exists for.
     let (iw, ih) = (450u32, 450u32);
     let src = common::high_frequency_checker(iw, ih);
     let mut doc = OpStack::default();
@@ -1275,16 +1268,6 @@ fn nr_tiled_matches_whole_image_at_the_seam() {
                     if gx >= iw || gy >= ih {
                         continue; // out-of-image tile padding
                     }
-                    // Exclude the true-canvas-edge geometry-resample band
-                    // documented above — NOT a seam exclusion, both seams
-                    // (x=256, y=256) sit far outside this margin.
-                    if gx < NR_EDGE_MARGIN
-                        || gx >= iw - NR_EDGE_MARGIN
-                        || gy < NR_EDGE_MARGIN
-                        || gy >= ih - NR_EDGE_MARGIN
-                    {
-                        continue;
-                    }
                     compared += 1;
                     min_gx = min_gx.min(gx);
                     max_gx = max_gx.max(gx);
@@ -1326,5 +1309,82 @@ fn nr_tiled_matches_whole_image_at_the_seam() {
     assert!(
         max_diff <= NR_SEAM_TOL,
         "per-tile NR disagrees with whole-image at the interior seam (diff {max_diff} at {max_loc:?}) — halo fold-in broken?"
+    );
+}
+
+/// Tiled and whole-image NR must agree at the TRUE CANVAS EDGE, with no
+/// exclusion margin — a SINGLE-TILE fixture, so no seam is involved and this
+/// tests only boundary handling.
+///
+/// The two tiers must converge on ONE boundary convention because the app shows
+/// the whole-image render as the initial reveal and then replaces it with
+/// tiles: any disagreement is a visible pop at the frame edge on every open.
+///
+/// This is the parity `NR_EDGE_MARGIN` used to exclude. The margin's recorded
+/// root cause (a geometry-head resample discrepancy) was WRONG — measured with
+/// identity ops, the head is bit-exact tiled-vs-whole, and the interior
+/// (including both seams) is bit-exact with NR active too. The real cause is
+/// that an ITERATED à trous decomposition does not commute with
+/// replicate-padding: the whole-image tier clamps every level's taps to the
+/// canvas, so a border tap reads that level's already-convolved approx, while
+/// the tiled tier reads a halo the geometry head filled with a replicate of the
+/// ORIGINAL source, whose level-N approx is the convolution of a constant.
+/// Level 0 agrees; levels 1..4 do not, and the error compounds out to exactly
+/// the total support (`nr_halo_px()` = 62 px — measured as a hard cutoff:
+/// nonzero at distance 59, exactly zero at 60).
+///
+/// Tolerance is deliberately far tighter than `NR_SEAM_TOL`: the interior
+/// measures EXACTLY 0, so once the conventions agree the edge should too, and
+/// only f16 rounding is allowed for.
+#[test]
+fn nr_tiled_matches_whole_image_at_the_true_canvas_edge() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // 200x150 fits in ONE tile: no seam, so any diff is boundary handling.
+    let (iw, ih) = (200u32, 150u32);
+    let src = common::high_frequency_checker(iw, ih);
+    let mut doc = OpStack::default();
+    doc.global.noise_reduction = NoiseReduction {
+        luminance: 0.8,
+        color: 0.5,
+        ..Default::default()
+    };
+
+    let mut whole = EditPipeline::new(ctx.clone(), &src, doc.clone(), IDENTITY);
+    let whole_lin = common::read_image_linear(&ctx, &whole.evaluate());
+
+    use ferrolite_image::{TileCoord, TILE_SIZE};
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &src));
+    let mut tep = TileEditPipeline::new(ctx.clone(), pyramid, doc, IDENTITY, None, None);
+    let tile = tep.produce_tile(TileCoord { lod: 0, x: 0, y: 0 });
+    let tile_lin = common::read_tile_linear(&ctx, &tile);
+
+    // Tolerance for f16 storage only — NOT a band to hide a convention
+    // mismatch in. The measured defect was 0.0132 at the edge.
+    const EDGE_TOL: f32 = 1e-3;
+    let mut max_diff = 0.0f32;
+    let mut max_loc = (0u32, 0u32);
+    for gy in 0..ih {
+        for gx in 0..iw {
+            let ti = ((gy * TILE_SIZE + gx) * 4) as usize;
+            let wi = ((gy * iw + gx) * 4) as usize;
+            for c in 0..3 {
+                let d = (tile_lin[ti + c] - whole_lin[wi + c]).abs();
+                if d > max_diff {
+                    max_diff = d;
+                    max_loc = (gx, gy);
+                }
+            }
+        }
+    }
+    eprintln!("NR true-canvas-edge max linear diff = {max_diff} at {max_loc:?}");
+    assert!(
+        max_diff <= EDGE_TOL,
+        "tiled NR disagrees with whole-image at the true canvas edge \
+         (diff {max_diff} at {max_loc:?}) — the two tiers are using different \
+         à trous boundary conventions"
     );
 }

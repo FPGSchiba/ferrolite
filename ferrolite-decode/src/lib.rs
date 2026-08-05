@@ -64,10 +64,38 @@ pub struct PreviewInfo {
     pub dct_scale: Option<u8>,
 }
 
+/// Run a RAW decode, converting a **panic** inside the decoder into
+/// [`DecodeError::DecoderPanicked`].
+///
+/// `rawler` asserts internally on containers it cannot really handle rather
+/// than returning an error — confirmed on Canon sRAW1/mRAW, which trips
+/// `assertion failed: self.initialized` in its `pixarray.rs`. Every decode in
+/// this app runs inside a `ferrolite-jobs` worker (CLAUDE.md's threading rule),
+/// so an escaping unwind kills that worker mid-ingest and the user loses the
+/// rest of the batch. Containing it here keeps one unreadable file to one
+/// failed row.
+///
+/// Deliberately wraps only the RAW route: the `image`/`kamadak-exif` standard
+/// route returns errors properly and needs no such guard. `AssertUnwindSafe` is
+/// sound here because the closure owns or immutably borrows everything it
+/// touches — on a panic nothing observable is left half-updated, and the only
+/// state that could be is inside rawler, which we drop.
+///
+/// Note this is containment, not a fix; see `fixtures/raw-broken/README.md`.
+fn guard_raw_panic<T>(
+    path: &Path,
+    f: impl FnOnce() -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(_) => Err(DecodeError::DecoderPanicked(path.to_path_buf())),
+    }
+}
+
 /// Decode an upright RGB8 preview, routed by `kind`.
 pub fn decode_preview(path: &Path, kind: FileKind) -> Result<ImageBuffer, DecodeError> {
     match kind {
-        FileKind::Raw => preview::decode_preview_raw(path),
+        FileKind::Raw => guard_raw_panic(path, || preview::decode_preview_raw(path)),
         FileKind::Standard => standard::decode_preview_standard(path),
     }
 }
@@ -75,7 +103,7 @@ pub fn decode_preview(path: &Path, kind: FileKind) -> Result<ImageBuffer, Decode
 /// Read camera/exposure metadata + dimensions, routed by `kind`.
 pub fn read_metadata(path: &Path, kind: FileKind) -> Result<Metadata, DecodeError> {
     match kind {
-        FileKind::Raw => read_metadata_raw(path),
+        FileKind::Raw => guard_raw_panic(path, || read_metadata_raw(path)),
         FileKind::Standard => standard::read_metadata_standard(path),
     }
 }
@@ -90,7 +118,7 @@ pub fn decode_meta_and_preview(
     thumb_edge: u32,
 ) -> Result<(Metadata, ImageBuffer, PreviewInfo), DecodeError> {
     match kind {
-        FileKind::Raw => {
+        FileKind::Raw => guard_raw_panic(path, || {
             let (parts_bundle, probe) = crate::source::with_ingest_source(path, measure, |src| {
                 let t = measure.then(Instant::now);
                 let decoder = rawler::get_decoder(src).map_err(rawler_err)?;
@@ -142,7 +170,7 @@ pub fn decode_meta_and_preview(
                 dct_scale: None,
             };
             Ok((metadata, preview, info))
-        }
+        }),
         FileKind::Standard => {
             let metadata = standard::read_metadata_standard(path)?;
             let t = measure.then(std::time::Instant::now);

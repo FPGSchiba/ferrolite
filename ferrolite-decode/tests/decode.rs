@@ -130,3 +130,78 @@ fn decode_full_crops_within_metadata_dimensions_and_buffer() {
         full.width as usize * full.height as usize * full.cpp
     );
 }
+
+/// A RAW that makes `rawler` PANIC must surface as a `DecodeError`, never as an
+/// unwind escaping into the caller.
+///
+/// This is not hypothetical tidiness: every decode runs inside a
+/// `ferrolite-jobs` worker (CLAUDE.md's threading rule), so an unguarded panic
+/// kills that worker on ingest. Canon sRAW1/mRAW stores YCbCr rather than a CFA
+/// mosaic and trips `assertion failed: self.initialized` in rawler 0.7.2's
+/// `pixarray.rs`. Any user with such a file in their library hits it.
+///
+/// Fixture-gated (see `fixtures/raw-broken/README.md`); skips when absent.
+#[test]
+fn a_decoder_panic_becomes_an_error_not_an_unwind() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/raw-broken/nolens-canon-eos60d-iso100-50mm-mraw.CR2");
+    if !path.exists() {
+        eprintln!("no sRAW fixture; skipping decoder-panic containment test");
+        return;
+    }
+
+    // The two entry points that reach rawler's CFA path must contain the panic.
+    let e = ferrolite_decode::read_metadata(&path, FileKind::Raw)
+        .expect_err("rawler panics on this file; read_metadata must return Err");
+    assert!(
+        matches!(e, ferrolite_decode::DecodeError::DecoderPanicked(_)),
+        "expected DecoderPanicked, got {e}"
+    );
+
+    // `let ... else`, NOT `expect_err`: this call's Ok type contains an
+    // `ImageBuffer`, and `expect_err` Debug-prints the Ok value on failure —
+    // every pixel, a 240 MB test log (hit while writing this test). Since the
+    // whole point of this assertion is to START failing when rawler fixes the
+    // bug, the failure path is the one that must stay readable.
+    let Err(e) = ferrolite_decode::decode_meta_and_preview(&path, FileKind::Raw, false, 256) else {
+        panic!("decode_meta_and_preview must return Err while rawler panics on sRAW");
+    };
+    assert!(
+        matches!(e, ferrolite_decode::DecodeError::DecoderPanicked(_)),
+        "expected DecoderPanicked, got {e}"
+    );
+
+    // `decode_preview` is DIFFERENT and must keep working: it extracts the
+    // embedded JPEG, which needs no CFA decode, so it never reaches the
+    // assertion. Asserted rather than left implicit because it is the reason a
+    // blanket "sRAW is unsupported" rejection would be wrong — the thumbnail is
+    // perfectly readable, only the raw-image path is not.
+    let preview = ferrolite_decode::decode_preview(&path, FileKind::Raw)
+        .map_err(|e| format!("{e}"))
+        .expect("embedded preview must still decode");
+    assert!(
+        preview.width > 0 && preview.height > 0,
+        "preview must be non-empty"
+    );
+}
+
+/// The Olympus ORF fixture fails cleanly with `NoPreview` — no panic, no hang.
+///
+/// Pinned so the day a rawler release starts extracting a preview from it, this
+/// test fails and tells us to move the file back into `fixtures/raw/` and claim
+/// its coverage slot. Fixture-gated; skips when absent.
+#[test]
+fn the_orf_fixture_still_fails_with_a_clean_nopreview() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fixtures/raw-broken/orf-olympus-em1mk2-iso400-28mm.ORF");
+    if !path.exists() {
+        eprintln!("no ORF fixture; skipping");
+        return;
+    }
+    let e = ferrolite_decode::decode_meta_and_preview(&path, FileKind::Raw, false, 256)
+        .expect_err("this ORF has no rawler-extractable preview");
+    assert!(
+        matches!(e, ferrolite_decode::DecodeError::NoPreview(_)),
+        "expected a clean NoPreview (not a panic), got {e}"
+    );
+}

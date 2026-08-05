@@ -1,0 +1,5 @@
+# RAWs here are decoder regression cases, not committed (large, and see the
+# licensing note in ../.gitignore). Only this file and the README are tracked.
+*
+!.gitignore
+!README.md

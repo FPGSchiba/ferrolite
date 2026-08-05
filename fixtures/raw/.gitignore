@@ -2,6 +2,17 @@
 # fixture the decode tests depend on (see ferrolite-decode/tests/decode.rs and
 # the fixture-gated tests in src/raw.rs); it stays tracked. Any other RAW (or
 # sidecar / exported image) dropped here for local hands-on testing is ignored.
+#
+# LICENSING: some local fixtures come from Signature Edits, whose grant
+# explicitly excludes compiling their photos into a redistributed collection.
+# Do NOT add a tracking exception for those files. The CC0 ones (raw.pixls.us)
+# would be safe to commit but are large — keep them ignored too.
+#
+# RAWs that rawler cannot handle live in ../raw-broken/, deliberately OUTSIDE
+# this tree: `Catalog::ingest_folder` RECURSES, so a subdirectory here would
+# still be swept into every ingest test (and would also be reachable by the
+# "first RAW in the dir" fixture picker in tests/decode.rs).
 *
 !.gitignore
 !sample.rw2
+!FIXTURES.md

@@ -152,9 +152,12 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
             "sharpen-apply-detail",
             include_str!("shaders/sharpen_apply_detail.wgsl"),
         ),
+        // `nr-clear` (a zero-fill pass that re-zeroed the à trous accumulator
+        // every evaluate) is RETIRED and its shader deleted: `nr_atrous.wgsl`'s
+        // level 0 now seeds the accumulator directly instead of adding to it,
+        // so there is nothing to zero. See `nr_node.rs`'s module doc.
         ("nr-atrous", include_str!("shaders/nr_atrous.wgsl")),
         ("nr-combine", include_str!("shaders/nr_combine.wgsl")),
-        ("nr-clear", include_str!("shaders/nr_clear.wgsl")),
         ("geometry", include_str!("shaders/geometry.wgsl")),
         ("vignette", include_str!("shaders/vignette.wgsl")),
         ("local-adjust", include_str!("shaders/local_adjust.wgsl")),
@@ -163,26 +166,70 @@ pub fn prewarm_shaders(ctx: &ferrolite_gpu::GpuContext) {
     }
 }
 
+/// The dummy op stacks [`prewarm_pipelines`] evaluates, one per set of passes
+/// that needs its own dispatch to get compiled.
+///
+/// A pass is only compiled by the driver when it is actually DISPATCHED, and a
+/// node that early-returns at identity never dispatches. `OpStack::default()`
+/// alone therefore leaves every conditionally-dispatched pass cold, to be
+/// compiled on the render thread the first time the user touches its slider —
+/// exactly the stall CLAUDE.md's build-once/pre-warm rule exists to prevent.
+/// Each entry below exists to force one such group:
+///
+/// 1. **Default** — the always-dispatched chain (reveal + preview path).
+/// 2. **NR + detail/masking sharpen** — `NoiseReductionNode` early-returns
+///    unless `is_active()` (needs a nonzero `luminance`/`color` *strength*, not
+///    merely `detail`), and `SharpenNode` only dispatches `sharpen-apply-detail`
+///    when `amount > 0` AND `detail`/`masking` aren't both zero (the all-zero
+///    case dispatches `sharpen-apply` instead, which entry 1 already warms).
+///
+/// Kept as data, not inlined, so `prewarm_covers_the_conditionally_dispatched_passes`
+/// can assert the coverage without needing a GPU adapter.
+pub(crate) fn prewarm_stacks() -> Vec<OpStack> {
+    let mut nr_and_detail_sharpen = OpStack::default();
+    nr_and_detail_sharpen.global.noise_reduction = crate::local::NoiseReduction {
+        luminance: 0.5,
+        detail: 0.5,
+        color: 0.5,
+        color_detail: 0.5,
+    };
+    nr_and_detail_sharpen.global.sharpen = crate::op::Sharpen {
+        amount: 0.5,
+        radius: 2,
+        detail: 0.5,
+        masking: 0.5,
+    };
+    vec![OpStack::default(), nr_and_detail_sharpen]
+}
+
 /// Force first-use driver compilation of every edit pipeline at startup by
 /// building + evaluating tiny dummy `EditPipeline`/`TileEditPipeline`s. Companion
 /// to `prewarm_shaders` (which only compiles shader MODULES): the driver compiles
 /// a pipeline on its first DISPATCH, so we must evaluate once here, not merely
 /// construct. Startup-only; the dummies are dropped, only the driver's cache
 /// persists. Call once, after `prewarm_shaders`, on the render thread.
+///
+/// Evaluates once per [`prewarm_stacks`] entry — see there for why more than
+/// the identity stack is needed.
 pub fn prewarm_pipelines(ctx: std::sync::Arc<ferrolite_gpu::GpuContext>) {
     const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     // 64×64 opaque grey dummy — size-independent for compilation.
     let px = vec![0.5f32; 64 * 64 * 4];
     let img = ferrolite_image::LinearRgbaF32::new(64, 64, px).expect("dummy image");
-
-    // Whole-image edit chain (reveal + preview path).
-    let mut ep = EditPipeline::new(ctx.clone(), &img, OpStack::default(), IDENTITY);
-    let _ = ep.evaluate();
-
-    // Tiled edit chain (full-res producer path: geometry-head + tiled passes).
+    // One pyramid, reused across stacks — building it is unrelated to which
+    // passes each stack warms.
     let pyramid = std::sync::Arc::new(GpuPyramidSource::new(&ctx, &img));
-    let mut tep = TileEditPipeline::new(ctx, pyramid, OpStack::default(), IDENTITY, None, None);
-    let _ = tep.produce_tile(ferrolite_image::TileCoord { lod: 0, x: 0, y: 0 });
+
+    for stack in prewarm_stacks() {
+        // Whole-image edit chain (reveal + preview path).
+        let mut ep = EditPipeline::new(ctx.clone(), &img, stack.clone(), IDENTITY);
+        let _ = ep.evaluate();
+
+        // Tiled edit chain (full-res producer path: geometry-head + tiled passes).
+        let mut tep =
+            TileEditPipeline::new(ctx.clone(), pyramid.clone(), stack, IDENTITY, None, None);
+        let _ = tep.produce_tile(ferrolite_image::TileCoord { lod: 0, x: 0, y: 0 });
+    }
 }
 
 /// Output image dimensions after the stack's geometry (crop/rotate) is applied to
@@ -197,6 +244,38 @@ pub fn edited_output_dims(stack: &OpStack, src_w: u32, src_h: u32) -> (u32, u32)
 #[cfg(test)]
 mod lib_tests {
     use crate::{edited_output_dims, OpStack};
+
+    /// Pre-warm must dispatch the passes that a DEFAULT op stack leaves cold,
+    /// or the driver compiles them on the render thread on first slider touch
+    /// (CLAUDE.md's pre-warm rule). `NoiseReductionNode` early-returns unless
+    /// `is_active()`, and `SharpenNode` only reaches `sharpen-apply-detail`
+    /// when `amount > 0` and `detail`/`masking` aren't both zero — so the
+    /// identity stack alone warms neither.
+    ///
+    /// No GPU needed: this asserts the warmed op stacks cover those gates,
+    /// which is the part that regresses (someone adding a conditionally
+    /// dispatched pass and forgetting to warm it). That a stack passing these
+    /// gates really does dispatch is proven separately, on a GPU, by
+    /// `nr_node::tests::active_nr_dispatches_and_allocates_four_plus_out` and
+    /// `sharpen_node`'s detail-apply tests.
+    #[test]
+    fn prewarm_covers_the_conditionally_dispatched_passes() {
+        let stacks = crate::prewarm_stacks();
+
+        assert!(
+            stacks.iter().any(|s| s.global.noise_reduction.is_active()),
+            "no pre-warm stack activates NR, so nr-atrous/nr-combine are never \
+             dispatched at startup and compile on first use"
+        );
+        assert!(
+            stacks.iter().any(|s| {
+                let sh = &s.global.sharpen;
+                sh.amount > 0.0 && (sh.detail > 0.0 || sh.masking > 0.0)
+            }),
+            "no pre-warm stack has sharpen amount + detail/masking, so \
+             sharpen-apply-detail is never dispatched at startup"
+        );
+    }
 
     #[test]
     fn edited_output_dims_identity_equals_source() {

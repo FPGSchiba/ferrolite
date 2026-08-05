@@ -557,6 +557,12 @@ impl TileEditPipeline {
             origin: [ox as i32, oy as i32],
             level_dims: [lw, lh],
         }));
+        // NR needs the SAME origin/level-dims pair, for a different reason: its
+        // à trous taps must clamp to the true canvas rather than to the haloed
+        // buffer's edge, or the frame edge disagrees with the whole-image
+        // reveal and pops when tiles replace it (see `NrUniform::canvas`).
+        self.nr_node
+            .set_tile_canvas([ox as i32, oy as i32], [lw, lh]);
         self.graph.mark_dirty(self.head_id);
         self.graph.mark_dirty(self.local_adjust_id);
         let haloed = self.graph.evaluate(self.output_id).clone();

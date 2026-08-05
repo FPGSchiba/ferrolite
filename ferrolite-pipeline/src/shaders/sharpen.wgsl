@@ -1,9 +1,17 @@
 // Unsharp mask: out = src + amount * (src - boxblur(src, radius)). The
 // neighborhood op. Reuses the point-op bind layout (0 = src, 1 = dst, 2 = uniform).
 // At preview-res a single-pass box blur is enough; Plan 3 adds the tiled halo.
+//
+// RETIRED — kept in-tree as reference math only (see `sharpen_node.rs`'s doc).
+// Not in `prewarm_shaders`, not compiled, bound to nothing: `SharpenNode` now
+// dispatches the separable `sharpen_box_h`/`_v` + `sharpen_apply*` passes.
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var dst: texture_storage_2d<rgba16float, write>;
-struct P { amount: f32, radius: i32, pad0: f32, pad1: f32 };
+// The last two fields were `pad0`/`pad1` when this shader shipped; P4 gave those
+// bytes real meaning in `SharpenUniform` (`detail`, `masking`). Named here to
+// match the Rust struct's LAYOUT so this reference stays readable against it —
+// this shader implements neither, which is precisely why it was retired.
+struct P { amount: f32, radius: i32, detail: f32, masking: f32 };
 @group(0) @binding(2) var<uniform> p: P;
 
 @compute @workgroup_size(8, 8, 1)

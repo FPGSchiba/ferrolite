@@ -402,12 +402,26 @@ pub(crate) struct NrUniform {
     pub spacing: i32,
     pub level: i32,
     pub pad: f32,
+    /// Inclusive `[min_x, min_y, max_x, max_y]` of the TRUE CANVAS, in the
+    /// dispatch buffer's own pixel coords — every à trous tap clamps to this
+    /// rect rather than to the buffer's dimensions.
+    ///
+    /// The whole-image tier passes the full buffer (`[0, 0, w-1, h-1]`), which
+    /// is exactly the old `clamp(xy, 0, dims-1)` behaviour, so its output is
+    /// byte-identical. The TILED tier passes the canvas as it sits inside the
+    /// haloed tile buffer, which is what makes the two tiers agree at the frame
+    /// edge: an iterated à trous does NOT commute with replicate-padding, so
+    /// reading the geometry head's replicated halo at levels >= 1 (instead of
+    /// clamping the tap into the canvas, as the whole-image tier does) drifts by
+    /// up to 0.013 out to the full 62 px support. See
+    /// `nr_tiled_matches_whole_image_at_the_true_canvas_edge`.
+    pub canvas: [i32; 4],
 }
 
 // The uniform's size is the GPU ABI — keep in lock-step with the WGSL side
 // (mirrors `GeometryUniform`'s own size assert above): 8 f32 thresholds (32B)
-// + active/spacing/level/pad (16B) = 48B, already 16-byte-aligned.
-const _: () = assert!(std::mem::size_of::<NrUniform>() == 48);
+// + active/spacing/level/pad (16B) + canvas (16B) = 64B, 16-byte-aligned.
+const _: () = assert!(std::mem::size_of::<NrUniform>() == 64);
 const _: () = assert!(std::mem::size_of::<NrUniform>().is_multiple_of(16));
 
 /// Build the uniform for `level` of the à trous loop. `pub(crate)` — see
@@ -416,7 +430,11 @@ const _: () = assert!(std::mem::size_of::<NrUniform>().is_multiple_of(16));
 /// `level` would silently produce a nonsensical (but not out-of-bounds)
 /// spacing rather than panicking — asserted in debug builds since the sole
 /// caller (`nr_node.rs`'s `0..NR_LEVELS` loop) should never pass one.
-pub(crate) fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrUniform {
+pub(crate) fn nr_uniform(
+    nr: &crate::local::NoiseReduction,
+    level: usize,
+    canvas: [i32; 4],
+) -> NrUniform {
     debug_assert!(
         level < crate::nr::NR_LEVELS,
         "nr_uniform: level {level} out of range (NR_LEVELS = {})",
@@ -427,10 +445,15 @@ pub(crate) fn nr_uniform(nr: &crate::local::NoiseReduction, level: usize) -> NrU
     thresholds[1] = crate::nr::threshold_at(nr.color, nr.color_detail, level);
     NrUniform {
         thresholds,
-        active: (!nr.is_identity()) as i32,
+        // `is_active`, NOT `!is_identity`: see
+        // `nr_uniform_is_inactive_for_detail_only_noise_reduction`. Keeps this
+        // flag consistent with the two gates that actually skip work
+        // (`NoiseReductionNode::evaluate` and `nr_halo`).
+        active: nr.is_active() as i32,
         spacing: 1 << level,
         level: level as i32,
         pad: 0.0,
+        canvas,
     }
 }
 
@@ -1879,10 +1902,14 @@ mod tests {
         assert_eq!(sharpen_halo_doc(&sharpened), 4);
     }
 
+    /// A stand-in canvas rect for tests that don't exercise the clamp itself —
+    /// the whole-image tier's shape (buffer == canvas) for a 64×64 buffer.
+    const WHOLE_CANVAS_64: [i32; 4] = [0, 0, 63, 63];
+
     #[test]
     fn nr_uniform_is_inactive_at_identity() {
         use crate::local::NoiseReduction;
-        let u = nr_uniform(&NoiseReduction::default(), 0);
+        let u = nr_uniform(&NoiseReduction::default(), 0, WHOLE_CANVAS_64);
         assert_eq!(u.active, 0);
         let u = nr_uniform(
             &NoiseReduction {
@@ -1890,8 +1917,51 @@ mod tests {
                 ..Default::default()
             },
             0,
+            WHOLE_CANVAS_64,
         );
         assert_eq!(u.active, 1);
+    }
+
+    /// The canvas rect must reach the uniform verbatim — it is the whole
+    /// mechanism keeping tiled and whole-image NR agreeing at the frame edge.
+    #[test]
+    fn nr_uniform_carries_the_canvas_rect() {
+        use crate::local::NoiseReduction;
+        let nr = NoiseReduction {
+            luminance: 0.5,
+            ..Default::default()
+        };
+        // A tile whose haloed buffer starts 62 px above/left of the canvas.
+        let tile_canvas = [62, 62, 511, 383];
+        assert_eq!(nr_uniform(&nr, 0, tile_canvas).canvas, tile_canvas);
+        assert_eq!(nr_uniform(&nr, 3, tile_canvas).canvas, tile_canvas);
+    }
+
+    /// `active` must mean "can this change a pixel" (`is_active`), not "differs
+    /// from a reset" (`is_identity`). A detail-only NR (zero `luminance`/
+    /// `color`) is non-identity yet provably cannot move any threshold off
+    /// zero, and `NoiseReductionNode`/`nr_halo` both already gate on
+    /// `is_active` — so this field, the last `is_identity`-flavoured activity
+    /// check, must agree with them. The flag is currently unread by
+    /// `nr_atrous.wgsl` (it exists for `NrUniform` layout parity), which is
+    /// exactly why it should be right BEFORE some future pass starts reading it.
+    #[test]
+    fn nr_uniform_is_inactive_for_detail_only_noise_reduction() {
+        use crate::local::NoiseReduction;
+        let detail_only = NoiseReduction {
+            detail: 0.8,
+            color_detail: 0.8,
+            ..Default::default()
+        };
+        assert!(
+            !detail_only.is_identity(),
+            "fixture must be non-identity, or this test is vacuous"
+        );
+        assert_eq!(
+            nr_uniform(&detail_only, 0, WHOLE_CANVAS_64).active,
+            0,
+            "detail-only NR dispatches nothing, so the uniform must read inactive"
+        );
     }
 
     #[test]
@@ -1904,7 +1974,7 @@ mod tests {
             color_detail: 0.0,
         };
         for level in 0..crate::nr::NR_LEVELS {
-            let u = nr_uniform(&nr, level);
+            let u = nr_uniform(&nr, level, WHOLE_CANVAS_64);
             assert_eq!(u.level, level as i32);
             assert_eq!(u.spacing, 1 << level, "spacing = 2^level");
             assert!(

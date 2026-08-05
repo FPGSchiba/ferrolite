@@ -577,3 +577,51 @@ test** with a numbered checklist before finishing the branch.
   harness, method, and current baselines.
 * **Design system** — `docs/design/V2/README.md`: the Effects tab and Export panel this phase
   edits.
+
+---
+
+## 12. Known issues & follow-ups (recorded at merge, 2026-07-31)
+
+Carried out of the implementation's review record so they survive the deletion of the
+git-ignored SDD scratch. None blocked the merge; the whole-branch review triaged each.
+
+**Known issue — tiled-vs-whole divergence at the true canvas edge.** With NR active, the
+whole-image render and the settled tiled render disagree by up to ~0.06 (display-linear) within
+~90 px of the true image border. Root cause is a geometry-resample discrepancy at the canvas
+edge, independent of tile-seam halo handling. It is **excluded**, not fixed: the tile-seam
+golden's `NR_EDGE_MARGIN` (`ferrolite-pipeline/tests/golden.rs`) skips that band. Note this is
+the opposite of the precedent in the same file — the dehaze tiled tests once needed such a margin
+and it was **removed** once the cause was fixed. Possible user-visible effect: the frame edge may
+pop when tiles replace the initial reveal. Worth root-causing.
+
+**Follow-up — delete `nr_clear.wgsl` entirely.** `nr_atrous.wgsl` already branches on
+`p.level == 0`. Having level 0 write `shrunk` directly instead of `acc_in + shrunk` removes the
+clear shader, its pipeline/BGL/bind group, one dispatch per evaluate, a `prewarm_shaders` entry,
+**and** the whole "the accumulator must be zeroed every evaluate" correctness class that consumed
+most of this phase's risk budget. Deferred only to avoid churning verified-correct code at branch
+end.
+
+**Follow-up — pre-warm the NR and detail-sharpen passes.** `prewarm_pipelines` evaluates
+`OpStack::default()`, where NR early-returns and sharpen is inactive, so `nr-atrous` / `nr-clear` /
+`nr-combine` / `sharpen-apply-detail` are never *dispatched* at startup and the driver compiles
+them on first use, on the render thread. Consistent with dehaze's existing behaviour, but
+CLAUDE.md names pre-warm load-bearing; a second dummy evaluate with NR + detail/masking active
+would close it.
+
+**Follow-up — `SharpenNode::blur_slots` grows monotonically.** Touching Detail once with a global
+sharpen active adds a blur pair (~384 MB at 24 MP on the whole-image pipeline), and returning
+Detail to 0 does not change the halo, so no rebuild occurs and the slot stays parked for the
+pipeline's lifetime. Same class as the "strength-to-0 must not leave ~1 GiB parked" issue that
+`NoiseReductionNode` deliberately fixes by releasing in its inactive branch.
+
+**Tuning knob.** `NR_STRENGTH_SCALE` (`ferrolite-pipeline/src/nr.rs`, currently `0.05`) is the
+single constant governing NR strength calibration. It was set from first principles
+(`3σ·s_l` for σ ≈ 0.005–0.02 linear) and is the intended adjustment point if real-world use shows
+the slider range is off.
+
+**Cosmetic.** The retired reference shader `sharpen.wgsl` still names the last two uniform fields
+`pad0`/`pad1` (dead code — not in `prewarm_shaders`, bound to nothing). `uniforms.rs`'s
+`nr_uniform` sets `active` from `!is_identity()`, the last activity-flavoured use of that
+predicate — provably unreachable for detail-only NR, but `is_active()` would be more robust.
+`docs/design/V2/README.md` and §6.3 call the second export combo "Amount" where the code labels it
+"Sharpen amount".

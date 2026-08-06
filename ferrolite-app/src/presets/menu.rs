@@ -7,6 +7,7 @@
 //! what happens when the group modal is confirmed. Only the actual menu
 //! rendering (which egui makes untestable) stays in `image_context_menu`.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -77,7 +78,7 @@ pub enum DocReadPurpose {
 pub fn build_batch_targets(
     ids: &[i64],
     open_in_develop: Option<i64>,
-    resolve: impl Fn(i64) -> Option<PathBuf>,
+    mut resolve: impl FnMut(i64) -> Option<PathBuf>,
 ) -> (Vec<BatchTarget>, bool) {
     let mut excluded_open_image = false;
     let mut targets = Vec::with_capacity(ids.len());
@@ -93,17 +94,62 @@ pub fn build_batch_targets(
     (targets, excluded_open_image)
 }
 
-/// `build_batch_targets` against the live catalog: ids are looked up in the
-/// browsed record list and turned into paths by `AppState::image_path`.
+/// Whether every id in `ids` is the image open in Develop — i.e. once §5.1's
+/// exclusion is applied a paste or preset apply would have nothing left to do.
+///
+/// Purely in-memory (no record lookup, no catalog read), so the context menu
+/// can call it on every frame it is open to decide whether to GREY those two
+/// items. Greying with an honest reason is the house convention; letting the
+/// user click into a guaranteed no-op is not.
+pub fn all_targets_excluded(ids: &[i64], open_in_develop: Option<i64>) -> bool {
+    open_in_develop.is_some()
+        && !ids.is_empty()
+        && ids.iter().all(|id| Some(*id) == open_in_develop)
+}
+
+/// A path resolver over `records` that consults `folder_path` AT MOST ONCE per
+/// distinct `folder_id`.
+///
+/// Both memoizations matter on a click handler that may see thousands of ids:
+/// `folder_path` is a read-pool SQLite query (contract 1 — a per-target
+/// round-trip inside a click handler is exactly the UI-thread stall the rule
+/// exists to prevent), and the id→record lookup would otherwise be
+/// O(targets × images). A selection almost always shares one folder, so the
+/// query count collapses to 1.
+///
+/// The path build (folder path + filename) mirrors `AppState::image_path`; it
+/// is repeated here rather than called because `image_path` resolves the folder
+/// itself and so cannot be memoized from outside.
+pub fn memoized_path_resolver<'a>(
+    records: &'a [ferrolite_catalog::ImageRecord],
+    mut folder_path: impl FnMut(i64) -> Option<PathBuf> + 'a,
+) -> impl FnMut(i64) -> Option<PathBuf> + 'a {
+    let by_id: HashMap<i64, &ferrolite_catalog::ImageRecord> =
+        records.iter().map(|r| (r.id, r)).collect();
+    let mut folders: HashMap<i64, Option<PathBuf>> = HashMap::new();
+    move |id| {
+        let rec = by_id.get(&id)?;
+        let base = folders
+            .entry(rec.folder_id)
+            .or_insert_with(|| folder_path(rec.folder_id))
+            .clone()?;
+        Some(base.join(&rec.filename))
+    }
+}
+
+/// `build_batch_targets` against the live catalog, resolving each distinct
+/// folder exactly once (see `memoized_path_resolver`).
 pub fn batch_targets(state: &AppState, ids: &[i64]) -> (Vec<BatchTarget>, bool) {
     let open = state.viewer.as_ref().map(|v| v.image_id);
-    build_batch_targets(ids, open, |id| {
+    let resolve = memoized_path_resolver(&state.images, |folder_id| {
         state
-            .images
-            .iter()
-            .find(|r| r.id == id)
-            .and_then(|rec| state.image_path(rec))
-    })
+            .reads
+            .folder_path(folder_id)
+            .ok()
+            .flatten()
+            .map(PathBuf::from)
+    });
+    build_batch_targets(ids, open, resolve)
 }
 
 /// Message for a copy/paste/preset action that ended up with nothing to do.
@@ -338,6 +384,26 @@ mod tests {
         Some(PathBuf::from(format!("/photos/{id}.arw")))
     }
 
+    fn rec(id: i64, folder_id: i64, filename: &str) -> ferrolite_catalog::ImageRecord {
+        ferrolite_catalog::ImageRecord {
+            id,
+            folder_id,
+            filename: filename.to_string(),
+            width: None,
+            height: None,
+            orientation: ferrolite_image::Orientation::Normal,
+            capture_time: None,
+            iso: None,
+            decode_status: ferrolite_catalog::DecodeStatus::Done,
+            kind: ferrolite_image::FileKind::Raw,
+            rating: ferrolite_image::Rating::new(0),
+            flag: ferrolite_image::Flag::None,
+            has_edits: false,
+            thumb_w: None,
+            thumb_h: None,
+        }
+    }
+
     #[test]
     fn every_id_becomes_a_target_when_nothing_is_open_in_develop() {
         let (targets, excluded) = build_batch_targets(&[1, 2, 3], None, fake_resolve);
@@ -432,6 +498,153 @@ mod tests {
             targets.iter().map(|t| t.image_id).collect::<Vec<_>>(),
             vec![2]
         );
+    }
+
+    /// A selection that shares one folder must cost ONE `folder_path` query,
+    /// not one per image: this runs inside a click handler, and a read-pool
+    /// round-trip per target is the UI-thread stall contract 1 forbids.
+    #[test]
+    fn one_shared_folder_costs_exactly_one_folder_lookup() {
+        let records = vec![
+            rec(1, 10, "a.arw"),
+            rec(2, 10, "b.arw"),
+            rec(3, 10, "c.arw"),
+        ];
+        let mut lookups = 0usize;
+        let resolve = memoized_path_resolver(&records, |folder_id| {
+            lookups += 1;
+            Some(PathBuf::from(format!("/vol/{folder_id}")))
+        });
+        let (targets, _) = build_batch_targets(&[1, 2, 3], None, resolve);
+
+        assert_eq!(lookups, 1, "three images in one folder = one query");
+        assert_eq!(
+            targets.iter().map(|t| t.path.clone()).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/vol/10").join("a.arw"),
+                PathBuf::from("/vol/10").join("b.arw"),
+                PathBuf::from("/vol/10").join("c.arw"),
+            ]
+        );
+    }
+
+    /// Mixed folders: one lookup per DISTINCT folder (not per image), and every
+    /// path is still joined against its own folder.
+    #[test]
+    fn mixed_folders_cost_one_lookup_each_and_keep_the_right_paths() {
+        let records = vec![
+            rec(1, 10, "a.arw"),
+            rec(2, 20, "b.arw"),
+            rec(3, 10, "c.arw"),
+            rec(4, 20, "d.arw"),
+        ];
+        let mut seen: Vec<i64> = Vec::new();
+        let resolve = memoized_path_resolver(&records, |folder_id| {
+            seen.push(folder_id);
+            Some(PathBuf::from(format!("/vol/{folder_id}")))
+        });
+        let (targets, _) = build_batch_targets(&[1, 2, 3, 4], None, resolve);
+
+        assert_eq!(seen, vec![10, 20], "each distinct folder resolved once");
+        assert_eq!(
+            targets.iter().map(|t| t.path.clone()).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/vol/10").join("a.arw"),
+                PathBuf::from("/vol/20").join("b.arw"),
+                PathBuf::from("/vol/10").join("c.arw"),
+                PathBuf::from("/vol/20").join("d.arw"),
+            ]
+        );
+    }
+
+    /// A folder that cannot be resolved is remembered as a MISS — the failing
+    /// query must not be retried once per image in it either.
+    #[test]
+    fn an_unresolvable_folder_is_queried_once_and_drops_its_images() {
+        let records = vec![
+            rec(1, 10, "a.arw"),
+            rec(2, 99, "b.arw"),
+            rec(3, 99, "c.arw"),
+        ];
+        let mut lookups = 0usize;
+        let resolve = memoized_path_resolver(&records, |folder_id| {
+            lookups += 1;
+            (folder_id != 99).then(|| PathBuf::from(format!("/vol/{folder_id}")))
+        });
+        let (targets, _) = build_batch_targets(&[1, 2, 3], None, resolve);
+
+        assert_eq!(lookups, 2, "the missing folder is not re-queried per image");
+        assert_eq!(
+            targets.iter().map(|t| t.image_id).collect::<Vec<_>>(),
+            vec![1]
+        );
+    }
+
+    /// An id with no record in the browsed list resolves to nothing without
+    /// touching the catalog at all.
+    #[test]
+    fn an_unknown_id_never_reaches_the_folder_query() {
+        let records = vec![rec(1, 10, "a.arw")];
+        let mut lookups = 0usize;
+        let resolve = memoized_path_resolver(&records, |_| {
+            lookups += 1;
+            Some(PathBuf::from("/vol"))
+        });
+        let (targets, _) = build_batch_targets(&[42], None, resolve);
+
+        assert_eq!(lookups, 0);
+        assert!(targets.is_empty());
+    }
+
+    /// The greying predicate the menu uses: true only when EVERY target is the
+    /// image open in Develop, so the two multi-image items can be disabled with
+    /// an honest reason instead of clicking into a guaranteed no-op.
+    #[test]
+    fn all_targets_excluded_is_true_only_when_every_target_is_the_open_image() {
+        assert!(
+            all_targets_excluded(&[7], Some(7)),
+            "right-clicking the open image alone"
+        );
+        assert!(
+            all_targets_excluded(&[7, 7], Some(7)),
+            "a degenerate duplicate list is still all-excluded"
+        );
+        assert!(
+            !all_targets_excluded(&[7, 8], Some(7)),
+            "one survivor is enough to keep the action live"
+        );
+        assert!(
+            !all_targets_excluded(&[7], Some(8)),
+            "a different image is open"
+        );
+        assert!(
+            !all_targets_excluded(&[7], None),
+            "no Develop session means nothing is excluded"
+        );
+        assert!(
+            !all_targets_excluded(&[], Some(7)),
+            "an empty target list is not an exclusion — there was nothing to exclude"
+        );
+    }
+
+    /// The predicate and the actual target build must agree: whenever the menu
+    /// greys the item, `build_batch_targets` would indeed have produced zero
+    /// targets (and vice versa for the live case).
+    #[test]
+    fn the_greying_predicate_agrees_with_the_target_build() {
+        for (ids, open) in [
+            (vec![7i64], Some(7i64)),
+            (vec![7, 8], Some(7)),
+            (vec![7], None),
+            (vec![7, 8], None),
+        ] {
+            let (targets, _) = build_batch_targets(&ids, open, fake_resolve);
+            assert_eq!(
+                all_targets_excluded(&ids, open),
+                targets.is_empty(),
+                "predicate disagreed with the build for ids={ids:?} open={open:?}"
+            );
+        }
     }
 
     /// The copy clipboard captures the FULL document; narrowing is the paste

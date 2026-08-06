@@ -1,6 +1,7 @@
 //! Presets, copy/paste/sync and batch apply (P7).
 
 pub mod apply;
+pub mod modal;
 pub mod store;
 
 pub use store::{

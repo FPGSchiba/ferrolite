@@ -20,7 +20,13 @@ them lazily on scroll. Presets are plain JSON files on disk with no catalog tabl
 
 ## Global Constraints
 
-- **No new dependencies.** `GroupSet` is a hand-rolled `u16` newtype, not the `bitflags` crate.
+- **No new third-party dependencies.** `GroupSet` is a hand-rolled `u16` newtype, not the
+  `bitflags` crate. **Ruling (author, pre-flight):** adding
+  `thiserror = { workspace = true }` to `ferrolite-app/Cargo.toml` IS permitted — `thiserror 2.0`
+  is already in `[workspace.dependencies]` and already compiled for `ferrolite-decode` and
+  `ferrolite-catalog`, so this is a new *edge*, not a new crate: the lock file is unchanged and
+  nothing extra is built. It also keeps `PresetError` shaped like every other error type in the
+  workspace. This is the ONLY dependency change permitted in P7.
 - **No engine-tier changes.** Only `ferrolite-pipeline`, `ferrolite-catalog`, `ferrolite-app`,
   `ferrolite-export` may be touched. Never `ferrolite-image`/`-gpu`/`-vt`/`-jobs`/`-mask`.
 - **Nothing multi-millisecond on the UI thread.** All file and DB I/O goes through
@@ -1308,7 +1314,6 @@ Append to `apply.rs`:
 /// Submit the batch as ONE Background job (contract 1: priority, cancellation,
 /// progress). Reads and writes each target's sidecar, flags the affected
 /// thumbnails stale, and reports through `AppEvent::BatchApplyDone`.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_batch_apply(
     jobs: &Arc<JobSystem>,
     writer: &Arc<Mutex<Catalog>>,

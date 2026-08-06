@@ -19,10 +19,6 @@ mod metadata;
 mod module;
 mod monitor_profile;
 mod notifications;
-// TEMPORARY scaffolding: nothing in this binary's module tree calls into
-// `presets::` yet. Remove this allow once P7 Task 7 wires the UI consumer
-// (copy/paste, sync, batch apply) and the module gets real call sites.
-#[allow(dead_code, unused_imports)]
 mod presets;
 mod read_gate;
 mod settings;

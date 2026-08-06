@@ -272,11 +272,21 @@ pub struct AppState {
     /// this is just the in-memory list the UI renders.
     pub presets: Vec<crate::presets::Preset>,
     /// The last "Copy settings" capture, session-scoped.
-    #[allow(dead_code)] // written/read by the copy/paste UI (P7 Task 6+)
     pub clipboard_patch: Option<ferrolite_pipeline::EditPatch>,
     /// Prior documents from the last batch apply, for a one-level undo.
     /// `None` when nothing to undo or the batch exceeded `BATCH_UNDO_MAX`.
     pub batch_undo: Option<crate::presets::apply::UndoSnapshot>,
+    /// The open "Save preset" / "Paste settings" group modal (P7 §6.3).
+    ///
+    /// Lives on `AppState` rather than on `FerroliteApp` because the library
+    /// context menu — the only thing that opens it — receives `&mut AppState`
+    /// and nothing more. `app.rs` still DRIVES it (it owns the
+    /// `egui::Context`); see `FerroliteApp::drive_group_modal`.
+    pub open_group_modal: Option<crate::presets::menu::PendingGroupModal>,
+    /// Set when the batch currently in flight left the image open in Develop
+    /// out of its targets, so the result toast can say so. Consumed (and
+    /// cleared) by the `BatchApplyDone` fold.
+    pub batch_excluded_open_image: bool,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -379,6 +389,8 @@ impl AppState {
             presets: Vec::new(),
             clipboard_patch: None,
             batch_undo: None,
+            open_group_modal: None,
+            batch_excluded_open_image: false,
         })
     }
 
@@ -1042,6 +1054,8 @@ impl AppState {
             presets: Vec::new(),
             clipboard_patch: None,
             batch_undo: None,
+            open_group_modal: None,
+            batch_excluded_open_image: false,
         }
     }
 

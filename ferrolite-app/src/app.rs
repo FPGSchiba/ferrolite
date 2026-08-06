@@ -877,6 +877,35 @@ impl FerroliteApp {
     /// before coming back. If that happens, `confirm_export` persists
     /// whatever the user leaves in the dialog: benign last-writer-wins on a
     /// preference value, not a data-loss risk.
+    /// Show the open group modal for one frame and act on its outcome.
+    ///
+    /// The modal is taken OUT of `AppState` for the duration so
+    /// `presets::menu::confirm_group_modal` can hold `&mut AppState` and
+    /// `&mut PendingGroupModal` at once; it is put back unless the confirm
+    /// closed it. A rejected preset name keeps it open with the reason on
+    /// `name_error`, so the user fixes the name instead of losing their input.
+    fn drive_group_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.state.open_group_modal.take() else {
+            return;
+        };
+        let keep_open = match pending.modal.show(ctx) {
+            crate::presets::modal::GroupModalOutcome::None => true,
+            crate::presets::modal::GroupModalOutcome::Cancelled => false,
+            crate::presets::modal::GroupModalOutcome::Confirmed { name, owns } => {
+                !crate::presets::menu::confirm_group_modal(
+                    &mut self.state,
+                    ctx,
+                    &mut pending,
+                    name,
+                    owns,
+                )
+            }
+        };
+        if keep_open {
+            self.state.open_group_modal = Some(pending);
+        }
+    }
+
     fn open_export_dialog(&mut self) {
         if self.state.viewer.is_some() {
             self.state.export_dialog = Some(crate::export::ExportDialogState {
@@ -2515,6 +2544,11 @@ impl eframe::App for FerroliteApp {
                 None => {}
             }
         }
+
+        // The P7 "Save preset" / "Paste settings" group modal, opened from the
+        // library context menu (which only reaches `AppState`, hence the state
+        // ownership) and driven here, where the `egui::Context` lives.
+        self.drive_group_modal(ctx);
 
         // 1px window border — full-window foreground stroke so it never double-draws
         // against the side panel or status bar edges.

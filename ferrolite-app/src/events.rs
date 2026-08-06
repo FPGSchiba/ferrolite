@@ -234,6 +234,14 @@ pub enum AppEvent {
     PresetsLoaded {
         presets: Vec<crate::presets::Preset>,
     },
+    /// An off-thread source-document read started by a library context-menu
+    /// action finished (`presets::menu::spawn_doc_read`). `purpose` says which
+    /// action asked for it — filling the copy-settings clipboard, or opening
+    /// the "Save preset" modal over the document.
+    MenuDocRead {
+        doc: ferrolite_pipeline::EditDoc,
+        purpose: crate::presets::menu::DocReadPurpose,
+    },
 }
 
 /// Owned fields of a delivered `AppEvent::WarmSourceReady`, queued onto
@@ -412,6 +420,10 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("PresetsLoaded")
                 .field("count", &presets.len())
                 .finish(),
+            AppEvent::MenuDocRead { purpose, .. } => f
+                .debug_struct("MenuDocRead")
+                .field("purpose", purpose)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -630,12 +642,20 @@ impl AppState {
                         .keymap
                         .hint(crate::settings::keymap::Action::Undo)
                 });
-                let (level, msg) = crate::presets::apply::batch_result_message(
+                let (level, mut msg) = crate::presets::apply::batch_result_message(
                     &result,
                     &label,
                     cancelled,
                     undo_hint.as_deref(),
                 );
+                // The image open in Develop is never a batch target (design
+                // §5.1). The user asked for it to be included, so say plainly
+                // that it was not — silently applying to N-1 images would look
+                // like a bug. The flag is set when the batch is SPAWNED
+                // (`presets::menu`) and consumed exactly once here.
+                if std::mem::take(&mut self.batch_excluded_open_image) {
+                    msg.push_str(crate::presets::menu::EXCLUDED_OPEN_IMAGE_NOTE);
+                }
                 self.notify(level, msg);
                 // At least one image's `has_edits`/thumbnail-stale flag was
                 // just rewritten on the catalog side (`spawn_batch_apply`/
@@ -668,6 +688,19 @@ impl AppState {
             }
             AppEvent::PresetsLoaded { presets } => {
                 self.presets = presets;
+                None
+            }
+            // Both landings are pure state transitions (no egui, no GPU), so
+            // they fold here rather than in `app.rs`.
+            AppEvent::MenuDocRead { doc, purpose } => {
+                match purpose {
+                    crate::presets::menu::DocReadPurpose::Copy => {
+                        crate::presets::menu::set_clipboard(self, &doc);
+                    }
+                    crate::presets::menu::DocReadPurpose::SavePreset => {
+                        crate::presets::menu::open_save_modal(self, doc);
+                    }
+                }
                 None
             }
         }
@@ -1187,5 +1220,122 @@ mod tests {
         let n = s.notifications.iter_newest_first().next().unwrap();
         assert_eq!(n.level(), Level::Info);
         assert_eq!(n.message(), "Reverted the last batch apply on 5 images.");
+    }
+
+    /// A batch that left the open Develop image out of its targets must SAY
+    /// so, appended to the ordinary result toast — applying to N-1 images
+    /// without a word would read as a bug (design §5.1).
+    #[test]
+    fn batch_apply_done_reports_the_excluded_develop_image_and_clears_the_flag() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.batch_excluded_open_image = true;
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 2,
+                failed: 0,
+                skipped: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert!(
+            n.message()
+                .ends_with(crate::presets::menu::EXCLUDED_OPEN_IMAGE_NOTE.trim_start()),
+            "the result toast must name the skipped Develop image: {}",
+            n.message()
+        );
+        assert!(
+            !s.batch_excluded_open_image,
+            "the flag is consumed exactly once, so the NEXT batch's toast stays honest"
+        );
+    }
+
+    /// The same event with the flag unset must not gain the sentence.
+    #[test]
+    fn batch_apply_done_omits_the_excluded_note_when_nothing_was_excluded() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 2,
+                failed: 0,
+                skipped: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert!(
+            !n.message().contains("Develop"),
+            "nothing was excluded, so nothing to mention: {}",
+            n.message()
+        );
+    }
+
+    /// A "Copy settings" read landing fills the clipboard with the FULL
+    /// document (`default_owns()`); the paste dialog narrows it later.
+    #[test]
+    fn menu_doc_read_for_copy_fills_the_clipboard_and_toasts() {
+        use crate::presets::menu::DocReadPurpose;
+
+        let mut s = AppState::for_test();
+        let doc = ferrolite_pipeline::EditDoc::default().set_op(ferrolite_pipeline::Op::Exposure(
+            ferrolite_pipeline::Exposure { ev: 1.25 },
+        ));
+        let out = s.apply(AppEvent::MenuDocRead {
+            doc: doc.clone(),
+            purpose: DocReadPurpose::Copy,
+        });
+        assert_eq!(out, None);
+        let clip = s.clipboard_patch.as_ref().expect("clipboard must be set");
+        assert_eq!(clip.doc, doc);
+        assert_eq!(clip.owns, crate::presets::modal::default_owns());
+        assert!(
+            s.open_group_modal.is_none(),
+            "copying opens no dialog — only pasting and saving do"
+        );
+        assert_eq!(
+            s.notifications
+                .iter_newest_first()
+                .next()
+                .unwrap()
+                .message(),
+            "Copied settings."
+        );
+    }
+
+    /// A "Save preset" read landing opens the group modal in Save mode over the
+    /// document that just arrived, without touching the clipboard.
+    #[test]
+    fn menu_doc_read_for_save_preset_opens_the_modal_without_touching_the_clipboard() {
+        use crate::presets::menu::{DocReadPurpose, GroupModalPurpose};
+        use crate::presets::modal::GroupModalMode;
+
+        let mut s = AppState::for_test();
+        let doc = ferrolite_pipeline::EditDoc::default().set_op(ferrolite_pipeline::Op::Exposure(
+            ferrolite_pipeline::Exposure { ev: -0.5 },
+        ));
+        s.apply(AppEvent::MenuDocRead {
+            doc: doc.clone(),
+            purpose: DocReadPurpose::SavePreset,
+        });
+        let pending = s.open_group_modal.as_ref().expect("modal must be open");
+        assert!(matches!(pending.modal.mode, GroupModalMode::Save { .. }));
+        match &pending.purpose {
+            GroupModalPurpose::SavePreset { doc: captured } => {
+                assert_eq!(**captured, doc, "the modal must carry the read document");
+            }
+            _ => panic!("expected a SavePreset purpose"),
+        }
+        assert!(
+            s.clipboard_patch.is_none(),
+            "saving a preset must not clobber the copy/paste clipboard"
+        );
     }
 }

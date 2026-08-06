@@ -138,6 +138,9 @@ pub fn spawn_load_all(
 
 /// Remove the file backing `preset`. A missing file is NOT an error — the
 /// desired end state (no such preset) already holds.
+// No binary call site until the preset-management UI lands; scoped allow
+// rather than a blanket module one (see `icons.rs`).
+#[allow(dead_code)]
 pub fn delete(dir: &Path, preset: &Preset) -> Result<(), PresetError> {
     let Some(stem) = sanitize_filename(&preset.name) else {
         return Err(PresetError::InvalidName);

@@ -1249,6 +1249,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "thiserror 2.0.18",
  "wgpu",
  "windows 0.58.0",
 ]

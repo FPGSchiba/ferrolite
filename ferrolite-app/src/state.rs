@@ -230,6 +230,38 @@ pub struct AppState {
     /// drained in `update()` where the GPU render state is available.
     pub pending_thumb_regen: Vec<i64>,
 
+    /// Image ids whose `thumbnails.stale` flag (P7 §5.2) was found set the
+    /// moment a grid cell realized this frame, awaiting `FerroliteApp::
+    /// drain_stale_thumb_regen_requests` to actually spawn the regen job —
+    /// mirrors `pending_thumb_regen` above: `library::grid::show` runs deep
+    /// inside an `egui::Ui` pass with no access to `eframe::Frame`/the GPU
+    /// render state, so it can only enqueue here.
+    pub pending_stale_regen: Vec<i64>,
+    /// Image ids with a stale-thumbnail regeneration currently in flight.
+    /// Without this guard a stale cell that stays on screen would re-spawn a
+    /// full decode + GPU render + encode EVERY FRAME — the same storm the
+    /// `ThumbMissing` sticky guard (`thumb_missing`) exists to prevent for
+    /// the lazy-load path. Inserted the moment a stale cell is DETECTED
+    /// (grid realize), not when the job actually spawns, so a realize that
+    /// races ahead of the next `drain_stale_thumb_regen_requests` call
+    /// cannot enqueue the same id twice. Cleared on `ThumbReady`/
+    /// `ThumbFailed` for the id (success or failure — see those events'
+    /// `apply` folds), so a later re-staling (another batch apply) or a
+    /// failed/cancelled regen can trigger a fresh attempt.
+    pub stale_regen_inflight: HashSet<i64>,
+    /// Negative cache: image ids the grid has already queried via
+    /// `ReadPool::is_thumbnail_stale` THIS epoch and found NOT stale, so a
+    /// cell that stays on screen across many frames (e.g. a held scroll
+    /// drag) does not re-issue an indexed SQLite lookup every single frame
+    /// for every visible cell. Bounded by construction to the currently
+    /// browsed folder/filter's row count: cleared in `refresh_images` (any
+    /// `dirty`-triggered reload — folder switch, filter change, and
+    /// crucially a batch apply's `BatchApplyDone`/`BatchUndoDone`, which is
+    /// exactly when a previously-fresh id could newly become stale) and in
+    /// `reset_for_new_folder`. Never grown outside those scopes, so it is
+    /// NOT an unbounded cache.
+    pub stale_checked_fresh: HashSet<i64>,
+
     /// Inline rename in progress: (kind, id, edit buffer).
     /// Set on double-click or "Rename" context-menu; cleared on Enter/blur.
     pub renaming: Option<(RenameKind, i64, String)>,
@@ -397,6 +429,9 @@ impl AppState {
             selection_anchor: None,
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
+            pending_stale_regen: Vec::new(),
+            stale_regen_inflight: HashSet::new(),
+            stale_checked_fresh: HashSet::new(),
             camera_options: Vec::new(),
             lens_options: Vec::new(),
             iso_range: None,
@@ -672,6 +707,12 @@ impl AppState {
         self.images_rev = self.images_rev.wrapping_add(1);
         self.visible_tags.clear();
         self.visible_collections.clear();
+        // Any `dirty`-triggered reload (this is the only caller) may have
+        // been caused by a batch preset apply/undo that just (un)set some
+        // rows' `thumbnails.stale` flag — the negative cache from a prior
+        // realize is no longer trustworthy for those ids, so drop it wholesale
+        // rather than tracking which ids a given reload actually touched.
+        self.stale_checked_fresh.clear();
     }
 
     /// Open `rec` in the viewer, cancelling any currently-open viewer first.
@@ -775,6 +816,13 @@ impl AppState {
         self.cancel_pending_jobs();
         self.reset_ingest_counters();
         self.thumb_missing.clear();
+        // A stale-regen job in flight for the OLD folder's images is still
+        // safe to let finish (it writes by image_id, not by folder), but the
+        // guard/queue must not carry over: the new folder's cells need to be
+        // free to detect and enqueue their own staleness from a clean slate.
+        self.pending_stale_regen.clear();
+        self.stale_regen_inflight.clear();
+        self.stale_checked_fresh.clear();
         self.images.clear();
         // Bump so the grid's layout cache rebuilds for the now-empty set instead
         // of indexing the previous folder's rows (stale-index panic otherwise).
@@ -1058,6 +1106,9 @@ impl AppState {
             selection_anchor: None,
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
+            pending_stale_regen: Vec::new(),
+            stale_regen_inflight: HashSet::new(),
+            stale_checked_fresh: HashSet::new(),
             camera_options: Vec::new(),
             lens_options: Vec::new(),
             iso_range: None,
@@ -1314,6 +1365,23 @@ mod tests {
         );
     }
 
+    /// A folder switch must also clear the P7 stale-regen queue/guards, so an
+    /// id in flight for the OLD folder cannot suppress detection for an
+    /// unrelated image sharing the same id under the new folder view.
+    #[test]
+    fn reset_for_new_folder_clears_stale_regen_state() {
+        let mut s = AppState::for_test();
+        s.pending_stale_regen.push(5);
+        s.stale_regen_inflight.insert(5);
+        s.stale_checked_fresh.insert(6);
+
+        s.reset_for_new_folder();
+
+        assert!(s.pending_stale_regen.is_empty());
+        assert!(s.stale_regen_inflight.is_empty());
+        assert!(s.stale_checked_fresh.is_empty());
+    }
+
     /// `select_folder` must delegate to `reset_for_new_folder` and then set the
     /// new `current_folder`.
     #[test]
@@ -1393,6 +1461,24 @@ mod tests {
         s.include_subfolders = true;
         s.refresh_images();
         assert_eq!(s.images.len(), 2, "recursive view: root + child images");
+    }
+
+    /// `refresh_images` is the only path `dirty` funnels through (folder
+    /// switch, filter change, and any batch-apply/undo write), so it must
+    /// drop the P7 stale-regen negative cache: a batch apply on the currently
+    /// browsed folder can newly flag a row the grid had previously cached as
+    /// "checked, not stale" this session.
+    #[test]
+    fn refresh_images_clears_stale_checked_fresh_cache() {
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(7);
+
+        s.refresh_images();
+
+        assert!(
+            s.stale_checked_fresh.is_empty(),
+            "a reload must invalidate the negative stale-check cache"
+        );
     }
 
     #[test]

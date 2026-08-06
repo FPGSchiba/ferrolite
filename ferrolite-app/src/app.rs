@@ -1472,6 +1472,66 @@ impl FerroliteApp {
         }
     }
 
+    /// Drain grid-detected stale-thumbnail regeneration requests (P7 Task
+    /// 10 — the consumer half of the design; Task 4 is the producer that
+    /// SETS the flag on a batch apply). `library::grid::show`'s per-frame
+    /// cell-realize path has no access to `eframe::Frame`/the GPU render
+    /// state, so it only enqueues onto `pending_stale_regen` (already having
+    /// marked the id `stale_regen_inflight` there, BEFORE this drains, to
+    /// guard against a per-frame re-spawn storm — see that field's doc
+    /// comment on `AppState`). This mirrors `drain_thumb_regen_requests`
+    /// above almost exactly; the one difference is the stack source: a
+    /// batch-applied image is never the open Develop viewer (batch apply
+    /// excludes it, design §5.1), so there is no in-memory stack to reuse —
+    /// the job reads the persisted `.xmp` sidecar instead, same as the
+    /// on-demand "Regenerate thumbnail" action above.
+    pub(crate) fn drain_stale_thumb_regen_requests(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        if self.state.pending_stale_regen.is_empty() {
+            return;
+        }
+        let Some(rs) = frame.wgpu_render_state() else {
+            // No GPU this frame; keep the requests (and their in-flight
+            // guards) for a later frame.
+            return;
+        };
+        let ids = std::mem::take(&mut self.state.pending_stale_regen);
+        let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let cam =
+            crate::develop::thumb_regen::srgb_fallback_camera_to_working(self.state.working_space);
+        for id in ids {
+            let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() else {
+                // Row no longer in the browsed set (folder switch/filter
+                // change raced this queue) — release the guard too, so a
+                // later realize (e.g. the same id reappearing under a
+                // changed filter) is free to re-detect and retry.
+                self.state.stale_regen_inflight.remove(&id);
+                continue;
+            };
+            let Ok(Some(folder)) = self.state.reads.folder_path(rec.folder_id) else {
+                self.state.stale_regen_inflight.remove(&id);
+                continue;
+            };
+            let path = std::path::PathBuf::from(folder).join(&rec.filename);
+            crate::develop::thumb_regen::spawn_regen_edited_thumbnail(
+                &self.state.jobs,
+                &self.state.writer,
+                &self.state.tx,
+                ctx,
+                std::sync::Arc::clone(&gpu),
+                self.state.lens_db.clone(),
+                id,
+                path,
+                rec.kind,
+                cam,
+                crate::develop::thumb_regen::RegenStackSource::Sidecar,
+            );
+        }
+    }
+
     /// Build a point-in-time memory attribution from live app state. Impure
     /// (reads `ViewerState`, caches, in-flight gauges, and the OS RSS). Only call
     /// behind `diag::enabled()`. GPU/VRAM figures are documented estimates.

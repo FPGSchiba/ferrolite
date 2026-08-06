@@ -465,6 +465,12 @@ impl AppState {
                 // that finds the texture gone (e.g. evicted from the LRU cache)
                 // can request it again instead of being stuck sticky-missing.
                 self.thumb_missing.remove(&image_id);
+                // P7 Task 10: this id's stale-thumbnail regen (if any) just
+                // delivered — clear the in-flight guard so a LATER re-staling
+                // (another batch apply) can trigger a fresh regen instead of
+                // being stuck permanently "in flight". Harmless no-op for the
+                // ordinary lazy-load path, which never inserts into this set.
+                self.stale_regen_inflight.remove(&image_id);
                 // Keep the in-memory grid row's cell-aspect source (`thumb_w`/
                 // `thumb_h`, see `ImageRecord::thumb_w`) in sync with what was
                 // just persisted, so an edited-thumbnail regen's new (cropped)
@@ -488,6 +494,15 @@ impl AppState {
             AppEvent::ThumbFailed { image_id } => {
                 self.thumb_pending.remove(&image_id);
                 self.thumb_handles.remove(&image_id);
+                // P7 Task 10: a failed OR cancelled stale-thumbnail regen (see
+                // `thumb_regen::spawn_regen_edited_thumbnail`, which now emits
+                // this on its error/cancel paths) must also release the
+                // in-flight guard — otherwise the catalog's `stale` flag
+                // correctly stays true (never cleared on failure) but the
+                // grid could never retry within this session, since
+                // `stale_regen_inflight` would never let it re-detect the
+                // row. Harmless no-op for the ordinary lazy-load path.
+                self.stale_regen_inflight.remove(&image_id);
                 None
             }
             AppEvent::ThumbMissing { image_id } => {
@@ -855,6 +870,21 @@ mod tests {
         );
     }
 
+    /// P7 Task 10: a failed (or cancelled) stale-thumbnail regen must still
+    /// release the in-flight guard, or the id could never be retried within
+    /// this session even though the catalog's `stale` flag correctly stays
+    /// true.
+    #[test]
+    fn thumb_failed_clears_stale_regen_inflight_guard() {
+        let mut s = AppState::for_test();
+        s.stale_regen_inflight.insert(9);
+        s.apply(AppEvent::ThumbFailed { image_id: 9 });
+        assert!(
+            !s.stale_regen_inflight.contains(&9),
+            "ThumbFailed must release the stale-regen in-flight guard"
+        );
+    }
+
     /// Anti-storm invariant (Task 1): folding `ThumbMissing` must clear
     /// `thumb_pending` and mark the id sticky-missing so `request_thumbnail`'s
     /// guard skips it on every subsequent frame instead of re-spawning a
@@ -903,6 +933,25 @@ mod tests {
         assert!(
             !s.thumb_missing.contains(&13),
             "ThumbReady must clear the sticky-missing marker"
+        );
+    }
+
+    /// P7 Task 10: once a regenerated thumbnail actually arrives, the
+    /// in-flight guard must be released so a later re-staling (another batch
+    /// apply on this id) can trigger a fresh regen attempt.
+    #[test]
+    fn thumb_ready_clears_stale_regen_inflight_guard() {
+        let mut s = AppState::for_test();
+        s.stale_regen_inflight.insert(13);
+        s.apply(AppEvent::ThumbReady {
+            image_id: 13,
+            rgba: vec![1, 2, 3, 255],
+            w: 1,
+            h: 1,
+        });
+        assert!(
+            !s.stale_regen_inflight.contains(&13),
+            "ThumbReady must release the stale-regen in-flight guard"
         );
     }
 

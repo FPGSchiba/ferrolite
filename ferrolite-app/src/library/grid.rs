@@ -262,6 +262,38 @@ fn paint_cell(
     {
         state.request_thumbnail(ui.ctx(), rec.id);
     }
+
+    // P7 §5.2 lazy-refresh consumer (Task 10): a batch preset apply flagged
+    // this thumbnail stale (Task 4) — regenerate it now that the cell is
+    // actually on screen, instead of the moment it was applied. The grid is
+    // already virtualized, so this only ever pays the decode + GPU render +
+    // encode cost for cells the user actually looks at.
+    //
+    // Gated on `Done` for the same reason as the request above (no thumbnail
+    // row exists yet for a `Pending` image, so there is nothing to check).
+    // `stale_regen_inflight`/`stale_checked_fresh` short-circuit the indexed
+    // `is_thumbnail_stale` read-pool lookup for an id already known this
+    // "epoch" (in flight, or freshly confirmed not-stale) — see their doc
+    // comments on `AppState` for why this is bounded, not unbounded: a cell
+    // that stays on screen across many frames (e.g. a held scroll drag) must
+    // not re-query the catalog every single frame. This cannot spawn the
+    // regen job directly (no access to `eframe::Frame`/the GPU render state
+    // here) — it only enqueues; `FerroliteApp::drain_stale_thumb_regen_requests`
+    // (app.rs), called once per frame, does the actual spawn.
+    let already_inflight = state.stale_regen_inflight.contains(&rec.id);
+    if rec.decode_status == ferrolite_catalog::DecodeStatus::Done
+        && !already_inflight
+        && !state.stale_checked_fresh.contains(&rec.id)
+    {
+        let stale = state.reads.is_thumbnail_stale(rec.id).unwrap_or(false);
+        if crate::develop::thumb_regen::should_regen_stale(stale, already_inflight) {
+            state.stale_regen_inflight.insert(rec.id);
+            state.pending_stale_regen.push(rec.id);
+        } else {
+            state.stale_checked_fresh.insert(rec.id);
+        }
+    }
+
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
 

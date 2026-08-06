@@ -244,6 +244,7 @@ impl AppController {
         crate::diag::add_events(events_this_frame);
         crate::diag::add_uploads(uploads_this_frame);
         app.drain_thumb_regen_requests(ctx, frame);
+        app.drain_stale_thumb_regen_requests(ctx, frame);
         if ingest_done {
             app.state.reload_vocab();
         }

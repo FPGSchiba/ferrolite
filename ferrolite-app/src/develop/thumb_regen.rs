@@ -141,6 +141,16 @@ pub fn regenerate_edited_thumbnail_blocking(
         let db = writer.lock().expect("writer");
         db.put_thumbnail(image_id, &thumb)
             .map_err(|e| format!("put_thumbnail: {e}"))?;
+        // P7 Task 10 carry-forward (Task 3 review finding): `put_thumbnail`'s
+        // `INSERT ... ON CONFLICT DO UPDATE` does not reference the `stale`
+        // column, so persisting alone never clears a flag a batch apply set.
+        // Clear it explicitly, and only AFTER the blob above is committed —
+        // if `put_thumbnail` had failed we would have already returned `Err`
+        // above and never reach this line, so a failed regen leaves the row
+        // genuinely stale and is retried on its next realize. Best-effort:
+        // if this write itself fails, the row simply stays stale and is
+        // retried too — never worse than not calling it.
+        let _ = db.set_thumbnails_stale(&[image_id], false);
     }
 
     Ok(decoded)
@@ -156,8 +166,15 @@ pub enum RegenStackSource {
 }
 
 /// Submit a Background regen job. On success it emits `AppEvent::ThumbReady`
-/// (the existing grid texture-swap signal); on failure it logs and keeps the
-/// existing thumbnail. Always requests a repaint so the UI drains the event.
+/// (the existing grid texture-swap signal); on failure OR cancellation it
+/// logs (failure only) and emits `AppEvent::ThumbFailed`, keeping the
+/// existing thumbnail. `ThumbFailed` is folded to a no-op by the ordinary
+/// lazy-load path's bookkeeping (this job never touches `thumb_pending`), but
+/// it IS what releases `AppState.stale_regen_inflight` (P7 Task 10) for the
+/// stale-thumbnail auto-regen caller — without it, a failed/cancelled regen
+/// would leave that id stuck "in flight" for the rest of the session even
+/// though the catalog's `stale` flag correctly stays set for a retry. Always
+/// requests a repaint so the UI drains the event.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_regen_edited_thumbnail(
     jobs: &Arc<JobSystem>,
@@ -177,6 +194,8 @@ pub fn spawn_regen_edited_thumbnail(
     let egui_ctx = egui_ctx.clone();
     jobs.submit(Priority::Background, move |cancel| {
         if cancel.is_cancelled() {
+            let _ = tx.send(AppEvent::ThumbFailed { image_id });
+            egui_ctx.request_repaint();
             return;
         }
         let stack = match stack_source {
@@ -203,10 +222,20 @@ pub fn spawn_regen_edited_thumbnail(
             }
             Err(e) => {
                 eprintln!("ferrolite: edited-thumbnail regen failed for #{image_id}: {e}");
+                let _ = tx.send(AppEvent::ThumbFailed { image_id });
             }
         }
         egui_ctx.request_repaint();
     });
+}
+
+/// Whether a realized grid cell should spawn a stale-thumbnail regeneration
+/// (P7 §5.2's lazy-refresh consumer, Task 10). Extracted from `library::grid`
+/// so the de-dup guard against a per-frame re-spawn storm is unit-testable
+/// without a grid, egui, or a GPU — the same rationale as `on_leave_decision`
+/// above.
+pub fn should_regen_stale(stale: bool, already_inflight: bool) -> bool {
+    stale && !already_inflight
 }
 
 #[cfg(test)]
@@ -232,6 +261,19 @@ mod tests {
         // it here would silently strand the image on its pre-edit thumbnail
         // forever (short of the manual "Regenerate thumbnail" action).
         assert_eq!(on_leave_decision(true, false), (false, true));
+    }
+
+    /// Anti-storm invariant (Task 10): a stale cell realizes and spawns
+    /// exactly once, never on every subsequent frame it stays on screen.
+    #[test]
+    fn a_stale_cell_regenerates_once_not_every_frame() {
+        assert!(should_regen_stale(true, false), "first realize spawns");
+        assert!(
+            !should_regen_stale(true, true),
+            "already in flight — must NOT re-spawn"
+        );
+        assert!(!should_regen_stale(false, false), "fresh cell never spawns");
+        assert!(!should_regen_stale(false, true));
     }
 
     #[test]

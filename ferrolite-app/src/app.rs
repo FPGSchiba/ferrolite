@@ -55,6 +55,28 @@ pub struct FerroliteApp {
     pub(crate) tool_registry: crate::develop::tool::DevelopToolRegistry,
 }
 
+/// The boolean-OR core of `FerroliteApp::modal_active`, split out as a free
+/// function over plain `bool`s so the "which flags gate global shortcut
+/// dispatch" logic is unit-testable without a `FerroliteApp` — constructing
+/// one needs a real wgpu `CreationContext` and opens the on-disk catalog
+/// (`AppState::new`), disproportionate scaffolding for what is otherwise a
+/// one-line `||` chain.
+fn any_modal_pending(
+    show_help: bool,
+    show_settings: bool,
+    pending_remove: bool,
+    open_group_modal: bool,
+    pending_rename_preset: bool,
+    pending_delete_preset: bool,
+) -> bool {
+    show_help
+        || show_settings
+        || pending_remove
+        || open_group_modal
+        || pending_rename_preset
+        || pending_delete_preset
+}
+
 impl FerroliteApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
@@ -797,22 +819,28 @@ impl FerroliteApp {
     }
 
     /// True while any modal overlay is on screen (Help, Settings, the
-    /// remove-folder confirmation). Used to suppress the app's global keyboard
-    /// shortcuts underneath the modal so its own input handling (e.g. Esc) is
-    /// the only thing that reacts, and so shortcuts like Enter/Ctrl+A don't
-    /// leak through to the grid/viewer while a modal is up. Extend this with
-    /// new modals as they're added.
+    /// remove-folder confirmation, the P7 group modal, or either P7 Task 8
+    /// preset dialog). Used to suppress the app's global keyboard shortcuts
+    /// underneath the modal so its own input handling (e.g. Esc) is the only
+    /// thing that reacts, and so shortcuts like Enter/Ctrl+A — and, for
+    /// `open_group_modal` and `pending_rename_preset` specifically, plain
+    /// letter/digit keys typed into their name text field — don't leak
+    /// through to the grid/viewer while a modal is up. Extend this with new
+    /// modals as they're added.
     ///
     /// The mask Components window is intentionally NOT included here: unlike
     /// the modals above, it must stay non-blocking so the canvas keeps
     /// receiving input behind it (live preview, color-eyedropper sampling,
     /// brush drawing all route through the canvas while the window is open).
     fn modal_active(&self) -> bool {
-        self.show_help
-            || self.show_settings
-            || self.state.pending_remove.is_some()
-            || self.state.pending_rename_preset.is_some()
-            || self.state.pending_delete_preset.is_some()
+        any_modal_pending(
+            self.show_help,
+            self.show_settings,
+            self.state.pending_remove.is_some(),
+            self.state.open_group_modal.is_some(),
+            self.state.pending_rename_preset.is_some(),
+            self.state.pending_delete_preset.is_some(),
+        )
     }
 
     /// If the current viewer's edit stack changed this session, spawn a
@@ -2849,7 +2877,27 @@ impl eframe::App for FerroliteApp {
 
 #[cfg(test)]
 mod tests {
+    use super::any_modal_pending;
     use crate::settings::Settings;
+
+    /// Every flag `modal_active` ORs together must independently suppress
+    /// shortcut dispatch — most importantly `open_group_modal` (Task 7's
+    /// "Save preset" / "Paste settings" dialog), which holds a free-text name
+    /// field: without this, typing a preset name would fire every single-key
+    /// shortcut (star ratings, tool switches, Ctrl+Z) on every keystroke.
+    #[test]
+    fn any_modal_pending_is_false_only_when_every_flag_is_clear() {
+        assert!(!any_modal_pending(false, false, false, false, false, false));
+        assert!(any_modal_pending(true, false, false, false, false, false));
+        assert!(any_modal_pending(false, true, false, false, false, false));
+        assert!(any_modal_pending(false, false, true, false, false, false));
+        assert!(
+            any_modal_pending(false, false, false, true, false, false),
+            "open_group_modal must suppress shortcut dispatch — it holds a text field"
+        );
+        assert!(any_modal_pending(false, false, false, false, true, false));
+        assert!(any_modal_pending(false, false, false, false, false, true));
+    }
 
     #[test]
     fn test_panel_width_and_height_persistence() {

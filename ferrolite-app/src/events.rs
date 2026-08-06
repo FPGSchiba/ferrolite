@@ -198,6 +198,18 @@ pub enum AppEvent {
     MetaBackfillReady {
         results: Vec<ferrolite_catalog::BackfillResult>,
     },
+    /// A batch preset/paste apply finished. `snapshot` is `None` when the batch
+    /// exceeded `BATCH_UNDO_MAX` (see `presets::apply`), in which case undo is
+    /// not offered. `label` names the applied patch for the toast.
+    BatchApplyDone {
+        result: crate::presets::apply::BatchResult,
+        // Consumed by the undo-stack push wired in Task 5; not read yet.
+        #[allow(dead_code)]
+        snapshot: Option<crate::presets::apply::UndoSnapshot>,
+        label: String,
+    },
+    /// Progress within a batch apply.
+    BatchApplyProgress { done: usize, total: usize },
 }
 
 /// Owned fields of a delivered `AppEvent::WarmSourceReady`, queued onto
@@ -351,6 +363,16 @@ impl std::fmt::Debug for AppEvent {
             AppEvent::MetaBackfillReady { results } => f
                 .debug_struct("MetaBackfillReady")
                 .field("batch_len", &results.len())
+                .finish(),
+            AppEvent::BatchApplyDone { result, label, .. } => f
+                .debug_struct("BatchApplyDone")
+                .field("result", result)
+                .field("label", label)
+                .finish_non_exhaustive(),
+            AppEvent::BatchApplyProgress { done, total } => f
+                .debug_struct("BatchApplyProgress")
+                .field("done", done)
+                .field("total", total)
                 .finish(),
         }
     }
@@ -552,6 +574,12 @@ impl AppState {
                 self.dirty = true;
                 None
             }
+            // Wired in Task 5 (toast + undo-stack push + `dirty`/thumbnail
+            // refresh); nothing to fold here yet.
+            AppEvent::BatchApplyDone { .. } => None,
+            // Handled in `app.rs`/a future batch-apply progress indicator
+            // (Task 5+); nothing to fold here.
+            AppEvent::BatchApplyProgress { .. } => None,
         }
     }
 }

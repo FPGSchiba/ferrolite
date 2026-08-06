@@ -200,16 +200,26 @@ pub enum AppEvent {
     },
     /// A batch preset/paste apply finished. `snapshot` is `None` when the batch
     /// exceeded `BATCH_UNDO_MAX` (see `presets::apply`), in which case undo is
-    /// not offered. `label` names the applied patch for the toast.
+    /// not offered. `label` names the applied patch for the toast. `cancelled`
+    /// is `true` when the run was cut short by its cancel token: the remaining,
+    /// unattempted targets are folded into `result.skipped` by
+    /// `apply_patch_to_targets`, which is indistinguishable from "sidecar
+    /// unreadable" at the count level — `cancelled` lets the toast phrase that
+    /// case as a cancellation instead of implying N corrupt files.
     BatchApplyDone {
         result: crate::presets::apply::BatchResult,
         // Consumed by the undo-stack push wired in Task 5; not read yet.
         #[allow(dead_code)]
         snapshot: Option<crate::presets::apply::UndoSnapshot>,
         label: String,
+        cancelled: bool,
     },
     /// Progress within a batch apply.
     BatchApplyProgress { done: usize, total: usize },
+    /// The startup preset-directory scan finished.
+    PresetsLoaded {
+        presets: Vec<crate::presets::Preset>,
+    },
 }
 
 /// Owned fields of a delivered `AppEvent::WarmSourceReady`, queued onto
@@ -364,15 +374,25 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("MetaBackfillReady")
                 .field("batch_len", &results.len())
                 .finish(),
-            AppEvent::BatchApplyDone { result, label, .. } => f
+            AppEvent::BatchApplyDone {
+                result,
+                label,
+                cancelled,
+                ..
+            } => f
                 .debug_struct("BatchApplyDone")
                 .field("result", result)
                 .field("label", label)
+                .field("cancelled", cancelled)
                 .finish_non_exhaustive(),
             AppEvent::BatchApplyProgress { done, total } => f
                 .debug_struct("BatchApplyProgress")
                 .field("done", done)
                 .field("total", total)
+                .finish(),
+            AppEvent::PresetsLoaded { presets } => f
+                .debug_struct("PresetsLoaded")
+                .field("count", &presets.len())
                 .finish(),
         }
     }
@@ -574,12 +594,50 @@ impl AppState {
                 self.dirty = true;
                 None
             }
-            // Wired in Task 5 (toast + undo-stack push + `dirty`/thumbnail
-            // refresh); nothing to fold here yet.
-            AppEvent::BatchApplyDone { .. } => None,
-            // Handled in `app.rs`/a future batch-apply progress indicator
-            // (Task 5+); nothing to fold here.
+            // Push the one-level undo snapshot (`None` when the batch exceeded
+            // `BATCH_UNDO_MAX` or nothing was applied — undo is simply not
+            // offered) and raise the result toast. `cancelled` is threaded
+            // through to `batch_result_message` so a cancelled run reads as
+            // a cancellation rather than "N images skipped" (see that
+            // variant's doc comment and Task 4's review finding).
+            AppEvent::BatchApplyDone {
+                result,
+                snapshot,
+                label,
+                cancelled,
+            } => {
+                self.batch_undo = snapshot;
+                let undo_hint = self.batch_undo.is_some().then(|| {
+                    self.settings
+                        .keymap
+                        .hint(crate::settings::keymap::Action::Undo)
+                });
+                let (level, msg) = crate::presets::apply::batch_result_message(
+                    &result,
+                    &label,
+                    cancelled,
+                    undo_hint.as_deref(),
+                );
+                self.notify(level, msg);
+                // At least one image's `has_edits`/thumbnail-stale flag was
+                // just rewritten on the catalog side (`spawn_batch_apply`/
+                // `spawn_batch_undo`), so the currently-browsed grid's
+                // in-memory `ImageRecord`s are now stale — mirrors
+                // `MetaBackfillReady`'s `dirty = true` for the same reason.
+                // No-op when nothing actually applied (e.g. an all-skipped
+                // or fully-cancelled-before-the-first-item run).
+                if result.applied > 0 {
+                    self.dirty = true;
+                }
+                None
+            }
+            // Status-bar-only progress readout (a future indicator); no
+            // counter to fold here.
             AppEvent::BatchApplyProgress { .. } => None,
+            AppEvent::PresetsLoaded { presets } => {
+                self.presets = presets;
+                None
+            }
         }
     }
 }
@@ -969,5 +1027,96 @@ mod tests {
             "the backfilled row must drop out of the NULL-metadata backlog"
         );
         assert!(s.notifications.is_empty(), "a clean write raises no toast");
+    }
+
+    /// A successful batch apply with a retained snapshot: the snapshot is
+    /// pushed into `batch_undo`, the toast names the live Undo keybind, and
+    /// `dirty` is bumped (the catalog's `has_edits` was rewritten under us).
+    #[test]
+    fn batch_apply_done_stores_snapshot_pushes_toast_and_marks_dirty() {
+        use crate::notifications::Level;
+        use crate::presets::apply::{BatchResult, UndoSnapshot};
+
+        let mut s = AppState::for_test();
+        s.dirty = false;
+        let snapshot = UndoSnapshot {
+            entries: vec![(1, std::path::PathBuf::from("/a.arw"), "{}".to_string())],
+        };
+        let out = s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+            },
+            snapshot: Some(snapshot),
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert_eq!(out, None);
+        assert!(
+            s.batch_undo.is_some(),
+            "a retained snapshot must be pushed onto batch_undo"
+        );
+        assert!(s.dirty, "an applied batch must bump dirty");
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert_eq!(n.level(), Level::Info);
+        assert!(
+            n.message().contains("Press Ctrl+Z to undo."),
+            "the toast must name the live Undo keybind: {}",
+            n.message()
+        );
+    }
+
+    /// No snapshot retained (batch over `BATCH_UNDO_MAX`, or nothing
+    /// applied): `batch_undo` clears to `None`, the toast carries no undo
+    /// hint, and a fully no-op batch does not spuriously mark `dirty`.
+    #[test]
+    fn batch_apply_done_without_snapshot_omits_undo_hint_and_skips_dirty_when_nothing_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.batch_undo = Some(crate::presets::apply::UndoSnapshot::default());
+        s.dirty = false;
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 0,
+                failed: 0,
+                skipped: 3,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert!(
+            s.batch_undo.is_none(),
+            "a None snapshot must clear any prior batch_undo"
+        );
+        assert!(!s.dirty, "nothing applied must not spuriously mark dirty");
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert!(
+            !n.message().contains("undo"),
+            "no snapshot means no undo hint: {}",
+            n.message()
+        );
+    }
+
+    /// The startup preset scan populates `state.presets` verbatim.
+    #[test]
+    fn presets_loaded_populates_state() {
+        let mut doc = ferrolite_pipeline::EditDoc::default();
+        doc.global.exposure = 0.5;
+        let preset = crate::presets::Preset {
+            version: ferrolite_pipeline::PATCH_VERSION,
+            name: "Warm".to_string(),
+            owns: ferrolite_pipeline::GroupSet::LIGHT,
+            doc,
+        };
+        let mut s = AppState::for_test();
+        assert!(s.presets.is_empty());
+        let out = s.apply(AppEvent::PresetsLoaded {
+            presets: vec![preset.clone()],
+        });
+        assert_eq!(out, None);
+        assert_eq!(s.presets, vec![preset]);
     }
 }

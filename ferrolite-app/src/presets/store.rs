@@ -120,6 +120,22 @@ pub fn save(dir: &Path, preset: &Preset) -> Result<PathBuf, PresetError> {
     Ok(path)
 }
 
+/// Scan the preset directory off the UI thread (contract 1 — this is file I/O,
+/// however small) and deliver the list over the event channel.
+pub fn spawn_load_all(
+    jobs: &std::sync::Arc<ferrolite_jobs::JobSystem>,
+    tx: &std::sync::mpsc::Sender<crate::events::AppEvent>,
+    ctx: &egui::Context,
+) {
+    let tx = tx.clone();
+    let ctx = ctx.clone();
+    jobs.submit(ferrolite_jobs::Priority::Background, move |_cancel| {
+        let presets = load_all(&presets_dir());
+        let _ = tx.send(crate::events::AppEvent::PresetsLoaded { presets });
+        ctx.request_repaint();
+    });
+}
+
 /// Remove the file backing `preset`. A missing file is NOT an error — the
 /// desired end state (no such preset) already holds.
 pub fn delete(dir: &Path, preset: &Preset) -> Result<(), PresetError> {

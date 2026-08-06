@@ -159,13 +159,131 @@ pub fn spawn_batch_apply(
         }
 
         let snapshot = (!snapshot.entries.is_empty()).then_some(snapshot);
+        let cancelled = cancel.is_cancelled();
         let _ = tx.send(AppEvent::BatchApplyDone {
             result,
             snapshot,
             label,
+            cancelled,
         });
         ctx.request_repaint();
     });
+}
+
+/// Decode a snapshot back into `(image_id, path, prior document)` triples.
+/// Entries that no longer deserialize are dropped — an undo that can restore
+/// most of a batch is better than one that panics.
+pub fn snapshot_documents(snap: &UndoSnapshot) -> Vec<(i64, PathBuf, EditDoc)> {
+    snap.entries
+        .iter()
+        .filter_map(|(id, path, text)| {
+            ferrolite_pipeline::deserialize(text).map(|doc| (*id, path.clone(), doc))
+        })
+        .collect()
+}
+
+/// Restore a batch's prior documents. Writes each sidecar back and re-flags the
+/// thumbnails stale (they were regenerated, or marked, against the now-undone
+/// edit either way).
+pub fn spawn_batch_undo(
+    jobs: &Arc<JobSystem>,
+    writer: &Arc<Mutex<Catalog>>,
+    tx: &std::sync::mpsc::Sender<AppEvent>,
+    ctx: &egui::Context,
+    snapshot: UndoSnapshot,
+) {
+    let writer = Arc::clone(writer);
+    let tx = tx.clone();
+    let ctx = ctx.clone();
+    jobs.submit(Priority::Background, move |_cancel| {
+        let docs = snapshot_documents(&snapshot);
+        let mut result = BatchResult::default();
+        let mut ids = Vec::with_capacity(docs.len());
+        for (image_id, path, doc) in &docs {
+            let xmp = ferrolite_catalog::sidecar_path(path);
+            let payload = ferrolite_pipeline::serialize(doc);
+            if ferrolite_catalog::write_ops(&xmp, &payload).is_err() {
+                result.failed += 1;
+                continue;
+            }
+            let db = writer.lock().expect("writer");
+            let _ = db.set_has_edits(*image_id, !doc.is_identity());
+            result.applied += 1;
+            ids.push(*image_id);
+        }
+        {
+            let db = writer.lock().expect("writer");
+            let _ = db.set_thumbnails_stale(&ids, true);
+        }
+        let _ = tx.send(AppEvent::BatchApplyDone {
+            result,
+            snapshot: None, // undoing an undo is not offered
+            label: "Undo".to_string(),
+            cancelled: false, // the undo job itself is not cancellable
+        });
+        ctx.request_repaint();
+    });
+}
+
+/// Build the batch-apply toast's level + message. Pure and unit-testable
+/// without egui.
+///
+/// `cancelled` is the reason this is a separate function rather than inline
+/// formatting at the call site: when a batch is cut short by its cancel
+/// token, `apply_patch_to_targets` folds every remaining, unattempted target
+/// into `result.skipped` (see that function's read closure) — the exact same
+/// counter an unreadable/corrupt sidecar increments. Without `cancelled`, a
+/// user who cancels a 500-image batch after 47 would see "47 applied, 453
+/// skipped", which reads as 453 corrupt files rather than "you clicked
+/// Cancel". `undo_hint`, when `Some`, is the live keybind text
+/// (`Keymap::hint(Action::Undo)`) appended as a call to action; `None` when
+/// no snapshot was retained (batch exceeded `BATCH_UNDO_MAX` or nothing was
+/// applied).
+pub fn batch_result_message(
+    result: &BatchResult,
+    label: &str,
+    cancelled: bool,
+    undo_hint: Option<&str>,
+) -> (crate::notifications::Level, String) {
+    use crate::notifications::Level;
+
+    let (level, mut msg) = if cancelled {
+        let level = if result.failed > 0 {
+            Level::Warning
+        } else {
+            Level::Info
+        };
+        let mut msg = format!(
+            "Cancelled \u{2014} applied to {} of {} images.",
+            result.applied,
+            result.total()
+        );
+        if result.failed > 0 {
+            msg = format!("{msg} {} failed.", result.failed);
+        }
+        (level, msg)
+    } else if result.failed == 0 && result.skipped == 0 {
+        (
+            Level::Info,
+            format!(
+                "Applied \u{201c}{label}\u{201d} to {} images.",
+                result.applied
+            ),
+        )
+    } else {
+        (
+            Level::Warning,
+            format!(
+                "Applied \u{201c}{label}\u{201d} to {} images. {} failed, {} skipped.",
+                result.applied, result.failed, result.skipped
+            ),
+        )
+    };
+
+    if let Some(hint) = undo_hint {
+        msg = format!("{msg} Press {hint} to undo.");
+    }
+    (level, msg)
 }
 
 #[cfg(test)]
@@ -300,5 +418,111 @@ mod tests {
             &mut |done, total| seen.borrow_mut().push((done, total)),
         );
         assert_eq!(*seen.borrow(), vec![(1, 2), (2, 2)]);
+    }
+
+    /// Undo restores each snapshot entry's prior document verbatim.
+    #[test]
+    fn undo_restores_the_exact_prior_documents() {
+        let mut prior = EditDoc::default();
+        prior.global.exposure = -1.25;
+        prior.global.saturation = 0.4;
+        let snap = UndoSnapshot {
+            entries: vec![(
+                7,
+                std::path::PathBuf::from("/img/7.arw"),
+                ferrolite_pipeline::serialize(&prior),
+            )],
+        };
+
+        let restored = snapshot_documents(&snap);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].0, 7);
+        assert_eq!(
+            restored[0].2, prior,
+            "prior document restored byte-for-byte"
+        );
+    }
+
+    /// A snapshot entry that no longer deserializes is dropped, not panicked on.
+    #[test]
+    fn undo_drops_an_unparseable_snapshot_entry() {
+        let snap = UndoSnapshot {
+            entries: vec![(1, std::path::PathBuf::from("/a"), "garbage {{".into())],
+        };
+        assert!(snapshot_documents(&snap).is_empty());
+    }
+
+    /// A clean run (no failures, no skips, not cancelled) gets a plain
+    /// success toast at Info, with the undo hint appended when offered.
+    #[test]
+    fn message_reports_full_success_with_undo_hint() {
+        let result = BatchResult {
+            applied: 5,
+            failed: 0,
+            skipped: 0,
+        };
+        let (level, msg) = batch_result_message(&result, "Warm portrait", false, Some("Ctrl+Z"));
+        assert_eq!(level, crate::notifications::Level::Info);
+        assert_eq!(
+            msg,
+            "Applied \u{201c}Warm portrait\u{201d} to 5 images. Press Ctrl+Z to undo."
+        );
+    }
+
+    /// Partial failure/skip (NOT cancelled) reports both counts and steps up
+    /// to Warning; with no snapshot retained, no undo hint is appended.
+    #[test]
+    fn message_reports_partial_failure_at_warning_without_undo_hint() {
+        let result = BatchResult {
+            applied: 3,
+            failed: 1,
+            skipped: 1,
+        };
+        let (level, msg) = batch_result_message(&result, "Warm portrait", false, None);
+        assert_eq!(level, crate::notifications::Level::Warning);
+        assert_eq!(
+            msg,
+            "Applied \u{201c}Warm portrait\u{201d} to 3 images. 1 failed, 1 skipped."
+        );
+    }
+
+    /// A cancelled run must be phrased as a cancellation, not as "N skipped"
+    /// (which would read as N corrupt sidecars) — the Task 4 review finding
+    /// this function exists to fix.
+    #[test]
+    fn message_reports_cancellation_not_as_skips() {
+        let result = BatchResult {
+            applied: 47,
+            failed: 0,
+            skipped: 453,
+        };
+        let (level, msg) = batch_result_message(&result, "Warm portrait", true, Some("Ctrl+Z"));
+        assert_eq!(level, crate::notifications::Level::Info);
+        assert_eq!(
+            msg,
+            "Cancelled \u{2014} applied to 47 of 500 images. Press Ctrl+Z to undo."
+        );
+        assert!(
+            !msg.contains("skipped"),
+            "cancellation must never be phrased in terms of skipped count"
+        );
+    }
+
+    /// A cancelled run that also had real write failures still surfaces them
+    /// (distinct from the targets left unattempted by the cancel) and steps
+    /// up to Warning.
+    #[test]
+    fn message_reports_cancellation_with_failures_at_warning() {
+        let result = BatchResult {
+            applied: 40,
+            failed: 2,
+            skipped: 458,
+        };
+        let (level, msg) = batch_result_message(&result, "Warm portrait", true, None);
+        assert_eq!(level, crate::notifications::Level::Warning);
+        assert_eq!(
+            msg,
+            "Cancelled \u{2014} applied to 40 of 500 images. 2 failed."
+        );
     }
 }

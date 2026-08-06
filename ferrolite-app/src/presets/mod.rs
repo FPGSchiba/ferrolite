@@ -3,4 +3,6 @@
 pub mod apply;
 pub mod store;
 
-pub use store::{delete, load_all, presets_dir, sanitize_filename, save, Preset, PresetError};
+pub use store::{
+    delete, load_all, presets_dir, sanitize_filename, save, spawn_load_all, Preset, PresetError,
+};

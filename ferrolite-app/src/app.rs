@@ -35,6 +35,10 @@ pub struct FerroliteApp {
     /// ensures the job is submitted at most once per app run, not a gate on
     /// whether there's work to do.
     did_meta_backfill_spawn: bool,
+    /// One-shot startup preset-directory scan guard (P7), mirroring
+    /// `did_meta_backfill_spawn`: the scan (`presets::spawn_load_all`) is
+    /// off-thread file I/O, spawned exactly once per app run.
+    did_presets_load_spawn: bool,
     /// Whether the Help modal (`crate::help::show`) is open. Opened by
     /// `Action::OpenHelp` (F1, global) or the Help menu.
     pub(crate) show_help: bool,
@@ -102,6 +106,7 @@ impl FerroliteApp {
             settings_dirty: false,
             did_restore: false,
             did_meta_backfill_spawn: false,
+            did_presets_load_spawn: false,
             show_help: false,
             show_settings: false,
             did_display_detect: false,
@@ -138,6 +143,26 @@ impl FerroliteApp {
         frame: &eframe::Frame,
         undo: bool,
     ) {
+        // P7: with no active Develop session, Ctrl+Z (or the Edit menu's
+        // Undo item) reverts the last batch apply. Reusing the existing
+        // action rather than adding a binding means Undo keeps meaning
+        // "undo the last thing I did", and the keybind is already
+        // discoverable in the Settings keyboard tab and the Help panel
+        // (CLAUDE.md), so no new GROUPS or Help entry is needed. Redo is
+        // NOT extended — undoing an undo is not offered (see
+        // `spawn_batch_undo`'s `snapshot: None`).
+        if undo && self.state.viewer.is_none() {
+            if let Some(snapshot) = self.state.batch_undo.take() {
+                crate::presets::apply::spawn_batch_undo(
+                    &self.state.jobs,
+                    &self.state.writer,
+                    &self.state.tx,
+                    ctx,
+                    snapshot,
+                );
+                return;
+            }
+        }
         let result = self.state.viewer.as_mut().and_then(|v| {
             if undo {
                 v.history.undo()
@@ -1427,6 +1452,13 @@ impl eframe::App for FerroliteApp {
             crate::library::meta_backfill::spawn_once(&mut self.state, ctx);
         }
 
+        // One-shot startup preset-directory scan (P7): file I/O off the UI
+        // thread (contract 1), delivered back via `AppEvent::PresetsLoaded`.
+        if !self.did_presets_load_spawn {
+            self.did_presets_load_spawn = true;
+            crate::presets::spawn_load_all(&self.state.jobs, &self.state.tx, ctx);
+        }
+
         // One-shot startup display-profile detect, once the render state is valid
         // (ViewerPipelines pre-warmed in `new`). Ordering is guaranteed: `new()`
         // inserts `ViewerPipelines` into `cc.wgpu_render_state`'s callback
@@ -1539,7 +1571,11 @@ impl eframe::App for FerroliteApp {
                     .state
                     .viewer
                     .as_ref()
-                    .is_some_and(|v| v.history.can_undo());
+                    .is_some_and(|v| v.history.can_undo())
+                    // P7: with no Develop session open, a pending batch-apply
+                    // snapshot also makes Undo actionable (see
+                    // `apply_undo_redo`'s batch-revert branch).
+                    || (self.state.viewer.is_none() && self.state.batch_undo.is_some());
                 let can_redo = self
                     .state
                     .viewer

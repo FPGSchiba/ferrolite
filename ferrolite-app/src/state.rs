@@ -267,6 +267,16 @@ pub struct AppState {
     /// lens-correction section (auto-match + manual picker + bake) is then
     /// disabled rather than retried on every open.
     pub lens_db: Option<Arc<ferrolite_lens::LensfunDb>>,
+
+    /// Presets loaded from disk at startup (P7). Source of truth is the files;
+    /// this is just the in-memory list the UI renders.
+    pub presets: Vec<crate::presets::Preset>,
+    /// The last "Copy settings" capture, session-scoped.
+    #[allow(dead_code)] // written/read by the copy/paste UI (P7 Task 6+)
+    pub clipboard_patch: Option<ferrolite_pipeline::EditPatch>,
+    /// Prior documents from the last batch apply, for a one-level undo.
+    /// `None` when nothing to undo or the batch exceeded `BATCH_UNDO_MAX`.
+    pub batch_undo: Option<crate::presets::apply::UndoSnapshot>,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -366,6 +376,9 @@ impl AppState {
             display_lut: None,
             last_monitor_key: 0,
             lens_db: crate::develop::lens_match::load_shared_db(),
+            presets: Vec::new(),
+            clipboard_patch: None,
+            batch_undo: None,
         })
     }
 
@@ -1002,6 +1015,9 @@ impl AppState {
             // Skip the bundled-DB load in unit tests (unnecessary I/O per test;
             // no test in this module exercises lens matching/baking).
             lens_db: None,
+            presets: Vec::new(),
+            clipboard_patch: None,
+            batch_undo: None,
         }
     }
 

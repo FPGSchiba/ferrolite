@@ -319,6 +319,139 @@ mod tests {
         assert_eq!(out, target);
     }
 
+    /// F8 (whole-branch review): spec §8.1 asks for a table-driven test —
+    /// for EVERY group in `GroupSet::ALL_APPLICABLE`, a patch owning only
+    /// that group overwrites its own fields and leaves every other field of
+    /// the target byte-identical. Before this, only LIGHT and COLOR had a
+    /// dedicated owned-branch test; CURVE, HSL, GRADING, DETAIL, EFFECTS had
+    /// none (all nine branches were verified correct by reading, so this is
+    /// a coverage gap, not a defect — but it guards the one function the
+    /// entire phase routes through).
+    ///
+    /// Strategy: build `target` as a per-group BASELINE (`group_test_baseline`
+    /// — plain `EditDoc::default()`, except LENS needs a pre-existing matched
+    /// `LensCorrection` for `apply_lens_amounts` to have anything to write
+    /// into) and `changed` as that same baseline with ONLY group `g`'s fields
+    /// set to a distinguishable value (`tag_group_fields`). Since `changed`
+    /// differs from `target` in EXACTLY group `g`'s fields, a patch owning
+    /// only `g` applied to `target` must produce a document byte-identical
+    /// to `changed` — one equality assertion verifies both halves (owned
+    /// fields overwrite; every unowned field survives).
+    #[test]
+    fn every_applicable_group_owns_only_its_own_fields() {
+        for &group in GroupSet::ALL_APPLICABLE.iter() {
+            let target = group_test_baseline(group);
+            let changed = tag_group_fields(&target, group);
+            let patch = EditPatch::from_doc(&changed, group);
+            let out = patch.apply_to(&target);
+            assert_eq!(
+                out,
+                changed,
+                "group bits {:#x}: owned fields must overwrite AND every unowned \
+                 field must survive byte-identical",
+                group.bits()
+            );
+        }
+    }
+
+    /// Per-group baseline target for `every_applicable_group_owns_only_its_own_fields`.
+    /// Every group uses `EditDoc::default()` except LENS, which needs a
+    /// pre-existing matched `LensCorrection` — `apply_lens_amounts` is a
+    /// documented no-op when the target has none (see
+    /// `lens_group_is_a_noop_when_the_target_has_no_lens` above), so an
+    /// all-default target would make the LENS case of the table vacuous.
+    fn group_test_baseline(group: GroupSet) -> EditDoc {
+        let mut doc = EditDoc::default();
+        if group == GroupSet::LENS {
+            use crate::op::{Correction, LensCorrection};
+            doc.lens = Some(LensCorrection {
+                lens_id: Some("baseline-lens".to_string()),
+                focal_len: 35.0,
+                aperture: 2.8,
+                crop_factor: 1.0,
+                distortion: Correction::default(),
+                tca: Correction::default(),
+                vignetting: Correction::default(),
+            });
+        }
+        doc
+    }
+
+    /// Returns a clone of `base` with ONLY `group`'s fields changed to a
+    /// value distinguishable from `base`'s (always `group_test_baseline`'s
+    /// identity/default value for that field).
+    fn tag_group_fields(base: &EditDoc, group: GroupSet) -> EditDoc {
+        let mut d = base.clone();
+        if group == GroupSet::LIGHT {
+            d.global.exposure = 1.5;
+            d.global.contrast = 0.6;
+            d.global.highlights = -0.3;
+            d.global.shadows = 0.2;
+            d.global.whites = 0.4;
+            d.global.blacks = -0.1;
+        } else if group == GroupSet::COLOR {
+            d.global.temp = 0.25;
+            d.global.tint = -0.1;
+            d.global.saturation = 0.5;
+            d.global.hue = 0.15;
+            d.global.vibrance = 0.3;
+            d.global.color = crate::local::ColorSwatch {
+                r: 0.9,
+                g: 0.1,
+                b: 0.2,
+                amount: 0.7,
+            };
+        } else if group == GroupSet::CURVE {
+            d.global.tone_curve.points = vec![(0.0, 0.0), (0.5, 0.7), (1.0, 1.0)];
+        } else if group == GroupSet::HSL {
+            d.global.hsl.bands[2].hue = 0.4;
+            d.global.hsl.bands[2].sat = -0.2;
+        } else if group == GroupSet::GRADING {
+            d.global.color_grade.shadows.hue = 210.0;
+            d.global.color_grade.shadows.sat = 0.3;
+        } else if group == GroupSet::DETAIL {
+            d.global.sharpen.amount = 0.6;
+            d.global.sharpen.radius = 3;
+            d.global.noise_reduction.luminance = 0.4;
+        } else if group == GroupSet::EFFECTS {
+            d.global.dehaze.amount = 0.35;
+        } else if group == GroupSet::GEOMETRY {
+            d.geometry = Some(Geometry {
+                crop: crate::op::CropRect {
+                    x: 0.05,
+                    y: 0.05,
+                    w: 0.9,
+                    h: 0.9,
+                },
+                angle_deg: 4.0,
+                aspect: crate::op::Aspect::Square,
+                keystone_v: 0.1,
+                keystone_h: -0.05,
+            });
+        } else if group == GroupSet::LENS {
+            use crate::op::Correction;
+            let lens = d.lens.as_mut().expect("group_test_baseline set a lens");
+            lens.distortion = Correction {
+                enabled: true,
+                amount: 0.6,
+            };
+            lens.tca = Correction {
+                enabled: true,
+                amount: 0.3,
+            };
+            lens.vignetting = Correction {
+                enabled: true,
+                amount: 0.5,
+            };
+        } else {
+            panic!(
+                "unhandled group in ALL_APPLICABLE table: bits {:#x}",
+                group.bits()
+            );
+        }
+        d
+    }
+
     #[test]
     fn group_set_contains_insert_remove_roundtrip() {
         let mut g = GroupSet::EMPTY;

@@ -339,9 +339,12 @@ The heart of the phase is pure and needs no GPU:
 
 ## 9. Contracts, tiers, and CLAUDE.md rules honored
 
-* **Contract 1 (jobs)** — preset scan, preset save/delete, batch apply and thumbnail regeneration
-  all run as `ferrolite-jobs` jobs with priority, cancellation and progress. Nothing multi-millisecond
-  on the UI thread.
+* **Contract 1 (jobs)** — preset scan, batch apply and thumbnail regeneration run as `ferrolite-jobs`
+  jobs with priority, cancellation and progress. Preset save/delete/rename are deliberately
+  SYNCHRONOUS, not jobbed: each is one small JSON file, and the rename/save dialog must report a
+  rejected name (duplicate or invalid) inline, in the same frame, before the user can act on it —
+  jobbing them would add a round trip with nothing to show while it's in flight. Nothing
+  multi-millisecond runs on the UI thread either way.
 * **Contract 2 (catalog is a cache)** — presets are files on disk, with no catalog table at all;
   the one new column (`stale`) is re-derivable.
 * **Contract 3 (decode products additive)** — untouched.

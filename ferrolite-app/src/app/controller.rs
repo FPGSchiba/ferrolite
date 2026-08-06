@@ -30,6 +30,13 @@ impl AppController {
         while let Ok(event) = app.state.rx.try_recv() {
             events_this_frame += 1;
             let mut matched = true;
+            // F10 (whole-branch review): `BatchApplyProgress` is emitted once
+            // PER TARGET during a batch apply/undo (see `presets/apply.rs`),
+            // changes no state (its fold is a documented no-op), and has no
+            // UI consumer — it must NOT force the unconditional `dirty = true`
+            // below, or a 500-image batch triggers `refresh_images()`
+            // repeatedly while it merely runs.
+            let mut skip_dirty = false;
             match &event {
                 AppEvent::PreviewReady { image_id, linear } => {
                     Self::apply_preview_ready(app, frame, ctx, *image_id, linear);
@@ -182,6 +189,14 @@ impl AppController {
                     }
                     ctx.request_repaint();
                 }
+                // Status-bar-only progress readout (a future indicator); the
+                // job thread already throttles its own `ctx.request_repaint()`
+                // (see `spawn_batch_apply`), and its `apply()` fold is a
+                // documented no-op, so nothing here needs to run — just don't
+                // force a `dirty` re-query for it (F10).
+                AppEvent::BatchApplyProgress { .. } => {
+                    skip_dirty = true;
+                }
                 AppEvent::DisplayProfileResolved {
                     lut,
                     name,
@@ -221,7 +236,9 @@ impl AppController {
                     }
                 }
             }
-            app.state.dirty = true;
+            if !skip_dirty {
+                app.state.dirty = true;
+            }
         }
 
         if !app.state.pending_uploads.is_empty() {

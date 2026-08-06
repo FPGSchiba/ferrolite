@@ -194,9 +194,14 @@ fn run_one(
     let stack = stack_for_item(&item.path);
     // Match the on-screen path: dual-illuminant interpolation + normalize_neutral
     // (the demosaic already applied the as-shot WB gains, so the matrix must be
-    // row-normalized or neutrals skew magenta). Identity export stack → temp 0.
+    // row-normalized or neutrals skew magenta). Use the PERSISTED stack's WB
+    // temp (0.0 when the stack has no WB op, i.e. as-shot) — mirrors
+    // `App::confirm_export`'s `self.camera_to_working(self.current_wb_temp())`
+    // so a batch export of a non-zero-temp edit renders the same camera matrix
+    // the user saw on screen, not the as-shot one.
+    let temp = stack.white_balance().map(|w| w.temp).unwrap_or(0.0);
     let camera_to_working =
-        crate::camera_matrix::wb_camera_to_working(&profile, 0.0, working_space);
+        crate::camera_matrix::wb_camera_to_working(&profile, temp, working_space);
     // Wrap in an `Arc` (cheap — no copy) so the just-decoded full-res buffer can
     // be reused below as the dehaze transmission source without re-decoding.
     let linear = Arc::new(linear);
@@ -297,6 +302,27 @@ mod tests {
             "malformed → default, never a panic"
         );
         let _ = std::fs::remove_file(&xmp);
+    }
+
+    #[test]
+    fn persisted_wb_temp_is_extracted_for_the_camera_matrix() {
+        // Regression for F1: batch export must use the PERSISTED stack's WB temp
+        // (like `App::confirm_export`'s `self.camera_to_working(self.current_wb_temp())`),
+        // not a hardcoded 0.0. This pins the exact expression `run_one` uses.
+        let mut doc = OpStack::default();
+        doc.global.temp = 2400.0;
+        let temp = doc.white_balance().map(|w| w.temp).unwrap_or(0.0);
+        assert_eq!(
+            temp, 2400.0,
+            "non-zero persisted WB temp must survive extraction"
+        );
+
+        let identity = OpStack::default();
+        let identity_temp = identity.white_balance().map(|w| w.temp).unwrap_or(0.0);
+        assert_eq!(
+            identity_temp, 0.0,
+            "identity stack still yields as-shot temp 0"
+        );
     }
 
     fn item(id: i64) -> BatchItem {

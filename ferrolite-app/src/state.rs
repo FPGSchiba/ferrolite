@@ -254,12 +254,16 @@ pub struct AppState {
     /// cell that stays on screen across many frames (e.g. a held scroll
     /// drag) does not re-issue an indexed SQLite lookup every single frame
     /// for every visible cell. Bounded by construction to the currently
-    /// browsed folder/filter's row count: cleared in `refresh_images` (any
-    /// `dirty`-triggered reload — folder switch, filter change, and
-    /// crucially a batch apply's `BatchApplyDone`/`BatchUndoDone`, which is
-    /// exactly when a previously-fresh id could newly become stale) and in
-    /// `reset_for_new_folder`. Never grown outside those scopes, so it is
-    /// NOT an unbounded cache.
+    /// browsed folder/filter's row count: cleared in `reset_for_new_folder`
+    /// (folder switch) and in the `BatchApplyDone`/`BatchUndoDone` folds in
+    /// `events.rs` (the only two write paths that ever set a row's
+    /// `thumbnails.stale` flag — exactly when a previously-fresh id could
+    /// newly become stale). Deliberately NOT cleared in `refresh_images`:
+    /// that runs on every `dirty`-triggered reload, and `dirty` is set for
+    /// EVERY drained event (including one `ThumbReady` per frame during a
+    /// held scroll), which would wipe the cache every frame and defeat its
+    /// purpose. Never grown outside those scopes, so it is NOT an unbounded
+    /// cache.
     pub stale_checked_fresh: HashSet<i64>,
 
     /// Inline rename in progress: (kind, id, edit buffer).
@@ -707,12 +711,6 @@ impl AppState {
         self.images_rev = self.images_rev.wrapping_add(1);
         self.visible_tags.clear();
         self.visible_collections.clear();
-        // Any `dirty`-triggered reload (this is the only caller) may have
-        // been caused by a batch preset apply/undo that just (un)set some
-        // rows' `thumbnails.stale` flag — the negative cache from a prior
-        // realize is no longer trustworthy for those ids, so drop it wholesale
-        // rather than tracking which ids a given reload actually touched.
-        self.stale_checked_fresh.clear();
     }
 
     /// Open `rec` in the viewer, cancelling any currently-open viewer first.
@@ -1463,21 +1461,23 @@ mod tests {
         assert_eq!(s.images.len(), 2, "recursive view: root + child images");
     }
 
-    /// `refresh_images` is the only path `dirty` funnels through (folder
-    /// switch, filter change, and any batch-apply/undo write), so it must
-    /// drop the P7 stale-regen negative cache: a batch apply on the currently
-    /// browsed folder can newly flag a row the grid had previously cached as
-    /// "checked, not stale" this session.
+    /// `refresh_images` runs on every `dirty`-triggered reload, including once
+    /// per frame during a held scroll (see F2 in the P7 whole-branch review) —
+    /// it must NOT touch the P7 stale-regen negative cache. That cache is
+    /// invalidated instead where the `thumbnails.stale` write actually
+    /// happens: the `BatchApplyDone`/`BatchUndoDone` folds in `events.rs`
+    /// (see the matching test there).
     #[test]
-    fn refresh_images_clears_stale_checked_fresh_cache() {
+    fn refresh_images_does_not_touch_stale_checked_fresh_cache() {
         let mut s = AppState::for_test();
         s.stale_checked_fresh.insert(7);
 
         s.refresh_images();
 
         assert!(
-            s.stale_checked_fresh.is_empty(),
-            "a reload must invalidate the negative stale-check cache"
+            s.stale_checked_fresh.contains(&7),
+            "a plain reload must NOT invalidate the negative stale-check cache \
+             (only a batch apply/undo write does, in events.rs)"
         );
     }
 

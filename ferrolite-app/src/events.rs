@@ -502,7 +502,21 @@ impl AppState {
                 // grid could never retry within this session, since
                 // `stale_regen_inflight` would never let it re-detect the
                 // row. Harmless no-op for the ordinary lazy-load path.
-                self.stale_regen_inflight.remove(&image_id);
+                if self.stale_regen_inflight.remove(&image_id) {
+                    // This WAS a stale regen (not an ordinary lazy load) and it
+                    // just failed or was cancelled. The catalog's `stale` flag
+                    // correctly stays true, so without this the grid would
+                    // re-detect it as stale and re-spawn a full decode + GPU
+                    // render + encode EVERY FRAME the cell stays on screen
+                    // (F3, whole-branch review) — reachable via a file moved,
+                    // deleted, or on an offline external drive after a batch
+                    // apply. Sticky-suppress it here, mirroring the lazy-load
+                    // path's `thumb_missing` guard; cleared on the next
+                    // successful batch apply/undo (`events.rs`'s
+                    // `BatchApplyDone`/`BatchUndoDone` folds) or folder switch
+                    // (`reset_for_new_folder`), same as any other entry.
+                    self.stale_checked_fresh.insert(image_id);
+                }
                 None
             }
             AppEvent::ThumbMissing { image_id } => {
@@ -677,10 +691,17 @@ impl AppState {
                 // `spawn_batch_undo`), so the currently-browsed grid's
                 // in-memory `ImageRecord`s are now stale — mirrors
                 // `MetaBackfillReady`'s `dirty = true` for the same reason.
+                // Also drop the `stale_checked_fresh` negative cache here (not
+                // in `refresh_images`, which runs on every `dirty`-triggered
+                // reload including once per frame during a held scroll while
+                // `ThumbReady` keeps landing) — this is one of only two write
+                // paths that ever sets a row's `thumbnails.stale` flag, so this
+                // is the only place the cache actually needs invalidating.
                 // No-op when nothing actually applied (e.g. an all-skipped
                 // or fully-cancelled-before-the-first-item run).
                 if result.applied > 0 {
                     self.dirty = true;
+                    self.stale_checked_fresh.clear();
                 }
                 None
             }
@@ -696,8 +717,12 @@ impl AppState {
             AppEvent::BatchUndoDone { result } => {
                 let (level, msg) = crate::presets::apply::batch_undo_message(&result);
                 self.notify(level, msg);
+                // See the matching comment on `BatchApplyDone`: drop the
+                // negative cache here, where the `thumbnails.stale` write
+                // actually happened, not on every `dirty`-triggered reload.
                 if result.applied > 0 {
                     self.dirty = true;
+                    self.stale_checked_fresh.clear();
                 }
                 None
             }
@@ -882,6 +907,38 @@ mod tests {
         assert!(
             !s.stale_regen_inflight.contains(&9),
             "ThumbFailed must release the stale-regen in-flight guard"
+        );
+    }
+
+    /// F3 (whole-branch review): a failed/cancelled stale regen must be
+    /// sticky-suppressed (inserted into `stale_checked_fresh`) so the grid
+    /// does not re-detect the still-`stale=1` row and re-spawn a full decode +
+    /// GPU render + encode on every subsequent frame the cell stays on
+    /// screen. Composes with F2: the cache is no longer wiped per frame, so
+    /// this insert actually sticks until the next batch apply/undo or folder
+    /// switch.
+    #[test]
+    fn thumb_failed_on_a_stale_regen_sticky_suppresses_further_detection() {
+        let mut s = AppState::for_test();
+        s.stale_regen_inflight.insert(9);
+        s.apply(AppEvent::ThumbFailed { image_id: 9 });
+        assert!(
+            s.stale_checked_fresh.contains(&9),
+            "a failed stale regen must be sticky-cached as 'checked' to stop re-detection"
+        );
+    }
+
+    /// The ordinary lazy-load path never inserts into `stale_regen_inflight`,
+    /// so an ordinary `ThumbFailed` (a plain missing/unreadable thumbnail,
+    /// not a stale regen) must NOT sticky-suppress the id — that is
+    /// `ThumbMissing`'s job, not this guard's.
+    #[test]
+    fn thumb_failed_on_an_ordinary_lazy_load_does_not_touch_stale_checked_fresh() {
+        let mut s = AppState::for_test();
+        s.apply(AppEvent::ThumbFailed { image_id: 21 });
+        assert!(
+            !s.stale_checked_fresh.contains(&21),
+            "an ordinary (non-stale-regen) ThumbFailed must not sticky-suppress the id"
         );
     }
 
@@ -1214,6 +1271,57 @@ mod tests {
         );
     }
 
+    /// F2 (whole-branch review): the `stale_checked_fresh` negative cache
+    /// must be invalidated where the `thumbnails.stale` write actually
+    /// happens — a successful `BatchApplyDone` — NOT on every `dirty`-
+    /// triggered `refresh_images` (see the matching state.rs test proving
+    /// `refresh_images` itself leaves the cache alone).
+    #[test]
+    fn batch_apply_done_clears_stale_checked_fresh_cache_when_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(7);
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert!(
+            s.stale_checked_fresh.is_empty(),
+            "a batch that applied edits must invalidate the negative stale-check cache"
+        );
+    }
+
+    /// A no-op batch (nothing applied) must not touch the cache either —
+    /// mirrors the `dirty` guard on the same branch.
+    #[test]
+    fn batch_apply_done_leaves_stale_checked_fresh_cache_when_nothing_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(7);
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 0,
+                failed: 0,
+                skipped: 3,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert!(
+            s.stale_checked_fresh.contains(&7),
+            "a fully no-op batch must not touch the negative stale-check cache"
+        );
+    }
+
     /// The startup preset scan populates `state.presets` verbatim.
     #[test]
     fn presets_loaded_populates_state() {
@@ -1269,6 +1377,28 @@ mod tests {
         let n = s.notifications.iter_newest_first().next().unwrap();
         assert_eq!(n.level(), Level::Info);
         assert_eq!(n.message(), "Reverted the last batch apply on 5 images.");
+    }
+
+    /// F2 (whole-branch review): `BatchUndoDone` is the other write path that
+    /// rewrites `thumbnails.stale`, so it must also invalidate the negative
+    /// cache when it actually restored something.
+    #[test]
+    fn batch_undo_done_clears_stale_checked_fresh_cache_when_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(9);
+        s.apply(AppEvent::BatchUndoDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+            },
+        });
+        assert!(
+            s.stale_checked_fresh.is_empty(),
+            "a batch undo that restored edits must invalidate the negative stale-check cache"
+        );
     }
 
     /// A batch that left the open Develop image out of its targets must SAY

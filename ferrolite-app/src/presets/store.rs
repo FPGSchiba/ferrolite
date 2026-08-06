@@ -160,7 +160,21 @@ pub fn delete(dir: &Path, preset: &Preset) -> Result<(), PresetError> {
 /// collapses away), this overwrites that one file in place rather than
 /// routing through `save`, which would otherwise reject it as a collision
 /// with itself.
-pub fn rename(dir: &Path, preset: &Preset, new_name: &str) -> Result<Preset, PresetError> {
+///
+/// The outer `Result` is `Err` only when the new-name write itself failed
+/// (nothing changed — the original survives untouched). Once that write has
+/// succeeded, the rename has logically happened, so a subsequent failure to
+/// delete the OLD file (e.g. an AV/indexer holding a handle on Windows — not
+/// hypothetical) is reported as a PARTIAL success: `Ok((renamed, Some(err)))`,
+/// rather than silently discarded with `let _ = delete(..)` (F6, whole-branch
+/// review). Discarding it would report success while both files survive with
+/// identical content, showing the preset twice under two names on the next
+/// `load_all`.
+pub fn rename(
+    dir: &Path,
+    preset: &Preset,
+    new_name: &str,
+) -> Result<(Preset, Option<PresetError>), PresetError> {
     let new_stem = sanitize_filename(new_name).ok_or(PresetError::InvalidName)?;
     let renamed = Preset {
         name: new_name.to_string(),
@@ -172,12 +186,12 @@ pub fn rename(dir: &Path, preset: &Preset, new_name: &str) -> Result<Preset, Pre
         let path = dir.join(format!("{new_stem}.json"));
         let json = serde_json::to_string_pretty(&renamed).expect("Preset is always serializable");
         std::fs::write(&path, json)?;
-        return Ok(renamed);
+        return Ok((renamed, None));
     }
 
     save(dir, &renamed)?;
-    let _ = delete(dir, preset);
-    Ok(renamed)
+    let delete_err = delete(dir, preset).err();
+    Ok((renamed, delete_err))
 }
 
 #[cfg(test)]
@@ -325,13 +339,50 @@ mod tests {
         let p = sample("Before");
         save(&dir, &p).expect("save");
 
-        let renamed = rename(&dir, &p, "After").expect("rename");
+        let (renamed, delete_err) = rename(&dir, &p, "After").expect("rename");
         assert_eq!(renamed.name, "After");
         assert_eq!(renamed.doc, p.doc, "only the name changes");
+        assert!(
+            delete_err.is_none(),
+            "the old file's delete must succeed here"
+        );
 
         let loaded = load_all(&dir);
         assert_eq!(loaded.len(), 1, "exactly one preset survives");
         assert_eq!(loaded[0].name, "After");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F6 (whole-branch review): when the new-name write succeeds but the
+    /// subsequent delete of the OLD file fails, `rename` must surface that
+    /// failure as a partial success (`Ok((renamed, Some(err)))`) rather than
+    /// silently discarding it with `let _ = delete(..)`. Simulated by making
+    /// the old file's path a directory, so `remove_file` on it errors.
+    #[test]
+    fn rename_reports_a_delete_failure_as_a_partial_success() {
+        let dir = tmp();
+        let original = sample("Before");
+        save(&dir, &original).expect("save");
+        // Replace the old file with a directory of the same path so the
+        // post-save `delete` call genuinely fails (not just "already gone").
+        let old_path = dir.join("Before.json");
+        std::fs::remove_file(&old_path).expect("remove the file");
+        std::fs::create_dir(&old_path).expect("shadow it with a directory");
+
+        let (renamed, delete_err) = rename(&dir, &original, "After").expect(
+            "the new-name write must still succeed even though the old file can't be deleted",
+        );
+        assert_eq!(renamed.name, "After");
+        assert!(
+            delete_err.is_some(),
+            "a genuine delete I/O failure must be surfaced, not swallowed"
+        );
+
+        let loaded = load_all(&dir);
+        assert!(
+            loaded.iter().any(|p| p.name == "After"),
+            "the renamed preset must exist under its new name regardless"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -383,8 +434,9 @@ mod tests {
         let original = sample("Same name");
         save(&dir, &original).expect("save");
 
-        let renamed = rename(&dir, &original, "Same name").expect("in-place rename");
+        let (renamed, delete_err) = rename(&dir, &original, "Same name").expect("in-place rename");
         assert_eq!(renamed.name, "Same name");
+        assert!(delete_err.is_none(), "the in-place path never calls delete");
 
         let loaded = load_all(&dir);
         assert_eq!(loaded.len(), 1, "still exactly one file, not two");

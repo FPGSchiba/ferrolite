@@ -900,15 +900,6 @@ impl FerroliteApp {
         );
     }
 
-    /// Open the single-file export dialog for the current viewer image, seeded
-    /// once from `settings.export` (the same slot the Export module panel
-    /// writes to via `state.export_settings`) at the moment it opens. The
-    /// dialog is a plain floating `egui::Window` — NOT modal — so the
-    /// titlebar/module tabs stay reachable while it's open and the user could
-    /// switch to the Export module panel and change `state.export_settings`
-    /// before coming back. If that happens, `confirm_export` persists
-    /// whatever the user leaves in the dialog: benign last-writer-wins on a
-    /// preference value, not a data-loss risk.
     /// Show the open group modal for one frame and act on its outcome.
     ///
     /// The modal is taken OUT of `AppState` for the duration so
@@ -974,19 +965,41 @@ impl FerroliteApp {
                             &pending.original,
                             &pending.new_name,
                         ) {
-                            Ok(renamed) => {
+                            Ok((renamed, delete_err)) => {
                                 crate::presets::spawn_load_all(
                                     &self.state.jobs,
                                     &self.state.tx,
                                     ctx,
                                 );
-                                self.state.notify(
-                                    crate::notifications::Level::Info,
-                                    format!(
-                                        "Renamed \u{201c}{}\u{201d} to \u{201c}{}\u{201d}.",
-                                        pending.original.name, renamed.name
-                                    ),
-                                );
+                                // The rename itself succeeded (the new-name
+                                // file is written) regardless of `delete_err`,
+                                // so the dialog closes either way. F6 (whole-
+                                // branch review): a genuine failure to remove
+                                // the OLD file — e.g. an AV/indexer holding a
+                                // handle — is no longer silently swallowed; it
+                                // is surfaced as a Warning toast so the user
+                                // knows to expect a leftover duplicate until
+                                // it's cleared manually, instead of the old
+                                // `let _ = delete(..)` which left no trace of
+                                // the problem at all.
+                                if let Some(err) = delete_err {
+                                    self.state.notify(
+                                        crate::notifications::Level::Warning,
+                                        format!(
+                                            "Renamed \u{201c}{}\u{201d} to \u{201c}{}\u{201d}, \
+                                             but could not remove the old preset file: {err}",
+                                            pending.original.name, renamed.name
+                                        ),
+                                    );
+                                } else {
+                                    self.state.notify(
+                                        crate::notifications::Level::Info,
+                                        format!(
+                                            "Renamed \u{201c}{}\u{201d} to \u{201c}{}\u{201d}.",
+                                            pending.original.name, renamed.name
+                                        ),
+                                    );
+                                }
                                 keep_open = false;
                             }
                             Err(e) => {
@@ -1077,6 +1090,15 @@ impl FerroliteApp {
         }
     }
 
+    /// Open the single-file export dialog for the current viewer image, seeded
+    /// once from `settings.export` (the same slot the Export module panel
+    /// writes to via `state.export_settings`) at the moment it opens. The
+    /// dialog is a plain floating `egui::Window` — NOT modal — so the
+    /// titlebar/module tabs stay reachable while it's open and the user could
+    /// switch to the Export module panel and change `state.export_settings`
+    /// before coming back. If that happens, `confirm_export` persists
+    /// whatever the user leaves in the dialog: benign last-writer-wins on a
+    /// preference value, not a data-loss risk.
     fn open_export_dialog(&mut self) {
         if self.state.viewer.is_some() {
             self.state.export_dialog = Some(crate::export::ExportDialogState {

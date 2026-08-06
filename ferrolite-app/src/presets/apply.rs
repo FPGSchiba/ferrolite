@@ -57,17 +57,24 @@ pub struct UndoSnapshot {
 /// Parameterized over `read` and `write` so the whole decision surface — counts,
 /// snapshot, progress, partial failure — is testable without a filesystem.
 /// `write` returns `Err(reason)` on failure; the batch continues regardless.
+///
+/// Returns the ids that were actually WRITTEN (i.e. `result.applied`'s
+/// members, in order) alongside the result/snapshot — F5 (whole-branch
+/// review): callers must flag only these thumbnails stale, not every target,
+/// or a cancelled/partial batch queues skipped/failed/never-attempted images
+/// for a pointless full decode + GPU render + encode on next browse.
 pub fn apply_patch_to_targets(
     patch: &EditPatch,
     targets: &[BatchTarget],
     read: impl Fn(&BatchTarget) -> Option<EditDoc>,
     write: impl Fn(&BatchTarget, &EditDoc) -> Result<(), String>,
     progress: &mut dyn FnMut(usize, usize),
-) -> (BatchResult, UndoSnapshot) {
+) -> (BatchResult, UndoSnapshot, Vec<i64>) {
     let total = targets.len();
     let snapshot_wanted = total <= BATCH_UNDO_MAX;
     let mut result = BatchResult::default();
     let mut snapshot = UndoSnapshot::default();
+    let mut applied_ids = Vec::new();
 
     for (i, t) in targets.iter().enumerate() {
         match read(t) {
@@ -77,6 +84,7 @@ pub fn apply_patch_to_targets(
                 match write(t, &merged) {
                     Ok(()) => {
                         result.applied += 1;
+                        applied_ids.push(t.image_id);
                         if snapshot_wanted {
                             snapshot.entries.push((
                                 t.image_id,
@@ -91,7 +99,7 @@ pub fn apply_patch_to_targets(
         }
         progress(i + 1, total);
     }
-    (result, snapshot)
+    (result, snapshot, applied_ids)
 }
 
 /// Submit the batch as ONE Background job (contract 1: priority, cancellation,
@@ -123,7 +131,7 @@ pub fn spawn_batch_apply(
             }
         };
 
-        let (result, snapshot) = apply_patch_to_targets(
+        let (result, snapshot, applied_ids) = apply_patch_to_targets(
             &patch,
             &targets,
             |t| {
@@ -151,11 +159,14 @@ pub fn spawn_batch_apply(
             &mut progress,
         );
 
-        // Flag every touched thumbnail stale in one statement (design §5.2).
-        let ids: Vec<i64> = targets.iter().map(|t| t.image_id).collect();
+        // Flag only the images that were ACTUALLY WRITTEN stale (design §5.2)
+        // — F5 (whole-branch review): flagging every target, including
+        // skipped/failed/never-attempted-after-cancel ones, queues a
+        // pointless full decode + GPU render + encode for images whose
+        // thumbnail never changed.
         {
             let db = writer.lock().expect("writer");
-            let _ = db.set_thumbnails_stale(&ids, true);
+            let _ = db.set_thumbnails_stale(&applied_ids, true);
         }
 
         let snapshot = (!snapshot.entries.is_empty()).then_some(snapshot);
@@ -326,6 +337,13 @@ pub fn batch_result_message(
 
     if let Some(hint) = undo_hint {
         msg = format!("{msg} Press {hint} to undo.");
+    } else if result.total() > BATCH_UNDO_MAX {
+        // F4 (whole-branch review): the paste modal warns BEFORE the user
+        // commits a batch over `BATCH_UNDO_MAX` (design §5.4), but preset-
+        // apply has no such dialog (P7-D3) — this toast is the only place
+        // the user is ever told undo is unavailable, so it must say so
+        // explicitly rather than just quietly omitting the undo hint.
+        msg = format!("{msg} Undo is unavailable for batches over {BATCH_UNDO_MAX} images.");
     }
     (level, msg)
 }
@@ -391,7 +409,7 @@ mod tests {
         source.global.exposure = 9.0;
         let patch = EditPatch::from_doc(&source, GroupSet::LIGHT);
 
-        let (result, snap) = apply_patch_to_targets(
+        let (result, snap, applied_ids) = apply_patch_to_targets(
             &patch,
             &[target(1), target(2), target(3)],
             |t| store.get(&t.image_id).cloned(),
@@ -413,6 +431,11 @@ mod tests {
             3,
             "one snapshot entry per applied target"
         );
+        assert_eq!(
+            applied_ids,
+            vec![1, 2, 3],
+            "F5: applied_ids must list exactly the ids that were written"
+        );
     }
 
     /// A write failure is counted, does NOT abort the batch, and the failed
@@ -425,7 +448,7 @@ mod tests {
         }
         let patch = EditPatch::from_doc(&EditDoc::default(), GroupSet::LIGHT);
 
-        let (result, snap) = apply_patch_to_targets(
+        let (result, snap, applied_ids) = apply_patch_to_targets(
             &patch,
             &[target(1), target(2), target(3)],
             |t| store.get(&t.image_id).cloned(),
@@ -442,6 +465,11 @@ mod tests {
         assert_eq!(result.applied, 2);
         assert_eq!(result.failed, 1);
         assert_eq!(snap.entries.len(), 2, "no undo entry for the failed write");
+        assert_eq!(
+            applied_ids,
+            vec![1, 3],
+            "F5: the failed target (2) must not appear in applied_ids"
+        );
     }
 
     /// A target whose current document cannot be read is SKIPPED, not failed —
@@ -449,7 +477,7 @@ mod tests {
     #[test]
     fn an_unreadable_target_is_skipped_not_failed() {
         let patch = EditPatch::from_doc(&EditDoc::default(), GroupSet::LIGHT);
-        let (result, snap) = apply_patch_to_targets(
+        let (result, snap, applied_ids) = apply_patch_to_targets(
             &patch,
             &[target(1)],
             |_t| None,
@@ -460,6 +488,10 @@ mod tests {
         assert_eq!(result.applied, 0);
         assert_eq!(result.failed, 0);
         assert!(snap.entries.is_empty());
+        assert!(
+            applied_ids.is_empty(),
+            "F5: a skipped (unreadable) target must not appear in applied_ids"
+        );
     }
 
     /// Past BATCH_UNDO_MAX no snapshot is taken — the dialog warns up front.
@@ -467,7 +499,7 @@ mod tests {
     fn no_snapshot_is_taken_beyond_the_undo_cap() {
         let targets: Vec<BatchTarget> = (1..=(BATCH_UNDO_MAX as i64 + 1)).map(target).collect();
         let patch = EditPatch::from_doc(&EditDoc::default(), GroupSet::LIGHT);
-        let (result, snap) = apply_patch_to_targets(
+        let (result, snap, applied_ids) = apply_patch_to_targets(
             &patch,
             &targets,
             |_t| Some(EditDoc::default()),
@@ -478,6 +510,11 @@ mod tests {
         assert!(
             snap.entries.is_empty(),
             "over the cap, no snapshot is retained"
+        );
+        assert_eq!(
+            applied_ids.len(),
+            targets.len(),
+            "F5: applied_ids is populated regardless of the undo-snapshot cap"
         );
     }
 
@@ -598,6 +635,44 @@ mod tests {
         assert_eq!(
             msg,
             "Cancelled \u{2014} applied to 40 of 500 images. 2 failed."
+        );
+    }
+
+    /// F4 (whole-branch review): applying a preset to a batch over
+    /// `BATCH_UNDO_MAX` never gets a snapshot, so `undo_hint` is `None` — but
+    /// unlike an ordinary no-snapshot case, the user must be told explicitly
+    /// that undo is unavailable, not just left to notice its absence.
+    #[test]
+    fn message_over_undo_cap_warns_undo_is_unavailable() {
+        let result = BatchResult {
+            applied: BATCH_UNDO_MAX + 1,
+            failed: 0,
+            skipped: 0,
+        };
+        let (level, msg) = batch_result_message(&result, "Warm portrait", false, None);
+        assert_eq!(level, crate::notifications::Level::Info);
+        assert!(
+            msg.contains(&format!(
+                "Undo is unavailable for batches over {BATCH_UNDO_MAX} images."
+            )),
+            "must explicitly warn that undo is unavailable over the cap: {msg}"
+        );
+    }
+
+    /// A batch AT or under the cap that simply had nothing retained (e.g.
+    /// nothing applied) must NOT get the over-cap warning — it only fires
+    /// when `total() > BATCH_UNDO_MAX`.
+    #[test]
+    fn message_under_undo_cap_without_hint_has_no_unavailable_warning() {
+        let result = BatchResult {
+            applied: 0,
+            failed: 0,
+            skipped: 3,
+        };
+        let (_level, msg) = batch_result_message(&result, "Warm portrait", false, None);
+        assert!(
+            !msg.contains("unavailable"),
+            "a small batch must not claim undo is unavailable: {msg}"
         );
     }
 

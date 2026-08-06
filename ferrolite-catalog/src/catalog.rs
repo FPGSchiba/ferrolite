@@ -405,6 +405,24 @@ impl Catalog {
         Ok(())
     }
 
+    /// Mark (or clear) the stale flag on the given images' thumbnails. Returns
+    /// the number of thumbnail rows updated — ids without a thumbnail row are
+    /// silently skipped, which is correct: there is nothing cached to
+    /// invalidate. See P7 design §5.2.
+    pub fn set_thumbnails_stale(
+        &self,
+        image_ids: &[i64],
+        stale: bool,
+    ) -> Result<usize, CatalogError> {
+        crate::queries::set_thumbnails_stale(self.conn(), image_ids, stale)
+    }
+
+    /// Whether this image's thumbnail needs regenerating. `false` when no
+    /// thumbnail row exists (nothing cached, so nothing stale).
+    pub fn is_thumbnail_stale(&self, image_id: i64) -> Result<bool, CatalogError> {
+        crate::queries::is_thumbnail_stale(self.conn(), image_id)
+    }
+
     /// Create a new tag. Returns `CatalogError::Conflict` if a tag with that name
     /// already exists (enforced by the UNIQUE constraint on `tags.name`).
     pub fn create_tag(&self, name: &str, color: Color) -> Result<TagId, CatalogError> {
@@ -1154,6 +1172,83 @@ mod ingest_batch_tests {
             thumb_count, 0,
             "no thumbnail persisted from the rolled-back batch"
         );
+    }
+}
+
+#[cfg(test)]
+mod thumbnail_stale_tests {
+    use super::*;
+    use crate::model::NewImage;
+    use crate::thumbnail::{Thumbnail, ThumbnailStore};
+    use ferrolite_image::FileKind;
+
+    fn thumb() -> Thumbnail {
+        Thumbnail {
+            width: 4,
+            height: 4,
+            format: "jpeg".to_string(),
+            bytes: vec![0xFF; 16],
+        }
+    }
+
+    /// An in-memory catalog with three images, each carrying a persisted
+    /// thumbnail row (all starting fresh). Mirrors the scaffolding
+    /// `ingest_batch_tests` already uses for image + thumbnail rows.
+    fn catalog_with_three_thumbnails() -> (Catalog, [i64; 3]) {
+        let cat = Catalog::open_in_memory().unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let ids: Vec<i64> = (0..3)
+            .map(|i| {
+                let id = cat
+                    .upsert_image(&NewImage::failed(
+                        f,
+                        format!("img{i}.nef"),
+                        1,
+                        1,
+                        FileKind::Raw,
+                        0,
+                    ))
+                    .unwrap();
+                cat.put_thumbnail(id, &thumb()).unwrap();
+                id
+            })
+            .collect();
+        (cat, [ids[0], ids[1], ids[2]])
+    }
+
+    #[test]
+    fn set_thumbnails_stale_flags_only_the_given_ids() {
+        let (cat, ids) = catalog_with_three_thumbnails();
+        assert_eq!(
+            cat.set_thumbnails_stale(&[ids[0], ids[2]], true).unwrap(),
+            2
+        );
+        assert!(cat.is_thumbnail_stale(ids[0]).unwrap());
+        assert!(
+            !cat.is_thumbnail_stale(ids[1]).unwrap(),
+            "untouched id stays fresh"
+        );
+        assert!(cat.is_thumbnail_stale(ids[2]).unwrap());
+    }
+
+    #[test]
+    fn set_thumbnails_stale_clears_the_flag_too() {
+        let (cat, ids) = catalog_with_three_thumbnails();
+        cat.set_thumbnails_stale(&[ids[0]], true).unwrap();
+        cat.set_thumbnails_stale(&[ids[0]], false).unwrap();
+        assert!(!cat.is_thumbnail_stale(ids[0]).unwrap());
+    }
+
+    #[test]
+    fn is_thumbnail_stale_is_false_when_no_thumbnail_row_exists() {
+        let (cat, _ids) = catalog_with_three_thumbnails();
+        assert!(!cat.is_thumbnail_stale(999_999).unwrap());
+    }
+
+    #[test]
+    fn set_thumbnails_stale_on_an_empty_slice_is_a_noop() {
+        let (cat, _ids) = catalog_with_three_thumbnails();
+        assert_eq!(cat.set_thumbnails_stale(&[], true).unwrap(), 0);
     }
 }
 

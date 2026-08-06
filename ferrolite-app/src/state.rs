@@ -920,6 +920,30 @@ impl AppState {
             .is_some_and(|a| a.kind == crate::export::ExportKind::Batch && !a.is_done())
     }
 
+    /// Take the pending batch-undo snapshot iff `undo` should revert a
+    /// batch: `undo` is `true` (a Redo must never touch it) AND no Develop
+    /// session is open. Returns `None`, leaving `batch_undo` untouched, in
+    /// every other case (a Develop session is open regardless of `undo`;
+    /// `undo` is `false`; or there is simply nothing pending).
+    ///
+    /// Extracted from `FerroliteApp::apply_undo_redo` (`app.rs`) so this
+    /// state TRANSITION — not just the gating decision — is pinned by a
+    /// test: a future refactor that reordered the guard, or swapped `take()`
+    /// for `as_ref()` (which would let a second Ctrl+Z double-revert the
+    /// same N images), would break the tests below instead of silently
+    /// hijacking a Develop session's history undo or double-reverting a
+    /// batch. `should_route_undo_to_batch` (`app::shortcuts`) is the sibling
+    /// dispatch-level gate that decides whether to call `apply_undo_redo` at
+    /// all; this is the actual take.
+    pub(crate) fn take_batch_undo(
+        &mut self,
+        undo: bool,
+    ) -> Option<crate::presets::apply::UndoSnapshot> {
+        (undo && self.viewer.is_none())
+            .then(|| self.batch_undo.take())
+            .flatten()
+    }
+
     #[cfg(test)]
     pub fn for_test() -> Self {
         // Use a unique ID per test (thread + process) to avoid concurrent collision.
@@ -2115,5 +2139,77 @@ mod tests {
         s.settings.show_info_panel = true;
         s.show_info_panel = s.settings.show_info_panel;
         assert!(s.show_info_panel);
+    }
+
+    fn sample_undo_snapshot() -> crate::presets::apply::UndoSnapshot {
+        crate::presets::apply::UndoSnapshot {
+            entries: vec![(1, std::path::PathBuf::from("/a.arw"), "{}".to_string())],
+        }
+    }
+
+    /// A Develop session open must block the batch-undo take even though
+    /// `undo` is `true` and a snapshot is pending: the snapshot must be left
+    /// exactly as it was (still `Some`), not consumed, so the caller's
+    /// Develop-history undo logic runs unmolested and a later Library Ctrl+Z
+    /// can still revert the batch.
+    #[test]
+    fn take_batch_undo_returns_none_and_leaves_snapshot_when_viewer_open() {
+        let mut s = AppState::for_test();
+        s.viewer = Some(crate::viewer::ViewerState::open(
+            1,
+            std::path::PathBuf::from("x"),
+            ferrolite_image::FileKind::Raw,
+        ));
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let taken = s.take_batch_undo(true);
+
+        assert!(taken.is_none(), "a Develop session must block the take");
+        assert!(
+            s.batch_undo.is_some(),
+            "the snapshot must survive a blocked take untouched"
+        );
+    }
+
+    /// No Develop session, `undo == true`, a snapshot pending: the snapshot
+    /// is returned exactly once and `batch_undo` is left `None` — the second
+    /// Ctrl+Z (or the Edit menu's Undo clicked twice) must find nothing to
+    /// re-apply.
+    #[test]
+    fn take_batch_undo_consumes_the_snapshot_exactly_once() {
+        let mut s = AppState::for_test();
+        s.viewer = None;
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let first = s.take_batch_undo(true);
+        assert!(first.is_some(), "the pending snapshot must be returned");
+        assert!(
+            s.batch_undo.is_none(),
+            "the take must consume batch_undo, not merely read it"
+        );
+
+        let second = s.take_batch_undo(true);
+        assert!(
+            second.is_none(),
+            "a second Ctrl+Z must be inert: nothing left to double-revert"
+        );
+    }
+
+    /// `undo == false` (a Redo) must never touch `batch_undo`, regardless of
+    /// viewer state — Redo has no batch counterpart (see `spawn_batch_undo`'s
+    /// `snapshot: None`; undoing an undo is not offered).
+    #[test]
+    fn take_batch_undo_ignores_redo_and_leaves_snapshot_intact() {
+        let mut s = AppState::for_test();
+        s.viewer = None;
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let taken = s.take_batch_undo(false);
+
+        assert!(taken.is_none(), "Redo must never take the batch snapshot");
+        assert!(
+            s.batch_undo.is_some(),
+            "the snapshot must survive a Redo untouched"
+        );
     }
 }

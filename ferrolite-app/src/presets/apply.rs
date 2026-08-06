@@ -159,7 +159,8 @@ pub fn spawn_batch_apply(
         }
 
         let snapshot = (!snapshot.entries.is_empty()).then_some(snapshot);
-        let cancelled = cancel.is_cancelled();
+        let cancelled =
+            batch_was_genuinely_cancelled(cancel.is_cancelled(), &result, targets.len());
         let _ = tx.send(AppEvent::BatchApplyDone {
             result,
             snapshot,
@@ -182,6 +183,15 @@ pub fn snapshot_documents(snap: &UndoSnapshot) -> Vec<(i64, PathBuf, EditDoc)> {
         .collect()
 }
 
+/// How many of `snap`'s entries `snapshot_documents` will drop (no longer
+/// deserializable). Extracted as its own pure function so `spawn_batch_undo`
+/// folding this count into `BatchResult.failed` — an image
+/// `snapshot_documents` could not restore is a failure to revert it, not a
+/// silent no-op — has a unit test independent of the job system.
+fn undo_snapshot_decode_failures(snap: &UndoSnapshot) -> usize {
+    snap.entries.len() - snapshot_documents(snap).len()
+}
+
 /// Restore a batch's prior documents. Writes each sidecar back and re-flags the
 /// thumbnails stale (they were regenerated, or marked, against the now-undone
 /// edit either way).
@@ -196,8 +206,19 @@ pub fn spawn_batch_undo(
     let tx = tx.clone();
     let ctx = ctx.clone();
     jobs.submit(Priority::Background, move |_cancel| {
+        let decode_failures = undo_snapshot_decode_failures(&snapshot);
         let docs = snapshot_documents(&snapshot);
-        let mut result = BatchResult::default();
+        // Entries `snapshot_documents` silently dropped (no longer
+        // deserializable) are images this undo could NOT restore — a
+        // failure to revert, not a no-op — so fold them into `failed` up
+        // front. Without this, the toast would report success ("Reverted…
+        // on 5 images") while quietly leaving some images on their
+        // post-batch edit, contradicting "restore most of a batch" with a
+        // claim of restoring all of it.
+        let mut result = BatchResult {
+            failed: decode_failures,
+            ..BatchResult::default()
+        };
         let mut ids = Vec::with_capacity(docs.len());
         for (image_id, path, doc) in &docs {
             let xmp = ferrolite_catalog::sidecar_path(path);
@@ -215,14 +236,37 @@ pub fn spawn_batch_undo(
             let db = writer.lock().expect("writer");
             let _ = db.set_thumbnails_stale(&ids, true);
         }
-        let _ = tx.send(AppEvent::BatchApplyDone {
-            result,
-            snapshot: None, // undoing an undo is not offered
-            label: "Undo".to_string(),
-            cancelled: false, // the undo job itself is not cancellable
-        });
+        // A DISTINCT event from `BatchApplyDone` (see that variant's doc
+        // comment): undo never carries a snapshot of its own (undoing an
+        // undo is not offered) and must never risk clobbering
+        // `AppState.batch_undo` if a newer, unrelated batch apply's
+        // `BatchApplyDone` raced this completion.
+        let _ = tx.send(AppEvent::BatchUndoDone { result });
         ctx.request_repaint();
     });
+}
+
+/// Whether a batch run should be reported as CANCELLED, as opposed to an
+/// ordinary completed run whose cancel token merely happened to be signalled
+/// (e.g. a cancel button click racing the very last item's completion).
+///
+/// `apply_patch_to_targets` always visits every target regardless of
+/// cancellation (a cancelled read simply returns `None` from the read
+/// closure, counted as `skipped` — see `spawn_batch_apply`'s read closure),
+/// so `cancel.is_cancelled()` alone can be `true` even when every target was
+/// actually attempted. Reporting THAT as "Cancelled — applied to 500 of 500
+/// images." would be exactly the kind of misleading phrasing `cancelled`
+/// exists to prevent in the first place. Only a run that left at least one
+/// target genuinely unattempted (`applied + failed < target_count`, i.e.
+/// some remainder landed in `skipped` for lack of being attempted) reads as
+/// cancelled. Pure so this arithmetic — easy to get subtly wrong — has a
+/// unit test independent of the job system and its `CancelToken`.
+fn batch_was_genuinely_cancelled(
+    cancel_flag: bool,
+    result: &BatchResult,
+    target_count: usize,
+) -> bool {
+    cancel_flag && result.applied + result.failed < target_count
 }
 
 /// Build the batch-apply toast's level + message. Pure and unit-testable
@@ -284,6 +328,37 @@ pub fn batch_result_message(
         msg = format!("{msg} Press {hint} to undo.");
     }
     (level, msg)
+}
+
+/// Build the batch-UNDO toast's level + message. Deliberately a separate
+/// function from `batch_result_message`, not a call to it with a
+/// `label: "Undo"`: the `label` slot elsewhere always names a PRESET
+/// (`Applied "Warm portrait" to 5 images.`), so reusing it for the revert
+/// would render as `Applied "Undo" to 5 images.` — Undo is not a preset
+/// name. `result.failed` here already includes both write failures AND any
+/// snapshot entries `snapshot_documents` could not deserialize (folded in by
+/// `spawn_batch_undo` before this is called), so a non-zero `failed` alone
+/// is enough to step up to `Warning`.
+pub fn batch_undo_message(result: &BatchResult) -> (crate::notifications::Level, String) {
+    use crate::notifications::Level;
+
+    if result.failed == 0 {
+        (
+            Level::Info,
+            format!(
+                "Reverted the last batch apply on {} images.",
+                result.applied
+            ),
+        )
+    } else {
+        (
+            Level::Warning,
+            format!(
+                "Reverted the last batch apply on {} images. {} failed.",
+                result.applied, result.failed
+            ),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -524,5 +599,113 @@ mod tests {
             msg,
             "Cancelled \u{2014} applied to 40 of 500 images. 2 failed."
         );
+    }
+
+    /// The undo path gets its own phrasing, never "Undo" plugged into the
+    /// preset-name slot (`Applied "Undo" to N images.` would read as if
+    /// "Undo" were a preset).
+    #[test]
+    fn undo_message_reports_full_success() {
+        let result = BatchResult {
+            applied: 5,
+            failed: 0,
+            skipped: 0,
+        };
+        let (level, msg) = batch_undo_message(&result);
+        assert_eq!(level, crate::notifications::Level::Info);
+        assert_eq!(msg, "Reverted the last batch apply on 5 images.");
+        assert!(!msg.contains("Undo"), "must not name Undo as if a preset");
+    }
+
+    /// Any failure (write failure or an undeserializable snapshot entry,
+    /// already folded into `failed` by `spawn_batch_undo`) steps the undo
+    /// toast up to Warning and names the count.
+    #[test]
+    fn undo_message_reports_failures_at_warning() {
+        let result = BatchResult {
+            applied: 3,
+            failed: 2,
+            skipped: 0,
+        };
+        let (level, msg) = batch_undo_message(&result);
+        assert_eq!(level, crate::notifications::Level::Warning);
+        assert_eq!(msg, "Reverted the last batch apply on 3 images. 2 failed.");
+    }
+
+    /// `snapshot_documents` dropping an unparseable entry must be reflected
+    /// as a decode failure so `spawn_batch_undo` can fold it into
+    /// `BatchResult.failed` — an image left un-reverted is a failure to
+    /// restore it, not a silent no-op (see that function's doc comment).
+    #[test]
+    fn undo_snapshot_decode_failures_counts_dropped_entries() {
+        let mut prior = EditDoc::default();
+        prior.global.exposure = -1.0;
+        let snap = UndoSnapshot {
+            entries: vec![
+                (1, std::path::PathBuf::from("/a"), "garbage {{".into()),
+                (
+                    2,
+                    std::path::PathBuf::from("/b"),
+                    ferrolite_pipeline::serialize(&prior),
+                ),
+                (3, std::path::PathBuf::from("/c"), "also garbage".into()),
+            ],
+        };
+        assert_eq!(undo_snapshot_decode_failures(&snap), 2);
+    }
+
+    /// A snapshot with nothing undecodable must report zero decode failures
+    /// — this fix must not manufacture spurious failures on the happy path.
+    #[test]
+    fn undo_snapshot_decode_failures_is_zero_when_all_entries_parse() {
+        let mut prior = EditDoc::default();
+        prior.global.exposure = 0.5;
+        let snap = UndoSnapshot {
+            entries: vec![(
+                1,
+                std::path::PathBuf::from("/a"),
+                ferrolite_pipeline::serialize(&prior),
+            )],
+        };
+        assert_eq!(undo_snapshot_decode_failures(&snap), 0);
+    }
+
+    /// A cancel landing strictly BEFORE the run completed every target
+    /// (some remainder never got attempted) must read as genuinely
+    /// cancelled.
+    #[test]
+    fn genuinely_cancelled_when_targets_remain_unattempted() {
+        let result = BatchResult {
+            applied: 47,
+            failed: 0,
+            skipped: 453,
+        };
+        assert!(batch_was_genuinely_cancelled(true, &result, 500));
+    }
+
+    /// A cancel token that fired but landed AFTER the run had already
+    /// attempted every target (applied + failed == target_count) must NOT
+    /// read as cancelled — this is the exact bug reported: "Cancelled —
+    /// applied to 500 of 500 images."
+    #[test]
+    fn not_cancelled_when_the_cancel_lands_after_the_last_item() {
+        let result = BatchResult {
+            applied: 500,
+            failed: 0,
+            skipped: 0,
+        };
+        assert!(!batch_was_genuinely_cancelled(true, &result, 500));
+    }
+
+    /// A cancel flag that never fired must never read as cancelled,
+    /// regardless of how many targets were attempted.
+    #[test]
+    fn not_cancelled_when_the_cancel_flag_never_fired() {
+        let result = BatchResult {
+            applied: 47,
+            failed: 0,
+            skipped: 453,
+        };
+        assert!(!batch_was_genuinely_cancelled(false, &result, 500));
     }
 }

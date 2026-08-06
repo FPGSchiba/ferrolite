@@ -205,17 +205,31 @@ pub enum AppEvent {
     /// unattempted targets are folded into `result.skipped` by
     /// `apply_patch_to_targets`, which is indistinguishable from "sidecar
     /// unreadable" at the count level — `cancelled` lets the toast phrase that
-    /// case as a cancellation instead of implying N corrupt files.
+    /// case as a cancellation instead of implying N corrupt files. `snapshot`
+    /// is read by `apply()` below (pushed into `AppState.batch_undo`).
     BatchApplyDone {
         result: crate::presets::apply::BatchResult,
-        // Consumed by the undo-stack push wired in Task 5; not read yet.
-        #[allow(dead_code)]
         snapshot: Option<crate::presets::apply::UndoSnapshot>,
         label: String,
         cancelled: bool,
     },
     /// Progress within a batch apply.
     BatchApplyProgress { done: usize, total: usize },
+    /// A batch UNDO (`spawn_batch_undo`) finished restoring a snapshot's
+    /// prior documents. Deliberately a DISTINCT variant from
+    /// `BatchApplyDone`, not a reuse with `snapshot: None`: both funnel
+    /// through the same `AppState.batch_undo` slot, and if a batch apply's
+    /// `BatchApplyDone` (which just populated a fresh snapshot) raced an
+    /// in-flight undo's completion, reusing `BatchApplyDone` would let
+    /// whichever event folds last unconditionally overwrite `batch_undo` —
+    /// silently clearing a freshly-promised "Press Ctrl+Z to undo." toast's
+    /// snapshot if the undo happened to land after it. A separate variant
+    /// means the undo path only ever clears `batch_undo` for the snapshot
+    /// IT took (already `None` after `take_batch_undo`), never one a
+    /// newer, unrelated batch apply just installed.
+    BatchUndoDone {
+        result: crate::presets::apply::BatchResult,
+    },
     /// The startup preset-directory scan finished.
     PresetsLoaded {
         presets: Vec<crate::presets::Preset>,
@@ -389,6 +403,10 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("BatchApplyProgress")
                 .field("done", done)
                 .field("total", total)
+                .finish(),
+            AppEvent::BatchUndoDone { result } => f
+                .debug_struct("BatchUndoDone")
+                .field("result", result)
                 .finish(),
             AppEvent::PresetsLoaded { presets } => f
                 .debug_struct("PresetsLoaded")
@@ -634,6 +652,20 @@ impl AppState {
             // Status-bar-only progress readout (a future indicator); no
             // counter to fold here.
             AppEvent::BatchApplyProgress { .. } => None,
+            // Deliberately does NOT touch `batch_undo`: `take_batch_undo`
+            // already consumed it (set it to `None`) before this job was
+            // ever spawned (`FerroliteApp::apply_undo_redo`), and a newer,
+            // unrelated batch apply may have installed a fresh snapshot in
+            // the meantime — this must never clobber that (see
+            // `AppEvent::BatchUndoDone`'s doc comment).
+            AppEvent::BatchUndoDone { result } => {
+                let (level, msg) = crate::presets::apply::batch_undo_message(&result);
+                self.notify(level, msg);
+                if result.applied > 0 {
+                    self.dirty = true;
+                }
+                None
+            }
             AppEvent::PresetsLoaded { presets } => {
                 self.presets = presets;
                 None
@@ -1118,5 +1150,42 @@ mod tests {
         });
         assert_eq!(out, None);
         assert_eq!(s.presets, vec![preset]);
+    }
+
+    /// The regression this variant exists to prevent: `BatchUndoDone` must
+    /// NEVER touch `batch_undo`. If a newer, unrelated batch apply installed
+    /// a fresh snapshot (its own `BatchApplyDone` already ran) while an
+    /// older undo job was still in flight, that undo's own completion must
+    /// not clobber the fresh promise the toast already made.
+    #[test]
+    fn batch_undo_done_never_touches_an_unrelated_pending_snapshot() {
+        use crate::notifications::Level;
+        use crate::presets::apply::{BatchResult, UndoSnapshot};
+
+        let mut s = AppState::for_test();
+        let fresh = UndoSnapshot {
+            entries: vec![(9, std::path::PathBuf::from("/newer.arw"), "{}".to_string())],
+        };
+        s.batch_undo = Some(fresh.clone());
+        s.dirty = false;
+
+        let out = s.apply(AppEvent::BatchUndoDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+            },
+        });
+
+        assert_eq!(out, None);
+        assert_eq!(
+            s.batch_undo.as_ref().map(|snap| &snap.entries),
+            Some(&fresh.entries),
+            "an unrelated newer snapshot must survive BatchUndoDone untouched"
+        );
+        assert!(s.dirty, "a successful revert must still mark dirty");
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert_eq!(n.level(), Level::Info);
+        assert_eq!(n.message(), "Reverted the last batch apply on 5 images.");
     }
 }

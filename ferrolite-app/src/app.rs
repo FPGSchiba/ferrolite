@@ -149,19 +149,20 @@ impl FerroliteApp {
         // "undo the last thing I did", and the keybind is already
         // discoverable in the Settings keyboard tab and the Help panel
         // (CLAUDE.md), so no new GROUPS or Help entry is needed. Redo is
-        // NOT extended — undoing an undo is not offered (see
-        // `spawn_batch_undo`'s `snapshot: None`).
-        if undo && self.state.viewer.is_none() {
-            if let Some(snapshot) = self.state.batch_undo.take() {
-                crate::presets::apply::spawn_batch_undo(
-                    &self.state.jobs,
-                    &self.state.writer,
-                    &self.state.tx,
-                    ctx,
-                    snapshot,
-                );
-                return;
-            }
+        // NOT extended — undoing an undo is not offered (`spawn_batch_undo`
+        // reports through `AppEvent::BatchUndoDone`, which carries no
+        // snapshot of its own). The gating + one-shot-take itself lives in
+        // `AppState::take_batch_undo` (state.rs), pinned by its own tests,
+        // rather than inline here.
+        if let Some(snapshot) = self.state.take_batch_undo(undo) {
+            crate::presets::apply::spawn_batch_undo(
+                &self.state.jobs,
+                &self.state.writer,
+                &self.state.tx,
+                ctx,
+                snapshot,
+            );
+            return;
         }
         let result = self.state.viewer.as_mut().and_then(|v| {
             if undo {

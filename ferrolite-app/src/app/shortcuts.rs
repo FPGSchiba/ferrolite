@@ -4,12 +4,17 @@ use crate::app::FerroliteApp;
 /// batch-apply snapshot rather than Develop's per-image history undo.
 ///
 /// True exactly when there is no active Develop session AND a batch-undo
-/// snapshot is pending. Mirrors the gating `apply_undo_redo` (`app.rs`)
-/// itself applies at the top of its body, and the `can_undo` OR-condition
-/// computed for the Edit menu — three call sites, one rule. Extracted as a
-/// pure, egui-free predicate so the gating decision is unit-testable without
-/// a `Context`; the Ctrl+Z chord match and `wants_keyboard_input` guard stay
-/// in `dispatch` itself, which does need egui.
+/// snapshot is pending. Mirrors the gating `AppState::take_batch_undo`
+/// (`state.rs`, called from `apply_undo_redo` in `app.rs`) itself applies
+/// before consuming the snapshot, and the `can_undo` OR-condition computed
+/// for the Edit menu — three call sites, one rule. This function only
+/// decides whether it is worth calling `apply_undo_redo` at all; extracted
+/// as a pure, egui-free predicate so THAT decision is unit-testable without
+/// a `Context` (the Ctrl+Z chord match and `wants_keyboard_input` guard stay
+/// in `dispatch` itself, which does need egui). `take_batch_undo` is the
+/// one that actually owns the state transition (see its own tests in
+/// `state.rs` for the take-exactly-once and Develop-session-blocks-it
+/// invariants).
 fn should_route_undo_to_batch(viewer_open: bool, batch_undo_pending: bool) -> bool {
     !viewer_open && batch_undo_pending
 }
@@ -110,16 +115,22 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
 
     // P7: Ctrl+Z (Action::Undo, reused rather than a new binding — decision
     // P7-D5) also reverts a pending batch-apply snapshot when no Develop
-    // session is open. Checked independently of the Develop-only Undo/Redo
-    // block further down (which requires `viewer.is_some()`, see the
-    // Left/Right navigation block below), so the toast's "Press Ctrl+Z to
-    // undo." promise (`presets::apply::batch_result_message`) is actually
-    // true when raised from the Library. Routes through the SAME
-    // `apply_undo_redo` funnel Develop's own Ctrl+Z uses below — exactly one
-    // implementation, not two. `apply_undo_redo` itself re-checks
-    // `viewer.is_none()` before touching `batch_undo`, so even if this
-    // predicate's inputs were ever stale, a Develop session cannot have its
-    // history undo hijacked by a pending batch snapshot.
+    // session is open. Deliberately checked on `viewer.is_none()` alone,
+    // with NO `app.module.is_library()` gate (unlike the select-all block
+    // just above): the approved spec's condition is "no active Develop
+    // session", full stop, matching the module-agnostic Edit menu's Undo
+    // item (`chrome::MenuAction::Undo`, which also fires regardless of
+    // module) — so this also fires in Export, not only the Library. Checked
+    // independently of the Develop-only Undo/Redo block further down (which
+    // requires `viewer.is_some()`, see the Left/Right navigation block
+    // below), so the toast's "Press Ctrl+Z to undo." promise
+    // (`presets::apply::batch_result_message`) is actually true wherever it
+    // was raised from. Routes through the SAME `apply_undo_redo` funnel
+    // Develop's own Ctrl+Z uses below — exactly one implementation, not two.
+    // `apply_undo_redo` itself re-checks `viewer.is_none()` before touching
+    // `batch_undo`, so even if this predicate's inputs were ever stale, a
+    // Develop session cannot have its history undo hijacked by a pending
+    // batch snapshot.
     if !ctx.wants_keyboard_input()
         && should_route_undo_to_batch(app.state.viewer.is_some(), app.state.batch_undo.is_some())
         && app

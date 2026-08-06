@@ -179,6 +179,26 @@ pub(crate) fn cell_aspect(rec: &ImageRecord) -> f32 {
     (w / h).clamp(0.1, 10.0)
 }
 
+/// Whether `paint_cell` should submit its ordinary lazy-load thumbnail fetch
+/// (`AppState::request_thumbnail`) for a visible cell this frame.
+///
+/// `false` whenever: the cell already has a texture (nothing to fetch);
+/// there is no thumbnail row yet (`decode_done == false`, i.e. a `Pending`
+/// row — see the call site's comment on why fetching would just re-spawn
+/// every frame); or a stale-thumbnail regen already owns this id
+/// (`stale_regen_inflight == true`, P7 Task 10's storm-fix). That last case
+/// is why this is a combined predicate rather than three separate `if`s at
+/// the call site: a stale regen SUPERSEDES the lazy load — it is about to
+/// replace the very blob the lazy load would fetch — so the two decisions
+/// must be evaluated together, with the staleness check settled first.
+pub(crate) fn should_request_lazy_thumbnail(
+    has_texture: bool,
+    decode_done: bool,
+    stale_regen_inflight: bool,
+) -> bool {
+    !has_texture && decode_done && !stale_regen_inflight
+}
+
 /// Draw the per-cell meta label centered under the (centered) thumbnail:
 /// filename on top, capture date below. The cell footprint is at least the label
 /// width (see `label_width`), so the centered text is never clipped.
@@ -244,6 +264,45 @@ fn paint_cell(
     // Determine selection state early so we can adjust the thumbnail rect.
     let selected = state.selection.contains(&rec.id) || state.selected == Some(rec.id);
 
+    // P7 §5.2 lazy-refresh consumer (Task 10): a batch preset apply flagged
+    // this thumbnail stale (Task 4) — regenerate it now that the cell is
+    // actually on screen, instead of the moment it was applied. The grid is
+    // already virtualized, so this only ever pays the decode + GPU render +
+    // encode cost for cells the user actually looks at.
+    //
+    // This MUST run before the lazy-load request below, not after: a cell
+    // that is both un-textured AND stale is the feature's primary scenario
+    // (the first browse of a folder right after a batch apply), and if the
+    // ordinary lazy load already fired this frame, it would be fetching the
+    // very stale blob this regen is about to replace — a second job, in the
+    // hot path this feature exists to make cheap, doing knowably wrong work.
+    // See `should_request_lazy_thumbnail` below for how the two decisions
+    // combine.
+    //
+    // Gated on `Done`: no thumbnail row exists yet for a `Pending` image, so
+    // there is nothing to check. `stale_regen_inflight`/`stale_checked_fresh`
+    // short-circuit the indexed `is_thumbnail_stale` read-pool lookup for an
+    // id already known this "epoch" (in flight, or freshly confirmed
+    // not-stale) — see their doc comments on `AppState` for why this is
+    // bounded, not unbounded: a cell that stays on screen across many frames
+    // (e.g. a held scroll drag) must not re-query the catalog every single
+    // frame. This cannot spawn the regen job directly (no access to
+    // `eframe::Frame`/the GPU render state here) — it only enqueues;
+    // `FerroliteApp::drain_stale_thumb_regen_requests` (app.rs), called once
+    // per frame, does the actual spawn.
+    let decode_done = rec.decode_status == ferrolite_catalog::DecodeStatus::Done;
+    let mut stale_regen_inflight = state.stale_regen_inflight.contains(&rec.id);
+    if decode_done && !stale_regen_inflight && !state.stale_checked_fresh.contains(&rec.id) {
+        let stale = state.reads.is_thumbnail_stale(rec.id).unwrap_or(false);
+        if crate::develop::thumb_regen::should_regen_stale(stale, stale_regen_inflight) {
+            state.stale_regen_inflight.insert(rec.id);
+            state.pending_stale_regen.push(rec.id);
+            stale_regen_inflight = true;
+        } else {
+            state.stale_checked_fresh.insert(rec.id);
+        }
+    }
+
     // Request a thumbnail off-thread if not yet cached (visible cell only). The
     // DB read + JPEG decode happen in a `Visible`-priority job; the decoded
     // pixels arrive over the event channel and are uploaded there. NO UI-thread
@@ -257,41 +316,19 @@ fn paint_cell(
     // `Pending` cell instead shows the `Generating` spinner while ingesting and
     // gets its texture from the ingest `ThumbReady` path once generation
     // reaches it (unchanged).
-    if !state.textures.contains(rec.id)
-        && rec.decode_status == ferrolite_catalog::DecodeStatus::Done
-    {
-        state.request_thumbnail(ui.ctx(), rec.id);
-    }
-
-    // P7 §5.2 lazy-refresh consumer (Task 10): a batch preset apply flagged
-    // this thumbnail stale (Task 4) — regenerate it now that the cell is
-    // actually on screen, instead of the moment it was applied. The grid is
-    // already virtualized, so this only ever pays the decode + GPU render +
-    // encode cost for cells the user actually looks at.
     //
-    // Gated on `Done` for the same reason as the request above (no thumbnail
-    // row exists yet for a `Pending` image, so there is nothing to check).
-    // `stale_regen_inflight`/`stale_checked_fresh` short-circuit the indexed
-    // `is_thumbnail_stale` read-pool lookup for an id already known this
-    // "epoch" (in flight, or freshly confirmed not-stale) — see their doc
-    // comments on `AppState` for why this is bounded, not unbounded: a cell
-    // that stays on screen across many frames (e.g. a held scroll drag) must
-    // not re-query the catalog every single frame. This cannot spawn the
-    // regen job directly (no access to `eframe::Frame`/the GPU render state
-    // here) — it only enqueues; `FerroliteApp::drain_stale_thumb_regen_requests`
-    // (app.rs), called once per frame, does the actual spawn.
-    let already_inflight = state.stale_regen_inflight.contains(&rec.id);
-    if rec.decode_status == ferrolite_catalog::DecodeStatus::Done
-        && !already_inflight
-        && !state.stale_checked_fresh.contains(&rec.id)
-    {
-        let stale = state.reads.is_thumbnail_stale(rec.id).unwrap_or(false);
-        if crate::develop::thumb_regen::should_regen_stale(stale, already_inflight) {
-            state.stale_regen_inflight.insert(rec.id);
-            state.pending_stale_regen.push(rec.id);
-        } else {
-            state.stale_checked_fresh.insert(rec.id);
-        }
+    // Also skipped whenever a stale regen owns this id (just enqueued above,
+    // or already in flight from an earlier frame): that job will deliver the
+    // correct, post-edit thumbnail, so a lazy load here would only be a
+    // second job racing to fetch the stale blob the regen is replacing. Until
+    // the regen lands the cell just keeps showing whatever it already has
+    // (or the usual placeholder) — the honest state, not a stale render.
+    if should_request_lazy_thumbnail(
+        state.textures.contains(rec.id),
+        decode_done,
+        stale_regen_inflight,
+    ) {
+        state.request_thumbnail(ui.ctx(), rec.id);
     }
 
     let has_tex = state.textures.contains(rec.id);
@@ -542,6 +579,40 @@ mod tests {
             thumb_w,
             thumb_h,
         }
+    }
+
+    /// P7 Task 10 fix: a cell that is both un-textured AND stale must spawn
+    /// ONLY the regen, never both jobs for the same `image_id` — the regen
+    /// supersedes the lazy load.
+    #[test]
+    fn stale_regen_supersedes_the_lazy_load_for_untextured_cells() {
+        assert!(
+            !should_request_lazy_thumbnail(false, true, true),
+            "untextured + stale-regen-inflight must NOT also fetch the (about-to-be-replaced) stale blob"
+        );
+    }
+
+    #[test]
+    fn untextured_fresh_cell_still_requests_the_lazy_load() {
+        assert!(
+            should_request_lazy_thumbnail(false, true, false),
+            "the ordinary case (no regen in play) must be unaffected"
+        );
+    }
+
+    #[test]
+    fn textured_cell_never_requests_a_lazy_load_regardless_of_staleness() {
+        assert!(!should_request_lazy_thumbnail(true, true, false));
+        assert!(!should_request_lazy_thumbnail(true, true, true));
+    }
+
+    #[test]
+    fn pending_row_never_requests_a_lazy_load() {
+        // decode_done == false (no thumbnail row yet) must short-circuit
+        // regardless of texture/stale-regen state, matching the existing
+        // Pending-row rationale at the call site.
+        assert!(!should_request_lazy_thumbnail(false, false, false));
+        assert!(!should_request_lazy_thumbnail(false, false, true));
     }
 
     #[test]

@@ -47,19 +47,14 @@ pub const NOTIFY_ERROR: &str = p::WARNING_OCTAGON; // error toast glyph
 pub const CLOSE: &str = p::X; // toast dismiss button
 pub const CROP_FLIP_ORIENTATION: &str = p::ARROWS_CLOCKWISE; // crop panel's landscape<->portrait toggle
 
-// Presets / copy-paste-sync (P7). No consumer yet — Tasks 7-8 wire these into
-// the preset list and the copy/paste settings menu. Scoped per-item
-// `#[allow(dead_code)]` (not a blanket module allow) so each stays covered by
-// the lint by default; remove the annotation once wired up.
+// Presets / copy-paste-sync (P7). Wired into the Library copy/paste/preset
+// context menu (Task 7) and the Develop "Presets" menu (Task 8).
 /// Presets menu / preset list entries. Distinct from `ADJUST` (SLIDERS_HORIZONTAL) —
-/// a stack of saved settings, not a single control. Reserved for Task 7.
-#[allow(dead_code)]
+/// a stack of saved settings, not a single control.
 pub const PRESET: &str = p::STACK;
-/// Copy settings. Reserved for Task 8.
-#[allow(dead_code)]
+/// Copy settings.
 pub const COPY_SETTINGS: &str = p::COPY;
-/// Paste settings. Reserved for Task 8.
-#[allow(dead_code)]
+/// Paste settings.
 pub const PASTE_SETTINGS: &str = p::CLIPBOARD_TEXT;
 
 /// The regular icon font. `add_to_fonts(Regular)` put Phosphor Regular into the

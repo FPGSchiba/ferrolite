@@ -24,8 +24,11 @@ pub fn show(
     reg: &DevelopToolRegistry,
     working_space: WorkingSpace,
 ) -> PanelOutcome {
-    // 1) Global chrome (not tool-specific) stays above the tab bar.
-    let ws_change = crate::develop::adjustment_panel::chrome(ui, state, working_space);
+    // 1) Global chrome (not tool-specific) stays above the tab bar; also
+    //    carries the Presets menu (P7 Task 8), which can itself produce an
+    //    edit (applying a preset to the current image).
+    let (ws_change, preset_edit) =
+        crate::develop::adjustment_panel::chrome(ui, state, working_space);
     ui.separator();
 
     // 2) Copy ToolState out (it is Copy) so the tab-bar mutation doesn't fight the
@@ -33,7 +36,7 @@ pub fn show(
     //    AppState, not ViewerState) so it survives image switches.
     if state.viewer.is_none() {
         return PanelOutcome {
-            edit: None,
+            edit: preset_edit,
             working_space: ws_change,
         };
     }
@@ -123,9 +126,12 @@ pub fn show(
     // 3) Dispatch the active tab's show(). Look the tab object up fresh (base ++ active
     //    tool tabs) and call it.
     let active = ts.active_tab;
-    // Seed with the mask panel's edit (if any) so a mask-list/component action
-    // this frame isn't lost when the active base tab itself produces no edit.
-    let mut out: Option<EditOutcome> = mask_panel_edit;
+    // Seed with the Presets menu's edit (if any), then the mask panel's edit,
+    // so neither a preset apply nor a mask-list/component action this frame
+    // is lost when the active base tab itself produces no edit. The two can
+    // never both be `Some` in the same frame (the Presets menu closes on
+    // click), so the precedence between them is moot in practice.
+    let mut out: Option<EditOutcome> = preset_edit.or(mask_panel_edit);
     // Base tabs:
     let mut rendered = false;
     for tab in reg.base_tabs() {

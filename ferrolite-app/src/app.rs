@@ -808,7 +808,11 @@ impl FerroliteApp {
     /// receiving input behind it (live preview, color-eyedropper sampling,
     /// brush drawing all route through the canvas while the window is open).
     fn modal_active(&self) -> bool {
-        self.show_help || self.show_settings || self.state.pending_remove.is_some()
+        self.show_help
+            || self.show_settings
+            || self.state.pending_remove.is_some()
+            || self.state.pending_rename_preset.is_some()
+            || self.state.pending_delete_preset.is_some()
     }
 
     /// If the current viewer's edit stack changed this session, spawn a
@@ -903,6 +907,145 @@ impl FerroliteApp {
         };
         if keep_open {
             self.state.open_group_modal = Some(pending);
+        }
+    }
+
+    /// Show the Develop-panel "Rename preset" dialog for one frame and act
+    /// on its outcome (P7 Task 8). `presets::rename` saves under the new
+    /// name before deleting the old file, so a rejected name (duplicate or
+    /// invalid) never loses the preset — the dialog just shows the reason
+    /// inline and stays open, mirroring `drive_group_modal`'s handling of a
+    /// rejected save name.
+    fn drive_rename_preset(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.state.pending_rename_preset.take() else {
+            return;
+        };
+        let mut keep_open = true;
+        egui::Window::new("Rename preset")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut pending.new_name);
+                });
+                if let Some(err) = &pending.error {
+                    ui.colored_label(theme::SEMANTIC_AMBER, err);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let can_confirm =
+                        crate::presets::sanitize_filename(&pending.new_name).is_some();
+                    let confirm = ui.add_enabled(can_confirm, egui::Button::new("Rename"));
+                    if !can_confirm {
+                        confirm.on_disabled_hover_text("Enter a name");
+                    } else if confirm.clicked() {
+                        match crate::presets::rename(
+                            &crate::presets::presets_dir(),
+                            &pending.original,
+                            &pending.new_name,
+                        ) {
+                            Ok(renamed) => {
+                                crate::presets::spawn_load_all(
+                                    &self.state.jobs,
+                                    &self.state.tx,
+                                    ctx,
+                                );
+                                self.state.notify(
+                                    crate::notifications::Level::Info,
+                                    format!(
+                                        "Renamed \u{201c}{}\u{201d} to \u{201c}{}\u{201d}.",
+                                        pending.original.name, renamed.name
+                                    ),
+                                );
+                                keep_open = false;
+                            }
+                            Err(e) => {
+                                // A friendlier message than the raw `Display`
+                                // for the two rejections the user can act on
+                                // by editing the name; `Io` keeps its message
+                                // (an underlying filesystem failure has no
+                                // more-actionable phrasing to offer here).
+                                let msg = match &e {
+                                    crate::presets::PresetError::Duplicate(_) => {
+                                        "A preset with that name already exists.".to_string()
+                                    }
+                                    crate::presets::PresetError::InvalidName => {
+                                        "Enter a name with at least one letter, number, \
+                                         space, - or _."
+                                            .to_string()
+                                    }
+                                    crate::presets::PresetError::Io(_) => e.to_string(),
+                                };
+                                pending.error = Some(msg);
+                            }
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep_open = false;
+                    }
+                });
+            });
+        if keep_open {
+            self.state.pending_rename_preset = Some(pending);
+        }
+    }
+
+    /// Show the pending preset-delete confirmation for one frame and act on
+    /// its outcome (P7 Task 8) — deleting removes a file from disk, so it is
+    /// confirmed first, mirroring the remove-folder confirmation above.
+    fn drive_delete_preset(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.state.pending_delete_preset.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Delete preset")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Delete the preset \u{201c}{}\u{201d}? This removes its file from disk.",
+                    pending.preset.name
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        match crate::presets::delete(
+                            &crate::presets::presets_dir(),
+                            &pending.preset,
+                        ) {
+                            Ok(()) => {
+                                crate::presets::spawn_load_all(
+                                    &self.state.jobs,
+                                    &self.state.tx,
+                                    ctx,
+                                );
+                                self.state.notify(
+                                    crate::notifications::Level::Info,
+                                    format!(
+                                        "Deleted preset \u{201c}{}\u{201d}.",
+                                        pending.preset.name
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                self.state
+                                    .notify(crate::notifications::Level::Error, e.to_string());
+                            }
+                        }
+                        self.state.pending_delete_preset = None;
+                        open = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.state.pending_delete_preset = None;
+                        open = false;
+                    }
+                });
+            });
+        if !open {
+            self.state.pending_delete_preset = None;
         }
     }
 
@@ -2549,6 +2692,11 @@ impl eframe::App for FerroliteApp {
         // library context menu (which only reaches `AppState`, hence the state
         // ownership) and driven here, where the `egui::Context` lives.
         self.drive_group_modal(ctx);
+        // The P7 Task 8 Develop-panel Presets menu's rename/delete dialogs —
+        // same reasoning: opened from `develop::presets_menu`, which only
+        // reaches `AppState`, and driven here where `egui::Context` lives.
+        self.drive_rename_preset(ctx);
+        self.drive_delete_preset(ctx);
 
         // 1px window border — full-window foreground stroke so it never double-draws
         // against the side panel or status bar edges.

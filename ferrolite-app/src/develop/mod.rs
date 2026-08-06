@@ -37,6 +37,7 @@ pub mod mask_ui;
 pub mod meta_read;
 pub mod ops_edit;
 pub mod ops_persist;
+pub mod presets_menu;
 pub mod preview_cache;
 pub mod scope;
 pub mod split;

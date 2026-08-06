@@ -29,6 +29,30 @@ pub enum RenameKind {
     Collection,
 }
 
+/// A preset staged for rename (P7 Task 8), shown in a small dialog driven by
+/// `FerroliteApp::drive_rename_preset`.
+///
+/// `original` is captured when the dialog opens rather than re-resolved by
+/// index at confirm time: `state.presets` can be overwritten wholesale by an
+/// in-flight `AppEvent::PresetsLoaded` rescan while the dialog is open (e.g.
+/// another rename/delete completing), which would leave an index pointing at
+/// the wrong preset or nothing at all.
+pub struct PendingRenamePreset {
+    pub original: crate::presets::Preset,
+    /// The live text-edit buffer.
+    pub new_name: String,
+    /// Set when a confirm was rejected (duplicate/invalid name); shown inline
+    /// so the user fixes the name instead of losing their edit.
+    pub error: Option<String>,
+}
+
+/// A preset staged for delete confirmation (P7 Task 8) — deleting removes a
+/// file from disk, so it is confirmed first via `FerroliteApp::drive_delete_preset`.
+#[derive(Clone)]
+pub struct PendingDeletePreset {
+    pub preset: crate::presets::Preset,
+}
+
 pub struct AppState {
     pub jobs: Arc<JobSystem>,
     pub writer: Arc<Mutex<Catalog>>,
@@ -287,6 +311,10 @@ pub struct AppState {
     /// out of its targets, so the result toast can say so. Consumed (and
     /// cleared) by the `BatchApplyDone` fold.
     pub batch_excluded_open_image: bool,
+    /// The open Develop-panel "Rename preset" dialog (P7 Task 8), if any.
+    pub pending_rename_preset: Option<PendingRenamePreset>,
+    /// The preset awaiting delete confirmation (P7 Task 8), if any.
+    pub pending_delete_preset: Option<PendingDeletePreset>,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -391,6 +419,8 @@ impl AppState {
             batch_undo: None,
             open_group_modal: None,
             batch_excluded_open_image: false,
+            pending_rename_preset: None,
+            pending_delete_preset: None,
         })
     }
 
@@ -1056,6 +1086,8 @@ impl AppState {
             batch_undo: None,
             open_group_modal: None,
             batch_excluded_open_image: false,
+            pending_rename_preset: None,
+            pending_delete_preset: None,
         }
     }
 

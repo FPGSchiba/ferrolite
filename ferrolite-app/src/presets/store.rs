@@ -138,9 +138,6 @@ pub fn spawn_load_all(
 
 /// Remove the file backing `preset`. A missing file is NOT an error — the
 /// desired end state (no such preset) already holds.
-// No binary call site until the preset-management UI lands; scoped allow
-// rather than a blanket module one (see `icons.rs`).
-#[allow(dead_code)]
 pub fn delete(dir: &Path, preset: &Preset) -> Result<(), PresetError> {
     let Some(stem) = sanitize_filename(&preset.name) else {
         return Err(PresetError::InvalidName);
@@ -151,6 +148,36 @@ pub fn delete(dir: &Path, preset: &Preset) -> Result<(), PresetError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(PresetError::Io(e)),
     }
+}
+
+/// Rename `preset` to `new_name`: write the new name FIRST, and only remove
+/// the old file once that write succeeded — a rejected name (empty, or
+/// colliding with a DIFFERENT existing preset) must never lose the original
+/// (P7 Task 8).
+///
+/// When `new_name` sanitizes to the SAME filename stem as `preset`'s current
+/// name (identical text, or a cosmetic difference `sanitize_filename`
+/// collapses away), this overwrites that one file in place rather than
+/// routing through `save`, which would otherwise reject it as a collision
+/// with itself.
+pub fn rename(dir: &Path, preset: &Preset, new_name: &str) -> Result<Preset, PresetError> {
+    let new_stem = sanitize_filename(new_name).ok_or(PresetError::InvalidName)?;
+    let renamed = Preset {
+        name: new_name.to_string(),
+        ..preset.clone()
+    };
+
+    if sanitize_filename(&preset.name).as_deref() == Some(new_stem.as_str()) {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{new_stem}.json"));
+        let json = serde_json::to_string_pretty(&renamed).expect("Preset is always serializable");
+        std::fs::write(&path, json)?;
+        return Ok(renamed);
+    }
+
+    save(dir, &renamed)?;
+    let _ = delete(dir, preset);
+    Ok(renamed)
 }
 
 #[cfg(test)]
@@ -288,5 +315,80 @@ mod tests {
     #[test]
     fn load_all_on_a_missing_directory_is_empty_not_an_error() {
         assert!(load_all(std::path::Path::new("definitely/not/here")).is_empty());
+    }
+
+    /// The happy path: the new file exists, the old one is gone, and the
+    /// renamed preset's content survives round-trip.
+    #[test]
+    fn rename_writes_the_new_file_and_removes_the_old_one() {
+        let dir = tmp();
+        let p = sample("Before");
+        save(&dir, &p).expect("save");
+
+        let renamed = rename(&dir, &p, "After").expect("rename");
+        assert_eq!(renamed.name, "After");
+        assert_eq!(renamed.doc, p.doc, "only the name changes");
+
+        let loaded = load_all(&dir);
+        assert_eq!(loaded.len(), 1, "exactly one preset survives");
+        assert_eq!(loaded[0].name, "After");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rename that collides with a DIFFERENT existing preset's filename
+    /// must be rejected, and — the load-bearing guarantee — the original
+    /// file must survive untouched: save-then-delete means the delete of the
+    /// old file never runs when the save itself failed.
+    #[test]
+    fn rename_rejecting_a_collision_leaves_the_original_preset_intact() {
+        let dir = tmp();
+        let original = sample("Before");
+        save(&dir, &original).expect("save original");
+        save(&dir, &sample("Taken")).expect("save the colliding preset");
+
+        let err = rename(&dir, &original, "Taken").expect_err("must reject the collision");
+        assert!(matches!(err, PresetError::Duplicate(_)), "got {err:?}");
+
+        let loaded = load_all(&dir);
+        assert_eq!(loaded.len(), 2, "both presets survive, nothing lost");
+        assert!(loaded.iter().any(|p| p.name == "Before"));
+        assert!(loaded.iter().any(|p| p.name == "Taken"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unusable new name is rejected up front (before any write), and the
+    /// original file is never touched.
+    #[test]
+    fn rename_rejecting_an_invalid_name_leaves_the_original_untouched() {
+        let dir = tmp();
+        let original = sample("Before");
+        save(&dir, &original).expect("save");
+
+        let err = rename(&dir, &original, "///").expect_err("must reject");
+        assert!(matches!(err, PresetError::InvalidName), "got {err:?}");
+
+        let loaded = load_all(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "Before");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Renaming to a sanitized-identical name (here: unchanged text) must
+    /// overwrite the SAME file in place rather than bouncing off `save`'s
+    /// self-collision — the file exists both before and after, and its
+    /// content still round-trips.
+    #[test]
+    fn rename_to_the_same_sanitized_name_overwrites_in_place() {
+        let dir = tmp();
+        let original = sample("Same name");
+        save(&dir, &original).expect("save");
+
+        let renamed = rename(&dir, &original, "Same name").expect("in-place rename");
+        assert_eq!(renamed.name, "Same name");
+
+        let loaded = load_all(&dir);
+        assert_eq!(loaded.len(), 1, "still exactly one file, not two");
+        assert_eq!(loaded[0].name, "Same name");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

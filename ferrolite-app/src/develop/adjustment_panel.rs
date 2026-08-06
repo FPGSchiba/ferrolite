@@ -24,14 +24,19 @@ pub struct PanelOutcome {
 }
 
 /// The Develop right-panel's global chrome (design §7): camera/coverage line,
-/// save-state indicator, and the working-space combo. Rendered ABOVE the tab bar
-/// by `tool_panel::show` — not tool-specific, so it stays outside the tab dispatch.
-/// Returns `Some(new_ws)` when the working-space combo changed this frame.
+/// save-state indicator, the working-space combo, and the "Presets" menu
+/// (P7 Task 8). Rendered ABOVE the tab bar by `tool_panel::show` — not
+/// tool-specific, so it stays outside the tab dispatch.
+///
+/// Returns the working-space combo's new value when it changed this frame,
+/// plus an `EditOutcome` when the Presets menu applied a preset to the
+/// current image (every other Presets action — save/rename/delete — mutates
+/// `AppState` directly and never reaches this return value).
 pub(crate) fn chrome(
     ui: &mut egui::Ui,
     state: &mut AppState,
     working_space: WorkingSpace,
-) -> Option<WorkingSpace> {
+) -> (Option<WorkingSpace>, Option<EditOutcome>) {
     let mut ws_change: Option<WorkingSpace> = None;
 
     // ── Camera info + color-profile coverage status (Spec 4.6 §3) ──
@@ -120,5 +125,13 @@ pub(crate) fn chrome(
         ui.add_space(4.0);
     }
 
-    ws_change
+    // ── Presets (P7 Task 8) ── a compact menu button, deliberately NOT a tab,
+    // so it never competes with the Light/Color/Effects tab row below.
+    // Placed here (last, immediately above `tool_panel::show`'s tab-bar
+    // separator) rather than the brief's original "beside Reset all" anchor,
+    // which does not exist in this panel — see the module doc there.
+    let preset_edit = crate::develop::presets_menu::presets_row(ui, state);
+    ui.add_space(4.0);
+
+    (ws_change, preset_edit)
 }

@@ -121,7 +121,7 @@ pub fn bake_display_lut(
 
     // Pack to RGBA16F, clamped to [0,1], alpha = 1.
     let mut rgba16f = Vec::with_capacity(n * n * n * 4);
-    for px in out.chunks_exact(3) {
+    for px in out.as_chunks::<3>().0 {
         rgba16f.push(half::f16::from_f32(px[0].clamp(0.0, 1.0)).to_bits());
         rgba16f.push(half::f16::from_f32(px[1].clamp(0.0, 1.0)).to_bits());
         rgba16f.push(half::f16::from_f32(px[2].clamp(0.0, 1.0)).to_bits());

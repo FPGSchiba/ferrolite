@@ -108,7 +108,9 @@ pub(crate) fn encode_to_file(
                 PixelData::Sixteen(v) => v.iter().map(|&s| (s >> 8) as u8).collect(),
             };
             let pixels: Vec<ravif::RGB8> = rgb8
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|c| ravif::RGB8::new(c[0], c[1], c[2]))
                 .collect();
             let encoded = ravif::Encoder::new()

@@ -123,7 +123,7 @@ fn dehaze_positive_increases_contrast_on_hazy_image() {
     // Range (max - min) over the red channel: dehaze must widen it (more contrast).
     let range = |buf: &[u8]| {
         let (mut lo, mut hi) = (255u8, 0u8);
-        for px in buf.chunks_exact(4) {
+        for px in buf.as_chunks::<4>().0 {
             lo = lo.min(px[0]);
             hi = hi.max(px[0]);
         }
@@ -1066,7 +1066,9 @@ fn dehaze_coarse_lod_matches_whole_image_mean_luminance() {
         );
     }
     let whole_mean: f32 = whole_lin
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| px[..3].iter().copied())
         .sum::<f32>()
         / (iw * ih * 3) as f32;
@@ -1086,7 +1088,9 @@ fn dehaze_coarse_lod_matches_whole_image_mean_luminance() {
     let tile = tep.produce_tile(TileCoord { lod: 1, x: 0, y: 0 });
     let tile_lin = common::read_tile_linear(&ctx, &tile);
     let lod1_mean: f32 = tile_lin
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|px| px[..3].iter().copied())
         .sum::<f32>()
         / (TILE_SIZE * TILE_SIZE * 3) as f32;

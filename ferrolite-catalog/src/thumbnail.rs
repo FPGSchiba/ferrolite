@@ -68,7 +68,7 @@ pub fn generate_thumbnail(
     // Widen the already-resized RGB8 buffer to RGBA8 (opaque alpha) so the UI
     // can upload it as a texture with no JPEG round-trip.
     let mut rgba = Vec::with_capacity((dst_w as usize) * (dst_h as usize) * 4);
-    for px in dst_rgb.chunks_exact(3) {
+    for px in dst_rgb.as_chunks::<3>().0 {
         rgba.extend_from_slice(px);
         rgba.push(255);
     }
@@ -94,7 +94,7 @@ fn to_rgb8(buf: &ImageBuffer) -> (Vec<u8>, u32, u32) {
         PixelFormat::Rgb8 => (buf.pixels.clone(), buf.width, buf.height),
         PixelFormat::Rgba8 => {
             let mut rgb = Vec::with_capacity(buf.pixels.len() / 4 * 3);
-            for px in buf.pixels.chunks_exact(4) {
+            for px in buf.pixels.as_chunks::<4>().0 {
                 rgb.extend_from_slice(&px[0..3]);
             }
             (rgb, buf.width, buf.height)

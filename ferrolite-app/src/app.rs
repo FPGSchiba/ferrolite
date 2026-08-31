@@ -175,8 +175,12 @@ impl FerroliteApp {
         // reports through `AppEvent::BatchUndoDone`, which carries no
         // snapshot of its own). The gating + one-shot-take itself lives in
         // `AppState::take_batch_undo` (state.rs), pinned by its own tests,
-        // rather than inline here.
-        if let Some(snapshot) = self.state.take_batch_undo(undo) {
+        // rather than inline here. `self.module.is_develop()` is passed
+        // explicitly — NOT `self.state.viewer.is_some()` — because `viewer`
+        // is never cleared by switching module tabs away from Develop, so it
+        // stays `Some` for the rest of the session after the first Develop
+        // visit and would permanently block this take from Library.
+        if let Some(snapshot) = self.state.take_batch_undo(undo, self.module.is_develop()) {
             crate::presets::apply::spawn_batch_undo(
                 &self.state.jobs,
                 &self.state.writer,
@@ -1857,8 +1861,11 @@ impl eframe::App for FerroliteApp {
                     .is_some_and(|v| v.history.can_undo())
                     // P7: with no Develop session open, a pending batch-apply
                     // snapshot also makes Undo actionable (see
-                    // `apply_undo_redo`'s batch-revert branch).
-                    || (self.state.viewer.is_none() && self.state.batch_undo.is_some());
+                    // `apply_undo_redo`'s batch-revert branch). Gated on the
+                    // MODULE, not `viewer.is_none()` — `viewer` is never
+                    // cleared by switching module tabs, so it stays `Some`
+                    // long after the user has left Develop.
+                    || (!self.module.is_develop() && self.state.batch_undo.is_some());
                 let can_redo = self
                     .state
                     .viewer

@@ -1014,6 +1014,15 @@ impl AppState {
     /// every other case (a Develop session is open regardless of `undo`;
     /// `undo` is `false`; or there is simply nothing pending).
     ///
+    /// `in_develop` is the caller's `Module::is_develop()` — NOT derived from
+    /// `self.viewer` here. `AppState` cannot see `module` (it lives on
+    /// `FerroliteApp`, `app.rs`), and `viewer.is_some()` is not a safe stand-in:
+    /// switching module tabs away from Develop back to Library does not clear
+    /// `viewer`, so it stays `Some` for the rest of the session once the user
+    /// has opened Develop once, which silently defeated this gate entirely
+    /// (a Library Ctrl+Z after any Develop visit could never reach the batch
+    /// snapshot). The caller must pass the live module, not the viewer.
+    ///
     /// Extracted from `FerroliteApp::apply_undo_redo` (`app.rs`) so this
     /// state TRANSITION — not just the gating decision — is pinned by a
     /// test: a future refactor that reordered the guard, or swapped `take()`
@@ -1026,8 +1035,9 @@ impl AppState {
     pub(crate) fn take_batch_undo(
         &mut self,
         undo: bool,
+        in_develop: bool,
     ) -> Option<crate::presets::apply::UndoSnapshot> {
-        (undo && self.viewer.is_none())
+        (undo && !in_develop)
             .then(|| self.batch_undo.take())
             .flatten()
     }
@@ -2285,7 +2295,7 @@ mod tests {
     /// Develop-history undo logic runs unmolested and a later Library Ctrl+Z
     /// can still revert the batch.
     #[test]
-    fn take_batch_undo_returns_none_and_leaves_snapshot_when_viewer_open() {
+    fn take_batch_undo_returns_none_and_leaves_snapshot_when_in_develop() {
         let mut s = AppState::for_test();
         s.viewer = Some(crate::viewer::ViewerState::open(
             1,
@@ -2294,13 +2304,40 @@ mod tests {
         ));
         s.batch_undo = Some(sample_undo_snapshot());
 
-        let taken = s.take_batch_undo(true);
+        let taken = s.take_batch_undo(true, true);
 
         assert!(taken.is_none(), "a Develop session must block the take");
         assert!(
             s.batch_undo.is_some(),
             "the snapshot must survive a blocked take untouched"
         );
+    }
+
+    /// The exact regression scenario the coordinator's diagnosis called out:
+    /// the user opened Develop earlier (so `viewer` is still `Some` — module
+    /// tabs never clear it), then switched back to Library. `in_develop` is
+    /// `false` (Library is the active module) even though `viewer.is_some()`
+    /// is still `true`, and the pending snapshot MUST still route to batch
+    /// undo. Before the fix this used `self.viewer.is_none()` as the gate,
+    /// which stayed permanently `false` after any Develop visit and made
+    /// batch undo unreachable from Library for the rest of the session.
+    #[test]
+    fn take_batch_undo_routes_from_library_even_when_viewer_still_holds_a_stale_session() {
+        let mut s = AppState::for_test();
+        s.viewer = Some(crate::viewer::ViewerState::open(
+            1,
+            std::path::PathBuf::from("x"),
+            ferrolite_image::FileKind::Raw,
+        ));
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let taken = s.take_batch_undo(true, false);
+
+        assert!(
+            taken.is_some(),
+            "Library (in_develop == false) must take the snapshot regardless of a stale viewer"
+        );
+        assert!(s.batch_undo.is_none(), "the take must consume batch_undo");
     }
 
     /// No Develop session, `undo == true`, a snapshot pending: the snapshot
@@ -2313,14 +2350,14 @@ mod tests {
         s.viewer = None;
         s.batch_undo = Some(sample_undo_snapshot());
 
-        let first = s.take_batch_undo(true);
+        let first = s.take_batch_undo(true, false);
         assert!(first.is_some(), "the pending snapshot must be returned");
         assert!(
             s.batch_undo.is_none(),
             "the take must consume batch_undo, not merely read it"
         );
 
-        let second = s.take_batch_undo(true);
+        let second = s.take_batch_undo(true, false);
         assert!(
             second.is_none(),
             "a second Ctrl+Z must be inert: nothing left to double-revert"
@@ -2328,7 +2365,7 @@ mod tests {
     }
 
     /// `undo == false` (a Redo) must never touch `batch_undo`, regardless of
-    /// viewer state — Redo has no batch counterpart (see `spawn_batch_undo`'s
+    /// module — Redo has no batch counterpart (see `spawn_batch_undo`'s
     /// `snapshot: None`; undoing an undo is not offered).
     #[test]
     fn take_batch_undo_ignores_redo_and_leaves_snapshot_intact() {
@@ -2336,7 +2373,7 @@ mod tests {
         s.viewer = None;
         s.batch_undo = Some(sample_undo_snapshot());
 
-        let taken = s.take_batch_undo(false);
+        let taken = s.take_batch_undo(false, false);
 
         assert!(taken.is_none(), "Redo must never take the batch snapshot");
         assert!(

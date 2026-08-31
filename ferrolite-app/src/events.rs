@@ -1218,6 +1218,7 @@ mod tests {
                 applied: 5,
                 failed: 0,
                 skipped: 0,
+                unchanged: 0,
             },
             snapshot: Some(snapshot),
             label: "Warm portrait".to_string(),
@@ -1253,6 +1254,7 @@ mod tests {
                 applied: 0,
                 failed: 0,
                 skipped: 3,
+                unchanged: 0,
             },
             snapshot: None,
             label: "Warm portrait".to_string(),
@@ -1287,6 +1289,7 @@ mod tests {
                 applied: 5,
                 failed: 0,
                 skipped: 0,
+                unchanged: 0,
             },
             snapshot: None,
             label: "Warm portrait".to_string(),
@@ -1311,6 +1314,7 @@ mod tests {
                 applied: 0,
                 failed: 0,
                 skipped: 3,
+                unchanged: 0,
             },
             snapshot: None,
             label: "Warm portrait".to_string(),
@@ -1364,6 +1368,7 @@ mod tests {
                 applied: 5,
                 failed: 0,
                 skipped: 0,
+                unchanged: 0,
             },
         });
 
@@ -1393,6 +1398,7 @@ mod tests {
                 applied: 5,
                 failed: 0,
                 skipped: 0,
+                unchanged: 0,
             },
         });
         assert!(
@@ -1415,6 +1421,7 @@ mod tests {
                 applied: 2,
                 failed: 0,
                 skipped: 0,
+                unchanged: 0,
             },
             snapshot: None,
             label: "Warm portrait".to_string(),
@@ -1444,6 +1451,7 @@ mod tests {
                 applied: 2,
                 failed: 0,
                 skipped: 0,
+                unchanged: 0,
             },
             snapshot: None,
             label: "Warm portrait".to_string(),

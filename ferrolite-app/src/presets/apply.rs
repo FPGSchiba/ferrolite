@@ -29,18 +29,25 @@ pub struct BatchTarget {
     pub path: PathBuf,
 }
 
-/// Outcome counts. `skipped` (could not read the current document) and
-/// `failed` (could not write) are distinct and reported separately.
+/// Outcome counts. `skipped` (could not read the current document), `failed`
+/// (could not write), and `unchanged` (read fine, but the patch merged onto
+/// the prior document byte-for-byte identically, so nothing was written) are
+/// three distinct outcomes and reported separately. `unchanged` is
+/// deliberately its own counter rather than folded into `skipped` — the two
+/// mean different things ("could not read" vs. "read fine, no-op") and an
+/// earlier review on this branch already flagged conflating them as a
+/// mistake.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BatchResult {
     pub applied: usize,
     pub failed: usize,
     pub skipped: usize,
+    pub unchanged: usize,
 }
 
 impl BatchResult {
     pub fn total(&self) -> usize {
-        self.applied + self.failed + self.skipped
+        self.applied + self.failed + self.skipped + self.unchanged
     }
 }
 
@@ -81,19 +88,32 @@ pub fn apply_patch_to_targets(
             None => result.skipped += 1,
             Some(prior) => {
                 let merged = patch.apply_to(&prior);
-                match write(t, &merged) {
-                    Ok(()) => {
-                        result.applied += 1;
-                        applied_ids.push(t.image_id);
-                        if snapshot_wanted {
-                            snapshot.entries.push((
-                                t.image_id,
-                                t.path.clone(),
-                                ferrolite_pipeline::serialize(&prior),
-                            ));
+                if merged == prior {
+                    // No-op: the patch's groups already matched what this
+                    // target had (e.g. "paste only Tone curve" onto a target
+                    // that, like the source, has no curve). Writing an
+                    // identical document would still flag the thumbnail
+                    // stale and burn a full decode + GPU render + encode to
+                    // produce a byte-identical image — this is the bug
+                    // report's "pasting appears to do nothing": there WAS no
+                    // change, so nothing should be written, applied, or
+                    // snapshotted for undo.
+                    result.unchanged += 1;
+                } else {
+                    match write(t, &merged) {
+                        Ok(()) => {
+                            result.applied += 1;
+                            applied_ids.push(t.image_id);
+                            if snapshot_wanted {
+                                snapshot.entries.push((
+                                    t.image_id,
+                                    t.path.clone(),
+                                    ferrolite_pipeline::serialize(&prior),
+                                ));
+                            }
                         }
+                        Err(_reason) => result.failed += 1,
                     }
-                    Err(_reason) => result.failed += 1,
                 }
             }
         }
@@ -302,6 +322,33 @@ pub fn batch_result_message(
 ) -> (crate::notifications::Level, String) {
     use crate::notifications::Level;
 
+    // An all-unchanged batch: every target was read fine but the patch
+    // merged onto it identically (`apply_patch_to_targets`'s `merged ==
+    // prior` short-circuit), so nothing was written and there is nothing to
+    // undo. Reported as its own case, ahead of the ordinary success branch
+    // below, which would otherwise read "Applied \u{201c}X\u{201d} to 0
+    // images." — technically accurate but indistinguishable from a silent
+    // failure. This is the exact report that motivated this function: the
+    // author saw no visible thumbnail change and filed it as a bug, when in
+    // fact the paste was a correct no-op. A genuinely cancelled run can never
+    // land here (`batch_was_genuinely_cancelled` requires at least one
+    // target left unattempted, which is counted as `skipped`, not
+    // `unchanged`), but `!cancelled` is kept explicit rather than relied on.
+    if !cancelled
+        && result.applied == 0
+        && result.failed == 0
+        && result.skipped == 0
+        && result.unchanged > 0
+    {
+        return (
+            Level::Info,
+            format!(
+                "Applied \u{201c}{label}\u{201d} \u{2014} no changes ({} images already matched).",
+                result.unchanged
+            ),
+        );
+    }
+
     let (level, mut msg) = if cancelled {
         let level = if result.failed > 0 {
             Level::Warning
@@ -446,7 +493,14 @@ mod tests {
         for id in 1..=3 {
             store.insert(id, EditDoc::default());
         }
-        let patch = EditPatch::from_doc(&EditDoc::default(), GroupSet::LIGHT);
+        // Must actually CHANGE the target (not an identity patch onto a
+        // default document) — otherwise the `merged == prior` no-op guard
+        // would short-circuit every target as `unchanged` before `write` is
+        // ever called, and this test would no longer exercise a write
+        // failure at all.
+        let mut source = EditDoc::default();
+        source.global.exposure = 9.0;
+        let patch = EditPatch::from_doc(&source, GroupSet::LIGHT);
 
         let (result, snap, applied_ids) = apply_patch_to_targets(
             &patch,
@@ -494,11 +548,111 @@ mod tests {
         );
     }
 
+    /// An all-unchanged batch (every target's document already equals what
+    /// the patch would merge in) must write NOTHING, apply nothing, and
+    /// snapshot nothing. This is the actual bug: before the `merged == prior`
+    /// guard, a byte-identical write still flagged the thumbnail stale and
+    /// burned a full decode + GPU render + encode per image to produce a
+    /// pixel-identical thumbnail, which the author correctly could not see
+    /// change and filed as "pasting doesn't refresh thumbnails".
+    #[test]
+    fn an_all_unchanged_batch_writes_nothing_and_is_counted_as_unchanged() {
+        let patch = EditPatch::from_doc(&EditDoc::default(), GroupSet::LIGHT);
+        let write_calls = std::cell::RefCell::new(0usize);
+
+        let (result, snap, applied_ids) = apply_patch_to_targets(
+            &patch,
+            &[target(1), target(2), target(3)],
+            |_t| Some(EditDoc::default()), // already matches the identity patch
+            |_t, _doc| {
+                *write_calls.borrow_mut() += 1;
+                Ok(())
+            },
+            &mut |_d, _t| {},
+        );
+
+        assert_eq!(result.unchanged, 3);
+        assert_eq!(result.applied, 0);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.skipped, 0);
+        assert_eq!(
+            *write_calls.borrow(),
+            0,
+            "an unchanged target must never be written"
+        );
+        assert!(
+            applied_ids.is_empty(),
+            "an unchanged target must not appear in applied_ids"
+        );
+        assert!(
+            snap.entries.is_empty(),
+            "an unchanged target gets no undo entry — there is nothing to revert"
+        );
+    }
+
+    /// A single batch that hits every outcome bucket — skipped, failed,
+    /// unchanged, applied — must count each one correctly and keep them
+    /// distinct. In particular `unchanged` (read fine, no-op) must never be
+    /// folded into `skipped` (could not read) — an earlier review on this
+    /// branch already flagged conflating the two as a mistake.
+    #[test]
+    fn a_mixed_batch_counts_every_bucket_correctly() {
+        let mut source = EditDoc::default();
+        source.global.exposure = 9.0;
+        let patch = EditPatch::from_doc(&source, GroupSet::LIGHT);
+
+        let mut already_matching = EditDoc::default();
+        already_matching.global.exposure = 9.0;
+
+        let (result, snap, applied_ids) = apply_patch_to_targets(
+            &patch,
+            &[target(1), target(2), target(3), target(4)],
+            move |t| match t.image_id {
+                1 => None,                           // unreadable -> skipped
+                2 => Some(EditDoc::default()),       // read fine, write fails -> failed
+                3 => Some(already_matching.clone()), // already matches -> unchanged
+                4 => Some(EditDoc::default()),       // differs -> applied
+                _ => unreachable!(),
+            },
+            |t, _doc| {
+                if t.image_id == 2 {
+                    Err("read-only".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            &mut |_d, _t| {},
+        );
+
+        assert_eq!(result.skipped, 1, "target 1 was unreadable");
+        assert_eq!(result.failed, 1, "target 2's write failed");
+        assert_eq!(result.unchanged, 1, "target 3 already matched");
+        assert_eq!(result.applied, 1, "target 4 differed and was written");
+        assert_eq!(
+            applied_ids,
+            vec![4],
+            "only the genuinely-applied target appears in applied_ids"
+        );
+        assert_eq!(
+            snap.entries.len(),
+            1,
+            "only the applied target gets an undo entry"
+        );
+    }
+
     /// Past BATCH_UNDO_MAX no snapshot is taken — the dialog warns up front.
     #[test]
     fn no_snapshot_is_taken_beyond_the_undo_cap() {
         let targets: Vec<BatchTarget> = (1..=(BATCH_UNDO_MAX as i64 + 1)).map(target).collect();
-        let patch = EditPatch::from_doc(&EditDoc::default(), GroupSet::LIGHT);
+        // Non-identity patch (see the comment in
+        // `a_failed_write_is_counted_and_does_not_abort_the_batch`) — this
+        // test's `result.applied == targets.len()` assertion requires every
+        // target to actually be WRITTEN, which the `merged == prior` no-op
+        // guard would otherwise short-circuit for a default-onto-default
+        // identity patch.
+        let mut source = EditDoc::default();
+        source.global.exposure = 9.0;
+        let patch = EditPatch::from_doc(&source, GroupSet::LIGHT);
         let (result, snap, applied_ids) = apply_patch_to_targets(
             &patch,
             &targets,
@@ -572,6 +726,7 @@ mod tests {
             applied: 5,
             failed: 0,
             skipped: 0,
+            unchanged: 0,
         };
         let (level, msg) = batch_result_message(&result, "Warm portrait", false, Some("Ctrl+Z"));
         assert_eq!(level, crate::notifications::Level::Info);
@@ -589,12 +744,35 @@ mod tests {
             applied: 3,
             failed: 1,
             skipped: 1,
+            unchanged: 0,
         };
         let (level, msg) = batch_result_message(&result, "Warm portrait", false, None);
         assert_eq!(level, crate::notifications::Level::Warning);
         assert_eq!(
             msg,
             "Applied \u{201c}Warm portrait\u{201d} to 3 images. 1 failed, 1 skipped."
+        );
+    }
+
+    /// An all-unchanged batch (nothing applied, failed, or skipped — every
+    /// target simply already matched) must say so plainly rather than
+    /// falling into the ordinary success phrasing, which would otherwise
+    /// read "Applied ... to 0 images." — indistinguishable from a silent
+    /// failure. This is the wording that would have told the author
+    /// immediately what happened instead of it being filed as a bug.
+    #[test]
+    fn message_reports_all_unchanged_plainly() {
+        let result = BatchResult {
+            applied: 0,
+            failed: 0,
+            skipped: 0,
+            unchanged: 3,
+        };
+        let (level, msg) = batch_result_message(&result, "Pasted settings", false, None);
+        assert_eq!(level, crate::notifications::Level::Info);
+        assert_eq!(
+            msg,
+            "Applied \u{201c}Pasted settings\u{201d} \u{2014} no changes (3 images already matched)."
         );
     }
 
@@ -607,6 +785,7 @@ mod tests {
             applied: 47,
             failed: 0,
             skipped: 453,
+            unchanged: 0,
         };
         let (level, msg) = batch_result_message(&result, "Warm portrait", true, Some("Ctrl+Z"));
         assert_eq!(level, crate::notifications::Level::Info);
@@ -629,6 +808,7 @@ mod tests {
             applied: 40,
             failed: 2,
             skipped: 458,
+            unchanged: 0,
         };
         let (level, msg) = batch_result_message(&result, "Warm portrait", true, None);
         assert_eq!(level, crate::notifications::Level::Warning);
@@ -648,6 +828,7 @@ mod tests {
             applied: BATCH_UNDO_MAX + 1,
             failed: 0,
             skipped: 0,
+            unchanged: 0,
         };
         let (level, msg) = batch_result_message(&result, "Warm portrait", false, None);
         assert_eq!(level, crate::notifications::Level::Info);
@@ -668,6 +849,7 @@ mod tests {
             applied: 0,
             failed: 0,
             skipped: 3,
+            unchanged: 0,
         };
         let (_level, msg) = batch_result_message(&result, "Warm portrait", false, None);
         assert!(
@@ -685,6 +867,7 @@ mod tests {
             applied: 5,
             failed: 0,
             skipped: 0,
+            unchanged: 0,
         };
         let (level, msg) = batch_undo_message(&result);
         assert_eq!(level, crate::notifications::Level::Info);
@@ -701,6 +884,7 @@ mod tests {
             applied: 3,
             failed: 2,
             skipped: 0,
+            unchanged: 0,
         };
         let (level, msg) = batch_undo_message(&result);
         assert_eq!(level, crate::notifications::Level::Warning);
@@ -754,6 +938,7 @@ mod tests {
             applied: 47,
             failed: 0,
             skipped: 453,
+            unchanged: 0,
         };
         assert!(batch_was_genuinely_cancelled(true, &result, 500));
     }
@@ -768,6 +953,7 @@ mod tests {
             applied: 500,
             failed: 0,
             skipped: 0,
+            unchanged: 0,
         };
         assert!(!batch_was_genuinely_cancelled(true, &result, 500));
     }
@@ -780,6 +966,7 @@ mod tests {
             applied: 47,
             failed: 0,
             skipped: 453,
+            unchanged: 0,
         };
         assert!(!batch_was_genuinely_cancelled(false, &result, 500));
     }

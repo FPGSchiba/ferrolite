@@ -43,6 +43,7 @@ rfd = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sysinfo = "0.32"
+thiserror = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

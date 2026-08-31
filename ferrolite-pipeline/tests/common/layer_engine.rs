@@ -601,7 +601,7 @@ pub fn compare_or_write_golden16(pixels: &[f32], w: u32, h: u32, name: &str) -> 
         std::fs::create_dir_all(path.parent().expect("golden path has a parent"))
             .expect("create tests/golden/layer_engine");
         let mut buf: Vec<u16> = Vec::with_capacity(pixels.len());
-        for chunk in pixels.chunks_exact(4) {
+        for chunk in pixels.as_chunks::<4>().0 {
             buf.push(encode16(chunk[0]));
             buf.push(encode16(chunk[1]));
             buf.push(encode16(chunk[2]));
@@ -621,7 +621,7 @@ pub fn compare_or_write_golden16(pixels: &[f32], w: u32, h: u32, name: &str) -> 
     assert_eq!(golden.dimensions(), (w, h), "golden dims mismatch: {name}");
 
     let mut max_diff = 0.0f32;
-    for (got, want) in pixels.chunks_exact(4).zip(golden.pixels()) {
+    for (got, want) in pixels.as_chunks::<4>().0.iter().zip(golden.pixels()) {
         for c in 0..3 {
             let d = (got[c] - decode16(want[c])).abs();
             if d > max_diff {
@@ -635,8 +635,10 @@ pub fn compare_or_write_golden16(pixels: &[f32], w: u32, h: u32, name: &str) -> 
 /// Max per-channel (RGB only) absolute difference between two scene-linear f32
 /// RGBA buffers of the same length.
 pub fn max_abs_diff_f32(a: &[f32], b: &[f32]) -> f32 {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
         .flat_map(|(pa, pb)| (0..3).map(move |c| (pa[c] - pb[c]).abs()))
         .fold(0.0f32, f32::max)
 }

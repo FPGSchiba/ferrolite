@@ -183,6 +183,112 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, image_id: i64, single_image
         );
         ui.close_menu();
     }
+
+    show_edit_settings_items(ui, state, image_id, single_image, &ctx);
+}
+
+/// The P7 copy / paste / preset block. Split out of `show` purely to keep both
+/// functions inside the house size limit; it is one continuous menu section.
+///
+/// Copy and Save act on the RIGHT-CLICKED image alone (they read one source
+/// document). Paste and Apply preset are multi-image actions and therefore go
+/// through `regen_target_ids`, exactly like "Regenerate thumbnail" above — a
+/// user right-clicking an unselected image must not silently hit their whole
+/// selection.
+fn show_edit_settings_items(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    image_id: i64,
+    single_image: bool,
+    ctx: &egui::Context,
+) {
+    ui.separator();
+
+    // `has_edits` is the catalog's cache of "has a non-identity edit stack" —
+    // enough to grey the item, and it costs no sidecar read to consult.
+    let source_has_edits = state
+        .images
+        .iter()
+        .find(|r| r.id == image_id)
+        .is_some_and(|r| r.has_edits);
+
+    let copy = ui.add_enabled(
+        source_has_edits,
+        egui::Button::new(format!("{} Copy settings", crate::icons::COPY_SETTINGS)),
+    );
+    if !source_has_edits {
+        copy.on_disabled_hover_text("This image has no edits to copy");
+    } else if copy.clicked() {
+        crate::presets::menu::start_copy(state, ctx, image_id);
+        ui.close_menu();
+    }
+
+    // Both multi-image actions share one target list, computed once. When every
+    // target is the image open in Develop the batch path has nothing left to do
+    // (design §5.1 excludes it), so GREY them with the reason rather than let
+    // the user click into a guaranteed no-op — the same convention as the four
+    // states above. The runtime "Nothing to apply" message stays as a backstop
+    // for the race where the selection changes between render and click.
+    let target_ids = regen_target_ids(single_image, image_id, &state.selection);
+    let all_excluded = crate::presets::menu::all_targets_excluded(
+        &target_ids,
+        state.viewer.as_ref().map(|v| v.image_id),
+    );
+    const OPEN_IN_DEVELOP_REASON: &str = "This image is open in Develop — edit it there instead";
+
+    let has_clipboard = state.clipboard_patch.is_some();
+    let paste = ui.add_enabled(
+        has_clipboard && !all_excluded,
+        egui::Button::new(format!("{} Paste settings…", crate::icons::PASTE_SETTINGS)),
+    );
+    if !has_clipboard {
+        paste.on_disabled_hover_text("Copy settings from an image first");
+    } else if all_excluded {
+        paste.on_disabled_hover_text(OPEN_IN_DEVELOP_REASON);
+    } else if paste.clicked() {
+        crate::presets::menu::start_paste(state, &target_ids);
+        ui.close_menu();
+    }
+
+    // Applying a preset opens NO dialog — a preset already declares its own
+    // groups (design §6.3) — so this is a plain submenu of one entry each.
+    let preset_names: Vec<String> = state.presets.iter().map(|p| p.name.clone()).collect();
+    let mut chosen: Option<usize> = None;
+    let preset_menu = ui
+        .add_enabled_ui(!preset_names.is_empty() && !all_excluded, |ui| {
+            ui.menu_button(format!("{} Apply preset", crate::icons::PRESET), |ui| {
+                for (i, name) in preset_names.iter().enumerate() {
+                    if ui.button(name).clicked() {
+                        chosen = Some(i);
+                        ui.close_menu();
+                    }
+                }
+            });
+        })
+        .response;
+    if preset_names.is_empty() {
+        preset_menu.on_disabled_hover_text("Save a preset first");
+    } else if all_excluded {
+        preset_menu.on_disabled_hover_text(OPEN_IN_DEVELOP_REASON);
+    }
+    if let Some(index) = chosen {
+        crate::presets::menu::apply_preset(state, ctx, index, &target_ids);
+        ui.close_menu();
+    }
+
+    let save = ui.add_enabled(
+        source_has_edits,
+        egui::Button::new(format!(
+            "{} Save preset from this image…",
+            crate::icons::PRESET
+        )),
+    );
+    if !source_has_edits {
+        save.on_disabled_hover_text("This image has no edits to save");
+    } else if save.clicked() {
+        crate::presets::menu::start_save_preset(state, ctx, image_id);
+        ui.close_menu();
+    }
 }
 
 #[cfg(test)]

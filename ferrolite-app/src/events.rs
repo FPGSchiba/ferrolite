@@ -198,6 +198,50 @@ pub enum AppEvent {
     MetaBackfillReady {
         results: Vec<ferrolite_catalog::BackfillResult>,
     },
+    /// A batch preset/paste apply finished. `snapshot` is `None` when the batch
+    /// exceeded `BATCH_UNDO_MAX` (see `presets::apply`), in which case undo is
+    /// not offered. `label` names the applied patch for the toast. `cancelled`
+    /// is `true` when the run was cut short by its cancel token: the remaining,
+    /// unattempted targets are folded into `result.skipped` by
+    /// `apply_patch_to_targets`, which is indistinguishable from "sidecar
+    /// unreadable" at the count level — `cancelled` lets the toast phrase that
+    /// case as a cancellation instead of implying N corrupt files. `snapshot`
+    /// is read by `apply()` below (pushed into `AppState.batch_undo`).
+    BatchApplyDone {
+        result: crate::presets::apply::BatchResult,
+        snapshot: Option<crate::presets::apply::UndoSnapshot>,
+        label: String,
+        cancelled: bool,
+    },
+    /// Progress within a batch apply.
+    BatchApplyProgress { done: usize, total: usize },
+    /// A batch UNDO (`spawn_batch_undo`) finished restoring a snapshot's
+    /// prior documents. Deliberately a DISTINCT variant from
+    /// `BatchApplyDone`, not a reuse with `snapshot: None`: both funnel
+    /// through the same `AppState.batch_undo` slot, and if a batch apply's
+    /// `BatchApplyDone` (which just populated a fresh snapshot) raced an
+    /// in-flight undo's completion, reusing `BatchApplyDone` would let
+    /// whichever event folds last unconditionally overwrite `batch_undo` —
+    /// silently clearing a freshly-promised "Press Ctrl+Z to undo." toast's
+    /// snapshot if the undo happened to land after it. A separate variant
+    /// means the undo path only ever clears `batch_undo` for the snapshot
+    /// IT took (already `None` after `take_batch_undo`), never one a
+    /// newer, unrelated batch apply just installed.
+    BatchUndoDone {
+        result: crate::presets::apply::BatchResult,
+    },
+    /// The startup preset-directory scan finished.
+    PresetsLoaded {
+        presets: Vec<crate::presets::Preset>,
+    },
+    /// An off-thread source-document read started by a library context-menu
+    /// action finished (`presets::menu::spawn_doc_read`). `purpose` says which
+    /// action asked for it — filling the copy-settings clipboard, or opening
+    /// the "Save preset" modal over the document.
+    MenuDocRead {
+        doc: ferrolite_pipeline::EditDoc,
+        purpose: crate::presets::menu::DocReadPurpose,
+    },
 }
 
 /// Owned fields of a delivered `AppEvent::WarmSourceReady`, queued onto
@@ -352,6 +396,34 @@ impl std::fmt::Debug for AppEvent {
                 .debug_struct("MetaBackfillReady")
                 .field("batch_len", &results.len())
                 .finish(),
+            AppEvent::BatchApplyDone {
+                result,
+                label,
+                cancelled,
+                ..
+            } => f
+                .debug_struct("BatchApplyDone")
+                .field("result", result)
+                .field("label", label)
+                .field("cancelled", cancelled)
+                .finish_non_exhaustive(),
+            AppEvent::BatchApplyProgress { done, total } => f
+                .debug_struct("BatchApplyProgress")
+                .field("done", done)
+                .field("total", total)
+                .finish(),
+            AppEvent::BatchUndoDone { result } => f
+                .debug_struct("BatchUndoDone")
+                .field("result", result)
+                .finish(),
+            AppEvent::PresetsLoaded { presets } => f
+                .debug_struct("PresetsLoaded")
+                .field("count", &presets.len())
+                .finish(),
+            AppEvent::MenuDocRead { purpose, .. } => f
+                .debug_struct("MenuDocRead")
+                .field("purpose", purpose)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -393,6 +465,12 @@ impl AppState {
                 // that finds the texture gone (e.g. evicted from the LRU cache)
                 // can request it again instead of being stuck sticky-missing.
                 self.thumb_missing.remove(&image_id);
+                // P7 Task 10: this id's stale-thumbnail regen (if any) just
+                // delivered — clear the in-flight guard so a LATER re-staling
+                // (another batch apply) can trigger a fresh regen instead of
+                // being stuck permanently "in flight". Harmless no-op for the
+                // ordinary lazy-load path, which never inserts into this set.
+                self.stale_regen_inflight.remove(&image_id);
                 // Keep the in-memory grid row's cell-aspect source (`thumb_w`/
                 // `thumb_h`, see `ImageRecord::thumb_w`) in sync with what was
                 // just persisted, so an edited-thumbnail regen's new (cropped)
@@ -416,6 +494,29 @@ impl AppState {
             AppEvent::ThumbFailed { image_id } => {
                 self.thumb_pending.remove(&image_id);
                 self.thumb_handles.remove(&image_id);
+                // P7 Task 10: a failed OR cancelled stale-thumbnail regen (see
+                // `thumb_regen::spawn_regen_edited_thumbnail`, which now emits
+                // this on its error/cancel paths) must also release the
+                // in-flight guard — otherwise the catalog's `stale` flag
+                // correctly stays true (never cleared on failure) but the
+                // grid could never retry within this session, since
+                // `stale_regen_inflight` would never let it re-detect the
+                // row. Harmless no-op for the ordinary lazy-load path.
+                if self.stale_regen_inflight.remove(&image_id) {
+                    // This WAS a stale regen (not an ordinary lazy load) and it
+                    // just failed or was cancelled. The catalog's `stale` flag
+                    // correctly stays true, so without this the grid would
+                    // re-detect it as stale and re-spawn a full decode + GPU
+                    // render + encode EVERY FRAME the cell stays on screen
+                    // (F3, whole-branch review) — reachable via a file moved,
+                    // deleted, or on an offline external drive after a batch
+                    // apply. Sticky-suppress it here, mirroring the lazy-load
+                    // path's `thumb_missing` guard; cleared on the next
+                    // successful batch apply/undo (`events.rs`'s
+                    // `BatchApplyDone`/`BatchUndoDone` folds) or folder switch
+                    // (`reset_for_new_folder`), same as any other entry.
+                    self.stale_checked_fresh.insert(image_id);
+                }
                 None
             }
             AppEvent::ThumbMissing { image_id } => {
@@ -550,6 +651,96 @@ impl AppState {
                 // count, so this is cheap even across many batches.
                 self.reload_vocab();
                 self.dirty = true;
+                None
+            }
+            // Push the one-level undo snapshot (`None` when the batch exceeded
+            // `BATCH_UNDO_MAX` or nothing was applied — undo is simply not
+            // offered) and raise the result toast. `cancelled` is threaded
+            // through to `batch_result_message` so a cancelled run reads as
+            // a cancellation rather than "N images skipped" (see that
+            // variant's doc comment and Task 4's review finding).
+            AppEvent::BatchApplyDone {
+                result,
+                snapshot,
+                label,
+                cancelled,
+            } => {
+                self.batch_undo = snapshot;
+                let undo_hint = self.batch_undo.is_some().then(|| {
+                    self.settings
+                        .keymap
+                        .hint(crate::settings::keymap::Action::Undo)
+                });
+                let (level, mut msg) = crate::presets::apply::batch_result_message(
+                    &result,
+                    &label,
+                    cancelled,
+                    undo_hint.as_deref(),
+                );
+                // The image open in Develop is never a batch target (design
+                // §5.1). The user asked for it to be included, so say plainly
+                // that it was not — silently applying to N-1 images would look
+                // like a bug. The flag is set when the batch is SPAWNED
+                // (`presets::menu`) and consumed exactly once here.
+                if std::mem::take(&mut self.batch_excluded_open_image) {
+                    msg.push_str(crate::presets::menu::EXCLUDED_OPEN_IMAGE_NOTE);
+                }
+                self.notify(level, msg);
+                // At least one image's `has_edits`/thumbnail-stale flag was
+                // just rewritten on the catalog side (`spawn_batch_apply`/
+                // `spawn_batch_undo`), so the currently-browsed grid's
+                // in-memory `ImageRecord`s are now stale — mirrors
+                // `MetaBackfillReady`'s `dirty = true` for the same reason.
+                // Also drop the `stale_checked_fresh` negative cache here (not
+                // in `refresh_images`, which runs on every `dirty`-triggered
+                // reload including once per frame during a held scroll while
+                // `ThumbReady` keeps landing) — this is one of only two write
+                // paths that ever sets a row's `thumbnails.stale` flag, so this
+                // is the only place the cache actually needs invalidating.
+                // No-op when nothing actually applied (e.g. an all-skipped
+                // or fully-cancelled-before-the-first-item run).
+                if result.applied > 0 {
+                    self.dirty = true;
+                    self.stale_checked_fresh.clear();
+                }
+                None
+            }
+            // Status-bar-only progress readout (a future indicator); no
+            // counter to fold here.
+            AppEvent::BatchApplyProgress { .. } => None,
+            // Deliberately does NOT touch `batch_undo`: `take_batch_undo`
+            // already consumed it (set it to `None`) before this job was
+            // ever spawned (`FerroliteApp::apply_undo_redo`), and a newer,
+            // unrelated batch apply may have installed a fresh snapshot in
+            // the meantime — this must never clobber that (see
+            // `AppEvent::BatchUndoDone`'s doc comment).
+            AppEvent::BatchUndoDone { result } => {
+                let (level, msg) = crate::presets::apply::batch_undo_message(&result);
+                self.notify(level, msg);
+                // See the matching comment on `BatchApplyDone`: drop the
+                // negative cache here, where the `thumbnails.stale` write
+                // actually happened, not on every `dirty`-triggered reload.
+                if result.applied > 0 {
+                    self.dirty = true;
+                    self.stale_checked_fresh.clear();
+                }
+                None
+            }
+            AppEvent::PresetsLoaded { presets } => {
+                self.presets = presets;
+                None
+            }
+            // Both landings are pure state transitions (no egui, no GPU), so
+            // they fold here rather than in `app.rs`.
+            AppEvent::MenuDocRead { doc, purpose } => {
+                match purpose {
+                    crate::presets::menu::DocReadPurpose::Copy => {
+                        crate::presets::menu::set_clipboard(self, &doc);
+                    }
+                    crate::presets::menu::DocReadPurpose::SavePreset => {
+                        crate::presets::menu::open_save_modal(self, doc);
+                    }
+                }
                 None
             }
         }
@@ -704,6 +895,53 @@ mod tests {
         );
     }
 
+    /// P7 Task 10: a failed (or cancelled) stale-thumbnail regen must still
+    /// release the in-flight guard, or the id could never be retried within
+    /// this session even though the catalog's `stale` flag correctly stays
+    /// true.
+    #[test]
+    fn thumb_failed_clears_stale_regen_inflight_guard() {
+        let mut s = AppState::for_test();
+        s.stale_regen_inflight.insert(9);
+        s.apply(AppEvent::ThumbFailed { image_id: 9 });
+        assert!(
+            !s.stale_regen_inflight.contains(&9),
+            "ThumbFailed must release the stale-regen in-flight guard"
+        );
+    }
+
+    /// F3 (whole-branch review): a failed/cancelled stale regen must be
+    /// sticky-suppressed (inserted into `stale_checked_fresh`) so the grid
+    /// does not re-detect the still-`stale=1` row and re-spawn a full decode +
+    /// GPU render + encode on every subsequent frame the cell stays on
+    /// screen. Composes with F2: the cache is no longer wiped per frame, so
+    /// this insert actually sticks until the next batch apply/undo or folder
+    /// switch.
+    #[test]
+    fn thumb_failed_on_a_stale_regen_sticky_suppresses_further_detection() {
+        let mut s = AppState::for_test();
+        s.stale_regen_inflight.insert(9);
+        s.apply(AppEvent::ThumbFailed { image_id: 9 });
+        assert!(
+            s.stale_checked_fresh.contains(&9),
+            "a failed stale regen must be sticky-cached as 'checked' to stop re-detection"
+        );
+    }
+
+    /// The ordinary lazy-load path never inserts into `stale_regen_inflight`,
+    /// so an ordinary `ThumbFailed` (a plain missing/unreadable thumbnail,
+    /// not a stale regen) must NOT sticky-suppress the id — that is
+    /// `ThumbMissing`'s job, not this guard's.
+    #[test]
+    fn thumb_failed_on_an_ordinary_lazy_load_does_not_touch_stale_checked_fresh() {
+        let mut s = AppState::for_test();
+        s.apply(AppEvent::ThumbFailed { image_id: 21 });
+        assert!(
+            !s.stale_checked_fresh.contains(&21),
+            "an ordinary (non-stale-regen) ThumbFailed must not sticky-suppress the id"
+        );
+    }
+
     /// Anti-storm invariant (Task 1): folding `ThumbMissing` must clear
     /// `thumb_pending` and mark the id sticky-missing so `request_thumbnail`'s
     /// guard skips it on every subsequent frame instead of re-spawning a
@@ -752,6 +990,25 @@ mod tests {
         assert!(
             !s.thumb_missing.contains(&13),
             "ThumbReady must clear the sticky-missing marker"
+        );
+    }
+
+    /// P7 Task 10: once a regenerated thumbnail actually arrives, the
+    /// in-flight guard must be released so a later re-staling (another batch
+    /// apply on this id) can trigger a fresh regen attempt.
+    #[test]
+    fn thumb_ready_clears_stale_regen_inflight_guard() {
+        let mut s = AppState::for_test();
+        s.stale_regen_inflight.insert(13);
+        s.apply(AppEvent::ThumbReady {
+            image_id: 13,
+            rgba: vec![1, 2, 3, 255],
+            w: 1,
+            h: 1,
+        });
+        assert!(
+            !s.stale_regen_inflight.contains(&13),
+            "ThumbReady must release the stale-regen in-flight guard"
         );
     }
 
@@ -941,5 +1198,331 @@ mod tests {
             "the backfilled row must drop out of the NULL-metadata backlog"
         );
         assert!(s.notifications.is_empty(), "a clean write raises no toast");
+    }
+
+    /// A successful batch apply with a retained snapshot: the snapshot is
+    /// pushed into `batch_undo`, the toast names the live Undo keybind, and
+    /// `dirty` is bumped (the catalog's `has_edits` was rewritten under us).
+    #[test]
+    fn batch_apply_done_stores_snapshot_pushes_toast_and_marks_dirty() {
+        use crate::notifications::Level;
+        use crate::presets::apply::{BatchResult, UndoSnapshot};
+
+        let mut s = AppState::for_test();
+        s.dirty = false;
+        let snapshot = UndoSnapshot {
+            entries: vec![(1, std::path::PathBuf::from("/a.arw"), "{}".to_string())],
+        };
+        let out = s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+                unchanged: 0,
+            },
+            snapshot: Some(snapshot),
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert_eq!(out, None);
+        assert!(
+            s.batch_undo.is_some(),
+            "a retained snapshot must be pushed onto batch_undo"
+        );
+        assert!(s.dirty, "an applied batch must bump dirty");
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert_eq!(n.level(), Level::Info);
+        assert!(
+            n.message().contains("Press Ctrl+Z to undo."),
+            "the toast must name the live Undo keybind: {}",
+            n.message()
+        );
+    }
+
+    /// No snapshot retained (batch over `BATCH_UNDO_MAX`, or nothing
+    /// applied): `batch_undo` clears to `None`, the toast carries no undo
+    /// hint, and a fully no-op batch does not spuriously mark `dirty`.
+    #[test]
+    fn batch_apply_done_without_snapshot_omits_undo_hint_and_skips_dirty_when_nothing_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.batch_undo = Some(crate::presets::apply::UndoSnapshot::default());
+        s.dirty = false;
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 0,
+                failed: 0,
+                skipped: 3,
+                unchanged: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert!(
+            s.batch_undo.is_none(),
+            "a None snapshot must clear any prior batch_undo"
+        );
+        assert!(!s.dirty, "nothing applied must not spuriously mark dirty");
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert!(
+            !n.message().contains("undo"),
+            "no snapshot means no undo hint: {}",
+            n.message()
+        );
+    }
+
+    /// F2 (whole-branch review): the `stale_checked_fresh` negative cache
+    /// must be invalidated where the `thumbnails.stale` write actually
+    /// happens — a successful `BatchApplyDone` — NOT on every `dirty`-
+    /// triggered `refresh_images` (see the matching state.rs test proving
+    /// `refresh_images` itself leaves the cache alone).
+    #[test]
+    fn batch_apply_done_clears_stale_checked_fresh_cache_when_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(7);
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+                unchanged: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert!(
+            s.stale_checked_fresh.is_empty(),
+            "a batch that applied edits must invalidate the negative stale-check cache"
+        );
+    }
+
+    /// A no-op batch (nothing applied) must not touch the cache either —
+    /// mirrors the `dirty` guard on the same branch.
+    #[test]
+    fn batch_apply_done_leaves_stale_checked_fresh_cache_when_nothing_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(7);
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 0,
+                failed: 0,
+                skipped: 3,
+                unchanged: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        assert!(
+            s.stale_checked_fresh.contains(&7),
+            "a fully no-op batch must not touch the negative stale-check cache"
+        );
+    }
+
+    /// The startup preset scan populates `state.presets` verbatim.
+    #[test]
+    fn presets_loaded_populates_state() {
+        let mut doc = ferrolite_pipeline::EditDoc::default();
+        doc.global.exposure = 0.5;
+        let preset = crate::presets::Preset {
+            version: ferrolite_pipeline::PATCH_VERSION,
+            name: "Warm".to_string(),
+            owns: ferrolite_pipeline::GroupSet::LIGHT,
+            doc,
+        };
+        let mut s = AppState::for_test();
+        assert!(s.presets.is_empty());
+        let out = s.apply(AppEvent::PresetsLoaded {
+            presets: vec![preset.clone()],
+        });
+        assert_eq!(out, None);
+        assert_eq!(s.presets, vec![preset]);
+    }
+
+    /// The regression this variant exists to prevent: `BatchUndoDone` must
+    /// NEVER touch `batch_undo`. If a newer, unrelated batch apply installed
+    /// a fresh snapshot (its own `BatchApplyDone` already ran) while an
+    /// older undo job was still in flight, that undo's own completion must
+    /// not clobber the fresh promise the toast already made.
+    #[test]
+    fn batch_undo_done_never_touches_an_unrelated_pending_snapshot() {
+        use crate::notifications::Level;
+        use crate::presets::apply::{BatchResult, UndoSnapshot};
+
+        let mut s = AppState::for_test();
+        let fresh = UndoSnapshot {
+            entries: vec![(9, std::path::PathBuf::from("/newer.arw"), "{}".to_string())],
+        };
+        s.batch_undo = Some(fresh.clone());
+        s.dirty = false;
+
+        let out = s.apply(AppEvent::BatchUndoDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+                unchanged: 0,
+            },
+        });
+
+        assert_eq!(out, None);
+        assert_eq!(
+            s.batch_undo.as_ref().map(|snap| &snap.entries),
+            Some(&fresh.entries),
+            "an unrelated newer snapshot must survive BatchUndoDone untouched"
+        );
+        assert!(s.dirty, "a successful revert must still mark dirty");
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert_eq!(n.level(), Level::Info);
+        assert_eq!(n.message(), "Reverted the last batch apply on 5 images.");
+    }
+
+    /// F2 (whole-branch review): `BatchUndoDone` is the other write path that
+    /// rewrites `thumbnails.stale`, so it must also invalidate the negative
+    /// cache when it actually restored something.
+    #[test]
+    fn batch_undo_done_clears_stale_checked_fresh_cache_when_applied() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(9);
+        s.apply(AppEvent::BatchUndoDone {
+            result: BatchResult {
+                applied: 5,
+                failed: 0,
+                skipped: 0,
+                unchanged: 0,
+            },
+        });
+        assert!(
+            s.stale_checked_fresh.is_empty(),
+            "a batch undo that restored edits must invalidate the negative stale-check cache"
+        );
+    }
+
+    /// A batch that left the open Develop image out of its targets must SAY
+    /// so, appended to the ordinary result toast — applying to N-1 images
+    /// without a word would read as a bug (design §5.1).
+    #[test]
+    fn batch_apply_done_reports_the_excluded_develop_image_and_clears_the_flag() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.batch_excluded_open_image = true;
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 2,
+                failed: 0,
+                skipped: 0,
+                unchanged: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert!(
+            n.message()
+                .ends_with(crate::presets::menu::EXCLUDED_OPEN_IMAGE_NOTE.trim_start()),
+            "the result toast must name the skipped Develop image: {}",
+            n.message()
+        );
+        assert!(
+            !s.batch_excluded_open_image,
+            "the flag is consumed exactly once, so the NEXT batch's toast stays honest"
+        );
+    }
+
+    /// The same event with the flag unset must not gain the sentence.
+    #[test]
+    fn batch_apply_done_omits_the_excluded_note_when_nothing_was_excluded() {
+        use crate::presets::apply::BatchResult;
+
+        let mut s = AppState::for_test();
+        s.apply(AppEvent::BatchApplyDone {
+            result: BatchResult {
+                applied: 2,
+                failed: 0,
+                skipped: 0,
+                unchanged: 0,
+            },
+            snapshot: None,
+            label: "Warm portrait".to_string(),
+            cancelled: false,
+        });
+        let n = s.notifications.iter_newest_first().next().unwrap();
+        assert!(
+            !n.message().contains("Develop"),
+            "nothing was excluded, so nothing to mention: {}",
+            n.message()
+        );
+    }
+
+    /// A "Copy settings" read landing fills the clipboard with the FULL
+    /// document (`default_owns()`); the paste dialog narrows it later.
+    #[test]
+    fn menu_doc_read_for_copy_fills_the_clipboard_and_toasts() {
+        use crate::presets::menu::DocReadPurpose;
+
+        let mut s = AppState::for_test();
+        let doc = ferrolite_pipeline::EditDoc::default().set_op(ferrolite_pipeline::Op::Exposure(
+            ferrolite_pipeline::Exposure { ev: 1.25 },
+        ));
+        let out = s.apply(AppEvent::MenuDocRead {
+            doc: doc.clone(),
+            purpose: DocReadPurpose::Copy,
+        });
+        assert_eq!(out, None);
+        let clip = s.clipboard_patch.as_ref().expect("clipboard must be set");
+        assert_eq!(clip.doc, doc);
+        assert_eq!(clip.owns, crate::presets::modal::default_owns());
+        assert!(
+            s.open_group_modal.is_none(),
+            "copying opens no dialog — only pasting and saving do"
+        );
+        assert_eq!(
+            s.notifications
+                .iter_newest_first()
+                .next()
+                .unwrap()
+                .message(),
+            "Copied settings."
+        );
+    }
+
+    /// A "Save preset" read landing opens the group modal in Save mode over the
+    /// document that just arrived, without touching the clipboard.
+    #[test]
+    fn menu_doc_read_for_save_preset_opens_the_modal_without_touching_the_clipboard() {
+        use crate::presets::menu::{DocReadPurpose, GroupModalPurpose};
+        use crate::presets::modal::GroupModalMode;
+
+        let mut s = AppState::for_test();
+        let doc = ferrolite_pipeline::EditDoc::default().set_op(ferrolite_pipeline::Op::Exposure(
+            ferrolite_pipeline::Exposure { ev: -0.5 },
+        ));
+        s.apply(AppEvent::MenuDocRead {
+            doc: doc.clone(),
+            purpose: DocReadPurpose::SavePreset,
+        });
+        let pending = s.open_group_modal.as_ref().expect("modal must be open");
+        assert!(matches!(pending.modal.mode, GroupModalMode::Save { .. }));
+        match &pending.purpose {
+            GroupModalPurpose::SavePreset { doc: captured } => {
+                assert_eq!(**captured, doc, "the modal must carry the read document");
+            }
+            _ => panic!("expected a SavePreset purpose"),
+        }
+        assert!(
+            s.clipboard_patch.is_none(),
+            "saving a preset must not clobber the copy/paste clipboard"
+        );
     }
 }

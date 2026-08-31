@@ -47,6 +47,16 @@ pub const NOTIFY_ERROR: &str = p::WARNING_OCTAGON; // error toast glyph
 pub const CLOSE: &str = p::X; // toast dismiss button
 pub const CROP_FLIP_ORIENTATION: &str = p::ARROWS_CLOCKWISE; // crop panel's landscape<->portrait toggle
 
+// Presets / copy-paste-sync (P7). Wired into the Library copy/paste/preset
+// context menu (Task 7) and the Develop "Presets" menu (Task 8).
+/// Presets menu / preset list entries. Distinct from `ADJUST` (SLIDERS_HORIZONTAL) —
+/// a stack of saved settings, not a single control.
+pub const PRESET: &str = p::STACK;
+/// Copy settings.
+pub const COPY_SETTINGS: &str = p::COPY;
+/// Paste settings.
+pub const PASTE_SETTINGS: &str = p::CLIPBOARD_TEXT;
+
 /// The regular icon font. `add_to_fonts(Regular)` put Phosphor Regular into the
 /// `Proportional` family's fallback chain, so its PUA codepoints resolve here.
 pub fn font(size: f32) -> egui::FontId {
@@ -97,6 +107,9 @@ mod tests {
             ("NOTIFY_ERROR", NOTIFY_ERROR),
             ("CLOSE", CLOSE),
             ("CROP_FLIP_ORIENTATION", CROP_FLIP_ORIENTATION),
+            ("PRESET", PRESET),
+            ("COPY_SETTINGS", COPY_SETTINGS),
+            ("PASTE_SETTINGS", PASTE_SETTINGS),
         ] {
             assert!(!s.is_empty(), "icon alias {name} is empty");
         }

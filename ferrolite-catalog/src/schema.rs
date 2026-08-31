@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 /// Bump this and add a `if version < N { ... }` block when the schema changes.
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 /// Apply migrations using the SQLite `user_version` pragma. Idempotent.
 pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -132,6 +132,20 @@ pub(crate) fn migrate(conn: &Connection) -> Result<(), rusqlite::Error> {
         version = 7;
     }
 
+    if version < 8 {
+        // Thumbnail staleness for batch edits (P7 design §5.2). A batch apply
+        // writes N sidecars and flags the affected thumbnails; the virtualized
+        // grid regenerates a cell when it realizes, then clears the flag.
+        //
+        // DEFAULT 0 (fresh) is load-bearing: upgrading an existing catalog must
+        // not mark every thumbnail stale and trigger a library-wide
+        // regeneration on first launch.
+        //
+        // A re-derivable cache column, which contract 2 explicitly permits.
+        conn.execute_batch("ALTER TABLE thumbnails ADD COLUMN stale INTEGER NOT NULL DEFAULT 0;")?;
+        version = 8;
+    }
+
     debug_assert_eq!(
         version, SCHEMA_VERSION,
         "every migration block must advance `version` to SCHEMA_VERSION"
@@ -176,7 +190,7 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, super::SCHEMA_VERSION);
-        assert_eq!(super::SCHEMA_VERSION, 7);
+        assert_eq!(super::SCHEMA_VERSION, 8);
 
         let img = table_columns(&conn, "images");
         assert!(img.contains(&"flag".to_string()));
@@ -234,5 +248,36 @@ mod tests {
             cols.contains(&"focal_length".to_string()),
             "focal_length column added"
         );
+    }
+
+    #[test]
+    fn migrate_creates_v8_thumbnail_stale_column_defaulting_fresh() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::migrate(&conn).unwrap();
+        let cols = table_columns(&conn, "thumbnails");
+        assert!(cols.contains(&"stale".to_string()), "stale column added");
+
+        // Existing rows must default to FRESH so upgrading an installed
+        // catalog does not trigger a library-wide thumbnail regeneration.
+        conn.execute("INSERT INTO folders (id, path) VALUES (1, 'p')", [])
+            .ok();
+        conn.execute(
+            "INSERT INTO images (id, folder_id, filename, mtime, size)
+             VALUES (1, 1, 'a.arw', 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO thumbnails (image_id, level, w, h, format, blob)
+             VALUES (1, 0, 8, 8, 'jpeg', x'00')",
+            [],
+        )
+        .unwrap();
+        let stale: i64 = conn
+            .query_row("SELECT stale FROM thumbnails WHERE image_id = 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stale, 0, "new rows default to fresh");
     }
 }

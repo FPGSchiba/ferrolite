@@ -19,6 +19,7 @@ mod metadata;
 mod module;
 mod monitor_profile;
 mod notifications;
+mod presets;
 mod read_gate;
 mod settings;
 mod state;

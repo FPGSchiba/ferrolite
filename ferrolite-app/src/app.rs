@@ -35,6 +35,10 @@ pub struct FerroliteApp {
     /// ensures the job is submitted at most once per app run, not a gate on
     /// whether there's work to do.
     did_meta_backfill_spawn: bool,
+    /// One-shot startup preset-directory scan guard (P7), mirroring
+    /// `did_meta_backfill_spawn`: the scan (`presets::spawn_load_all`) is
+    /// off-thread file I/O, spawned exactly once per app run.
+    did_presets_load_spawn: bool,
     /// Whether the Help modal (`crate::help::show`) is open. Opened by
     /// `Action::OpenHelp` (F1, global) or the Help menu.
     pub(crate) show_help: bool,
@@ -49,6 +53,28 @@ pub struct FerroliteApp {
     /// ordered canvas tools shown in the palette. Built once here; read in
     /// Tasks 10-11 to render the palette/tab bar/canvas overlay.
     pub(crate) tool_registry: crate::develop::tool::DevelopToolRegistry,
+}
+
+/// The boolean-OR core of `FerroliteApp::modal_active`, split out as a free
+/// function over plain `bool`s so the "which flags gate global shortcut
+/// dispatch" logic is unit-testable without a `FerroliteApp` — constructing
+/// one needs a real wgpu `CreationContext` and opens the on-disk catalog
+/// (`AppState::new`), disproportionate scaffolding for what is otherwise a
+/// one-line `||` chain.
+fn any_modal_pending(
+    show_help: bool,
+    show_settings: bool,
+    pending_remove: bool,
+    open_group_modal: bool,
+    pending_rename_preset: bool,
+    pending_delete_preset: bool,
+) -> bool {
+    show_help
+        || show_settings
+        || pending_remove
+        || open_group_modal
+        || pending_rename_preset
+        || pending_delete_preset
 }
 
 impl FerroliteApp {
@@ -102,6 +128,7 @@ impl FerroliteApp {
             settings_dirty: false,
             did_restore: false,
             did_meta_backfill_spawn: false,
+            did_presets_load_spawn: false,
             show_help: false,
             show_settings: false,
             did_display_detect: false,
@@ -138,6 +165,31 @@ impl FerroliteApp {
         frame: &eframe::Frame,
         undo: bool,
     ) {
+        // P7: with no active Develop session, Ctrl+Z (or the Edit menu's
+        // Undo item) reverts the last batch apply. Reusing the existing
+        // action rather than adding a binding means Undo keeps meaning
+        // "undo the last thing I did", and the keybind is already
+        // discoverable in the Settings keyboard tab and the Help panel
+        // (CLAUDE.md), so no new GROUPS or Help entry is needed. Redo is
+        // NOT extended — undoing an undo is not offered (`spawn_batch_undo`
+        // reports through `AppEvent::BatchUndoDone`, which carries no
+        // snapshot of its own). The gating + one-shot-take itself lives in
+        // `AppState::take_batch_undo` (state.rs), pinned by its own tests,
+        // rather than inline here. `self.module.is_develop()` is passed
+        // explicitly — NOT `self.state.viewer.is_some()` — because `viewer`
+        // is never cleared by switching module tabs away from Develop, so it
+        // stays `Some` for the rest of the session after the first Develop
+        // visit and would permanently block this take from Library.
+        if let Some(snapshot) = self.state.take_batch_undo(undo, self.module.is_develop()) {
+            crate::presets::apply::spawn_batch_undo(
+                &self.state.jobs,
+                &self.state.writer,
+                &self.state.tx,
+                ctx,
+                snapshot,
+            );
+            return;
+        }
         let result = self.state.viewer.as_mut().and_then(|v| {
             if undo {
                 v.history.undo()
@@ -771,18 +823,28 @@ impl FerroliteApp {
     }
 
     /// True while any modal overlay is on screen (Help, Settings, the
-    /// remove-folder confirmation). Used to suppress the app's global keyboard
-    /// shortcuts underneath the modal so its own input handling (e.g. Esc) is
-    /// the only thing that reacts, and so shortcuts like Enter/Ctrl+A don't
-    /// leak through to the grid/viewer while a modal is up. Extend this with
-    /// new modals as they're added.
+    /// remove-folder confirmation, the P7 group modal, or either P7 Task 8
+    /// preset dialog). Used to suppress the app's global keyboard shortcuts
+    /// underneath the modal so its own input handling (e.g. Esc) is the only
+    /// thing that reacts, and so shortcuts like Enter/Ctrl+A — and, for
+    /// `open_group_modal` and `pending_rename_preset` specifically, plain
+    /// letter/digit keys typed into their name text field — don't leak
+    /// through to the grid/viewer while a modal is up. Extend this with new
+    /// modals as they're added.
     ///
     /// The mask Components window is intentionally NOT included here: unlike
     /// the modals above, it must stay non-blocking so the canvas keeps
     /// receiving input behind it (live preview, color-eyedropper sampling,
     /// brush drawing all route through the canvas while the window is open).
     fn modal_active(&self) -> bool {
-        self.show_help || self.show_settings || self.state.pending_remove.is_some()
+        any_modal_pending(
+            self.show_help,
+            self.show_settings,
+            self.state.pending_remove.is_some(),
+            self.state.open_group_modal.is_some(),
+            self.state.pending_rename_preset.is_some(),
+            self.state.pending_delete_preset.is_some(),
+        )
     }
 
     /// If the current viewer's edit stack changed this session, spawn a
@@ -840,6 +902,196 @@ impl FerroliteApp {
             cam,
             crate::develop::thumb_regen::RegenStackSource::InMemory(Box::new(stack)),
         );
+    }
+
+    /// Show the open group modal for one frame and act on its outcome.
+    ///
+    /// The modal is taken OUT of `AppState` for the duration so
+    /// `presets::menu::confirm_group_modal` can hold `&mut AppState` and
+    /// `&mut PendingGroupModal` at once; it is put back unless the confirm
+    /// closed it. A rejected preset name keeps it open with the reason on
+    /// `name_error`, so the user fixes the name instead of losing their input.
+    fn drive_group_modal(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.state.open_group_modal.take() else {
+            return;
+        };
+        let keep_open = match pending.modal.show(ctx) {
+            crate::presets::modal::GroupModalOutcome::None => true,
+            crate::presets::modal::GroupModalOutcome::Cancelled => false,
+            crate::presets::modal::GroupModalOutcome::Confirmed { name, owns } => {
+                !crate::presets::menu::confirm_group_modal(
+                    &mut self.state,
+                    ctx,
+                    &mut pending,
+                    name,
+                    owns,
+                )
+            }
+        };
+        if keep_open {
+            self.state.open_group_modal = Some(pending);
+        }
+    }
+
+    /// Show the Develop-panel "Rename preset" dialog for one frame and act
+    /// on its outcome (P7 Task 8). `presets::rename` saves under the new
+    /// name before deleting the old file, so a rejected name (duplicate or
+    /// invalid) never loses the preset — the dialog just shows the reason
+    /// inline and stays open, mirroring `drive_group_modal`'s handling of a
+    /// rejected save name.
+    fn drive_rename_preset(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.state.pending_rename_preset.take() else {
+            return;
+        };
+        let mut keep_open = true;
+        egui::Window::new("Rename preset")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Name");
+                    ui.text_edit_singleline(&mut pending.new_name);
+                });
+                if let Some(err) = &pending.error {
+                    ui.colored_label(theme::SEMANTIC_AMBER, err);
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    let can_confirm =
+                        crate::presets::sanitize_filename(&pending.new_name).is_some();
+                    let confirm = ui.add_enabled(can_confirm, egui::Button::new("Rename"));
+                    if !can_confirm {
+                        confirm.on_disabled_hover_text("Enter a name");
+                    } else if confirm.clicked() {
+                        match crate::presets::rename(
+                            &crate::presets::presets_dir(),
+                            &pending.original,
+                            &pending.new_name,
+                        ) {
+                            Ok((renamed, delete_err)) => {
+                                crate::presets::spawn_load_all(
+                                    &self.state.jobs,
+                                    &self.state.tx,
+                                    ctx,
+                                );
+                                // The rename itself succeeded (the new-name
+                                // file is written) regardless of `delete_err`,
+                                // so the dialog closes either way. F6 (whole-
+                                // branch review): a genuine failure to remove
+                                // the OLD file — e.g. an AV/indexer holding a
+                                // handle — is no longer silently swallowed; it
+                                // is surfaced as a Warning toast so the user
+                                // knows to expect a leftover duplicate until
+                                // it's cleared manually, instead of the old
+                                // `let _ = delete(..)` which left no trace of
+                                // the problem at all.
+                                if let Some(err) = delete_err {
+                                    self.state.notify(
+                                        crate::notifications::Level::Warning,
+                                        format!(
+                                            "Renamed \u{201c}{}\u{201d} to \u{201c}{}\u{201d}, \
+                                             but could not remove the old preset file: {err}",
+                                            pending.original.name, renamed.name
+                                        ),
+                                    );
+                                } else {
+                                    self.state.notify(
+                                        crate::notifications::Level::Info,
+                                        format!(
+                                            "Renamed \u{201c}{}\u{201d} to \u{201c}{}\u{201d}.",
+                                            pending.original.name, renamed.name
+                                        ),
+                                    );
+                                }
+                                keep_open = false;
+                            }
+                            Err(e) => {
+                                // A friendlier message than the raw `Display`
+                                // for the two rejections the user can act on
+                                // by editing the name; `Io` keeps its message
+                                // (an underlying filesystem failure has no
+                                // more-actionable phrasing to offer here).
+                                let msg = match &e {
+                                    crate::presets::PresetError::Duplicate(_) => {
+                                        "A preset with that name already exists.".to_string()
+                                    }
+                                    crate::presets::PresetError::InvalidName => {
+                                        "Enter a name with at least one letter, number, \
+                                         space, - or _."
+                                            .to_string()
+                                    }
+                                    crate::presets::PresetError::Io(_) => e.to_string(),
+                                };
+                                pending.error = Some(msg);
+                            }
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        keep_open = false;
+                    }
+                });
+            });
+        if keep_open {
+            self.state.pending_rename_preset = Some(pending);
+        }
+    }
+
+    /// Show the pending preset-delete confirmation for one frame and act on
+    /// its outcome (P7 Task 8) — deleting removes a file from disk, so it is
+    /// confirmed first, mirroring the remove-folder confirmation above.
+    fn drive_delete_preset(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.state.pending_delete_preset.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new("Delete preset")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "Delete the preset \u{201c}{}\u{201d}? This removes its file from disk.",
+                    pending.preset.name
+                ));
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Delete").clicked() {
+                        match crate::presets::delete(
+                            &crate::presets::presets_dir(),
+                            &pending.preset,
+                        ) {
+                            Ok(()) => {
+                                crate::presets::spawn_load_all(
+                                    &self.state.jobs,
+                                    &self.state.tx,
+                                    ctx,
+                                );
+                                self.state.notify(
+                                    crate::notifications::Level::Info,
+                                    format!(
+                                        "Deleted preset \u{201c}{}\u{201d}.",
+                                        pending.preset.name
+                                    ),
+                                );
+                            }
+                            Err(e) => {
+                                self.state
+                                    .notify(crate::notifications::Level::Error, e.to_string());
+                            }
+                        }
+                        self.state.pending_delete_preset = None;
+                        open = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.state.pending_delete_preset = None;
+                        open = false;
+                    }
+                });
+            });
+        if !open {
+            self.state.pending_delete_preset = None;
+        }
     }
 
     /// Open the single-file export dialog for the current viewer image, seeded
@@ -1246,6 +1498,66 @@ impl FerroliteApp {
         }
     }
 
+    /// Drain grid-detected stale-thumbnail regeneration requests (P7 Task
+    /// 10 — the consumer half of the design; Task 4 is the producer that
+    /// SETS the flag on a batch apply). `library::grid::show`'s per-frame
+    /// cell-realize path has no access to `eframe::Frame`/the GPU render
+    /// state, so it only enqueues onto `pending_stale_regen` (already having
+    /// marked the id `stale_regen_inflight` there, BEFORE this drains, to
+    /// guard against a per-frame re-spawn storm — see that field's doc
+    /// comment on `AppState`). This mirrors `drain_thumb_regen_requests`
+    /// above almost exactly; the one difference is the stack source: a
+    /// batch-applied image is never the open Develop viewer (batch apply
+    /// excludes it, design §5.1), so there is no in-memory stack to reuse —
+    /// the job reads the persisted `.xmp` sidecar instead, same as the
+    /// on-demand "Regenerate thumbnail" action above.
+    pub(crate) fn drain_stale_thumb_regen_requests(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+    ) {
+        if self.state.pending_stale_regen.is_empty() {
+            return;
+        }
+        let Some(rs) = frame.wgpu_render_state() else {
+            // No GPU this frame; keep the requests (and their in-flight
+            // guards) for a later frame.
+            return;
+        };
+        let ids = std::mem::take(&mut self.state.pending_stale_regen);
+        let gpu = std::sync::Arc::new(ferrolite_gpu::GpuContext::from_render_state(rs));
+        let cam =
+            crate::develop::thumb_regen::srgb_fallback_camera_to_working(self.state.working_space);
+        for id in ids {
+            let Some(rec) = self.state.images.iter().find(|r| r.id == id).cloned() else {
+                // Row no longer in the browsed set (folder switch/filter
+                // change raced this queue) — release the guard too, so a
+                // later realize (e.g. the same id reappearing under a
+                // changed filter) is free to re-detect and retry.
+                self.state.stale_regen_inflight.remove(&id);
+                continue;
+            };
+            let Ok(Some(folder)) = self.state.reads.folder_path(rec.folder_id) else {
+                self.state.stale_regen_inflight.remove(&id);
+                continue;
+            };
+            let path = std::path::PathBuf::from(folder).join(&rec.filename);
+            crate::develop::thumb_regen::spawn_regen_edited_thumbnail(
+                &self.state.jobs,
+                &self.state.writer,
+                &self.state.tx,
+                ctx,
+                std::sync::Arc::clone(&gpu),
+                self.state.lens_db.clone(),
+                id,
+                path,
+                rec.kind,
+                cam,
+                crate::develop::thumb_regen::RegenStackSource::Sidecar,
+            );
+        }
+    }
+
     /// Build a point-in-time memory attribution from live app state. Impure
     /// (reads `ViewerState`, caches, in-flight gauges, and the OS RSS). Only call
     /// behind `diag::enabled()`. GPU/VRAM figures are documented estimates.
@@ -1427,6 +1739,13 @@ impl eframe::App for FerroliteApp {
             crate::library::meta_backfill::spawn_once(&mut self.state, ctx);
         }
 
+        // One-shot startup preset-directory scan (P7): file I/O off the UI
+        // thread (contract 1), delivered back via `AppEvent::PresetsLoaded`.
+        if !self.did_presets_load_spawn {
+            self.did_presets_load_spawn = true;
+            crate::presets::spawn_load_all(&self.state.jobs, &self.state.tx, ctx);
+        }
+
         // One-shot startup display-profile detect, once the render state is valid
         // (ViewerPipelines pre-warmed in `new`). Ordering is guaranteed: `new()`
         // inserts `ViewerPipelines` into `cc.wgpu_render_state`'s callback
@@ -1539,7 +1858,14 @@ impl eframe::App for FerroliteApp {
                     .state
                     .viewer
                     .as_ref()
-                    .is_some_and(|v| v.history.can_undo());
+                    .is_some_and(|v| v.history.can_undo())
+                    // P7: with no Develop session open, a pending batch-apply
+                    // snapshot also makes Undo actionable (see
+                    // `apply_undo_redo`'s batch-revert branch). Gated on the
+                    // MODULE, not `viewer.is_none()` — `viewer` is never
+                    // cleared by switching module tabs, so it stays `Some`
+                    // long after the user has left Develop.
+                    || (!self.module.is_develop() && self.state.batch_undo.is_some());
                 let can_redo = self
                     .state
                     .viewer
@@ -2479,6 +2805,16 @@ impl eframe::App for FerroliteApp {
             }
         }
 
+        // The P7 "Save preset" / "Paste settings" group modal, opened from the
+        // library context menu (which only reaches `AppState`, hence the state
+        // ownership) and driven here, where the `egui::Context` lives.
+        self.drive_group_modal(ctx);
+        // The P7 Task 8 Develop-panel Presets menu's rename/delete dialogs —
+        // same reasoning: opened from `develop::presets_menu`, which only
+        // reaches `AppState`, and driven here where `egui::Context` lives.
+        self.drive_rename_preset(ctx);
+        self.drive_delete_preset(ctx);
+
         // 1px window border — full-window foreground stroke so it never double-draws
         // against the side panel or status bar edges.
         ctx.layer_painter(egui::LayerId::new(
@@ -2630,7 +2966,27 @@ impl eframe::App for FerroliteApp {
 
 #[cfg(test)]
 mod tests {
+    use super::any_modal_pending;
     use crate::settings::Settings;
+
+    /// Every flag `modal_active` ORs together must independently suppress
+    /// shortcut dispatch — most importantly `open_group_modal` (Task 7's
+    /// "Save preset" / "Paste settings" dialog), which holds a free-text name
+    /// field: without this, typing a preset name would fire every single-key
+    /// shortcut (star ratings, tool switches, Ctrl+Z) on every keystroke.
+    #[test]
+    fn any_modal_pending_is_false_only_when_every_flag_is_clear() {
+        assert!(!any_modal_pending(false, false, false, false, false, false));
+        assert!(any_modal_pending(true, false, false, false, false, false));
+        assert!(any_modal_pending(false, true, false, false, false, false));
+        assert!(any_modal_pending(false, false, true, false, false, false));
+        assert!(
+            any_modal_pending(false, false, false, true, false, false),
+            "open_group_modal must suppress shortcut dispatch — it holds a text field"
+        );
+        assert!(any_modal_pending(false, false, false, false, true, false));
+        assert!(any_modal_pending(false, false, false, false, false, true));
+    }
 
     #[test]
     fn test_panel_width_and_height_persistence() {

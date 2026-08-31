@@ -15,6 +15,7 @@ mod nodes;
 mod nr;
 mod nr_node;
 mod op;
+mod patch;
 mod pipeline;
 mod rcd_gpu;
 mod serialize;
@@ -53,6 +54,7 @@ pub use op::{
     Geometry, GradeWheel, Hsl, HslBand, LensCorrection, Op, OpKind, OpStack, ParametricCurve,
     PointCurve, Sharpen, ToneCurve, WhiteBalance, STACK_VERSION,
 };
+pub use patch::{EditPatch, GroupSet, PATCH_VERSION};
 pub use pipeline::{blit_to_rgba8, blit_to_rgba8_with_matrix, EditPipeline};
 pub use rcd_gpu::{demosaic_rcd_gpu, CfaInput};
 pub use serialize::{deserialize, serialize};

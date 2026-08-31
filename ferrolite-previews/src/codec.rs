@@ -77,7 +77,7 @@ pub fn decode_srgb_jpeg(bytes: &[u8]) -> Result<ImageBuffer, PreviewCodecError> 
 /// cached previews are opaque.
 fn render_to_srgb8(render: &LinearRgbaF32, display_matrix: Mat3) -> Vec<u8> {
     let mut out = Vec::with_capacity(render.width as usize * render.height as usize * 3);
-    for px in render.pixels.chunks_exact(4) {
+    for px in render.pixels.as_chunks::<4>().0 {
         let mapped = mul_vec3(&display_matrix, &[px[0], px[1], px[2]]);
         for channel in mapped {
             let clamped = channel.clamp(0.0, 1.0);

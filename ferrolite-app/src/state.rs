@@ -29,6 +29,30 @@ pub enum RenameKind {
     Collection,
 }
 
+/// A preset staged for rename (P7 Task 8), shown in a small dialog driven by
+/// `FerroliteApp::drive_rename_preset`.
+///
+/// `original` is captured when the dialog opens rather than re-resolved by
+/// index at confirm time: `state.presets` can be overwritten wholesale by an
+/// in-flight `AppEvent::PresetsLoaded` rescan while the dialog is open (e.g.
+/// another rename/delete completing), which would leave an index pointing at
+/// the wrong preset or nothing at all.
+pub struct PendingRenamePreset {
+    pub original: crate::presets::Preset,
+    /// The live text-edit buffer.
+    pub new_name: String,
+    /// Set when a confirm was rejected (duplicate/invalid name); shown inline
+    /// so the user fixes the name instead of losing their edit.
+    pub error: Option<String>,
+}
+
+/// A preset staged for delete confirmation (P7 Task 8) — deleting removes a
+/// file from disk, so it is confirmed first via `FerroliteApp::drive_delete_preset`.
+#[derive(Clone)]
+pub struct PendingDeletePreset {
+    pub preset: crate::presets::Preset,
+}
+
 pub struct AppState {
     pub jobs: Arc<JobSystem>,
     pub writer: Arc<Mutex<Catalog>>,
@@ -206,6 +230,42 @@ pub struct AppState {
     /// drained in `update()` where the GPU render state is available.
     pub pending_thumb_regen: Vec<i64>,
 
+    /// Image ids whose `thumbnails.stale` flag (P7 §5.2) was found set the
+    /// moment a grid cell realized this frame, awaiting `FerroliteApp::
+    /// drain_stale_thumb_regen_requests` to actually spawn the regen job —
+    /// mirrors `pending_thumb_regen` above: `library::grid::show` runs deep
+    /// inside an `egui::Ui` pass with no access to `eframe::Frame`/the GPU
+    /// render state, so it can only enqueue here.
+    pub pending_stale_regen: Vec<i64>,
+    /// Image ids with a stale-thumbnail regeneration currently in flight.
+    /// Without this guard a stale cell that stays on screen would re-spawn a
+    /// full decode + GPU render + encode EVERY FRAME — the same storm the
+    /// `ThumbMissing` sticky guard (`thumb_missing`) exists to prevent for
+    /// the lazy-load path. Inserted the moment a stale cell is DETECTED
+    /// (grid realize), not when the job actually spawns, so a realize that
+    /// races ahead of the next `drain_stale_thumb_regen_requests` call
+    /// cannot enqueue the same id twice. Cleared on `ThumbReady`/
+    /// `ThumbFailed` for the id (success or failure — see those events'
+    /// `apply` folds), so a later re-staling (another batch apply) or a
+    /// failed/cancelled regen can trigger a fresh attempt.
+    pub stale_regen_inflight: HashSet<i64>,
+    /// Negative cache: image ids the grid has already queried via
+    /// `ReadPool::is_thumbnail_stale` THIS epoch and found NOT stale, so a
+    /// cell that stays on screen across many frames (e.g. a held scroll
+    /// drag) does not re-issue an indexed SQLite lookup every single frame
+    /// for every visible cell. Bounded by construction to the currently
+    /// browsed folder/filter's row count: cleared in `reset_for_new_folder`
+    /// (folder switch) and in the `BatchApplyDone`/`BatchUndoDone` folds in
+    /// `events.rs` (the only two write paths that ever set a row's
+    /// `thumbnails.stale` flag — exactly when a previously-fresh id could
+    /// newly become stale). Deliberately NOT cleared in `refresh_images`:
+    /// that runs on every `dirty`-triggered reload, and `dirty` is set for
+    /// EVERY drained event (including one `ThumbReady` per frame during a
+    /// held scroll), which would wipe the cache every frame and defeat its
+    /// purpose. Never grown outside those scopes, so it is NOT an unbounded
+    /// cache.
+    pub stale_checked_fresh: HashSet<i64>,
+
     /// Inline rename in progress: (kind, id, edit buffer).
     /// Set on double-click or "Rename" context-menu; cleared on Enter/blur.
     pub renaming: Option<(RenameKind, i64, String)>,
@@ -267,6 +327,30 @@ pub struct AppState {
     /// lens-correction section (auto-match + manual picker + bake) is then
     /// disabled rather than retried on every open.
     pub lens_db: Option<Arc<ferrolite_lens::LensfunDb>>,
+
+    /// Presets loaded from disk at startup (P7). Source of truth is the files;
+    /// this is just the in-memory list the UI renders.
+    pub presets: Vec<crate::presets::Preset>,
+    /// The last "Copy settings" capture, session-scoped.
+    pub clipboard_patch: Option<ferrolite_pipeline::EditPatch>,
+    /// Prior documents from the last batch apply, for a one-level undo.
+    /// `None` when nothing to undo or the batch exceeded `BATCH_UNDO_MAX`.
+    pub batch_undo: Option<crate::presets::apply::UndoSnapshot>,
+    /// The open "Save preset" / "Paste settings" group modal (P7 §6.3).
+    ///
+    /// Lives on `AppState` rather than on `FerroliteApp` because the library
+    /// context menu — the only thing that opens it — receives `&mut AppState`
+    /// and nothing more. `app.rs` still DRIVES it (it owns the
+    /// `egui::Context`); see `FerroliteApp::drive_group_modal`.
+    pub open_group_modal: Option<crate::presets::menu::PendingGroupModal>,
+    /// Set when the batch currently in flight left the image open in Develop
+    /// out of its targets, so the result toast can say so. Consumed (and
+    /// cleared) by the `BatchApplyDone` fold.
+    pub batch_excluded_open_image: bool,
+    /// The open Develop-panel "Rename preset" dialog (P7 Task 8), if any.
+    pub pending_rename_preset: Option<PendingRenamePreset>,
+    /// The preset awaiting delete confirmation (P7 Task 8), if any.
+    pub pending_delete_preset: Option<PendingDeletePreset>,
 }
 
 /// CPU thumbnail-pixel cache capacity. ≤256px RGBA8 ≈ 256 KB each → ~256 MB
@@ -349,6 +433,9 @@ impl AppState {
             selection_anchor: None,
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
+            pending_stale_regen: Vec::new(),
+            stale_regen_inflight: HashSet::new(),
+            stale_checked_fresh: HashSet::new(),
             camera_options: Vec::new(),
             lens_options: Vec::new(),
             iso_range: None,
@@ -366,6 +453,13 @@ impl AppState {
             display_lut: None,
             last_monitor_key: 0,
             lens_db: crate::develop::lens_match::load_shared_db(),
+            presets: Vec::new(),
+            clipboard_patch: None,
+            batch_undo: None,
+            open_group_modal: None,
+            batch_excluded_open_image: false,
+            pending_rename_preset: None,
+            pending_delete_preset: None,
         })
     }
 
@@ -720,6 +814,13 @@ impl AppState {
         self.cancel_pending_jobs();
         self.reset_ingest_counters();
         self.thumb_missing.clear();
+        // A stale-regen job in flight for the OLD folder's images is still
+        // safe to let finish (it writes by image_id, not by folder), but the
+        // guard/queue must not carry over: the new folder's cells need to be
+        // free to detect and enqueue their own staleness from a clean slate.
+        self.pending_stale_regen.clear();
+        self.stale_regen_inflight.clear();
+        self.stale_checked_fresh.clear();
         self.images.clear();
         // Bump so the grid's layout cache rebuilds for the now-empty set instead
         // of indexing the previous folder's rows (stale-index panic otherwise).
@@ -907,6 +1008,40 @@ impl AppState {
             .is_some_and(|a| a.kind == crate::export::ExportKind::Batch && !a.is_done())
     }
 
+    /// Take the pending batch-undo snapshot iff `undo` should revert a
+    /// batch: `undo` is `true` (a Redo must never touch it) AND no Develop
+    /// session is open. Returns `None`, leaving `batch_undo` untouched, in
+    /// every other case (a Develop session is open regardless of `undo`;
+    /// `undo` is `false`; or there is simply nothing pending).
+    ///
+    /// `in_develop` is the caller's `Module::is_develop()` — NOT derived from
+    /// `self.viewer` here. `AppState` cannot see `module` (it lives on
+    /// `FerroliteApp`, `app.rs`), and `viewer.is_some()` is not a safe stand-in:
+    /// switching module tabs away from Develop back to Library does not clear
+    /// `viewer`, so it stays `Some` for the rest of the session once the user
+    /// has opened Develop once, which silently defeated this gate entirely
+    /// (a Library Ctrl+Z after any Develop visit could never reach the batch
+    /// snapshot). The caller must pass the live module, not the viewer.
+    ///
+    /// Extracted from `FerroliteApp::apply_undo_redo` (`app.rs`) so this
+    /// state TRANSITION — not just the gating decision — is pinned by a
+    /// test: a future refactor that reordered the guard, or swapped `take()`
+    /// for `as_ref()` (which would let a second Ctrl+Z double-revert the
+    /// same N images), would break the tests below instead of silently
+    /// hijacking a Develop session's history undo or double-reverting a
+    /// batch. `should_route_undo_to_batch` (`app::shortcuts`) is the sibling
+    /// dispatch-level gate that decides whether to call `apply_undo_redo` at
+    /// all; this is the actual take.
+    pub(crate) fn take_batch_undo(
+        &mut self,
+        undo: bool,
+        in_develop: bool,
+    ) -> Option<crate::presets::apply::UndoSnapshot> {
+        (undo && !in_develop)
+            .then(|| self.batch_undo.take())
+            .flatten()
+    }
+
     #[cfg(test)]
     pub fn for_test() -> Self {
         // Use a unique ID per test (thread + process) to avoid concurrent collision.
@@ -979,6 +1114,9 @@ impl AppState {
             selection_anchor: None,
             notifications: crate::notifications::Notifications::default(),
             pending_thumb_regen: Vec::new(),
+            pending_stale_regen: Vec::new(),
+            stale_regen_inflight: HashSet::new(),
+            stale_checked_fresh: HashSet::new(),
             camera_options: Vec::new(),
             lens_options: Vec::new(),
             iso_range: None,
@@ -1002,6 +1140,13 @@ impl AppState {
             // Skip the bundled-DB load in unit tests (unnecessary I/O per test;
             // no test in this module exercises lens matching/baking).
             lens_db: None,
+            presets: Vec::new(),
+            clipboard_patch: None,
+            batch_undo: None,
+            open_group_modal: None,
+            batch_excluded_open_image: false,
+            pending_rename_preset: None,
+            pending_delete_preset: None,
         }
     }
 
@@ -1228,6 +1373,23 @@ mod tests {
         );
     }
 
+    /// A folder switch must also clear the P7 stale-regen queue/guards, so an
+    /// id in flight for the OLD folder cannot suppress detection for an
+    /// unrelated image sharing the same id under the new folder view.
+    #[test]
+    fn reset_for_new_folder_clears_stale_regen_state() {
+        let mut s = AppState::for_test();
+        s.pending_stale_regen.push(5);
+        s.stale_regen_inflight.insert(5);
+        s.stale_checked_fresh.insert(6);
+
+        s.reset_for_new_folder();
+
+        assert!(s.pending_stale_regen.is_empty());
+        assert!(s.stale_regen_inflight.is_empty());
+        assert!(s.stale_checked_fresh.is_empty());
+    }
+
     /// `select_folder` must delegate to `reset_for_new_folder` and then set the
     /// new `current_folder`.
     #[test]
@@ -1307,6 +1469,26 @@ mod tests {
         s.include_subfolders = true;
         s.refresh_images();
         assert_eq!(s.images.len(), 2, "recursive view: root + child images");
+    }
+
+    /// `refresh_images` runs on every `dirty`-triggered reload, including once
+    /// per frame during a held scroll (see F2 in the P7 whole-branch review) —
+    /// it must NOT touch the P7 stale-regen negative cache. That cache is
+    /// invalidated instead where the `thumbnails.stale` write actually
+    /// happens: the `BatchApplyDone`/`BatchUndoDone` folds in `events.rs`
+    /// (see the matching test there).
+    #[test]
+    fn refresh_images_does_not_touch_stale_checked_fresh_cache() {
+        let mut s = AppState::for_test();
+        s.stale_checked_fresh.insert(7);
+
+        s.refresh_images();
+
+        assert!(
+            s.stale_checked_fresh.contains(&7),
+            "a plain reload must NOT invalidate the negative stale-check cache \
+             (only a batch apply/undo write does, in events.rs)"
+        );
     }
 
     #[test]
@@ -2099,5 +2281,104 @@ mod tests {
         s.settings.show_info_panel = true;
         s.show_info_panel = s.settings.show_info_panel;
         assert!(s.show_info_panel);
+    }
+
+    fn sample_undo_snapshot() -> crate::presets::apply::UndoSnapshot {
+        crate::presets::apply::UndoSnapshot {
+            entries: vec![(1, std::path::PathBuf::from("/a.arw"), "{}".to_string())],
+        }
+    }
+
+    /// A Develop session open must block the batch-undo take even though
+    /// `undo` is `true` and a snapshot is pending: the snapshot must be left
+    /// exactly as it was (still `Some`), not consumed, so the caller's
+    /// Develop-history undo logic runs unmolested and a later Library Ctrl+Z
+    /// can still revert the batch.
+    #[test]
+    fn take_batch_undo_returns_none_and_leaves_snapshot_when_in_develop() {
+        let mut s = AppState::for_test();
+        s.viewer = Some(crate::viewer::ViewerState::open(
+            1,
+            std::path::PathBuf::from("x"),
+            ferrolite_image::FileKind::Raw,
+        ));
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let taken = s.take_batch_undo(true, true);
+
+        assert!(taken.is_none(), "a Develop session must block the take");
+        assert!(
+            s.batch_undo.is_some(),
+            "the snapshot must survive a blocked take untouched"
+        );
+    }
+
+    /// The exact regression scenario the coordinator's diagnosis called out:
+    /// the user opened Develop earlier (so `viewer` is still `Some` — module
+    /// tabs never clear it), then switched back to Library. `in_develop` is
+    /// `false` (Library is the active module) even though `viewer.is_some()`
+    /// is still `true`, and the pending snapshot MUST still route to batch
+    /// undo. Before the fix this used `self.viewer.is_none()` as the gate,
+    /// which stayed permanently `false` after any Develop visit and made
+    /// batch undo unreachable from Library for the rest of the session.
+    #[test]
+    fn take_batch_undo_routes_from_library_even_when_viewer_still_holds_a_stale_session() {
+        let mut s = AppState::for_test();
+        s.viewer = Some(crate::viewer::ViewerState::open(
+            1,
+            std::path::PathBuf::from("x"),
+            ferrolite_image::FileKind::Raw,
+        ));
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let taken = s.take_batch_undo(true, false);
+
+        assert!(
+            taken.is_some(),
+            "Library (in_develop == false) must take the snapshot regardless of a stale viewer"
+        );
+        assert!(s.batch_undo.is_none(), "the take must consume batch_undo");
+    }
+
+    /// No Develop session, `undo == true`, a snapshot pending: the snapshot
+    /// is returned exactly once and `batch_undo` is left `None` — the second
+    /// Ctrl+Z (or the Edit menu's Undo clicked twice) must find nothing to
+    /// re-apply.
+    #[test]
+    fn take_batch_undo_consumes_the_snapshot_exactly_once() {
+        let mut s = AppState::for_test();
+        s.viewer = None;
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let first = s.take_batch_undo(true, false);
+        assert!(first.is_some(), "the pending snapshot must be returned");
+        assert!(
+            s.batch_undo.is_none(),
+            "the take must consume batch_undo, not merely read it"
+        );
+
+        let second = s.take_batch_undo(true, false);
+        assert!(
+            second.is_none(),
+            "a second Ctrl+Z must be inert: nothing left to double-revert"
+        );
+    }
+
+    /// `undo == false` (a Redo) must never touch `batch_undo`, regardless of
+    /// module — Redo has no batch counterpart (see `spawn_batch_undo`'s
+    /// `snapshot: None`; undoing an undo is not offered).
+    #[test]
+    fn take_batch_undo_ignores_redo_and_leaves_snapshot_intact() {
+        let mut s = AppState::for_test();
+        s.viewer = None;
+        s.batch_undo = Some(sample_undo_snapshot());
+
+        let taken = s.take_batch_undo(false, false);
+
+        assert!(taken.is_none(), "Redo must never take the batch snapshot");
+        assert!(
+            s.batch_undo.is_some(),
+            "the snapshot must survive a Redo untouched"
+        );
     }
 }

@@ -21,6 +21,7 @@ pub mod metadata;
 pub mod module;
 pub mod monitor_profile;
 pub mod notifications;
+pub mod presets;
 pub mod read_gate;
 pub mod settings;
 pub mod state;

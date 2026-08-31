@@ -66,6 +66,13 @@ impl ReadPool {
     pub fn get_thumbnail(&self, image_id: i64) -> Result<Option<Thumbnail>, CatalogError> {
         self.with_conn(|c| crate::queries::get_thumbnail(c, image_id))
     }
+    /// Whether this image's thumbnail needs regenerating, read off the pool
+    /// so the virtualized grid's per-frame render path (Task 10) never
+    /// contends with the writer's `Mutex<Catalog>` — same rationale as
+    /// `get_thumbnail` above.
+    pub fn is_thumbnail_stale(&self, image_id: i64) -> Result<bool, CatalogError> {
+        self.with_conn(|c| crate::queries::is_thumbnail_stale(c, image_id))
+    }
     pub fn needs_reingest(
         &self,
         folder_id: i64,
@@ -163,8 +170,10 @@ impl ReadPool {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::NewImage;
+    use crate::thumbnail::{Thumbnail, ThumbnailStore};
     use crate::Catalog;
-    use ferrolite_image::Color;
+    use ferrolite_image::{Color, FileKind};
 
     #[test]
     fn read_pool_lists_tags() {
@@ -176,5 +185,48 @@ mod tests {
         cat.create_tag("x", Color::default()).unwrap();
         let rp = super::ReadPool::open(&path, 1).unwrap();
         assert_eq!(rp.list_tags().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn is_thumbnail_stale_agrees_with_catalog_for_flagged_and_unflagged() {
+        let dir = std::env::temp_dir().join(format!("frl-rp-stale-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("c.db");
+        let _ = std::fs::remove_file(&path);
+        let cat = Catalog::open(&path).unwrap();
+        let f = cat.upsert_folder(std::path::Path::new("/p"), None).unwrap();
+        let a = cat
+            .upsert_image(&NewImage::failed(f, "a.nef".into(), 1, 1, FileKind::Raw, 0))
+            .unwrap();
+        let b = cat
+            .upsert_image(&NewImage::failed(f, "b.nef".into(), 1, 1, FileKind::Raw, 0))
+            .unwrap();
+        let thumb = Thumbnail {
+            width: 4,
+            height: 4,
+            format: "jpeg".to_string(),
+            bytes: vec![0xFF; 16],
+        };
+        cat.put_thumbnail(a, &thumb).unwrap();
+        cat.put_thumbnail(b, &thumb).unwrap();
+        cat.set_thumbnails_stale(&[a], true).unwrap();
+
+        let rp = super::ReadPool::open(&path, 1).unwrap();
+        assert_eq!(
+            rp.is_thumbnail_stale(a).unwrap(),
+            cat.is_thumbnail_stale(a).unwrap()
+        );
+        assert!(
+            rp.is_thumbnail_stale(a).unwrap(),
+            "flagged image reads stale via the pool"
+        );
+        assert_eq!(
+            rp.is_thumbnail_stale(b).unwrap(),
+            cat.is_thumbnail_stale(b).unwrap()
+        );
+        assert!(
+            !rp.is_thumbnail_stale(b).unwrap(),
+            "unflagged image reads fresh via the pool"
+        );
     }
 }

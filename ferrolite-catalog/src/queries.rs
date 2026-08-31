@@ -140,6 +140,43 @@ pub(crate) fn get_thumbnail(
     })
 }
 
+/// Mark (or clear) the stale flag on the given images' thumbnails. Returns
+/// the number of thumbnail rows updated — ids without a thumbnail row are
+/// silently skipped, which is correct: there is nothing cached to
+/// invalidate. See P7 design §5.2.
+pub(crate) fn set_thumbnails_stale(
+    conn: &Connection,
+    image_ids: &[i64],
+    stale: bool,
+) -> Result<usize, CatalogError> {
+    if image_ids.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut updated = 0usize;
+    {
+        let mut stmt = tx.prepare("UPDATE thumbnails SET stale = ?1 WHERE image_id = ?2")?;
+        for id in image_ids {
+            updated += stmt.execute(rusqlite::params![stale as i64, id])?;
+        }
+    }
+    tx.commit()?;
+    Ok(updated)
+}
+
+/// Whether this image's thumbnail needs regenerating. `false` when no
+/// thumbnail row exists (nothing cached, so nothing stale).
+pub(crate) fn is_thumbnail_stale(conn: &Connection, image_id: i64) -> Result<bool, CatalogError> {
+    let v: Option<i64> = conn
+        .query_row(
+            "SELECT stale FROM thumbnails WHERE image_id = ?1",
+            rusqlite::params![image_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.unwrap_or(0) != 0)
+}
+
 pub(crate) fn list_images_recursive(
     conn: &Connection,
     folder_id: i64,

@@ -31,8 +31,10 @@ pub struct ExportRequest<'a> {
     /// Shared lens database. When present AND the stack carries an enabled lens
     /// correction with a matched `lens_id`, the export bakes the correction
     /// products off-thread (inside this job) and renders them; otherwise the
-    /// render is identity (byte-identical to an uncorrected export). `None` for
-    /// batch/thumbnail-less callers or when no db is loaded.
+    /// render is identity (byte-identical to an uncorrected export). `None`
+    /// only when no db is loaded — batch export threads the same shared db
+    /// through as the single-file path (see `ferrolite-app`'s
+    /// `export/batch.rs`), it is not a batch-specific `None`.
     pub lens_db: Option<&'a Arc<LensfunDb>>,
     pub options: &'a ExportOptions,
     pub dest: &'a Path,

@@ -2,9 +2,11 @@
 //! Background job processes the whole queue **one image at a time** (bounded
 //! concurrency — see `spawn_batch` for why). Each item decodes ON THE WORKER
 //! THREAD (never the UI thread), builds the GPU pyramid, computes camera→working
-//! from the decoded ColorProfile, and renders with `OpStack::default()` —
-//! per-image edits are not persisted, so batch export is color-managed but
-//! unedited (spec §2 non-goal).
+//! from the decoded ColorProfile, and renders each item's PERSISTED edit stack
+//! (read from its XMP sidecar via `stack_for_item`), so a batch export matches
+//! what the grid and Develop show. This was previously hardcoded to
+//! `OpStack::default()`, which silently exported every image unedited once
+//! sidecar persistence shipped (P7 design §7).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use ferrolite_export::{run_export, ExportOptions, ExportRequest};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::FileKind;
 use ferrolite_jobs::{CancelToken, JobHandle, Priority};
+use ferrolite_lens::LensfunDb;
 use ferrolite_pipeline::{GpuPyramidSource, OpStack};
 
 use crate::events::AppEvent;
@@ -49,6 +52,11 @@ pub fn spawn_batch(
 ) -> Vec<JobHandle> {
     let tx = state.tx.clone();
     let egui_ctx = egui_ctx.clone();
+    // Shared lens db (photo tier), same as the single-file path (`spawn_export`
+    // in `export/mod.rs`) — so a batch item with an enabled, matched lens
+    // correction in its persisted stack bakes + renders it identically to a
+    // single-file export of the same image. `None` when no db is loaded.
+    let lens_db = state.lens_db.clone();
     let handle = state.jobs.submit(Priority::Background, move |cancel| {
         run_batch_sequential(
             &items,
@@ -81,8 +89,15 @@ pub fn spawn_batch(
                         egui_ctx.request_repaint();
                     }
                 };
-                let (ok, message) =
-                    run_one(&gpu, item, working_space, &options, cancel, &mut progress);
+                let (ok, message) = run_one(
+                    &gpu,
+                    item,
+                    working_space,
+                    &options,
+                    lens_db.as_ref(),
+                    cancel,
+                    &mut progress,
+                );
                 crate::diag::export_item_end(ok, t0.elapsed().as_millis() as u64);
                 (ok, message)
             },
@@ -121,11 +136,32 @@ fn run_batch_sequential(
     }
 }
 
+/// The edit document a batch item renders with: its persisted sidecar, or the
+/// default (identity) document when there is no sidecar or it is malformed.
+/// Mirrors `develop::thumb_regen::resolve_regen_stack`'s fallback shape for the
+/// same reason: a missing/corrupt XMP sidecar must never fail or panic a batch
+/// export — it just falls back to an unedited render for that one item.
+///
+/// Batch export previously hardcoded `OpStack::default()` here unconditionally,
+/// justified by a comment reading "per-image edits are not persisted" — true
+/// when written, stale once sidecars shipped. The effect was that editing 50
+/// images and batch-exporting produced 50 UNEDITED files.
+pub(crate) fn stack_for_item(path: &std::path::Path) -> OpStack {
+    let xmp = ferrolite_catalog::sidecar_path(path);
+    ferrolite_catalog::read_ops(&xmp)
+        .and_then(|text| ferrolite_pipeline::deserialize(&text))
+        .unwrap_or_default()
+}
+
 fn run_one(
     gpu: &Arc<GpuContext>,
     item: &BatchItem,
     working_space: WorkingSpace,
     options: &ExportOptions,
+    // Shared lens db (see `spawn_batch`'s comment); threaded through so this
+    // item's persisted lens correction (if any) bakes exactly like the
+    // single-file path.
+    lens_db: Option<&Arc<LensfunDb>>,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(u32, u32),
 ) -> (bool, String) {
@@ -152,22 +188,42 @@ fn run_one(
     if cancel.is_cancelled() {
         return (false, "Export cancelled".to_string());
     }
+    // Read the persisted edit stack for THIS item (see `stack_for_item` doc) —
+    // the fix for the "batch exports unedited" defect this module's doc comment
+    // used to justify.
+    let stack = stack_for_item(&item.path);
     // Match the on-screen path: dual-illuminant interpolation + normalize_neutral
     // (the demosaic already applied the as-shot WB gains, so the matrix must be
-    // row-normalized or neutrals skew magenta). Identity export stack → temp 0.
+    // row-normalized or neutrals skew magenta). Use the PERSISTED stack's WB
+    // temp (0.0 when the stack has no WB op, i.e. as-shot) — mirrors
+    // `App::confirm_export`'s `self.camera_to_working(self.current_wb_temp())`
+    // so a batch export of a non-zero-temp edit renders the same camera matrix
+    // the user saw on screen, not the as-shot one.
+    let temp = stack.white_balance().map(|w| w.temp).unwrap_or(0.0);
     let camera_to_working =
-        crate::camera_matrix::wb_camera_to_working(&profile, 0.0, working_space);
+        crate::camera_matrix::wb_camera_to_working(&profile, temp, working_space);
+    // Wrap in an `Arc` (cheap — no copy) so the just-decoded full-res buffer can
+    // be reused below as the dehaze transmission source without re-decoding.
+    let linear = Arc::new(linear);
     let pyramid = Arc::new(GpuPyramidSource::new(gpu, &linear));
-    let stack = OpStack::default();
+    // Whole-image dehaze transmission source (design §5.3, ST-Task 5): needed
+    // only when the persisted stack actually has dehaze active somewhere
+    // (global op or a visible mask layer — `EditDoc::dehaze_active_anywhere`).
+    // Batch has no cached preview-tier buffer (unlike `App::confirm_export`), so
+    // it reuses the full-res `linear` it already decoded above; `render_tiled`
+    // downscales it internally to `DEHAZE_MAX_TRANSMISSION_DIM` regardless, so
+    // this is equivalent (and needs no extra decode).
+    let transmission_source = stack.dehaze_active_anywhere().then(|| linear.clone());
     let req = ExportRequest {
         ctx: gpu,
         pyramid: &pyramid,
         stack: &stack,
         camera_to_working,
         working_space,
-        // Batch export renders the identity stack (no per-image edits), so no
-        // lens correction can be present — pass `None`.
-        lens_db: None,
+        // Bakes the persisted lens correction (if any) off-thread inside
+        // `render_tiled`, exactly like the single-file export path — see
+        // `spawn_batch`'s comment on `lens_db`.
+        lens_db,
         options,
         dest: &item.dest,
         source_path: &item.path,
@@ -176,9 +232,7 @@ fn run_one(
         // from it above), so it can estimate the real value here — no fallback
         // needed for this path.
         atmospheric_light: ferrolite_pipeline::estimate_atmospheric_light(&linear),
-        // Batch export always renders `OpStack::default()` (no per-image edits),
-        // so dehaze can never be active — no transmission to build.
-        transmission_source: None,
+        transmission_source: transmission_source.as_deref(),
     };
     match run_export(req, cancel, progress) {
         Ok(outcome) => {
@@ -198,6 +252,78 @@ fn run_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A unique path in the OS temp dir for a `stack_for_item` test. A plain
+    /// counter (not `{:?}` on a `ThreadId`, which produced invalid Windows
+    /// filenames in earlier P7 tasks) plus the process id keeps concurrent test
+    /// runs from colliding on the same sidecar path.
+    fn unique_temp_path(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "ferrolite-batch-{label}-{}-{seq}.arw",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn stack_for_item_is_default_when_no_sidecar_exists() {
+        let p = unique_temp_path("no-sidecar");
+        let xmp = ferrolite_catalog::sidecar_path(&p);
+        let _ = std::fs::remove_file(&xmp); // guard against a stale leftover
+        assert!(stack_for_item(&p).is_identity());
+    }
+
+    #[test]
+    fn stack_for_item_reads_a_persisted_edit() {
+        let p = unique_temp_path("with-sidecar");
+        let xmp = ferrolite_catalog::sidecar_path(&p);
+        let mut doc = OpStack::default();
+        doc.global.exposure = 1.25;
+        ferrolite_catalog::write_ops(&xmp, &ferrolite_pipeline::serialize(&doc)).unwrap();
+
+        let got = stack_for_item(&p);
+        assert_eq!(
+            got.global.exposure, 1.25,
+            "batch export must honour persisted edits"
+        );
+
+        let _ = std::fs::remove_file(&xmp);
+    }
+
+    #[test]
+    fn stack_for_item_falls_back_to_default_on_a_malformed_sidecar() {
+        let p = unique_temp_path("bad-sidecar");
+        let xmp = ferrolite_catalog::sidecar_path(&p);
+        ferrolite_catalog::write_ops(&xmp, "not json {{").unwrap();
+        assert!(
+            stack_for_item(&p).is_identity(),
+            "malformed → default, never a panic"
+        );
+        let _ = std::fs::remove_file(&xmp);
+    }
+
+    #[test]
+    fn persisted_wb_temp_is_extracted_for_the_camera_matrix() {
+        // Regression for F1: batch export must use the PERSISTED stack's WB temp
+        // (like `App::confirm_export`'s `self.camera_to_working(self.current_wb_temp())`),
+        // not a hardcoded 0.0. This pins the exact expression `run_one` uses.
+        let mut doc = OpStack::default();
+        doc.global.temp = 2400.0;
+        let temp = doc.white_balance().map(|w| w.temp).unwrap_or(0.0);
+        assert_eq!(
+            temp, 2400.0,
+            "non-zero persisted WB temp must survive extraction"
+        );
+
+        let identity = OpStack::default();
+        let identity_temp = identity.white_balance().map(|w| w.temp).unwrap_or(0.0);
+        assert_eq!(
+            identity_temp, 0.0,
+            "identity stack still yields as-shot temp 0"
+        );
+    }
 
     fn item(id: i64) -> BatchItem {
         BatchItem {

@@ -1190,7 +1190,7 @@ mod edit_pipeline_tests {
 
         assert_eq!(a.len(), b.len());
         let mut max_diff = 0i32;
-        for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        for (pa, pb) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
             for c in 0..3 {
                 let d = (pa[c] as i32 - pb[c] as i32).abs();
                 max_diff = max_diff.max(d);

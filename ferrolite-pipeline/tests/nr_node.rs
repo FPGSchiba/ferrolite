@@ -12,7 +12,9 @@ const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.
 
 fn luma_variance(px: &[u8]) -> f32 {
     let lum: Vec<f32> = px
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| 0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32)
         .collect();
     let m = lum.iter().sum::<f32>() / lum.len() as f32;

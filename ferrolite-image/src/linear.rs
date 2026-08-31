@@ -34,7 +34,7 @@ impl LinearRgbaF32 {
     /// Opaque black image (RGB 0, A 1).
     pub fn black(width: u32, height: u32) -> Self {
         let mut pixels = vec![0.0f32; Self::expected_len(width, height)];
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px[3] = 1.0;
         }
         Self {

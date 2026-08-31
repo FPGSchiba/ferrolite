@@ -1,5 +1,30 @@
 use crate::app::FerroliteApp;
 
+/// Whether an `Action::Undo` keypress should route to the pending
+/// batch-apply snapshot rather than Develop's per-image history undo.
+///
+/// True exactly when there is no active Develop session AND a batch-undo
+/// snapshot is pending. Mirrors the gating `AppState::take_batch_undo`
+/// (`state.rs`, called from `apply_undo_redo` in `app.rs`) itself applies
+/// before consuming the snapshot, and the `can_undo` OR-condition computed
+/// for the Edit menu — three call sites, one rule. This function only
+/// decides whether it is worth calling `apply_undo_redo` at all; extracted
+/// as a pure, egui-free predicate so THAT decision is unit-testable without
+/// a `Context` (the Ctrl+Z chord match and `wants_keyboard_input` guard stay
+/// in `dispatch` itself, which does need egui). `take_batch_undo` is the
+/// one that actually owns the state transition (see its own tests in
+/// `state.rs` for the take-exactly-once and Develop-session-blocks-it
+/// invariants).
+///
+/// `in_develop` is the caller's `Module::is_develop()` — NOT derived from
+/// `AppState.viewer`. `viewer` is never cleared by switching module tabs
+/// away from Develop, so `viewer.is_some()` stays true for the rest of the
+/// session after the first Develop visit and is not a safe stand-in for "a
+/// Develop session is currently active".
+fn should_route_undo_to_batch(in_develop: bool, batch_undo_pending: bool) -> bool {
+    !in_develop && batch_undo_pending
+}
+
 pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe::Frame) {
     // Esc closes the viewer. Cancel its in-flight decode + tile jobs first so a
     // closed image's work stops competing with whatever is opened next.
@@ -92,6 +117,41 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
             .pressed(ctx, crate::settings::keymap::Action::SelectAll)
     {
         app.state.toggle_select_all();
+    }
+
+    // P7: Ctrl+Z (Action::Undo, reused rather than a new binding — decision
+    // P7-D5) also reverts a pending batch-apply snapshot when no Develop
+    // session is open. Deliberately checked on `app.module.is_develop()`
+    // alone, with NO `app.module.is_library()` gate (unlike the select-all
+    // block just above): the approved spec's condition is "no active Develop
+    // session", full stop, matching the module-agnostic Edit menu's Undo
+    // item (`chrome::MenuAction::Undo`, which also fires regardless of
+    // module) — so this also fires in Export, not only the Library. Checked
+    // independently of the Develop-only Undo/Redo block further down (which
+    // requires `viewer.is_some()`, see the Left/Right navigation block
+    // below), so the toast's "Press Ctrl+Z to undo." promise
+    // (`presets::apply::batch_result_message`) is actually true wherever it
+    // was raised from. Routes through the SAME `apply_undo_redo` funnel
+    // Develop's own Ctrl+Z uses below — exactly one implementation, not two.
+    // `apply_undo_redo` itself re-checks `module.is_develop()` before
+    // touching `batch_undo`, so even if this predicate's inputs were ever
+    // stale, a Develop session cannot have its history undo hijacked by a
+    // pending batch snapshot.
+    //
+    // Deliberately `app.module.is_develop()`, NOT `app.state.viewer.is_some()`
+    // (the original, buggy gate): `viewer` is never cleared by switching
+    // module tabs away from Develop, so it stays `Some` for the rest of the
+    // session once the user has opened Develop once, which made this route
+    // permanently unreachable from Library after any Develop visit.
+    if !ctx.wants_keyboard_input()
+        && should_route_undo_to_batch(app.module.is_develop(), app.state.batch_undo.is_some())
+        && app
+            .state
+            .settings
+            .keymap
+            .pressed(ctx, crate::settings::keymap::Action::Undo)
+    {
+        app.apply_undo_redo(ctx, frame, true);
     }
 
     // Keyboard metadata commands: rating 0–5 (I = Pick, O = Reject), all as
@@ -388,5 +448,34 @@ pub fn dispatch(ctx: &egui::Context, app: &mut FerroliteApp, frame: &mut eframe:
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No Develop session open and a batch snapshot pending: Undo must route
+    /// to the batch revert.
+    #[test]
+    fn routes_to_batch_when_not_in_develop_and_snapshot_pending() {
+        assert!(should_route_undo_to_batch(false, true));
+    }
+
+    /// No Develop session, but nothing to undo: must not route (there is no
+    /// batch job for `apply_undo_redo`'s revert branch to act on).
+    #[test]
+    fn does_not_route_when_not_in_develop_and_no_snapshot() {
+        assert!(!should_route_undo_to_batch(false, false));
+    }
+
+    /// A Develop session IS open: Undo must never route to the batch
+    /// snapshot even if one is pending — Develop's own history undo owns
+    /// Ctrl+Z while a session is active. This is the inverse case the
+    /// coordinator asked to double-check.
+    #[test]
+    fn never_routes_to_batch_while_a_develop_session_is_open() {
+        assert!(!should_route_undo_to_batch(true, true));
+        assert!(!should_route_undo_to_batch(true, false));
     }
 }

@@ -167,6 +167,34 @@ pub(crate) fn cell_aspect(rec: &ImageRecord) -> f32 {
     (w / h).clamp(0.1, 10.0)
 }
 
+/// Where a thumbnail of ratio `aspect` sits inside its uniform `cell` box:
+/// letterboxed to `grid_layout::fit_size`, horizontally centered, and
+/// **bottom-aligned**.
+///
+/// Bottom-aligned, not centered, because the caption is anchored to the CELL's
+/// bottom edge while the image is only as tall as its own aspect allows. Centred
+/// placement therefore split the slack in two and pushed the image up off its
+/// caption by half of it: at the default Size, `sample.rw2` (4060x2250, ratio
+/// 1.80 against the cell's 1.5) sat 11px clear of the cell bottom, so its
+/// caption read 14px away while every 3:2 cell's read 3px. With the grid ground
+/// deliberately invisible that inconsistency is the most visible thing about a
+/// wide image. Bottom-aligning moves all the slack above the thumbnail, where no
+/// caption is, so every cell's image-to-caption gap is exactly `LABEL_PAD`.
+///
+/// Only images WIDER than the cell are affected: a portrait or an exact-3:2
+/// frame already fills the cell's height, so its rect is unchanged.
+///
+/// `egui::Rect` is plain data (no `Ui` needed), so this stays unit-testable —
+/// it closes the placement half of the spec's fit coverage, which `fit_size`'s
+/// own tests cannot reach because they return a size, not a position.
+pub(crate) fn cell_image_rect(cell: egui::Rect, aspect: f32) -> egui::Rect {
+    let (img_w, img_h) = crate::library::grid_layout::fit_size(cell.width(), cell.height(), aspect);
+    egui::Rect::from_min_size(
+        egui::pos2(cell.center().x - img_w * 0.5, cell.bottom() - img_h),
+        egui::vec2(img_w, img_h),
+    )
+}
+
 /// Whether `paint_cell` should submit its ordinary lazy-load thumbnail fetch
 /// (`AppState::request_thumbnail`) for a visible cell this frame.
 ///
@@ -341,33 +369,26 @@ fn paint_cell(
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
 
-    // The image is letterboxed inside the cell box, not stretched to it.
-    // `egui::Image::paint_at` maps the whole texture onto whatever rect it is
-    // given with no aspect handling, and `Image::fit_to_exact_size` does NOT
-    // change that (`fit` is only read by `Image::ui`/`calc_size`, so on this
-    // path it is a silent no-op) — so the fit has to be computed here. The
-    // aspect comes from the RECORD via the shared `cell_aspect`, not from the
-    // texture, so the cell does not reflow when the thumbnail finishes loading.
-    // Every overlay below (rating, flag, queue badge, tag dots, selection ring)
-    // anchors to `img_rect`, so they hug the thumbnail rather than floating over
-    // a letterbox bar (spec D5).
-    let (img_w, img_h) =
-        crate::library::grid_layout::fit_size(rect.width(), rect.height(), cell_aspect(rec));
-    let img_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(img_w, img_h));
+    // The image is letterboxed inside the cell box, not stretched to it — and
+    // bottom-aligned within it, so every caption sits the same distance below
+    // its thumbnail (see `cell_image_rect`). The aspect comes from the RECORD
+    // via the shared `cell_aspect`, not from the texture, so the cell does not
+    // reflow when the thumbnail finishes loading. Every overlay below (rating,
+    // flag, queue badge, tag dots, selection ring) anchors to `img_rect`, so
+    // they hug the thumbnail rather than floating over a letterbox bar (D5).
+    let img_rect = cell_image_rect(rect, cell_aspect(rec));
 
     // Round the thumbnail corners to match the selection border so a square
     // corner never pokes outside the rounded border. Unselected cells stay square.
     let img_round = if selected { SEL_ROUND } else { 0.0 };
 
-    // Cell ground, always painted across the full CELL box (not just
-    // `img_rect`): the hit area below (`ui.interact(rect, ...)`) is the whole
-    // cell, so for a non-3:2 image the letterbox bars are otherwise bare
-    // canvas and the clickable region extends past anything visible. Uses the
-    // cell's own rounding so a selected cell's rounded corners still line up.
-    // Mirrors the export queue's identical fill (`export_module::queue_list`).
-    // Fully covered (no visual change) when the image fills the cell.
-    painter.rect_filled(rect, img_round, theme::BG_PANEL);
-
+    // NO cell-ground fill: the grid is deliberately invisible, so an image that
+    // does not fill its cell shows the canvas rather than a lighter slot. That
+    // is the author's explicit call after seeing both (the export queue does
+    // paint a ground; the two panels differ on purpose). The consequence to
+    // keep in mind is that the hit area below (`ui.interact(rect, ...)`) is the
+    // whole cell, so it extends a little past the visible thumbnail — a
+    // forgiving click target, but an invisible one.
     match cell_state(rec, has_tex, is_ingesting) {
         CellState::Ready => {
             if let Some(tex) = state.textures.get(rec.id) {
@@ -766,6 +787,90 @@ mod tests {
             (w / h - a).abs() < 1e-3,
             "the fitted rect must keep the image's aspect, else it is stretched"
         );
+    }
+
+    // --- cell_image_rect (letterbox placement) --------------------------
+
+    /// The cell box at the default Size (46 -> 196.2px wide, 3:2).
+    fn default_cell() -> egui::Rect {
+        let w = cell_width_for_size(46.0);
+        egui::Rect::from_min_size(
+            egui::pos2(100.0, 200.0),
+            egui::vec2(w, w / crate::library::grid_layout::CELL_ASPECT),
+        )
+    }
+
+    /// The reported defect: `sample.rw2` (4060x2250, ratio 1.80) is wider than
+    /// the 3:2 cell, so it is width-bound and shorter than the cell. Centred
+    /// placement left it hanging 11px clear of the cell bottom, which -- since
+    /// the caption is anchored to the CELL bottom -- made its caption gap 14px
+    /// against every 3:2 cell's 3px. It must sit ON the cell's bottom edge.
+    #[test]
+    fn a_wide_image_is_bottom_aligned_so_its_caption_gap_matches_every_other_cell() {
+        let cell = default_cell();
+        let r = cell_image_rect(cell, 4060.0 / 2250.0);
+        assert!(
+            (r.bottom() - cell.bottom()).abs() < 0.01,
+            "a wide image must sit on the cell's bottom edge, not float above it \
+             (bottom {} vs cell bottom {})",
+            r.bottom(),
+            cell.bottom()
+        );
+        assert!(
+            r.top() > cell.top() + 1.0,
+            "all the slack should be ABOVE the image, where no caption is"
+        );
+    }
+
+    /// An exact-3:2 frame fills the cell, so bottom-aligning changes nothing.
+    #[test]
+    fn a_three_two_image_still_fills_the_cell_exactly() {
+        let cell = default_cell();
+        let r = cell_image_rect(cell, crate::library::grid_layout::CELL_ASPECT);
+        assert!((r.width() - cell.width()).abs() < 0.01);
+        assert!((r.height() - cell.height()).abs() < 0.01);
+        assert!((r.top() - cell.top()).abs() < 0.01);
+        assert!((r.bottom() - cell.bottom()).abs() < 0.01);
+    }
+
+    /// A portrait is height-bound, so it already fills the cell vertically and
+    /// bottom-aligning is a no-op for it; what matters is that it stays
+    /// horizontally CENTRED (side bars equal).
+    #[test]
+    fn a_portrait_fills_the_height_and_stays_horizontally_centred() {
+        let cell = default_cell();
+        let r = cell_image_rect(cell, 2.0 / 3.0);
+        assert!((r.height() - cell.height()).abs() < 0.01, "height-bound");
+        assert!(r.width() < cell.width(), "narrower than the cell");
+        let left_bar = r.left() - cell.left();
+        let right_bar = cell.right() - r.right();
+        assert!(
+            (left_bar - right_bar).abs() < 0.01,
+            "side bars must be equal: {left_bar} vs {right_bar}"
+        );
+    }
+
+    /// Whatever the source shape, the placed rect stays inside its cell and
+    /// keeps the image's own aspect -- never stretched, never overflowing into a
+    /// neighbouring cell.
+    #[test]
+    fn placement_is_contained_and_never_distorts_for_any_aspect() {
+        let cell = default_cell();
+        for a in [0.1_f32, 0.5, 0.6667, 1.0, 1.5, 1.8044, 2.5, 4.0, 10.0] {
+            let r = cell_image_rect(cell, a);
+            assert!(
+                r.left() >= cell.left() - 0.01
+                    && r.right() <= cell.right() + 0.01
+                    && r.top() >= cell.top() - 0.01
+                    && r.bottom() <= cell.bottom() + 0.01,
+                "aspect {a}: {r:?} escapes cell {cell:?}"
+            );
+            assert!(
+                (r.width() / r.height() - a).abs() < 1e-3,
+                "aspect {a}: placed ratio {} differs -- the image would be stretched",
+                r.width() / r.height()
+            );
+        }
     }
 
     /// Guard against the O(all-items) text measurement returning. The deleted

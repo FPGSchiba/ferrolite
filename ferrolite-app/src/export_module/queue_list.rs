@@ -228,17 +228,19 @@ fn paint_thumb(
     // own upright dims (already crop- and orientation-corrected) and only falls
     // back to sensor dims + orientation swap. Derived from the RECORD, not the
     // texture, so the cell does not reflow when the thumbnail finishes loading.
+    // Placed by the SAME helper the Library grid uses, so the two grids agree on
+    // both halves of the treatment: letterboxed to the image's own aspect, and
+    // bottom-aligned in the cell so every caption sits `CELL_PAD` under its
+    // thumbnail instead of a distance that varies with the image's shape.
     let aspect = rec
         .map(crate::library::grid::cell_aspect)
         .unwrap_or(THUMB_W / THUMB_H);
-    let (img_w, img_h) = crate::library::grid_layout::fit_size(THUMB_W, THUMB_H, aspect);
-    let img_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(img_w, img_h));
+    let img_rect = crate::library::grid::cell_image_rect(rect, aspect);
 
     let painter = ui.painter_at(rect);
-    // Cell ground, always painted: for a non-3:2 image it is what the letterbox
-    // bars show, so the cell reads as a slot rather than a hole in the panel.
-    // Fully covered (no visual change) when the image happens to be 3:2.
-    painter.rect_filled(rect, 3.0, theme::BG_PANEL);
+    // NO cell ground: the grid is deliberately invisible in both the Library and
+    // here, so an image that does not fill its cell shows the panel behind it
+    // rather than a lighter slot.
     if let Some(tex) = state.textures.get(id) {
         egui::Image::new(tex).paint_at(ui, img_rect);
     } else {

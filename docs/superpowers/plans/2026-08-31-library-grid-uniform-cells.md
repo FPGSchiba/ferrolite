@@ -520,25 +520,32 @@ Append inside `ferrolite-app/src/library/grid.rs`'s existing `#[cfg(test)] mod t
         );
     }
 
-    /// Guard against the O(all-items) text measurement returning. `label_width`
-    /// used `Fonts::layout_no_wrap` on EVERY image on each layout rebuild (any
-    /// panel resize or Size-slider change) — the class of work CLAUDE.md's
-    /// virtualization rule forbids. Eliding to a known cell width replaces it.
+    /// Guard against the O(all-items) text measurement returning. The deleted
+    /// `label_width` called egui's no-wrap text layout on EVERY image on each
+    /// layout rebuild (any panel resize or Size-slider change) — the class of
+    /// work CLAUDE.md's virtualization rule forbids. Eliding to a known cell
+    /// width replaces it.
     ///
-    /// A source-grep guard in the spirit of `every_action_is_in_a_settings_group`.
-    /// `\r` is stripped so a CRLF checkout does not change the result.
+    /// Each needle is ASSEMBLED AT RUNTIME from two fragments so it cannot match
+    /// this test's own source (`include_str!` pulls in the test module too, so a
+    /// plain literal would make the test red even on correct code). Same
+    /// convention as `settings::dto`'s `disclosure_snapshot_covers_every_open_field`,
+    /// which crafts its needle so it cannot self-match. `\r` is stripped so a
+    /// CRLF checkout does not change the result.
     #[test]
     fn the_grid_never_measures_filenames_to_size_cells() {
         let src = include_str!("grid.rs").replace('\r', "");
+        let measure_call = ["layout_no", "_wrap"].concat();
         assert!(
-            !src.contains("layout_no_wrap"),
+            !src.contains(&measure_call),
             "grid.rs measures text again — sizing cells from filename widths \
              reintroduces the O(all-items) work and the row collapse"
         );
+        let label_cap = ["MAX_LABEL", "_W"].concat();
         assert!(
-            !src.contains("MAX_LABEL_W"),
-            "MAX_LABEL_W is the label-width floor's cap; its return means the \
-             floors are back"
+            !src.contains(&label_cap),
+            "the label-width floor's cap is back; a filename-derived minimum \
+             cell width is what made the row solver unsolvable"
         );
     }
 ```
@@ -756,25 +763,35 @@ Replaces the justified solver with `UniformGridLayout` and deletes the solver. T
 Append inside `ferrolite-app/src/library/grid.rs`'s test module:
 
 ```rust
-    /// The justified solver must be gone, not merely bypassed. A zeroed
-    /// `min_widths` argument (Task 2) removed the symptom; leaving
-    /// `solve_row_height` in the tree leaves the 0.4x clamp one call site away
-    /// from returning. Source-grep guard, `\r`-stripped for CRLF checkouts.
+    /// The justified solver must be GONE, not merely bypassed. Task 2's zeroed
+    /// `min_widths` argument removed the symptom; leaving `solve_row_height` in
+    /// the tree leaves the 0.4x clamp one call site away from returning.
+    ///
+    /// Needles are assembled at runtime so they cannot match this test's own
+    /// source. They grep a different file (`grid_layout.rs`) today, so a plain
+    /// literal would work — but assembling them means the test keeps meaning the
+    /// same thing if it is ever moved into that file. Same convention as
+    /// `settings::dto`'s `disclosure_snapshot_covers_every_open_field`.
+    ///
+    /// There is deliberately NO positive "grid.rs calls uniform_layout"
+    /// assertion: greping this file for that name would match this test's own
+    /// text and pass vacuously, and the compiler is the stronger check anyway —
+    /// once the solver is deleted, `grid.rs` cannot build a layout without it.
     #[test]
     fn the_justified_row_solver_is_gone() {
         let layout_src = include_str!("grid_layout.rs").replace('\r', "");
-        for gone in ["solve_row_height", "fn row_width", "struct RowItem"] {
+        let gone = [
+            ["solve_row", "_height"].concat(),
+            ["fn row", "_width"].concat(),
+            ["struct Row", "Item"].concat(),
+        ];
+        for needle in &gone {
             assert!(
-                !layout_src.contains(gone),
-                "grid_layout.rs still defines `{gone}` — the uniform grid \
+                !layout_src.contains(needle),
+                "grid_layout.rs still defines `{needle}` — the uniform grid \
                  replaced the justified solver, so it must not linger"
             );
         }
-        let grid_src = include_str!("grid.rs").replace('\r', "");
-        assert!(
-            grid_src.contains("uniform_layout"),
-            "grid.rs must build its layout with uniform_layout"
-        );
     }
 ```
 
@@ -782,7 +799,7 @@ Append inside `ferrolite-app/src/library/grid.rs`'s test module:
 
 Run: `cargo test -p ferrolite-app --lib the_justified_row_solver_is_gone 2>&1 | tail -20`
 
-Expected: FAIL — `grid_layout.rs still defines 'solve_row_height'`.
+Expected: FAIL — `grid_layout.rs still defines \`solve_row_height\``.
 
 - [ ] **Step 3: Rewrite `show`'s layout build and render pass**
 

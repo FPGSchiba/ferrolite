@@ -21,9 +21,6 @@ const LABEL_PAD: f32 = 3.0;
 /// Outer padding around the grid (left, right, top, bottom) so cells don't hug
 /// the panel edges.
 const MARGIN: f32 = 14.0;
-/// Upper bound on how wide a filename label may push a cell, so one very long
-/// name can't blow out a whole row.
-const MAX_LABEL_W: f32 = 240.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = (ui.available_width() - 2.0 * MARGIN).max(1.0);
@@ -41,9 +38,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let mut cache = state.grid_layout.take();
     if cache.as_ref().map(|c| c.sig) != Some(sig) {
         let aspects: Vec<f32> = state.images.iter().map(cell_aspect).collect();
-        // Per-cell minimum width = its label width, so portrait filenames aren't
-        // clipped (the cell widens to the text and the image is centered in it).
-        let min_widths: Vec<f32> = state.images.iter().map(|r| label_width(ui, r)).collect();
+        // NO per-cell minimum widths. A filename-derived floor made the row-height
+        // solver unsolvable whenever a row's floors exceeded the panel: it
+        // returned its `0.4 * target_h` clamp, so the row collapsed to a strip AND
+        // overflowed the right edge, which is what clipped the names. Labels elide
+        // to the cell width instead (`paint_meta`), which also removes the
+        // O(all-items) no-wrap text-layout measurement this used to do on every
+        // rebuild (CLAUDE.md §1). Kept as a zeroed argument rather than dropped
+        // from `layout`'s signature so this task does not also churn the pure
+        // module; Task 3 removes the parameter with the solver.
+        let min_widths: Vec<f32> = vec![0.0; state.images.len()];
         cache = Some(CachedGridLayout {
             sig,
             layout: layout(&aspects, &min_widths, avail_w, target_h, GAP, LABEL_H),
@@ -130,29 +134,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     opened
 }
 
-/// Measured pixel width of a cell's meta label (the wider of filename/date), so
-/// the layout can widen narrow cells enough to show the name. Capped so one long
-/// name can't dominate a row. egui caches galleys, so repeated calls are cheap.
-fn label_width(ui: &egui::Ui, rec: &ImageRecord) -> f32 {
-    let name = ui.fonts(|f| {
-        f.layout_no_wrap(
-            rec.filename.clone(),
-            egui::FontId::proportional(11.0),
-            theme::TEXT_PRIMARY,
-        )
-        .size()
-        .x
-    });
-    let date = format_capture_date(rec.capture_time.as_deref()).map_or(0.0, |d| {
-        ui.fonts(|f| {
-            f.layout_no_wrap(d, egui::FontId::proportional(10.0), theme::TEXT_DIM)
-                .size()
-                .x
-        })
-    });
-    (name.max(date) + 6.0).min(MAX_LABEL_W)
-}
-
 /// Upright aspect ratio (width / height) of an image, matching what the
 /// thumbnail actually shows.
 ///
@@ -199,27 +180,43 @@ pub(crate) fn should_request_lazy_thumbnail(
     !has_texture && decode_done && !stale_regen_inflight
 }
 
-/// Draw the per-cell meta label centered under the (centered) thumbnail:
-/// filename on top, capture date below. The cell footprint is at least the label
-/// width (see `label_width`), so the centered text is never clipped.
-/// Non-interactive — the thumbnail above is the click target.
-fn paint_meta(ui: &egui::Ui, rec: &ImageRecord, rect: egui::Rect) {
-    let p = ui.painter_at(rect);
-    let cx = rect.center().x;
-    p.text(
-        egui::pos2(cx, rect.top()),
-        egui::Align2::CENTER_TOP,
-        &rec.filename,
-        egui::FontId::proportional(11.0),
-        theme::TEXT_PRIMARY,
-    );
+/// Draw the per-cell meta label under the thumbnail: filename on top, capture
+/// date below, both centered and both ELIDED to the cell width.
+///
+/// Eliding (not measuring) is the rule: `Label::truncate()` lays out one galley
+/// for one visible cell inside the already-virtualized render pass, whereas the
+/// `label_width` floor this replaces measured every filename in the catalog on
+/// each layout rebuild. The full name is always on hover, so nothing is lost —
+/// attached unconditionally rather than only when truncated, matching the export
+/// queue's cell (`export_module::queue_list`); egui exposes no cheap
+/// "was truncated" flag on the response.
+///
+/// `selectable(false)` keeps the label inert so it never steals the drag or
+/// click that the cell's own `interact` owns.
+fn paint_meta(ui: &mut egui::Ui, rec: &ImageRecord, rect: egui::Rect) {
+    let name_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 14.0));
+    ui.put(
+        name_rect,
+        egui::Label::new(
+            egui::RichText::new(&rec.filename)
+                .size(11.0)
+                .color(theme::TEXT_PRIMARY),
+        )
+        .truncate()
+        .selectable(false),
+    )
+    .on_hover_text(&rec.filename);
+
     if let Some(date) = format_capture_date(rec.capture_time.as_deref()) {
-        p.text(
-            egui::pos2(cx, rect.top() + 14.0),
-            egui::Align2::CENTER_TOP,
-            date,
-            egui::FontId::proportional(10.0),
-            theme::TEXT_DIM,
+        let date_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.top() + 14.0),
+            egui::vec2(rect.width(), (rect.height() - 14.0).max(1.0)),
+        );
+        ui.put(
+            date_rect,
+            egui::Label::new(egui::RichText::new(date).size(10.0).color(theme::TEXT_DIM))
+                .truncate()
+                .selectable(false),
         );
     }
 }
@@ -334,9 +331,19 @@ fn paint_cell(
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
 
-    // Thumbnail fills the full cell in both states; the gradient border is
-    // drawn on top at the end of the function.
-    let img_rect = rect;
+    // The image is letterboxed inside the cell box, not stretched to it.
+    // `egui::Image::paint_at` maps the whole texture onto whatever rect it is
+    // given with no aspect handling, and `Image::fit_to_exact_size` does NOT
+    // change that (`fit` is only read by `Image::ui`/`calc_size`, so on this
+    // path it is a silent no-op) — so the fit has to be computed here. The
+    // aspect comes from the RECORD via the shared `cell_aspect`, not from the
+    // texture, so the cell does not reflow when the thumbnail finishes loading.
+    // Every overlay below (rating, flag, queue badge, tag dots, selection ring)
+    // anchors to `img_rect`, so they hug the thumbnail rather than floating over
+    // a letterbox bar (spec D5).
+    let (img_w, img_h) =
+        crate::library::grid_layout::fit_size(rect.width(), rect.height(), cell_aspect(rec));
+    let img_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(img_w, img_h));
 
     // Round the thumbnail corners to match the selection border so a square
     // corner never pokes outside the rounded border. Unselected cells stay square.
@@ -466,7 +473,8 @@ fn paint_cell(
 
     // Selection: ctrl/cmd-click toggles; shift-click range-select; plain click replaces.
     // Context menu on right-click.
-    // Hit area remains the full rect (unchanged).
+    // Hit area is the full CELL box, not the letterboxed image: a uniform,
+    // gap-free target means a portrait is no harder to click than a panorama.
     let resp = ui.interact(
         rect,
         ui.id().with(("cell", rec.id)),
@@ -524,7 +532,7 @@ fn paint_cell(
     // painter is clipped to `rect`, so a band centered nearer the edge would have
     // its outer half clipped away (which hid the halo before).
     if selected {
-        let path = rect.shrink(2.0);
+        let path = img_rect.shrink(2.0);
         painter.rect_stroke(
             path,
             SEL_ROUND,
@@ -710,6 +718,99 @@ mod tests {
         assert_eq!(
             format_capture_date(Some("sometime")).as_deref(),
             Some("sometime")
+        );
+    }
+
+    /// Regression for the collapsed-row / clipped-filename defect: the grid must
+    /// pass NO per-cell minimum widths into the layout. A filename-derived floor
+    /// made `solve_row_height` unsolvable, so it returned its `0.4 * target_h`
+    /// clamp — rows 40px tall that overflowed the panel by up to 211px, which is
+    /// what cut the names off. Labels elide to the cell instead (`paint_meta`).
+    ///
+    /// Asserts on the real `grid_layout::layout` with the aspects of a mixed set:
+    /// with zero floors every row must fill the width and none may collapse to
+    /// the solver's lower clamp.
+    #[test]
+    fn zero_label_floors_stop_rows_collapsing_and_overflowing() {
+        // Upright aspects spanning portrait -> panorama, as the RAW fixtures do.
+        let aspects: [f32; 15] = [
+            1.506, 0.661, 1.512, 1.512, 1.506, 1.527, 1.510, 1.462, 1.495, 0.665, 0.666, 0.714,
+            0.666, 0.665, 1.345,
+        ];
+        let zeros = vec![0.0_f32; aspects.len()];
+        let avail_w = 900.0_f32;
+        let target_h = 150.0_f32;
+        let l =
+            crate::library::grid_layout::layout(&aspects, &zeros, avail_w, target_h, GAP, LABEL_H);
+        assert!(!l.rows.is_empty());
+        for (ri, row) in l.rows.iter().enumerate() {
+            let right = row.items.last().map(|it| it.x + it.width).unwrap_or(0.0);
+            assert!(
+                right <= avail_w + 1.0,
+                "row {ri} right edge {right} overflows avail {avail_w} — this is \
+                 what clipped the filenames"
+            );
+            assert!(
+                row.img_height > target_h * 0.45,
+                "row {ri} height {} collapsed to the solver's lower clamp",
+                row.img_height
+            );
+        }
+    }
+
+    /// The image must be letterboxed inside its cell, never stretched to it.
+    /// `paint_cell` cannot be unit-tested (it needs an egui `Ui`), so this pins
+    /// the composition it performs: `fit_size` of `cell_aspect`.
+    #[test]
+    fn cell_image_is_letterboxed_to_its_own_aspect() {
+        use crate::library::grid_layout::fit_size;
+        // Portrait thumbnail (2:3) in a landscape 3:2 cell.
+        let r = rec(
+            Some(4000),
+            Some(6000),
+            Orientation::Normal,
+            Some(200),
+            Some(300),
+        );
+        let a = cell_aspect(&r);
+        let (w, h) = fit_size(150.0, 100.0, a);
+        assert!(
+            w < 150.0,
+            "a portrait must not fill a landscape cell's width"
+        );
+        assert!((h - 100.0).abs() < 0.01, "it should fill the height");
+        assert!(
+            (w / h - a).abs() < 1e-3,
+            "the fitted rect must keep the image's aspect, else it is stretched"
+        );
+    }
+
+    /// Guard against the O(all-items) text measurement returning. The deleted
+    /// `label_width` called egui's no-wrap text layout on EVERY image on each
+    /// layout rebuild (any panel resize or Size-slider change) — the class of
+    /// work CLAUDE.md's virtualization rule forbids. Eliding to a known cell
+    /// width replaces it.
+    ///
+    /// Each needle is ASSEMBLED AT RUNTIME from two fragments so it cannot match
+    /// this test's own source (`include_str!` pulls in the test module too, so a
+    /// plain literal would make the test red even on correct code). Same
+    /// convention as `settings::dto`'s `disclosure_snapshot_covers_every_open_field`,
+    /// which crafts its needle so it cannot self-match. `\r` is stripped so a
+    /// CRLF checkout does not change the result.
+    #[test]
+    fn the_grid_never_measures_filenames_to_size_cells() {
+        let src = include_str!("grid.rs").replace('\r', "");
+        let measure_call = ["layout_no", "_wrap"].concat();
+        assert!(
+            !src.contains(&measure_call),
+            "grid.rs measures text again — sizing cells from filename widths \
+             reintroduces the O(all-items) work and the row collapse"
+        );
+        let label_cap = ["MAX_LABEL", "_W"].concat();
+        assert!(
+            !src.contains(&label_cap),
+            "the label-width floor's cap is back; a filename-derived minimum \
+             cell width is what made the row solver unsolvable"
         );
     }
 }

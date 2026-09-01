@@ -476,8 +476,14 @@ impl AppState {
                 // just persisted, so an edited-thumbnail regen's new (cropped)
                 // aspect shows immediately without a full library reload — and
                 // an un-cropped re-edit correctly restores the original aspect.
-                // Only bumps `images_rev` (rebuilding the grid's justified-rows
-                // layout) when the aspect actually changed: an ordinary
+                // This in-place update is what actually makes the new aspect
+                // show: the uniform grid's letterbox is recomputed from the
+                // record (`library::grid::cell_aspect`) fresh every frame, not
+                // cached in the layout. The `images_rev` bump alongside it only
+                // forces the (O(1), cheap) uniform-layout cache to rebuild —
+                // harmless, and kept so the cache's invalidation contract stays
+                // exact rather than silently excluding a field it reads. Only
+                // bumped when the aspect actually changed: an ordinary
                 // lazy-load re-decode reports the SAME dims already cached from
                 // the initial `thumbnails`-joined query, so this is a no-op on
                 // the hot scroll path and only fires for a genuine crop/geometry
@@ -834,9 +840,10 @@ mod tests {
 
     /// A crop-driven regen reports NEW (cropped) thumbnail dims: the grid row's
     /// `thumb_w`/`thumb_h` (its cell-aspect source, see `library::grid::
-    /// cell_aspect`) must update in place, and `images_rev` must bump so the
-    /// justified-rows layout rebuilds with the new aspect — without this, the
-    /// grid would keep showing the pre-crop aspect until a full library reload.
+    /// cell_aspect`) must update in place — without this, the grid would keep
+    /// showing the pre-crop aspect until a full library reload — and
+    /// `images_rev` must still bump alongside it so the uniform-layout cache's
+    /// invalidation contract stays exact.
     #[test]
     fn thumb_ready_updates_thumb_dims_and_bumps_images_rev_on_change() {
         let mut s = AppState::for_test();

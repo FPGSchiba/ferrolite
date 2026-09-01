@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use ferrolite_color::{mul_vec3, output_oetf, working_to_output, WorkingSpace};
-use ferrolite_export::{render_tiled, BitDepth, PixelData};
+use ferrolite_export::{render_tiled, BitDepth, ExportOptions, PixelData};
 use ferrolite_gpu::GpuContext;
 use ferrolite_image::LinearRgbaF32;
 use ferrolite_jobs::CancelToken;
@@ -505,4 +505,92 @@ fn export_renders_keystone() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The crop → EXPORTED-FILE extent contract. `render_tiled` sizes its buffer
+// from `edited_output_dims`, but nothing downstream re-derived dims from the
+// source, and no test pinned that end to end: this walks the whole orchestrator
+// (`run_export`: render → resize → encode) and reads the dimensions back out of
+// the encoded PNG on disk, so a future change that re-derives dims in the
+// encode/resize step — or a tile loop that iterates SOURCE rather than OUTPUT
+// space — fails here instead of silently shipping uncropped exports.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_exported_file_has_the_cropped_extent() {
+    let Some(ctx) = GpuContext::headless() else {
+        eprintln!("no GPU adapter; skipping (headless CI)");
+        return;
+    };
+    let ctx = Arc::new(ctx);
+    // Non-tile-aligned source AND a crop whose extent is non-tile-aligned, so
+    // the edge-tile clipping in the write-back loop is exercised.
+    let (w, h) = (600u32, 500u32);
+    let img = probe(w, h);
+    let pyramid = Arc::new(GpuPyramidSource::new(&ctx, &img));
+
+    // An off-center, non-square crop: distinct from the source extent on both
+    // axes and not centered, so an ignored offset shows up as wrong content and
+    // an ignored extent as wrong dims.
+    let stack = OpStack::default().set_op(Op::Geometry(Geometry {
+        crop: CropRect {
+            x: 0.2,
+            y: 0.1,
+            w: 0.55,
+            h: 0.7,
+        },
+        angle_deg: 0.0,
+        aspect: Aspect::Free,
+        keystone_v: 0.0,
+        keystone_h: 0.0,
+    }));
+    let expected = ferrolite_pipeline::edited_output_dims(&stack, w, h);
+    assert_ne!(
+        expected,
+        (w, h),
+        "the fixture crop must actually change the extent"
+    );
+
+    let dest = std::env::temp_dir().join(format!(
+        "ferrolite-export-crop-extent-{}.png",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&dest);
+    // PNG so the readback is lossless and `copy_exif` has a container it
+    // supports; `ResizeSpec::None` (the default) keeps the encoded extent equal
+    // to the rendered one.
+    let options = ExportOptions {
+        format: ferrolite_export::ExportFormat::Png,
+        ..Default::default()
+    };
+    let outcome = ferrolite_export::run_export(
+        ferrolite_export::ExportRequest {
+            ctx: &ctx,
+            pyramid: &pyramid,
+            stack: &stack,
+            camera_to_working: IDENTITY,
+            working_space: WorkingSpace::Srgb,
+            lens_db: None,
+            options: &options,
+            dest: &dest,
+            // The probe image is not a real file; `copy_exif` therefore fails and
+            // is reported as a warning, which is exactly the documented
+            // best-effort contract (never fatal).
+            source_path: &dest,
+            atmospheric_light: ferrolite_pipeline::DEHAZE_ATMOS_NEUTRAL,
+            transmission_source: None,
+        },
+        &CancelToken::new(),
+        &mut |_, _| {},
+    )
+    .expect("run_export");
+
+    let got = image::image_dimensions(&outcome.dest).expect("read back encoded dims");
+    assert_eq!(
+        got, expected,
+        "the exported file must have the cropped extent (edited_output_dims),          not the source extent — a crop that survives the render but is lost          downstream looks exactly like 'export ignored my crop'"
+    );
+
+    let _ = std::fs::remove_file(&dest);
 }

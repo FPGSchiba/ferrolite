@@ -15,7 +15,7 @@ use ferrolite_color::WorkingSpace;
 use ferrolite_decode::{ColorProfile, DemosaicToRgb16f, Rcd};
 use ferrolite_export::{run_export, ExportOptions, ExportRequest};
 use ferrolite_gpu::GpuContext;
-use ferrolite_image::FileKind;
+use ferrolite_image::{FileKind, LinearRgbaF32};
 use ferrolite_jobs::{CancelToken, JobHandle, Priority};
 use ferrolite_lens::LensfunDb;
 use ferrolite_pipeline::{GpuPyramidSource, OpStack};
@@ -153,6 +153,32 @@ pub(crate) fn stack_for_item(path: &std::path::Path) -> OpStack {
         .unwrap_or_default()
 }
 
+/// Decode + demosaic + **upright** one RAW for a batch export: the same
+/// sensor-native-then-oriented sequence the viewer's full-decode path uses
+/// (`viewer::load`'s `apply_orientation_linear` right after the demosaic).
+///
+/// The `apply_orientation_linear` call is load-bearing, not cosmetic. A
+/// demosaic is sensor-native, but every consumer of the edit document works in
+/// the ORIENTED frame: `Geometry::crop` is normalized against the image as
+/// displayed (the crop overlay derives it from `ViewerState::image_dims`), the
+/// library grid swaps dimensions for a rotating orientation, and the preview
+/// and warm-prefetch paths both upright before rendering. Batch export was the
+/// only `decode_full` call site that skipped it, so for any orientation that
+/// swaps axes (`Rotate90`/`Rotate270`/`Transpose`/`Transverse`) it applied the
+/// persisted crop to a transposed source: a portrait 367×551 crop of a
+/// Rotate270 frame exported as a 551×367 landscape patch of an entirely
+/// different region — indistinguishable, to the user, from "export lost my
+/// crop". Rotation-free images were unaffected, which is why it went unnoticed.
+fn decode_oriented_raw(path: &std::path::Path) -> Result<(LinearRgbaF32, ColorProfile), String> {
+    let raw = ferrolite_decode::decode_full(path).map_err(|e| e.to_string())?;
+    let profile = raw.color_profile.clone();
+    let demosaiced = Rcd.to_linear_rgba_f32(&raw);
+    Ok((
+        ferrolite_decode::apply_orientation_linear(demosaiced, raw.orientation),
+        profile,
+    ))
+}
+
 fn run_one(
     gpu: &Arc<GpuContext>,
     item: &BatchItem,
@@ -170,11 +196,8 @@ fn run_one(
     }
     // Decode full-res on the worker thread → (linear image, color profile).
     let (linear, profile) = match item.kind {
-        FileKind::Raw => match ferrolite_decode::decode_full(&item.path) {
-            Ok(raw) => {
-                let profile = raw.color_profile.clone();
-                (Rcd.to_linear_rgba_f32(&raw), profile)
-            }
+        FileKind::Raw => match decode_oriented_raw(&item.path) {
+            Ok(pair) => pair,
             Err(e) => return (false, format!("Decode failed: {e}")),
         },
         _ => match ferrolite_decode::decode_preview(&item.path, item.kind) {
@@ -265,6 +288,101 @@ mod tests {
             "ferrolite-batch-{label}-{}-{seq}.arw",
             std::process::id()
         ))
+    }
+
+    /// A fixture whose EXIF orientation SWAPS axes, or `None` when the
+    /// git-ignored fixture set is absent (fresh clone / CI) — the established
+    /// skip-when-no-fixtures pattern from `ferrolite-decode/tests/decode.rs`.
+    /// `iso0200-…RW2` is recorded as **Rotate270** in `fixtures/raw/FIXTURES.md`
+    /// and is the fixture the author's own crop test used.
+    fn rotated_fixture() -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/raw/iso0200-panasonic-dc-s5-iso200-105mm.RW2");
+        p.is_file().then_some(p)
+    }
+
+    /// Regression: batch export must hand `render_tiled` an UPRIGHT source, so a
+    /// persisted crop (normalized against the oriented frame the user cropped
+    /// on) lands on the region they chose. `decode_oriented_raw` was previously
+    /// inlined in `run_one` WITHOUT `apply_orientation_linear` — the only one of
+    /// the four `decode_full` call sites to skip it — which transposed every
+    /// rotated image's crop. See `decode_oriented_raw`'s doc comment.
+    ///
+    /// Asserts the axes really are swapped relative to the sensor-native
+    /// demosaic, which is the exact property the missing call provided; a
+    /// dims-only check would pass even if the pixels were left unrotated.
+    #[test]
+    fn decode_oriented_raw_uprights_a_rotated_fixture() {
+        let Some(path) = rotated_fixture() else {
+            eprintln!("fixtures/raw absent; skipping");
+            return;
+        };
+        let raw = ferrolite_decode::decode_full(&path).expect("decode_full");
+        assert!(
+            raw.orientation.swaps_dimensions(),
+            "fixture must have a dimension-swapping orientation or this test is              vacuous, got {:?}",
+            raw.orientation
+        );
+        let sensor_native = Rcd.to_linear_rgba_f32(&raw);
+        let (oriented, _) = decode_oriented_raw(&path).expect("decode_oriented_raw");
+
+        assert_eq!(
+            (oriented.width, oriented.height),
+            (sensor_native.height, sensor_native.width),
+            "batch export must upright the demosaic (dims swapped) — without it              a persisted crop is applied to a transposed source and the export              shows an entirely different region"
+        );
+    }
+
+    /// The extent a cropped batch export renders at must be derived from the
+    /// UPRIGHT source. Pins the crop → output-extent contract for a rotated
+    /// image: pre-fix this produced the transposed extent, i.e. a landscape file
+    /// where the user cropped a portrait.
+    #[test]
+    fn a_cropped_rotated_export_renders_at_the_upright_crop_extent() {
+        let Some(path) = rotated_fixture() else {
+            eprintln!("fixtures/raw absent; skipping");
+            return;
+        };
+        // A deliberately non-square normalized crop, so the upright and
+        // transposed extents cannot coincide (the `assert_ne!` guard below).
+        let stack = OpStack::default().set_op(ferrolite_pipeline::Op::Geometry(
+            ferrolite_pipeline::Geometry {
+                crop: ferrolite_pipeline::CropRect {
+                    x: 0.1,
+                    y: 0.2,
+                    w: 0.5,
+                    h: 0.25,
+                },
+                ..Default::default()
+            },
+        ));
+        let raw = ferrolite_decode::decode_full(&path).expect("decode_full");
+        let sensor_native = Rcd.to_linear_rgba_f32(&raw);
+        // The frame the crop was authored against, derived from the RAW's own
+        // orientation rather than from `decode_oriented_raw` — so the guard and
+        // the expectation below stay independent of the code under test.
+        let (uw, uh) = if raw.orientation.swaps_dimensions() {
+            (sensor_native.height, sensor_native.width)
+        } else {
+            (sensor_native.width, sensor_native.height)
+        };
+        let expected = ferrolite_pipeline::edited_output_dims(&stack, uw, uh);
+        let transposed = ferrolite_pipeline::edited_output_dims(
+            &stack,
+            sensor_native.width,
+            sensor_native.height,
+        );
+        assert_ne!(
+            expected, transposed,
+            "this crop must distinguish the upright extent from the transposed              one, or the assertion below cannot fail"
+        );
+
+        let (oriented, _) = decode_oriented_raw(&path).expect("decode_oriented_raw");
+        let got = ferrolite_pipeline::edited_output_dims(&stack, oriented.width, oriented.height);
+        assert_eq!(
+            got, expected,
+            "a cropped batch export must render at the UPRIGHT crop extent;              {got:?} is the transposed extent, so the demosaic reached              `render_tiled` sensor-native"
+        );
     }
 
     #[test]

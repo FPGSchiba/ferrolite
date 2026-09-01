@@ -4,7 +4,7 @@
 //! per-image thumbnail jobs for the grid to reprioritize by visibility.
 
 use crate::library::cell_state::{cell_state, CellState};
-use crate::library::grid_layout::{layout, CachedGridLayout, LayoutSig};
+use crate::library::grid_layout::{uniform_layout, CachedUniformLayout, UniformLayoutSig};
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
@@ -18,35 +18,51 @@ const SEL_ROUND: f32 = 6.0;
 const LABEL_H: f32 = 30.0;
 /// Gap between the thumbnail and its label band.
 const LABEL_PAD: f32 = 3.0;
+/// Spec §4.3's text inset: horizontal breathing room between the label band's
+/// elided text and the cell's own left/right edges, so the ellipsis does not
+/// land flush on the cell boundary.
+const LABEL_INSET: f32 = 3.0;
 /// Outer padding around the grid (left, right, top, bottom) so cells don't hug
 /// the panel edges.
 const MARGIN: f32 = 14.0;
-/// Upper bound on how wide a filename label may push a cell, so one very long
-/// name can't blow out a whole row.
-const MAX_LABEL_W: f32 = 240.0;
+
+/// Size-slider → cell-width mapping from `docs/design/V2/README.md:42`
+/// (`118 + sizePct * 1.7`), spec decision D4. The slider is a 0..=100 percentage
+/// (`settings.grid_size`, default 46), so this yields 118..288 px, default ~196.
+///
+/// Replaced `thumb_size + 60` (60..160). The old 60 px floor made a cell narrower
+/// than a typical filename at small sizes, which is how the label-width floor
+/// came to dominate the layout in the first place.
+const CELL_W_BASE: f32 = 118.0;
+const CELL_W_PER_PCT: f32 = 1.7;
+
+/// Cell width for a `0..=100` Size-slider percentage. Clamps out-of-range input
+/// so a hand-edited or future-versioned settings file cannot produce a
+/// degenerate cell.
+pub(crate) fn cell_width_for_size(size_pct: f32) -> f32 {
+    CELL_W_BASE + size_pct.clamp(0.0, 100.0) * CELL_W_PER_PCT
+}
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = (ui.available_width() - 2.0 * MARGIN).max(1.0);
-    let target_h = cell;
+    // `cell` is the cell WIDTH (spec D4's slider mapping); height follows from
+    // `CELL_ASPECT` inside `uniform_layout`.
+    let cell_w = cell.max(1.0);
 
-    // Rebuild the justified-rows layout only when the image set, width, or cell
-    // size changed. Taken out of `state` for the render pass so `paint_cell` can
-    // borrow `state` mutably without aliasing; restored at the end.
-    let sig = LayoutSig {
+    // Rebuild only when the image set, width, or cell size changed. Taken out of
+    // `state` for the render pass so `paint_cell` can borrow `state` mutably
+    // without aliasing; restored at the end.
+    let sig = UniformLayoutSig {
         images_rev: state.images_rev,
         item_count: state.images.len(),
         avail_w: avail_w.round() as u32,
-        target_h: target_h.round() as u32,
+        cell_w: cell_w.round() as u32,
     };
     let mut cache = state.grid_layout.take();
     if cache.as_ref().map(|c| c.sig) != Some(sig) {
-        let aspects: Vec<f32> = state.images.iter().map(cell_aspect).collect();
-        // Per-cell minimum width = its label width, so portrait filenames aren't
-        // clipped (the cell widens to the text and the image is centered in it).
-        let min_widths: Vec<f32> = state.images.iter().map(|r| label_width(ui, r)).collect();
-        cache = Some(CachedGridLayout {
+        cache = Some(CachedUniformLayout {
             sig,
-            layout: layout(&aspects, &min_widths, avail_w, target_h, GAP, LABEL_H),
+            layout: uniform_layout(state.images.len(), avail_w, cell_w, GAP, LABEL_PAD, LABEL_H),
         });
     }
     let cache = cache.expect("layout built above");
@@ -68,16 +84,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         let scroll_top = (viewport.min.y - MARGIN).max(0.0);
         let vh = viewport.height() + MARGIN;
         let rows = cache.layout.visible_rows(scroll_top, vh);
+        // Bounded by the viewport, never by the item count (CLAUDE.md §1) — see
+        // `uniform_indices_for_rows_is_bounded_by_the_viewport_not_the_item_count`.
+        let indices = cache.layout.indices_for_rows(rows);
 
         // Compute the visible id set (used to fetch tag associations for the
         // window). Ingest thumbnails are now generated inline within the ingest
         // job — there are no separate per-image thumbnail jobs to reprioritize by
         // visibility, so the old promote/demote pass is gone.
         let mut now_visible: HashSet<i64> = HashSet::new();
-        for ri in rows.clone() {
-            for item in &cache.layout.rows[ri].items {
-                now_visible.insert(state.images[item.index].id);
-            }
+        for i in indices.clone() {
+            now_visible.insert(state.images[i].id);
         }
         // Fetch tag associations for the visible window (only missing ids queried).
         state.ensure_tags_for(&now_visible);
@@ -91,33 +108,73 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         state.retain_visible_thumbnail_jobs(&now_visible);
 
         let origin = ui.min_rect().left_top() + egui::vec2(MARGIN, MARGIN);
-        for ri in rows {
-            let row = &cache.layout.rows[ri];
-            for item in &row.items {
-                let rec = state.images[item.index].clone();
-                let cell_x = origin.x + item.x;
-                let cell_y = origin.y + row.y;
-                // Image centered within its (possibly wider) cell footprint.
-                let img_x = cell_x + (item.width - item.img_width) * 0.5;
-                let img_rect = egui::Rect::from_min_size(
-                    egui::pos2(img_x, cell_y),
-                    egui::vec2(item.img_width, row.img_height),
-                );
-                if let Some(id) = paint_cell(
-                    ui,
-                    state,
-                    &rec,
-                    img_rect,
-                    queued.contains(&rec.id),
-                    is_ingesting,
-                ) {
-                    opened = Some(id);
+        for i in indices {
+            let rec = state.images[i].clone();
+            let (cx, cy) = cache.layout.cell_offset(i);
+            let cell_rect = egui::Rect::from_min_size(
+                origin + egui::vec2(cx, cy),
+                egui::vec2(cache.layout.cell_w, cache.layout.cell_h),
+            );
+            if let Some(id) = paint_cell(
+                ui,
+                state,
+                &rec,
+                cell_rect,
+                queued.contains(&rec.id),
+                is_ingesting,
+            ) {
+                opened = Some(id);
+            }
+            let label_rect = egui::Rect::from_min_size(
+                egui::pos2(cell_rect.left(), cell_rect.bottom() + LABEL_PAD),
+                egui::vec2(cell_rect.width(), LABEL_H - LABEL_PAD),
+            );
+            paint_meta(ui, &rec, label_rect);
+        }
+
+        // Clicking unoccupied grid space clears the selection — the standard
+        // "click the background to deselect" gesture.
+        //
+        // Decided from the LAYOUT (`index_at`) rather than from a background
+        // `Response`: the cells' own `interact` rects, the caption labels, and
+        // the scroll area's floating scrollbar all overlap this region, so
+        // whether a background widget would win the click depends on egui's
+        // hit-test ordering. Asking the layout "is there a photo under that
+        // point?" is closed-form, needs no extra widget, and is unit-tested
+        // (`grid_layout::index_at`) — including that a caption counts as its
+        // own photo, so clicking a filename never deselects.
+        //
+        // Gated on the pointer being inside the visible viewport so a click
+        // landing on the toolbar or a panel above cannot reach here, and on the
+        // primary button so a right-click (context menu) is unaffected. The
+        // scrollbar strip is excluded too: when the content overflows, egui's
+        // floating scrollbar overlays the right edge, and a click on it lands in
+        // space the layout rightly calls empty — deselecting on a scroll gesture
+        // would be a nasty surprise.
+        if ui.input(|i| i.pointer.primary_clicked()) {
+            let visible = ui.clip_rect();
+            let scrollbar_w = if cache.layout.total_height + 2.0 * MARGIN > visible.height() {
+                let s = ui.spacing().scroll;
+                if s.floating {
+                    s.floating_width.max(s.bar_width)
+                } else {
+                    s.bar_width
                 }
-                let label_rect = egui::Rect::from_min_size(
-                    egui::pos2(cell_x, img_rect.bottom() + LABEL_PAD),
-                    egui::vec2(item.width, LABEL_H - LABEL_PAD),
-                );
-                paint_meta(ui, &rec, label_rect);
+            } else {
+                0.0
+            };
+            let clickable =
+                egui::Rect::from_min_max(visible.min, visible.max - egui::vec2(scrollbar_w, 0.0));
+            if let Some(p) = ui.ctx().pointer_interact_pos() {
+                let local = p - origin;
+                if clickable.contains(p)
+                    && cache.layout.index_at(local.x, local.y).is_none()
+                    && !state.selection.is_empty()
+                {
+                    state.selection.clear();
+                    state.selected = None;
+                    state.selection_anchor = None;
+                }
             }
         }
     });
@@ -128,29 +185,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     }
 
     opened
-}
-
-/// Measured pixel width of a cell's meta label (the wider of filename/date), so
-/// the layout can widen narrow cells enough to show the name. Capped so one long
-/// name can't dominate a row. egui caches galleys, so repeated calls are cheap.
-fn label_width(ui: &egui::Ui, rec: &ImageRecord) -> f32 {
-    let name = ui.fonts(|f| {
-        f.layout_no_wrap(
-            rec.filename.clone(),
-            egui::FontId::proportional(11.0),
-            theme::TEXT_PRIMARY,
-        )
-        .size()
-        .x
-    });
-    let date = format_capture_date(rec.capture_time.as_deref()).map_or(0.0, |d| {
-        ui.fonts(|f| {
-            f.layout_no_wrap(d, egui::FontId::proportional(10.0), theme::TEXT_DIM)
-                .size()
-                .x
-        })
-    });
-    (name.max(date) + 6.0).min(MAX_LABEL_W)
 }
 
 /// Upright aspect ratio (width / height) of an image, matching what the
@@ -179,6 +213,34 @@ pub(crate) fn cell_aspect(rec: &ImageRecord) -> f32 {
     (w / h).clamp(0.1, 10.0)
 }
 
+/// Where a thumbnail of ratio `aspect` sits inside its uniform `cell` box:
+/// letterboxed to `grid_layout::fit_size`, horizontally centered, and
+/// **bottom-aligned**.
+///
+/// Bottom-aligned, not centered, because the caption is anchored to the CELL's
+/// bottom edge while the image is only as tall as its own aspect allows. Centred
+/// placement therefore split the slack in two and pushed the image up off its
+/// caption by half of it: at the default Size, `sample.rw2` (4060x2250, ratio
+/// 1.80 against the cell's 1.5) sat 11px clear of the cell bottom, so its
+/// caption read 14px away while every 3:2 cell's read 3px. With the grid ground
+/// deliberately invisible that inconsistency is the most visible thing about a
+/// wide image. Bottom-aligning moves all the slack above the thumbnail, where no
+/// caption is, so every cell's image-to-caption gap is exactly `LABEL_PAD`.
+///
+/// Only images WIDER than the cell are affected: a portrait or an exact-3:2
+/// frame already fills the cell's height, so its rect is unchanged.
+///
+/// `egui::Rect` is plain data (no `Ui` needed), so this stays unit-testable —
+/// it closes the placement half of the spec's fit coverage, which `fit_size`'s
+/// own tests cannot reach because they return a size, not a position.
+pub(crate) fn cell_image_rect(cell: egui::Rect, aspect: f32) -> egui::Rect {
+    let (img_w, img_h) = crate::library::grid_layout::fit_size(cell.width(), cell.height(), aspect);
+    egui::Rect::from_min_size(
+        egui::pos2(cell.center().x - img_w * 0.5, cell.bottom() - img_h),
+        egui::vec2(img_w, img_h),
+    )
+}
+
 /// Whether `paint_cell` should submit its ordinary lazy-load thumbnail fetch
 /// (`AppState::request_thumbnail`) for a visible cell this frame.
 ///
@@ -199,27 +261,46 @@ pub(crate) fn should_request_lazy_thumbnail(
     !has_texture && decode_done && !stale_regen_inflight
 }
 
-/// Draw the per-cell meta label centered under the (centered) thumbnail:
-/// filename on top, capture date below. The cell footprint is at least the label
-/// width (see `label_width`), so the centered text is never clipped.
-/// Non-interactive — the thumbnail above is the click target.
-fn paint_meta(ui: &egui::Ui, rec: &ImageRecord, rect: egui::Rect) {
-    let p = ui.painter_at(rect);
-    let cx = rect.center().x;
-    p.text(
-        egui::pos2(cx, rect.top()),
-        egui::Align2::CENTER_TOP,
-        &rec.filename,
-        egui::FontId::proportional(11.0),
-        theme::TEXT_PRIMARY,
+/// Draw the per-cell meta label under the thumbnail: filename on top, capture
+/// date below, both centered and both ELIDED to the cell width.
+///
+/// Eliding (not measuring) is the rule: `Label::truncate()` lays out one galley
+/// for one visible cell inside the already-virtualized render pass, whereas the
+/// `label_width` floor this replaces measured every filename in the catalog on
+/// each layout rebuild. The full name on hover comes free from `egui::Label`
+/// itself: it checks the galley's own `elided` flag and attaches the hover
+/// tooltip ONLY when the text was actually truncated (`egui-0.29.1/src/widgets/
+/// label.rs`) — so nothing more needs doing here, and nothing should be added:
+/// an explicit `.on_hover_text(...)` on this response would stack a SECOND
+/// tooltip bubble on a long name (each call adds a bubble, it does not replace
+/// one) and would wrongly attach a tooltip to a short, non-elided name.
+///
+/// `selectable(false)` keeps the label inert so it never steals the drag or
+/// click that the cell's own `interact` owns.
+fn paint_meta(ui: &mut egui::Ui, rec: &ImageRecord, rect: egui::Rect) {
+    let rect = rect.shrink2(egui::vec2(LABEL_INSET, 0.0));
+    let name_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 14.0));
+    ui.put(
+        name_rect,
+        egui::Label::new(
+            egui::RichText::new(&rec.filename)
+                .size(11.0)
+                .color(theme::TEXT_PRIMARY),
+        )
+        .truncate()
+        .selectable(false),
     );
+
     if let Some(date) = format_capture_date(rec.capture_time.as_deref()) {
-        p.text(
-            egui::pos2(cx, rect.top() + 14.0),
-            egui::Align2::CENTER_TOP,
-            date,
-            egui::FontId::proportional(10.0),
-            theme::TEXT_DIM,
+        let date_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.top() + 14.0),
+            egui::vec2(rect.width(), (rect.height() - 14.0).max(1.0)),
+        );
+        ui.put(
+            date_rect,
+            egui::Label::new(egui::RichText::new(date).size(10.0).color(theme::TEXT_DIM))
+                .truncate()
+                .selectable(false),
         );
     }
 }
@@ -334,13 +415,26 @@ fn paint_cell(
     let has_tex = state.textures.contains(rec.id);
     let painter = ui.painter_at(rect);
 
-    // Thumbnail fills the full cell in both states; the gradient border is
-    // drawn on top at the end of the function.
-    let img_rect = rect;
+    // The image is letterboxed inside the cell box, not stretched to it — and
+    // bottom-aligned within it, so every caption sits the same distance below
+    // its thumbnail (see `cell_image_rect`). The aspect comes from the RECORD
+    // via the shared `cell_aspect`, not from the texture, so the cell does not
+    // reflow when the thumbnail finishes loading. Every overlay below (rating,
+    // flag, queue badge, tag dots, selection ring) anchors to `img_rect`, so
+    // they hug the thumbnail rather than floating over a letterbox bar (D5).
+    let img_rect = cell_image_rect(rect, cell_aspect(rec));
 
     // Round the thumbnail corners to match the selection border so a square
     // corner never pokes outside the rounded border. Unselected cells stay square.
     let img_round = if selected { SEL_ROUND } else { 0.0 };
+
+    // NO cell-ground fill: the grid is deliberately invisible, so an image that
+    // does not fill its cell shows the canvas rather than a lighter slot. That
+    // is the author's explicit call after seeing both (the export queue does
+    // paint a ground; the two panels differ on purpose). The consequence to
+    // keep in mind is that the hit area below (`ui.interact(rect, ...)`) is the
+    // whole cell, so it extends a little past the visible thumbnail — a
+    // forgiving click target, but an invisible one.
     match cell_state(rec, has_tex, is_ingesting) {
         CellState::Ready => {
             if let Some(tex) = state.textures.get(rec.id) {
@@ -466,7 +560,8 @@ fn paint_cell(
 
     // Selection: ctrl/cmd-click toggles; shift-click range-select; plain click replaces.
     // Context menu on right-click.
-    // Hit area remains the full rect (unchanged).
+    // Hit area is the full CELL box, not the letterboxed image: a uniform,
+    // gap-free target means a portrait is no harder to click than a panorama.
     let resp = ui.interact(
         rect,
         ui.id().with(("cell", rec.id)),
@@ -524,7 +619,7 @@ fn paint_cell(
     // painter is clipped to `rect`, so a band centered nearer the edge would have
     // its outer half clipped away (which hid the halo before).
     if selected {
-        let path = rect.shrink(2.0);
+        let path = img_rect.shrink(2.0);
         painter.rect_stroke(
             path,
             SEL_ROUND,
@@ -711,5 +806,207 @@ mod tests {
             format_capture_date(Some("sometime")).as_deref(),
             Some("sometime")
         );
+    }
+
+    /// The image must be letterboxed inside its cell, never stretched to it.
+    /// `paint_cell` cannot be unit-tested (it needs an egui `Ui`), so this pins
+    /// the composition it performs: `fit_size` of `cell_aspect`.
+    #[test]
+    fn cell_image_is_letterboxed_to_its_own_aspect() {
+        use crate::library::grid_layout::fit_size;
+        // Portrait thumbnail (2:3) in a landscape 3:2 cell.
+        let r = rec(
+            Some(4000),
+            Some(6000),
+            Orientation::Normal,
+            Some(200),
+            Some(300),
+        );
+        let a = cell_aspect(&r);
+        let (w, h) = fit_size(150.0, 100.0, a);
+        assert!(
+            w < 150.0,
+            "a portrait must not fill a landscape cell's width"
+        );
+        assert!((h - 100.0).abs() < 0.01, "it should fill the height");
+        assert!(
+            (w / h - a).abs() < 1e-3,
+            "the fitted rect must keep the image's aspect, else it is stretched"
+        );
+    }
+
+    // --- cell_image_rect (letterbox placement) --------------------------
+
+    /// The cell box at the default Size (46 -> 196.2px wide, 3:2).
+    fn default_cell() -> egui::Rect {
+        let w = cell_width_for_size(46.0);
+        egui::Rect::from_min_size(
+            egui::pos2(100.0, 200.0),
+            egui::vec2(w, w / crate::library::grid_layout::CELL_ASPECT),
+        )
+    }
+
+    /// The reported defect: `sample.rw2` (4060x2250, ratio 1.80) is wider than
+    /// the 3:2 cell, so it is width-bound and shorter than the cell. Centred
+    /// placement left it hanging 11px clear of the cell bottom, which -- since
+    /// the caption is anchored to the CELL bottom -- made its caption gap 14px
+    /// against every 3:2 cell's 3px. It must sit ON the cell's bottom edge.
+    #[test]
+    fn a_wide_image_is_bottom_aligned_so_its_caption_gap_matches_every_other_cell() {
+        let cell = default_cell();
+        let r = cell_image_rect(cell, 4060.0 / 2250.0);
+        assert!(
+            (r.bottom() - cell.bottom()).abs() < 0.01,
+            "a wide image must sit on the cell's bottom edge, not float above it \
+             (bottom {} vs cell bottom {})",
+            r.bottom(),
+            cell.bottom()
+        );
+        assert!(
+            r.top() > cell.top() + 1.0,
+            "all the slack should be ABOVE the image, where no caption is"
+        );
+    }
+
+    /// An exact-3:2 frame fills the cell, so bottom-aligning changes nothing.
+    #[test]
+    fn a_three_two_image_still_fills_the_cell_exactly() {
+        let cell = default_cell();
+        let r = cell_image_rect(cell, crate::library::grid_layout::CELL_ASPECT);
+        assert!((r.width() - cell.width()).abs() < 0.01);
+        assert!((r.height() - cell.height()).abs() < 0.01);
+        assert!((r.top() - cell.top()).abs() < 0.01);
+        assert!((r.bottom() - cell.bottom()).abs() < 0.01);
+    }
+
+    /// A portrait is height-bound, so it already fills the cell vertically and
+    /// bottom-aligning is a no-op for it; what matters is that it stays
+    /// horizontally CENTRED (side bars equal).
+    #[test]
+    fn a_portrait_fills_the_height_and_stays_horizontally_centred() {
+        let cell = default_cell();
+        let r = cell_image_rect(cell, 2.0 / 3.0);
+        assert!((r.height() - cell.height()).abs() < 0.01, "height-bound");
+        assert!(r.width() < cell.width(), "narrower than the cell");
+        let left_bar = r.left() - cell.left();
+        let right_bar = cell.right() - r.right();
+        assert!(
+            (left_bar - right_bar).abs() < 0.01,
+            "side bars must be equal: {left_bar} vs {right_bar}"
+        );
+    }
+
+    /// Whatever the source shape, the placed rect stays inside its cell and
+    /// keeps the image's own aspect -- never stretched, never overflowing into a
+    /// neighbouring cell.
+    #[test]
+    fn placement_is_contained_and_never_distorts_for_any_aspect() {
+        let cell = default_cell();
+        for a in [0.1_f32, 0.5, 0.6667, 1.0, 1.5, 1.8044, 2.5, 4.0, 10.0] {
+            let r = cell_image_rect(cell, a);
+            assert!(
+                r.left() >= cell.left() - 0.01
+                    && r.right() <= cell.right() + 0.01
+                    && r.top() >= cell.top() - 0.01
+                    && r.bottom() <= cell.bottom() + 0.01,
+                "aspect {a}: {r:?} escapes cell {cell:?}"
+            );
+            assert!(
+                (r.width() / r.height() - a).abs() < 1e-3,
+                "aspect {a}: placed ratio {} differs -- the image would be stretched",
+                r.width() / r.height()
+            );
+        }
+    }
+
+    /// Guard against the O(all-items) text measurement returning. The deleted
+    /// `label_width` called egui's no-wrap text layout on EVERY image on each
+    /// layout rebuild (any panel resize or Size-slider change) — the class of
+    /// work CLAUDE.md's virtualization rule forbids. Eliding to a known cell
+    /// width replaces it.
+    ///
+    /// Each needle is ASSEMBLED AT RUNTIME from two fragments so it cannot match
+    /// this test's own source (`include_str!` pulls in the test module too, so a
+    /// plain literal would make the test red even on correct code). Same
+    /// convention as `settings::dto`'s `disclosure_snapshot_covers_every_open_field`,
+    /// which crafts its needle so it cannot self-match. `\r` is stripped so a
+    /// CRLF checkout does not change the result.
+    #[test]
+    fn the_grid_never_measures_filenames_to_size_cells() {
+        let src = include_str!("grid.rs").replace('\r', "");
+        let measure_call = ["layout_no", "_wrap"].concat();
+        assert!(
+            !src.contains(&measure_call),
+            "grid.rs measures text again — sizing cells from filename widths \
+             reintroduces the O(all-items) work and the row collapse"
+        );
+        let label_cap = ["MAX_LABEL", "_W"].concat();
+        assert!(
+            !src.contains(&label_cap),
+            "the label-width floor's cap is back; a filename-derived minimum \
+             cell width is what made the row solver unsolvable"
+        );
+    }
+
+    /// The justified solver must be GONE, not merely bypassed. Task 2's zeroed
+    /// `min_widths` argument removed the symptom; leaving `solve_row_height` in
+    /// the tree leaves the 0.4x clamp one call site away from returning.
+    ///
+    /// Needles are assembled at runtime so they cannot match this test's own
+    /// source. They grep a different file (`grid_layout.rs`) today, so a plain
+    /// literal would work — but assembling them means the test keeps meaning the
+    /// same thing if it is ever moved into that file. Same convention as
+    /// `settings::dto`'s `disclosure_snapshot_covers_every_open_field`.
+    ///
+    /// There is deliberately NO positive "grid.rs calls uniform_layout"
+    /// assertion: greping this file for that name would match this test's own
+    /// text and pass vacuously, and the compiler is the stronger check anyway —
+    /// once the solver is deleted, `grid.rs` cannot build a layout without it.
+    #[test]
+    fn the_justified_row_solver_is_gone() {
+        let layout_src = include_str!("grid_layout.rs").replace('\r', "");
+        let gone = [
+            ["solve_row", "_height"].concat(),
+            ["fn row", "_width"].concat(),
+            ["struct Row", "Item"].concat(),
+        ];
+        for needle in &gone {
+            assert!(
+                !layout_src.contains(needle),
+                "grid_layout.rs still defines `{needle}` — the uniform grid \
+                 replaced the justified solver, so it must not linger"
+            );
+        }
+    }
+
+    /// Spec D4: the Size slider maps to cell WIDTH by the documented V2 formula
+    /// `118 + sizePct * 1.7` (docs/design/V2/README.md:42), replacing the old
+    /// `thumb_size + 60`. Pinned because the old 60px floor is what let a
+    /// filename dominate a cell.
+    #[test]
+    fn cell_width_follows_the_documented_v2_size_range() {
+        assert!(
+            (cell_width_for_size(0.0) - 118.0).abs() < 0.01,
+            "slider min"
+        );
+        assert!(
+            (cell_width_for_size(100.0) - 288.0).abs() < 0.01,
+            "slider max"
+        );
+        // The persisted default (settings::dto grid_size = 46.0).
+        assert!((cell_width_for_size(46.0) - 196.2).abs() < 0.01, "default");
+    }
+
+    #[test]
+    fn cell_width_is_monotonic_and_clamps_out_of_range_input() {
+        let mut prev = 0.0_f32;
+        for pct in [0.0_f32, 10.0, 46.0, 90.0, 100.0] {
+            let w = cell_width_for_size(pct);
+            assert!(w > prev, "must grow with the slider");
+            prev = w;
+        }
+        // A persisted setting outside 0..=100 must not produce a degenerate cell.
+        assert!((cell_width_for_size(-50.0) - 118.0).abs() < 0.01);
+        assert!((cell_width_for_size(999.0) - 288.0).abs() < 0.01);
     }
 }

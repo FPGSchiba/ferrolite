@@ -287,12 +287,12 @@ pub struct AppState {
     /// (earliest, latest) capture-date strings from the catalog, or None.
     pub date_range: Option<(String, String)>,
 
-    /// Bumped every time `images` is reassigned, so the grid's justified-layout
+    /// Bumped every time `images` is reassigned, so the grid's uniform-layout
     /// cache knows when to rebuild (covers streaming ingest, filter, folder
     /// switch, and in-place edits — all funnel through `refresh_images`).
     pub images_rev: u64,
-    /// Cached justified-rows layout, rebuilt only when its inputs change.
-    pub grid_layout: Option<crate::library::grid_layout::CachedGridLayout>,
+    /// Cached uniform-cell grid layout, rebuilt only when its inputs change.
+    pub grid_layout: Option<crate::library::grid_layout::CachedUniformLayout>,
 
     /// Editing working space (spec §4.1, default Rec.2020). Global preference; the
     /// ColorMatrixNode + display tail are recomposed on change.
@@ -706,7 +706,7 @@ impl AppState {
         if let Ok(rows) = self.reads.query_images(&q) {
             self.images = rows;
         }
-        // Bump the layout revision so the grid rebuilds its justified layout for
+        // Bump the layout revision so the grid rebuilds its uniform layout for
         // the new set, and invalidate the per-cell tag cache so it re-fetches.
         self.images_rev = self.images_rev.wrapping_add(1);
         self.visible_tags.clear();

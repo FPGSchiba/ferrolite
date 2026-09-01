@@ -504,8 +504,26 @@ pub fn show(ui: &mut egui::Ui, thumb_size: &mut f32, state: &mut AppState) -> bo
                 egui::vec2(SIZE_SLIDER_W, ui.available_height()),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
+                    // "Size" is drawn as its own label so the slider's label
+                    // column can collapse (`label: ""`), handing the freed width
+                    // to the track while the value readout and reset arrow keep
+                    // their own columns. The shared 74px label gutter exists to
+                    // align stacked panel rows so their tracks start at one x;
+                    // this slider stands alone, and reserving the gutter for a
+                    // ~27px word left it a 42px track inside its 208px box.
+                    //
+                    // Deliberately NOT done via `custom_label_w`: that field
+                    // also becomes the RIGHT margin, which is what centres each
+                    // Lum track inside the Color Grading 2x2 wheel columns
+                    // (`develop::grade_widget`, guarded by two tests). Narrowing
+                    // the label there would squeeze the value/reset columns.
+                    ui.label(
+                        egui::RichText::new("Size")
+                            .size(11.0)
+                            .color(crate::theme::TEXT_DIM),
+                    );
                     ui.add(EguiSlider {
-                        label: "Size",
+                        label: "",
                         value: thumb_size,
                         min: 0.0_f32,
                         max: 100.0_f32,

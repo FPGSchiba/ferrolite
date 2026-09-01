@@ -161,6 +161,49 @@ impl UniformGridLayout {
         let end = rows.end.saturating_mul(cols).min(self.item_count);
         start..end.max(start)
     }
+
+    /// The item occupying content-space point `(x, y)`, or `None` when the point
+    /// falls on unoccupied grid space: an inter-cell gap, the ragged tail of the
+    /// last row, anywhere below the last row, or outside the centred block.
+    ///
+    /// A cell's occupied region is its box PLUS its caption band, because the
+    /// caption belongs to the photo: clicking a filename should not read as
+    /// clicking nothing. That region is exactly `row_stride - gap` tall (the
+    /// stride minus the inter-row gap it also carries).
+    ///
+    /// Coordinates are in the layout's own 0-based space, so the caller
+    /// subtracts its content origin first. Closed-form, so answering "did that
+    /// click land on a photo?" costs no iteration over cells.
+    pub fn index_at(&self, x: f32, y: f32) -> Option<usize> {
+        if x < 0.0 || y < 0.0 || self.item_count == 0 || self.row_stride <= 0.0 {
+            return None;
+        }
+        // Vertical: reject the inter-row gap below each row's caption band.
+        let row = (y / self.row_stride).floor();
+        if row < 0.0 || !row.is_finite() {
+            return None;
+        }
+        let row = row as usize;
+        let within_row = y - row as f32 * self.row_stride;
+        if within_row > self.row_stride - self.gap {
+            return None;
+        }
+        // Horizontal: reject the centring inset and the inter-cell gaps.
+        let dx = x - self.x_offset;
+        if dx < 0.0 {
+            return None;
+        }
+        let stride_x = self.cell_w + self.gap;
+        let col = (dx / stride_x).floor() as usize;
+        if col >= self.cols {
+            return None;
+        }
+        if dx - col as f32 * stride_x > self.cell_w {
+            return None;
+        }
+        let index = row.checked_mul(self.cols)?.checked_add(col)?;
+        (index < self.item_count).then_some(index)
+    }
 }
 
 /// Cache key: the uniform layout is rebuilt only when the image set, available
@@ -406,6 +449,120 @@ mod tests {
         assert_eq!(l.row_count(), 0);
         assert_eq!(l.total_height, 0.0);
         assert_eq!(l.indices_for_rows(l.visible_rows(0.0, 600.0)), 0..0);
+    }
+
+    // --- index_at (which photo, if any, is under a click) ---------------
+
+    /// 10 items, cell 100 + gap 8 in 340px => 3 cols, 4 rows.
+    fn hit() -> UniformGridLayout {
+        uni(10, 340.0, 100.0)
+    }
+
+    #[test]
+    fn index_at_finds_the_cell_under_a_point() {
+        let l = hit();
+        assert_eq!(l.cols, 3);
+        // Middle of each of the first row's three cells.
+        for col in 0..3 {
+            let (x, y) = l.cell_offset(col);
+            let got = l.index_at(x + l.cell_w * 0.5, y + l.cell_h * 0.5);
+            assert_eq!(got, Some(col), "centre of cell {col}");
+        }
+        // Second row, first cell.
+        let (x, y) = l.cell_offset(3);
+        assert_eq!(l.index_at(x + 1.0, y + 1.0), Some(3));
+    }
+
+    #[test]
+    fn index_at_treats_the_caption_band_as_part_of_its_photo() {
+        let l = hit();
+        let (x, y) = l.cell_offset(0);
+        // Just below the cell box, inside the caption band.
+        let in_caption = y + l.cell_h + 2.0;
+        assert_eq!(
+            l.index_at(x + 5.0, in_caption),
+            Some(0),
+            "clicking a filename must not read as clicking empty space"
+        );
+    }
+
+    #[test]
+    fn index_at_rejects_the_gap_between_cells_in_a_row() {
+        let l = hit();
+        let (x0, y) = l.cell_offset(0);
+        // Strictly inside the horizontal gap between cell 0 and cell 1.
+        let in_gap = x0 + l.cell_w + l.gap * 0.5;
+        assert_eq!(l.index_at(in_gap, y + l.cell_h * 0.5), None);
+    }
+
+    #[test]
+    fn index_at_rejects_the_gap_between_rows() {
+        let l = hit();
+        // Strictly inside the vertical gap: past the caption band, before the
+        // next row's top.
+        let in_gap = l.row_stride - l.gap * 0.5;
+        assert_eq!(l.index_at(l.x_offset + 5.0, in_gap), None);
+    }
+
+    #[test]
+    fn index_at_rejects_the_ragged_tail_of_the_last_row() {
+        // 10 items in 3 cols: the last row holds only item 9, so cols 1 and 2
+        // of row 3 are empty space even though they are inside the block.
+        let l = hit();
+        let (x, y) = l.cell_offset(9);
+        assert_eq!(l.index_at(x + 1.0, y + 1.0), Some(9));
+        let stride_x = l.cell_w + l.gap;
+        assert_eq!(
+            l.index_at(x + stride_x + 1.0, y + 1.0),
+            None,
+            "col 1 of the tail"
+        );
+        assert_eq!(
+            l.index_at(x + 2.0 * stride_x + 1.0, y + 1.0),
+            None,
+            "col 2 of the tail"
+        );
+    }
+
+    #[test]
+    fn index_at_rejects_everything_below_the_last_row() {
+        let l = hit();
+        assert_eq!(l.index_at(l.x_offset + 5.0, l.total_height + 50.0), None);
+    }
+
+    #[test]
+    fn index_at_rejects_the_centring_inset_and_negative_coordinates() {
+        // 500px wide, 4 cols of 100 + 3 gaps = 424 => x_offset 38.
+        let l = uniform_layout(20, 500.0, 100.0, 8.0, 3.0, 30.0);
+        assert!(l.x_offset > 1.0);
+        assert_eq!(l.index_at(l.x_offset - 1.0, 5.0), None, "left inset");
+        assert_eq!(l.index_at(-5.0, 5.0), None);
+        assert_eq!(l.index_at(5.0, -5.0), None);
+    }
+
+    #[test]
+    fn index_at_on_an_empty_grid_is_always_none() {
+        let l = uni(0, 900.0, 150.0);
+        assert_eq!(l.index_at(0.0, 0.0), None);
+        assert_eq!(l.index_at(50.0, 50.0), None);
+    }
+
+    /// Never returns an index past the item list, whatever the point -- the
+    /// caller indexes `state.images` with it.
+    #[test]
+    fn index_at_never_exceeds_the_item_count() {
+        let l = hit();
+        let mut x = 0.0_f32;
+        while x < 400.0 {
+            let mut y = 0.0_f32;
+            while y < l.total_height + 100.0 {
+                if let Some(i) = l.index_at(x, y) {
+                    assert!(i < l.item_count, "index {i} >= item_count at ({x},{y})");
+                }
+                y += 3.0;
+            }
+            x += 3.0;
+        }
     }
 
     #[test]

@@ -131,6 +131,52 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
             );
             paint_meta(ui, &rec, label_rect);
         }
+
+        // Clicking unoccupied grid space clears the selection — the standard
+        // "click the background to deselect" gesture.
+        //
+        // Decided from the LAYOUT (`index_at`) rather than from a background
+        // `Response`: the cells' own `interact` rects, the caption labels, and
+        // the scroll area's floating scrollbar all overlap this region, so
+        // whether a background widget would win the click depends on egui's
+        // hit-test ordering. Asking the layout "is there a photo under that
+        // point?" is closed-form, needs no extra widget, and is unit-tested
+        // (`grid_layout::index_at`) — including that a caption counts as its
+        // own photo, so clicking a filename never deselects.
+        //
+        // Gated on the pointer being inside the visible viewport so a click
+        // landing on the toolbar or a panel above cannot reach here, and on the
+        // primary button so a right-click (context menu) is unaffected. The
+        // scrollbar strip is excluded too: when the content overflows, egui's
+        // floating scrollbar overlays the right edge, and a click on it lands in
+        // space the layout rightly calls empty — deselecting on a scroll gesture
+        // would be a nasty surprise.
+        if ui.input(|i| i.pointer.primary_clicked()) {
+            let visible = ui.clip_rect();
+            let scrollbar_w = if cache.layout.total_height + 2.0 * MARGIN > visible.height() {
+                let s = ui.spacing().scroll;
+                if s.floating {
+                    s.floating_width.max(s.bar_width)
+                } else {
+                    s.bar_width
+                }
+            } else {
+                0.0
+            };
+            let clickable =
+                egui::Rect::from_min_max(visible.min, visible.max - egui::vec2(scrollbar_w, 0.0));
+            if let Some(p) = ui.ctx().pointer_interact_pos() {
+                let local = p - origin;
+                if clickable.contains(p)
+                    && cache.layout.index_at(local.x, local.y).is_none()
+                    && !state.selection.is_empty()
+                {
+                    state.selection.clear();
+                    state.selected = None;
+                    state.selection_anchor = None;
+                }
+            }
+        }
     });
     state.grid_layout = Some(cache);
 

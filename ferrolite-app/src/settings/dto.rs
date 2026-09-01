@@ -390,6 +390,12 @@ pub fn default_panel_width() -> f32 {
     300.0
 }
 
+/// Default Size-slider percentage for both thumbnail grids (mid-range).
+/// Shared so the Library and Export grids start at the same size.
+fn default_grid_size() -> f32 {
+    46.0
+}
+
 pub fn default_filmstrip_height() -> f32 {
     96.0
 }
@@ -404,6 +410,11 @@ pub struct Settings {
     pub filter: PersistedFilter,
     pub working_space: PersistedWorkingSpace,
     pub grid_size: f32,
+    /// Size-slider percentage for the EXPORT queue's thumbnail grid, kept
+    /// separate from `grid_size` so the two grids size independently: the
+    /// Library fills a whole module, the queue shares a narrower panel.
+    #[serde(default = "default_grid_size")]
+    pub export_grid_size: f32,
     #[serde(default = "default_filmstrip_height")]
     pub filmstrip_height: f32,
     #[serde(default = "default_panel_width")]
@@ -477,7 +488,8 @@ impl Default for Settings {
             export: PersistedExport::default(),
             filter: PersistedFilter::default(),
             working_space: PersistedWorkingSpace::default(),
-            grid_size: 46.0,
+            grid_size: default_grid_size(),
+            export_grid_size: default_grid_size(),
             filmstrip_height: default_filmstrip_height(),
             right_panel_width: default_panel_width(),
             info_panel_width: default_panel_width(),

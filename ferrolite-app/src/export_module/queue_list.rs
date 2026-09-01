@@ -6,12 +6,6 @@ use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
 
-/// Fixed thumbnail CELL box (3:2) and layout constants. Every cell allocates
-/// this exact box whatever the image's shape — the uniform footprint is what
-/// keeps `horizontal_wrapped`'s rows aligned (see `CELL_H`). The image itself is
-/// letterboxed INSIDE the box (`grid_layout::fit_size`), never stretched to it.
-const THUMB_W: f32 = 132.0;
-const THUMB_H: f32 = 88.0;
 const CELL_GAP: f32 = 10.0;
 const ICON_BTN: f32 = 18.0;
 const ICON_R: f32 = 5.0;
@@ -22,10 +16,33 @@ const ICON_R: f32 = 5.0;
 const CELL_LABEL_H: f32 = 16.0;
 /// Intra-cell vertical gap between thumbnail/label/remove-row.
 const CELL_PAD: f32 = 4.0;
-/// Exact, uniform cell height: every queue cell allocates this same box
-/// (thumb + 2 gaps + label + remove-row), so `horizontal_wrapped` never sees
-/// a taller-than-allocated cell and cannot drift rows out of alignment.
-const CELL_H: f32 = THUMB_H + CELL_PAD + CELL_LABEL_H + CELL_PAD + ICON_BTN;
+
+/// The queue cell's box for a given Size-slider-derived thumbnail width.
+///
+/// Every cell allocates the SAME box whatever its image's shape — that uniform
+/// footprint is what keeps `horizontal_wrapped`'s rows aligned, so it must not
+/// vary per item. The image is letterboxed inside the box
+/// (`library::grid::cell_image_rect`), never stretched to it.
+#[derive(Clone, Copy)]
+struct CellMetrics {
+    /// Thumbnail box width — the Size slider's value.
+    thumb_w: f32,
+    /// Thumbnail box height, from the shared 3:2 cell aspect so the queue and
+    /// the Library grid stay the same shape.
+    thumb_h: f32,
+    /// Full cell height: thumb + 2 gaps + label + remove-row.
+    cell_h: f32,
+}
+
+fn cell_metrics(thumb_w: f32) -> CellMetrics {
+    let thumb_w = thumb_w.max(1.0);
+    let thumb_h = (thumb_w / crate::library::grid_layout::CELL_ASPECT).max(1.0);
+    CellMetrics {
+        thumb_w,
+        thumb_h,
+        cell_h: thumb_h + CELL_PAD + CELL_LABEL_H + CELL_PAD + ICON_BTN,
+    }
+}
 
 /// DnD payload id for the export-queue drag source (see [`egui::DragAndDrop`]).
 /// Kept a plain `i64` image id — a future Library drag-to-collections feature
@@ -35,7 +52,10 @@ fn drag_id(id: i64) -> egui::Id {
     egui::Id::new(("export_queue_cell", id))
 }
 
-pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
+/// `thumb_w` is the Size-slider-derived thumbnail width
+/// (`library::grid::cell_width_for_size` of `settings.export_grid_size`).
+pub fn show(ui: &mut egui::Ui, state: &mut AppState, thumb_w: f32) {
+    let m = cell_metrics(thumb_w);
     if state.export_queue.is_empty() {
         ui.centered_and_justified(|ui| {
             ui.label(
@@ -68,15 +88,15 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                             .unwrap_or_else(|| format!("#{id}"));
 
                         // Exact-size, explicit top-down allocation: every cell
-                        // reports an identical (THUMB_W, CELL_H) footprint
+                        // reports the identical `CellMetrics` footprint
                         // regardless of content, so `horizontal_wrapped`'s
                         // cross-axis cursor advances uniformly and rows stay
-                        // aligned (no more per-cell overflow drift).
+                        // aligned (no per-cell overflow drift).
                         ui.allocate_ui_with_layout(
-                            egui::vec2(THUMB_W, CELL_H),
+                            egui::vec2(m.thumb_w, m.cell_h),
                             egui::Layout::top_down(egui::Align::Center),
                             |ui| {
-                                ui.set_min_size(egui::vec2(THUMB_W, CELL_H));
+                                ui.set_min_size(egui::vec2(m.thumb_w, m.cell_h));
                                 ui.spacing_mut().item_spacing.y = CELL_PAD;
 
                                 // The thumbnail itself is the drag source (not the
@@ -85,11 +105,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState) {
                                 // a batch export is running, dragging is disabled
                                 // and the thumbnail is painted without a source.
                                 let thumb_rect = if running {
-                                    paint_thumb(ui, state, id, rec, idx)
+                                    paint_thumb(ui, state, id, rec, idx, m)
                                 } else {
                                     let resp = ui
                                         .dnd_drag_source(drag_id(id), id, |ui| {
-                                            paint_thumb(ui, state, id, rec, idx)
+                                            paint_thumb(ui, state, id, rec, idx, m)
                                         })
                                         .response;
                                     resp.rect
@@ -199,8 +219,10 @@ fn paint_thumb(
     id: i64,
     rec: Option<&ferrolite_catalog::ImageRecord>,
     idx: usize,
+    m: CellMetrics,
 ) -> egui::Rect {
-    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(THUMB_W, THUMB_H), egui::Sense::hover());
+    let (rect, _resp) =
+        ui.allocate_exact_size(egui::vec2(m.thumb_w, m.thumb_h), egui::Sense::hover());
 
     // Gated on `Done` (not just `!= Failed`), matching the Library grid's
     // `paint_cell` guard: a `Pending` row has no thumbnail blob yet, so
@@ -234,7 +256,7 @@ fn paint_thumb(
     // thumbnail instead of a distance that varies with the image's shape.
     let aspect = rec
         .map(crate::library::grid::cell_aspect)
-        .unwrap_or(THUMB_W / THUMB_H);
+        .unwrap_or(crate::library::grid_layout::CELL_ASPECT);
     let img_rect = crate::library::grid::cell_image_rect(rect, aspect);
 
     let painter = ui.painter_at(rect);
@@ -342,6 +364,37 @@ mod tests {
                 Rect::from_min_size(pos2(x, y), vec2(W, H))
             })
             .collect()
+    }
+
+    #[test]
+    fn cell_metrics_keeps_the_shared_three_two_cell_shape() {
+        // The pre-slider fixed box was 132x88 — exactly 3:2 — so the Size
+        // slider must reproduce that shape at any width, keeping the queue and
+        // the Library grid the same shape.
+        for w in [118.0_f32, 132.0, 196.2, 288.0] {
+            let m = cell_metrics(w);
+            assert!((m.thumb_w - w).abs() < 0.01);
+            assert!(
+                (m.thumb_w / m.thumb_h - crate::library::grid_layout::CELL_ASPECT).abs() < 1e-3,
+                "width {w}: thumb box {}x{} is not the shared cell aspect",
+                m.thumb_w,
+                m.thumb_h
+            );
+            assert!(
+                m.cell_h > m.thumb_h,
+                "the cell must be taller than its thumbnail (label + remove row)"
+            );
+        }
+        // The historical 132px width must still give exactly 88px.
+        assert!((cell_metrics(132.0).thumb_h - 88.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cell_metrics_stays_positive_on_degenerate_width() {
+        for w in [0.0_f32, -50.0] {
+            let m = cell_metrics(w);
+            assert!(m.thumb_w >= 1.0 && m.thumb_h >= 1.0 && m.cell_h > m.thumb_h);
+        }
     }
 
     #[test]

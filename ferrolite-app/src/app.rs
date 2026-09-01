@@ -2066,7 +2066,9 @@ impl eframe::App for FerroliteApp {
                             .inner_margin(egui::Margin::symmetric(10.0, 0.0)),
                     )
                     .show(ctx, |ui| {
-                        crate::export_module::toolbar(ui, &mut self.state);
+                        if crate::export_module::toolbar(ui, &mut self.state) {
+                            self.mark_settings_dirty();
+                        }
                     });
             }
         }
@@ -2697,7 +2699,10 @@ impl eframe::App for FerroliteApp {
                     }
                 }
                 crate::module::Module::Export => {
-                    crate::export_module::queue_list::show(ui, &mut self.state);
+                    let cell_w = crate::library::grid::cell_width_for_size(
+                        self.state.settings.export_grid_size,
+                    );
+                    crate::export_module::queue_list::show(ui, &mut self.state, cell_w);
                 }
             });
         if let Some(id) = opened {

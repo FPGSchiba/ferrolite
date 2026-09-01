@@ -18,6 +18,10 @@ const SEL_ROUND: f32 = 6.0;
 const LABEL_H: f32 = 30.0;
 /// Gap between the thumbnail and its label band.
 const LABEL_PAD: f32 = 3.0;
+/// Spec §4.3's text inset: horizontal breathing room between the label band's
+/// elided text and the cell's own left/right edges, so the ellipsis does not
+/// land flush on the cell boundary.
+const LABEL_INSET: f32 = 3.0;
 /// Outer padding around the grid (left, right, top, bottom) so cells don't hug
 /// the panel edges.
 const MARGIN: f32 = 14.0;
@@ -35,7 +39,7 @@ const CELL_W_PER_PCT: f32 = 1.7;
 /// Cell width for a `0..=100` Size-slider percentage. Clamps out-of-range input
 /// so a hand-edited or future-versioned settings file cannot produce a
 /// degenerate cell.
-pub fn cell_width_for_size(size_pct: f32) -> f32 {
+pub(crate) fn cell_width_for_size(size_pct: f32) -> f32 {
     CELL_W_BASE + size_pct.clamp(0.0, 100.0) * CELL_W_PER_PCT
 }
 
@@ -189,14 +193,18 @@ pub(crate) fn should_request_lazy_thumbnail(
 /// Eliding (not measuring) is the rule: `Label::truncate()` lays out one galley
 /// for one visible cell inside the already-virtualized render pass, whereas the
 /// `label_width` floor this replaces measured every filename in the catalog on
-/// each layout rebuild. The full name is always on hover, so nothing is lost —
-/// attached unconditionally rather than only when truncated, matching the export
-/// queue's cell (`export_module::queue_list`); egui exposes no cheap
-/// "was truncated" flag on the response.
+/// each layout rebuild. The full name on hover comes free from `egui::Label`
+/// itself: it checks the galley's own `elided` flag and attaches the hover
+/// tooltip ONLY when the text was actually truncated (`egui-0.29.1/src/widgets/
+/// label.rs`) — so nothing more needs doing here, and nothing should be added:
+/// an explicit `.on_hover_text(...)` on this response would stack a SECOND
+/// tooltip bubble on a long name (each call adds a bubble, it does not replace
+/// one) and would wrongly attach a tooltip to a short, non-elided name.
 ///
 /// `selectable(false)` keeps the label inert so it never steals the drag or
 /// click that the cell's own `interact` owns.
 fn paint_meta(ui: &mut egui::Ui, rec: &ImageRecord, rect: egui::Rect) {
+    let rect = rect.shrink2(egui::vec2(LABEL_INSET, 0.0));
     let name_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 14.0));
     ui.put(
         name_rect,
@@ -207,8 +215,7 @@ fn paint_meta(ui: &mut egui::Ui, rec: &ImageRecord, rect: egui::Rect) {
         )
         .truncate()
         .selectable(false),
-    )
-    .on_hover_text(&rec.filename);
+    );
 
     if let Some(date) = format_capture_date(rec.capture_time.as_deref()) {
         let date_rect = egui::Rect::from_min_size(
@@ -351,6 +358,16 @@ fn paint_cell(
     // Round the thumbnail corners to match the selection border so a square
     // corner never pokes outside the rounded border. Unselected cells stay square.
     let img_round = if selected { SEL_ROUND } else { 0.0 };
+
+    // Cell ground, always painted across the full CELL box (not just
+    // `img_rect`): the hit area below (`ui.interact(rect, ...)`) is the whole
+    // cell, so for a non-3:2 image the letterbox bars are otherwise bare
+    // canvas and the clickable region extends past anything visible. Uses the
+    // cell's own rounding so a selected cell's rounded corners still line up.
+    // Mirrors the export queue's identical fill (`export_module::queue_list`).
+    // Fully covered (no visual change) when the image fills the cell.
+    painter.rect_filled(rect, img_round, theme::BG_PANEL);
+
     match cell_state(rec, has_tex, is_ingesting) {
         CellState::Ready => {
             if let Some(tex) = state.textures.get(rec.id) {

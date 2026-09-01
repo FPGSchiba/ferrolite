@@ -81,21 +81,6 @@ pub struct UniformGridLayout {
     pub x_offset: f32,
 }
 
-impl Default for UniformGridLayout {
-    fn default() -> Self {
-        Self {
-            cols: 1,
-            cell_w: 1.0,
-            cell_h: 1.0,
-            gap: 0.0,
-            row_stride: 1.0,
-            item_count: 0,
-            total_height: 0.0,
-            x_offset: 0.0,
-        }
-    }
-}
-
 /// Build the uniform layout for `item_count` cells of width `cell_w` in
 /// `avail_w` of horizontal space. `label_pad`/`label_h` reserve the meta band
 /// under every cell. Never yields zero columns (a panel narrower than one cell

@@ -2608,8 +2608,11 @@ impl eframe::App for FerroliteApp {
             .show(ctx, |ui| match self.module {
                 crate::module::Module::Library => {
                     // Grid; capture a double-clicked id to open after the panel closes.
-                    opened =
-                        crate::library::grid::show(ui, &mut self.state, self.thumb_size + 60.0);
+                    opened = crate::library::grid::show(
+                        ui,
+                        &mut self.state,
+                        crate::library::grid::cell_width_for_size(self.thumb_size),
+                    );
                 }
                 crate::module::Module::Develop => {
                     if let Some(v) = self.state.viewer.as_ref() {

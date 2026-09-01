@@ -22,6 +22,23 @@ const LABEL_PAD: f32 = 3.0;
 /// the panel edges.
 const MARGIN: f32 = 14.0;
 
+/// Size-slider → cell-width mapping from `docs/design/V2/README.md:42`
+/// (`118 + sizePct * 1.7`), spec decision D4. The slider is a 0..=100 percentage
+/// (`settings.grid_size`, default 46), so this yields 118..288 px, default ~196.
+///
+/// Replaced `thumb_size + 60` (60..160). The old 60 px floor made a cell narrower
+/// than a typical filename at small sizes, which is how the label-width floor
+/// came to dominate the layout in the first place.
+const CELL_W_BASE: f32 = 118.0;
+const CELL_W_PER_PCT: f32 = 1.7;
+
+/// Cell width for a `0..=100` Size-slider percentage. Clamps out-of-range input
+/// so a hand-edited or future-versioned settings file cannot produce a
+/// degenerate cell.
+pub fn cell_width_for_size(size_pct: f32) -> f32 {
+    CELL_W_BASE + size_pct.clamp(0.0, 100.0) * CELL_W_PER_PCT
+}
+
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = (ui.available_width() - 2.0 * MARGIN).max(1.0);
     // `cell` is the cell WIDTH (spec D4's slider mapping); height follows from
@@ -792,5 +809,36 @@ mod tests {
                  replaced the justified solver, so it must not linger"
             );
         }
+    }
+
+    /// Spec D4: the Size slider maps to cell WIDTH by the documented V2 formula
+    /// `118 + sizePct * 1.7` (docs/design/V2/README.md:42), replacing the old
+    /// `thumb_size + 60`. Pinned because the old 60px floor is what let a
+    /// filename dominate a cell.
+    #[test]
+    fn cell_width_follows_the_documented_v2_size_range() {
+        assert!(
+            (cell_width_for_size(0.0) - 118.0).abs() < 0.01,
+            "slider min"
+        );
+        assert!(
+            (cell_width_for_size(100.0) - 288.0).abs() < 0.01,
+            "slider max"
+        );
+        // The persisted default (settings::dto grid_size = 46.0).
+        assert!((cell_width_for_size(46.0) - 196.2).abs() < 0.01, "default");
+    }
+
+    #[test]
+    fn cell_width_is_monotonic_and_clamps_out_of_range_input() {
+        let mut prev = 0.0_f32;
+        for pct in [0.0_f32, 10.0, 46.0, 90.0, 100.0] {
+            let w = cell_width_for_size(pct);
+            assert!(w > prev, "must grow with the slider");
+            prev = w;
+        }
+        // A persisted setting outside 0..=100 must not produce a degenerate cell.
+        assert!((cell_width_for_size(-50.0) - 118.0).abs() < 0.01);
+        assert!((cell_width_for_size(999.0) - 288.0).abs() < 0.01);
     }
 }

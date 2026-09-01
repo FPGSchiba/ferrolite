@@ -6,7 +6,10 @@ use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
 
-/// Thumbnail cell size (≈3:2) and layout constants.
+/// Fixed thumbnail CELL box (3:2) and layout constants. Every cell allocates
+/// this exact box whatever the image's shape — the uniform footprint is what
+/// keeps `horizontal_wrapped`'s rows aligned (see `CELL_H`). The image itself is
+/// letterboxed INSIDE the box (`grid_layout::fit_size`), never stretched to it.
 const THUMB_W: f32 = 132.0;
 const THUMB_H: f32 = 88.0;
 const CELL_GAP: f32 = 10.0;
@@ -183,8 +186,13 @@ fn draw_drop_indicator_and_handle_release(
 }
 
 /// Draws the thumbnail cell: requests the decode job lazily (same path as the
-/// Library grid's `paint_cell`), then paints either the ready texture or a
-/// filename placeholder, plus the 1-based sequence badge.
+/// Library grid's `paint_cell`), then paints either the ready texture
+/// (letterboxed to its own aspect inside the fixed cell box) or a filename
+/// placeholder, plus the 1-based sequence badge.
+///
+/// Returns the full allocated CELL box, not the letterboxed image rect — the
+/// drop-indicator geometry and `compute_drop_index` want uniform, gap-free cell
+/// bounds, so a portrait's narrow image rect must not shrink its drop target.
 fn paint_thumb(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -206,12 +214,34 @@ fn paint_thumb(
         state.request_thumbnail(ui.ctx(), id);
     }
 
+    // Letterbox the image inside the fixed 3:2 cell box instead of stretching
+    // it to fill. The cell box must stay exactly `THUMB_W x THUMB_H` (the
+    // wrapping layout depends on a uniform footprint), so the ASPECT has to be
+    // absorbed by the painted rect. Handing the box straight to `paint_at`
+    // squashed every non-3:2 image — a 2:3 portrait was stretched 2.25x
+    // horizontally — and `Image::fit_to_exact_size` did NOT prevent it: `fit`
+    // is only read by `Image::ui`/`calc_size`, so on the `paint_at` path it is
+    // a silent no-op. See `grid_layout::fit_size`.
+    //
+    // The aspect comes from the shared `cell_aspect`, so the queue agrees with
+    // the Library grid and the filmstrip: it prefers the persisted thumbnail's
+    // own upright dims (already crop- and orientation-corrected) and only falls
+    // back to sensor dims + orientation swap. Derived from the RECORD, not the
+    // texture, so the cell does not reflow when the thumbnail finishes loading.
+    let aspect = rec
+        .map(crate::library::grid::cell_aspect)
+        .unwrap_or(THUMB_W / THUMB_H);
+    let (img_w, img_h) = crate::library::grid_layout::fit_size(THUMB_W, THUMB_H, aspect);
+    let img_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(img_w, img_h));
+
     let painter = ui.painter_at(rect);
+    // Cell ground, always painted: for a non-3:2 image it is what the letterbox
+    // bars show, so the cell reads as a slot rather than a hole in the panel.
+    // Fully covered (no visual change) when the image happens to be 3:2.
+    painter.rect_filled(rect, 3.0, theme::BG_PANEL);
     if let Some(tex) = state.textures.get(id) {
-        let img = egui::Image::new(tex).fit_to_exact_size(rect.size());
-        img.paint_at(ui, rect);
+        egui::Image::new(tex).paint_at(ui, img_rect);
     } else {
-        painter.rect_filled(rect, 3.0, theme::BG_PANEL);
         let label = rec
             .map(|r| r.filename.clone())
             .unwrap_or_else(|| format!("#{id}"));
@@ -224,8 +254,9 @@ fn paint_thumb(
         );
     }
 
-    // 1-based sequence index badge, top-left, over the thumbnail.
-    let badge_rect = egui::Rect::from_min_size(rect.left_top(), egui::vec2(20.0, 15.0));
+    // 1-based sequence index badge, top-left of the IMAGE (not the cell box), so
+    // it sits on the thumbnail rather than floating over a letterbox bar.
+    let badge_rect = egui::Rect::from_min_size(img_rect.left_top(), egui::vec2(20.0, 15.0));
     painter.rect_filled(badge_rect, 2.0, egui::Color32::from_black_alpha(140));
     painter.text(
         badge_rect.left_top() + egui::vec2(4.0, 2.0),

@@ -35,15 +35,51 @@ pub struct GridLayout {
     pub label_h: f32,
 }
 
+/// Guard rails on a cell aspect ratio, so a corrupt catalog row cannot produce
+/// a degenerate or enormous cell. Wider than `cell_aspect`'s own `[0.1, 10.0]`
+/// clamp on purpose: this is the last line of defence, not the policy.
+const ASPECT_MIN: f32 = 0.05;
+const ASPECT_MAX: f32 = 20.0;
+
 /// Total width of items `i..j` at row height `h`: each cell is the image width
 /// (`aspect * h`) floored to its `min_width` (so a long filename label is never
 /// clipped), plus the inter-cell gaps.
 fn row_width(aspects: &[f32], min_w: &[f32], i: usize, j: usize, h: f32, gap: f32) -> f32 {
     let mut w = 0.0_f32;
     for k in i..j {
-        w += (aspects[k].clamp(0.05, 20.0) * h).max(min_w[k]);
+        w += (aspects[k].clamp(ASPECT_MIN, ASPECT_MAX) * h).max(min_w[k]);
     }
     w + (j - i).saturating_sub(1) as f32 * gap
+}
+
+/// The largest `aspect`-preserving size that fits inside a `cell_w x cell_h`
+/// box — a letterbox fit. The caller centers it in the box.
+///
+/// Needed wherever a thumbnail is painted into a cell whose aspect is NOT
+/// already the image's own. `egui::Image::paint_at` maps the whole texture onto
+/// the rect it is handed with no aspect handling at all, and
+/// `Image::fit_to_exact_size` does NOT change that — `fit` is only consulted by
+/// `Image::ui`/`calc_size`, so on the `paint_at` path it is a silent no-op.
+/// Handing `paint_at` a fixed-aspect box therefore STRETCHES the image (the
+/// export-queue grid squashed every portrait into its 3:2 cell this way). Fit
+/// the rect first, then paint into the fitted rect.
+///
+/// Pure and egui-free like the rest of this module, so it is unit-testable; it
+/// returns a size rather than a `Rect` to keep it that way.
+pub fn fit_size(cell_w: f32, cell_h: f32, aspect: f32) -> (f32, f32) {
+    let cell_w = cell_w.max(1.0);
+    let cell_h = cell_h.max(1.0);
+    // A non-finite or non-positive aspect (an absent/corrupt thumbnail row)
+    // falls back to the cell's own aspect, i.e. the image fills the box —
+    // never a zero, negative, or NaN extent.
+    let a = if aspect.is_finite() && aspect > 0.0 {
+        aspect.clamp(ASPECT_MIN, ASPECT_MAX)
+    } else {
+        cell_w / cell_h
+    };
+    let w = cell_w.min(a * cell_h);
+    let h = cell_h.min(cell_w / a);
+    (w.max(1.0), h.max(1.0))
 }
 
 /// Justify images into rows filling `avail_w`, where each cell is at least
@@ -269,6 +305,91 @@ mod tests {
         // Starts at row 0 (clamped) and covers the viewport plus padding.
         assert_eq!(r.start, 0);
         assert!(r.end >= 2 && r.end <= l.rows.len());
+    }
+
+    // --- fit_size (letterbox fit) ---------------------------------------
+
+    /// Cell is 3:2 like the export queue's 132x88 thumbnail box.
+    const CELL: (f32, f32) = (132.0, 88.0);
+
+    fn fit(aspect: f32) -> (f32, f32) {
+        fit_size(CELL.0, CELL.1, aspect)
+    }
+
+    #[test]
+    fn fit_size_matching_aspect_fills_the_box_exactly() {
+        let (w, h) = fit(CELL.0 / CELL.1);
+        assert!((w - CELL.0).abs() < 0.01 && (h - CELL.1).abs() < 0.01);
+    }
+
+    #[test]
+    fn fit_size_portrait_is_height_bound_and_keeps_its_aspect() {
+        // 2:3 portrait in a 3:2 box: height-bound, much narrower than the cell.
+        let a = 2.0 / 3.0;
+        let (w, h) = fit(a);
+        assert!((h - CELL.1).abs() < 0.01, "portrait fills the height");
+        assert!(
+            w < CELL.0,
+            "portrait must not fill the width ({w} vs {})",
+            CELL.0
+        );
+        assert!(
+            (w / h - a).abs() < 1e-3,
+            "aspect must survive the fit: got {}, want {a}",
+            w / h
+        );
+    }
+
+    #[test]
+    fn fit_size_panorama_is_width_bound_and_keeps_its_aspect() {
+        let a = 4.0;
+        let (w, h) = fit(a);
+        assert!((w - CELL.0).abs() < 0.01, "panorama fills the width");
+        assert!(h < CELL.1, "panorama must not fill the height");
+        assert!((w / h - a).abs() < 1e-3, "aspect must survive the fit");
+    }
+
+    /// The regression for the export-queue distortion: whatever the source
+    /// aspect, the fitted size is CONTAINED in the cell and never stretched.
+    #[test]
+    fn fit_size_is_always_contained_and_never_distorts() {
+        for a in [0.1_f32, 0.5, 0.6667, 1.0, 1.5, 1.8, 2.5, 4.0, 10.0] {
+            let (w, h) = fit(a);
+            assert!(
+                w <= CELL.0 + 0.01 && h <= CELL.1 + 0.01,
+                "aspect {a}: {w}x{h} escapes the {}x{} cell",
+                CELL.0,
+                CELL.1
+            );
+            assert!(
+                (w / h - a).abs() < 1e-3,
+                "aspect {a}: fitted aspect {} differs — the image would be                  stretched",
+                w / h
+            );
+            // And it must touch at least one edge, i.e. it is the LARGEST fit.
+            assert!(
+                (w - CELL.0).abs() < 0.01 || (h - CELL.1).abs() < 0.01,
+                "aspect {a}: {w}x{h} is smaller than the largest fit"
+            );
+        }
+    }
+
+    #[test]
+    fn fit_size_degenerate_inputs_stay_positive() {
+        for a in [0.0_f32, -3.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (w, h) = fit(a);
+            assert!(
+                w >= 1.0 && h >= 1.0 && w.is_finite() && h.is_finite(),
+                "aspect {a:?} yielded {w}x{h}"
+            );
+            assert!(w <= CELL.0 + 0.01 && h <= CELL.1 + 0.01);
+        }
+    }
+
+    #[test]
+    fn fit_size_tolerates_a_degenerate_cell() {
+        let (w, h) = fit_size(0.0, -5.0, 1.5);
+        assert!(w >= 1.0 && h >= 1.0 && w.is_finite() && h.is_finite());
     }
 
     #[test]

@@ -292,7 +292,7 @@ pub struct AppState {
     /// switch, and in-place edits — all funnel through `refresh_images`).
     pub images_rev: u64,
     /// Cached justified-rows layout, rebuilt only when its inputs change.
-    pub grid_layout: Option<crate::library::grid_layout::CachedGridLayout>,
+    pub grid_layout: Option<crate::library::grid_layout::CachedUniformLayout>,
 
     /// Editing working space (spec §4.1, default Rec.2020). Global preference; the
     /// ColorMatrixNode + display tail are recomposed on change.

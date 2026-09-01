@@ -4,7 +4,7 @@
 //! per-image thumbnail jobs for the grid to reprioritize by visibility.
 
 use crate::library::cell_state::{cell_state, CellState};
-use crate::library::grid_layout::{layout, CachedGridLayout, LayoutSig};
+use crate::library::grid_layout::{uniform_layout, CachedUniformLayout, UniformLayoutSig};
 use crate::library::icons;
 use crate::state::AppState;
 use crate::theme;
@@ -24,33 +24,24 @@ const MARGIN: f32 = 14.0;
 
 pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
     let avail_w = (ui.available_width() - 2.0 * MARGIN).max(1.0);
-    let target_h = cell;
+    // `cell` is the cell WIDTH (spec D4's slider mapping); height follows from
+    // `CELL_ASPECT` inside `uniform_layout`.
+    let cell_w = cell.max(1.0);
 
-    // Rebuild the justified-rows layout only when the image set, width, or cell
-    // size changed. Taken out of `state` for the render pass so `paint_cell` can
-    // borrow `state` mutably without aliasing; restored at the end.
-    let sig = LayoutSig {
+    // Rebuild only when the image set, width, or cell size changed. Taken out of
+    // `state` for the render pass so `paint_cell` can borrow `state` mutably
+    // without aliasing; restored at the end.
+    let sig = UniformLayoutSig {
         images_rev: state.images_rev,
         item_count: state.images.len(),
         avail_w: avail_w.round() as u32,
-        target_h: target_h.round() as u32,
+        cell_w: cell_w.round() as u32,
     };
     let mut cache = state.grid_layout.take();
     if cache.as_ref().map(|c| c.sig) != Some(sig) {
-        let aspects: Vec<f32> = state.images.iter().map(cell_aspect).collect();
-        // NO per-cell minimum widths. A filename-derived floor made the row-height
-        // solver unsolvable whenever a row's floors exceeded the panel: it
-        // returned its `0.4 * target_h` clamp, so the row collapsed to a strip AND
-        // overflowed the right edge, which is what clipped the names. Labels elide
-        // to the cell width instead (`paint_meta`), which also removes the
-        // O(all-items) no-wrap text-layout measurement this used to do on every
-        // rebuild (CLAUDE.md §1). Kept as a zeroed argument rather than dropped
-        // from `layout`'s signature so this task does not also churn the pure
-        // module; Task 3 removes the parameter with the solver.
-        let min_widths: Vec<f32> = vec![0.0; state.images.len()];
-        cache = Some(CachedGridLayout {
+        cache = Some(CachedUniformLayout {
             sig,
-            layout: layout(&aspects, &min_widths, avail_w, target_h, GAP, LABEL_H),
+            layout: uniform_layout(state.images.len(), avail_w, cell_w, GAP, LABEL_PAD, LABEL_H),
         });
     }
     let cache = cache.expect("layout built above");
@@ -72,16 +63,17 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         let scroll_top = (viewport.min.y - MARGIN).max(0.0);
         let vh = viewport.height() + MARGIN;
         let rows = cache.layout.visible_rows(scroll_top, vh);
+        // Bounded by the viewport, never by the item count (CLAUDE.md §1) — see
+        // `uniform_indices_for_rows_is_bounded_by_the_viewport_not_the_item_count`.
+        let indices = cache.layout.indices_for_rows(rows);
 
         // Compute the visible id set (used to fetch tag associations for the
         // window). Ingest thumbnails are now generated inline within the ingest
         // job — there are no separate per-image thumbnail jobs to reprioritize by
         // visibility, so the old promote/demote pass is gone.
         let mut now_visible: HashSet<i64> = HashSet::new();
-        for ri in rows.clone() {
-            for item in &cache.layout.rows[ri].items {
-                now_visible.insert(state.images[item.index].id);
-            }
+        for i in indices.clone() {
+            now_visible.insert(state.images[i].id);
         }
         // Fetch tag associations for the visible window (only missing ids queried).
         state.ensure_tags_for(&now_visible);
@@ -95,34 +87,28 @@ pub fn show(ui: &mut egui::Ui, state: &mut AppState, cell: f32) -> Option<i64> {
         state.retain_visible_thumbnail_jobs(&now_visible);
 
         let origin = ui.min_rect().left_top() + egui::vec2(MARGIN, MARGIN);
-        for ri in rows {
-            let row = &cache.layout.rows[ri];
-            for item in &row.items {
-                let rec = state.images[item.index].clone();
-                let cell_x = origin.x + item.x;
-                let cell_y = origin.y + row.y;
-                // Image centered within its (possibly wider) cell footprint.
-                let img_x = cell_x + (item.width - item.img_width) * 0.5;
-                let img_rect = egui::Rect::from_min_size(
-                    egui::pos2(img_x, cell_y),
-                    egui::vec2(item.img_width, row.img_height),
-                );
-                if let Some(id) = paint_cell(
-                    ui,
-                    state,
-                    &rec,
-                    img_rect,
-                    queued.contains(&rec.id),
-                    is_ingesting,
-                ) {
-                    opened = Some(id);
-                }
-                let label_rect = egui::Rect::from_min_size(
-                    egui::pos2(cell_x, img_rect.bottom() + LABEL_PAD),
-                    egui::vec2(item.width, LABEL_H - LABEL_PAD),
-                );
-                paint_meta(ui, &rec, label_rect);
+        for i in indices {
+            let rec = state.images[i].clone();
+            let (cx, cy) = cache.layout.cell_offset(i);
+            let cell_rect = egui::Rect::from_min_size(
+                origin + egui::vec2(cx, cy),
+                egui::vec2(cache.layout.cell_w, cache.layout.cell_h),
+            );
+            if let Some(id) = paint_cell(
+                ui,
+                state,
+                &rec,
+                cell_rect,
+                queued.contains(&rec.id),
+                is_ingesting,
+            ) {
+                opened = Some(id);
             }
+            let label_rect = egui::Rect::from_min_size(
+                egui::pos2(cell_rect.left(), cell_rect.bottom() + LABEL_PAD),
+                egui::vec2(cell_rect.width(), LABEL_H - LABEL_PAD),
+            );
+            paint_meta(ui, &rec, label_rect);
         }
     });
     state.grid_layout = Some(cache);
@@ -721,43 +707,6 @@ mod tests {
         );
     }
 
-    /// Regression for the collapsed-row / clipped-filename defect: the grid must
-    /// pass NO per-cell minimum widths into the layout. A filename-derived floor
-    /// made `solve_row_height` unsolvable, so it returned its `0.4 * target_h`
-    /// clamp — rows 40px tall that overflowed the panel by up to 211px, which is
-    /// what cut the names off. Labels elide to the cell instead (`paint_meta`).
-    ///
-    /// Asserts on the real `grid_layout::layout` with the aspects of a mixed set:
-    /// with zero floors every row must fill the width and none may collapse to
-    /// the solver's lower clamp.
-    #[test]
-    fn zero_label_floors_stop_rows_collapsing_and_overflowing() {
-        // Upright aspects spanning portrait -> panorama, as the RAW fixtures do.
-        let aspects: [f32; 15] = [
-            1.506, 0.661, 1.512, 1.512, 1.506, 1.527, 1.510, 1.462, 1.495, 0.665, 0.666, 0.714,
-            0.666, 0.665, 1.345,
-        ];
-        let zeros = vec![0.0_f32; aspects.len()];
-        let avail_w = 900.0_f32;
-        let target_h = 150.0_f32;
-        let l =
-            crate::library::grid_layout::layout(&aspects, &zeros, avail_w, target_h, GAP, LABEL_H);
-        assert!(!l.rows.is_empty());
-        for (ri, row) in l.rows.iter().enumerate() {
-            let right = row.items.last().map(|it| it.x + it.width).unwrap_or(0.0);
-            assert!(
-                right <= avail_w + 1.0,
-                "row {ri} right edge {right} overflows avail {avail_w} — this is \
-                 what clipped the filenames"
-            );
-            assert!(
-                row.img_height > target_h * 0.45,
-                "row {ri} height {} collapsed to the solver's lower clamp",
-                row.img_height
-            );
-        }
-    }
-
     /// The image must be letterboxed inside its cell, never stretched to it.
     /// `paint_cell` cannot be unit-tested (it needs an egui `Ui`), so this pins
     /// the composition it performs: `fit_size` of `cell_aspect`.
@@ -812,5 +761,36 @@ mod tests {
             "the label-width floor's cap is back; a filename-derived minimum \
              cell width is what made the row solver unsolvable"
         );
+    }
+
+    /// The justified solver must be GONE, not merely bypassed. Task 2's zeroed
+    /// `min_widths` argument removed the symptom; leaving `solve_row_height` in
+    /// the tree leaves the 0.4x clamp one call site away from returning.
+    ///
+    /// Needles are assembled at runtime so they cannot match this test's own
+    /// source. They grep a different file (`grid_layout.rs`) today, so a plain
+    /// literal would work — but assembling them means the test keeps meaning the
+    /// same thing if it is ever moved into that file. Same convention as
+    /// `settings::dto`'s `disclosure_snapshot_covers_every_open_field`.
+    ///
+    /// There is deliberately NO positive "grid.rs calls uniform_layout"
+    /// assertion: greping this file for that name would match this test's own
+    /// text and pass vacuously, and the compiler is the stronger check anyway —
+    /// once the solver is deleted, `grid.rs` cannot build a layout without it.
+    #[test]
+    fn the_justified_row_solver_is_gone() {
+        let layout_src = include_str!("grid_layout.rs").replace('\r', "");
+        let gone = [
+            ["solve_row", "_height"].concat(),
+            ["fn row", "_width"].concat(),
+            ["struct Row", "Item"].concat(),
+        ];
+        for needle in &gone {
+            assert!(
+                !layout_src.contains(needle),
+                "grid_layout.rs still defines `{needle}` — the uniform grid \
+                 replaced the justified solver, so it must not linger"
+            );
+        }
     }
 }
